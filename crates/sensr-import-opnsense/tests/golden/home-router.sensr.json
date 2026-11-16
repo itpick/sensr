@@ -929,6 +929,7 @@
           "rr": "A",
           "address": "192.168.1.10"
         },
+        "ptr": true,
         "description": "NAS"
       },
       "bb24e45c-eddb-433e-a9da-4b8b92469713": {
@@ -939,6 +940,7 @@
           "rr": "A",
           "address": "192.168.1.10"
         },
+        "ptr": true,
         "description": "Split-horizon for the NAS proxy"
       },
       "07ce2f4f-e828-4eea-b9b2-53fbc78a39e1": {
@@ -949,7 +951,87 @@
           "rr": "A",
           "address": "192.168.1.1"
         },
+        "ptr": true,
         "description": "Router GUI"
+      },
+      "3c9e6a1b-7f20-4d5e-8b13-6e2f0a9d4c77": {
+        "enabled": true,
+        "hostname": "cluster",
+        "domain": "internal.home.example",
+        "record": {
+          "rr": "A",
+          "address": "192.168.1.20"
+        },
+        "ptr": true,
+        "description": "Split-horizon name for the cluster VIP"
+      }
+    },
+    "statistics": true,
+    "register_firewall_records": true,
+    "txt_descriptions": false,
+    "access": {
+      "default_action": "allow",
+      "lists": {
+        "5b0c3f7e-2d41-4c8a-9e57-0a6f1d2c3b41": {
+          "enabled": true,
+          "name": "guest-wifi",
+          "action": "refuse_non_local",
+          "networks": [
+            "192.168.30.0/24"
+          ],
+          "description": "Guests may only ask for local names"
+        }
+      }
+    },
+    "tuning": {
+      "hide_identity": true,
+      "hide_version": true,
+      "prefetch": true,
+      "private_domains": [
+        "home.example"
+      ]
+    },
+    "blocklists": {
+      "14d4cffe-087b-45c1-b3a5-b06c07bf285e": {
+        "enabled": true,
+        "description": "Home ad and tracker blocking",
+        "lists": [
+          "hagezi-pro",
+          "oisd-small"
+        ],
+        "urls": [
+          "https://lists.example.net/extra-ads.txt"
+        ],
+        "block": [
+          "tracker.example.org"
+        ],
+        "block_subtrees": [
+          "ads.example.net"
+        ],
+        "allow": [
+          "updates.example.com",
+          "ok.ads.example.net",
+          "/^cdn[0-9]+\\.example\\.net$/"
+        ],
+        "answer": {
+          "mode": "address",
+          "address": "0.0.0.0"
+        },
+        "refresh_seconds": 72000
+      },
+      "c97bcab8-6d72-4ee2-9b82-c497270abc27": {
+        "enabled": true,
+        "description": "IoT threat intel only",
+        "lists": [
+          "hagezi-tif"
+        ],
+        "source_nets": [
+          "192.168.20.0/24"
+        ],
+        "answer": {
+          "mode": "nxdomain"
+        },
+        "refresh_seconds": 72000
       }
     }
   },

@@ -2876,6 +2876,7 @@ name = "sensr-import-opnsense"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
+ "ipnet",
  "pretty_assertions",
  "proptest",
  "quick-xml",

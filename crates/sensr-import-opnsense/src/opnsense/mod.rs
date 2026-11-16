@@ -169,18 +169,6 @@ pub const EXPECTED_UNMAPPED: &[(&str, &str)] = &[
         "trust store settings are not modelled yet",
     ),
     (
-        "OPNsense/unboundplus/dnsbl",
-        "DNS blocklists are not modelled yet",
-    ),
-    (
-        "OPNsense/unboundplus/advanced",
-        "Unbound tuning options are not modelled yet",
-    ),
-    (
-        "OPNsense/unboundplus/acls",
-        "Unbound access lists are not modelled yet",
-    ),
-    (
         "OPNsense/Kea/dhcp4/ha",
         "Kea high availability is not modelled yet",
     ),

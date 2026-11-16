@@ -1,9 +1,14 @@
 //! `OPNsense/unboundplus`: the Unbound DNS resolver.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
+use std::str::FromStr;
 
-use sensr_schema::fields::{DomainName, HostOverrideName, InterfaceId};
-use sensr_schema::models::dns::{DnsRecord, Forwarder, HostOverride, LocalZoneType};
+use ipnet::IpNet;
+use sensr_schema::fields::{Description, DomainName, HostOverrideName, HttpUrl, InterfaceId};
+use sensr_schema::models::dns::{
+    AccessAction, AccessList, CacheSize, DnsRecord, Forwarder, HostOverride, LocalZoneType, Tuning,
+};
+use sensr_schema::models::dnsbl::{AllowEntry, BlockAnswer, Blocklist, KnownList};
 use sensr_schema::{Document, Uuid};
 
 use super::common::{description, interface_id, item_uuid, list, parse_or_warn};
@@ -43,6 +48,22 @@ impl Mapper<Document> for UnboundMapper {
                         out.dns.forwarding.servers.insert(id, f);
                     }
                     None => ctx.release(d),
+                }
+            }
+        }
+        if let Some(a) = ctx.child(s, "advanced") {
+            advanced(a, ctx, out);
+        }
+        if let Some(a) = ctx.child(s, "acls") {
+            acls(a, ctx, out);
+        }
+        if let Some(d) = ctx.child(s, "dnsbl") {
+            for b in ctx.children(d, "blocklist") {
+                match blocklist(b, ctx) {
+                    Some((id, bl)) => {
+                        out.dns.blocklists.insert(id, bl);
+                    }
+                    None => ctx.release(b),
                 }
             }
         }
@@ -93,6 +114,12 @@ fn general<'doc>(g: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Documen
     }
     dns.dnssec = ctx.flag(g, "dnssec");
     dns.dns64 = ctx.flag(g, "dns64");
+    dns.statistics = ctx.bool01(g, "stats");
+    dns.dns64_prefix = ctx.parse(g, "dns64prefix");
+    if g.child("noregrecords").is_some() {
+        dns.register_firewall_records = !ctx.bool01(g, "noregrecords");
+    }
+    dns.txt_descriptions = ctx.bool01(g, "txtsupport");
     dns.register_dhcp_leases = ctx.flag(g, "regdhcp");
     dns.register_dhcp_static = ctx.flag(g, "regdhcpstatic");
     if let Some(d) = ctx.non_empty(g, "regdhcpdomain") {
@@ -118,12 +145,8 @@ fn general<'doc>(g: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Documen
     ctx.defaults(
         g,
         &[
-            ("stats", "0"),
-            ("dns64prefix", ""),
             ("noarecords", "0"),
             ("noreglladdr6", "0"),
-            ("noregrecords", "0"),
-            ("txtsupport", "0"),
             ("cacheflush", "0"),
             ("safesearch", "0"),
             ("enable_wpad", "0"),
@@ -241,16 +264,11 @@ fn host<'doc>(h: &'doc Element, ctx: &mut MapContext<'doc>) -> Option<(Uuid, Hos
     let ttl = ctx.parse(h, "ttl");
     let enabled = ctx.flag(h, "enabled");
     let descr = ctx.text(h, "description");
-    // A/AAAA overrides publish the matching PTR by default.
+    // Configs from before `addptr` existed published the PTR.
+    let ptr = h.child("addptr").is_none() || ctx.bool01(h, "addptr");
     ctx.defaults(
         h,
-        &[
-            ("addptr", "1"),
-            ("mxprio", ""),
-            ("mx", ""),
-            ("server", ""),
-            ("txtdata", ""),
-        ],
+        &[("mxprio", ""), ("mx", ""), ("server", ""), ("txtdata", "")],
     );
     Some((
         id,
@@ -260,7 +278,225 @@ fn host<'doc>(h: &'doc Element, ctx: &mut MapContext<'doc>) -> Option<(Uuid, Hos
             domain,
             record,
             ttl,
+            ptr,
             description: description(ctx, h, descr),
         },
     ))
+}
+
+/// A comma-separated leaf parsed item by item; bad items are reported and
+/// skipped.
+fn csv<'doc, T: FromStr>(
+    ctx: &mut MapContext<'doc>,
+    parent: &'doc Element,
+    name: &str,
+    what: &str,
+) -> Vec<T>
+where
+    T::Err: std::fmt::Display,
+{
+    let Some(el) = parent.child(name) else {
+        return Vec::new();
+    };
+    let text = ctx.text(parent, name).unwrap_or_default();
+    list(&text, &[','])
+        .iter()
+        .filter_map(|t| parse_or_warn(ctx, el, t, what))
+        .collect()
+}
+
+fn advanced<'doc>(a: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Document) {
+    let mut t = Tuning {
+        hide_identity: ctx.bool01(a, "hideidentity"),
+        hide_version: ctx.bool01(a, "hideversion"),
+        prefetch: ctx.bool01(a, "prefetch"),
+        prefetch_key: ctx.bool01(a, "prefetchkey"),
+        harden_dnssec_stripped: ctx.bool01(a, "dnssecstripped"),
+        serve_expired: ctx.bool01(a, "serveexpired"),
+        serve_expired_reply_ttl: ctx.parse(a, "serveexpiredreplyttl"),
+        serve_expired_ttl: ctx.parse(a, "serveexpiredttl"),
+        serve_expired_ttl_reset: ctx.bool01(a, "serveexpiredttlreset"),
+        serve_expired_client_timeout: ctx.parse(a, "serveexpiredclienttimeout"),
+        qname_minimisation_strict: ctx.bool01(a, "qnameminstrict"),
+        extended_statistics: ctx.bool01(a, "extendedstatistics"),
+        log_queries: ctx.bool01(a, "logqueries"),
+        log_replies: ctx.bool01(a, "logreplies"),
+        log_tag_query_reply: ctx.bool01(a, "logtagqueryreply"),
+        log_servfail: ctx.bool01(a, "logservfail"),
+        log_local_actions: ctx.bool01(a, "loglocalactions"),
+        private_domains: csv(ctx, a, "privatedomain", "private domain"),
+        insecure_domains: csv(ctx, a, "insecuredomain", "insecure domain"),
+        msg_cache_size: ctx.parse::<CacheSize>(a, "msgcachesize"),
+        rrset_cache_size: ctx.parse::<CacheSize>(a, "rrsetcachesize"),
+        outgoing_num_tcp: ctx.parse(a, "outgoingnumtcp"),
+        incoming_num_tcp: ctx.parse(a, "incomingnumtcp"),
+        num_queries_per_thread: ctx.parse(a, "numqueriesperthread"),
+        outgoing_range: ctx.parse(a, "outgoingrange"),
+        jostle_timeout: ctx.parse(a, "jostletimeout"),
+        discard_timeout: ctx.parse(a, "discardtimeout"),
+        cache_max_ttl: ctx.parse(a, "cachemaxttl"),
+        cache_max_negative_ttl: ctx.parse(a, "cachemaxnegativettl"),
+        cache_min_ttl: ctx.parse(a, "cacheminttl"),
+        infra_host_ttl: ctx.parse(a, "infrahostttl"),
+        infra_keep_probing: ctx.bool01(a, "infrakeepprobing"),
+        infra_cache_numhosts: ctx.parse(a, "infracachenumhosts"),
+        unwanted_reply_threshold: ctx.parse(a, "unwantedreplythreshold"),
+        ..Tuning::default()
+    };
+    // Both default to on: absent or empty keeps the default.
+    for (leaf, field) in [
+        ("belownxdomain", &mut t.harden_below_nxdomain),
+        ("aggressivensec", &mut t.aggressive_nsec),
+    ] {
+        if let Some(v) = ctx.text(a, leaf).filter(|v| !v.trim().is_empty()) {
+            *field = v.trim() == "1";
+        }
+    }
+    if let Some(v) = ctx.parse::<u8>(a, "logverbosity") {
+        t.log_verbosity = v;
+    }
+    t.val_log_level = ctx.parse::<u8>(a, "valloglevel").filter(|v| *v != 0);
+    if a.child("privateaddress").is_some() {
+        // Required in OPNsense: an empty list is rebinding protection off.
+        t.private_addresses = csv::<IpNet>(ctx, a, "privateaddress", "private address");
+    }
+    out.dns.tuning = t;
+}
+
+fn access_action(t: &str) -> Option<AccessAction> {
+    Some(match t.trim() {
+        "allow" => AccessAction::Allow,
+        "deny" => AccessAction::Deny,
+        "refuse" => AccessAction::Refuse,
+        "allow_snoop" => AccessAction::AllowSnoop,
+        "deny_non_local" => AccessAction::DenyNonLocal,
+        "refuse_non_local" => AccessAction::RefuseNonLocal,
+        _ => return None,
+    })
+}
+
+fn acls<'doc>(a: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Document) {
+    if let Some(d) = a.child("default_action") {
+        match access_action(&d.text()) {
+            Some(v) => {
+                ctx.consume(d);
+                out.dns.access.default_action = v;
+            }
+            None if d.text().trim().is_empty() => ctx.consume(d),
+            None => {}
+        }
+    }
+    for l in ctx.children(a, "acl") {
+        let id = item_uuid(ctx, l);
+        let action = match l.child("action") {
+            Some(e) => match access_action(&e.text()) {
+                Some(v) => {
+                    ctx.consume(e);
+                    v
+                }
+                None => {
+                    ctx.release(l);
+                    continue;
+                }
+            },
+            None => AccessAction::Allow,
+        };
+        let enabled = l.child("enabled").is_none() || ctx.bool01(l, "enabled");
+        let networks = csv::<IpNet>(ctx, l, "networks", "network");
+        let name_text = ctx.text(l, "name").unwrap_or_default();
+        let descr = ctx.text(l, "description");
+        let Some(name) = parse_or_warn::<Description>(ctx, l, &name_text, "name") else {
+            ctx.release(l);
+            continue;
+        };
+        if networks.is_empty() {
+            ctx.warn(
+                l,
+                Severity::Invalid,
+                "access list without networks not imported",
+            );
+            continue;
+        }
+        out.dns.access.lists.insert(
+            id,
+            AccessList {
+                enabled,
+                name,
+                action,
+                networks,
+                description: description(ctx, l, descr),
+            },
+        );
+    }
+}
+
+/// An OPNsense allowlist item. They are regular expressions, but nearly
+/// always written as plain names, which mean exactly that name.
+fn allow_entry(t: &str) -> AllowEntry {
+    let t = t.trim();
+    if let Ok(d) = t.trim_end_matches('.').parse::<DomainName>() {
+        return AllowEntry::Domain(d);
+    }
+    AllowEntry::Pattern(t.to_owned())
+}
+
+fn blocklist<'doc>(b: &'doc Element, ctx: &mut MapContext<'doc>) -> Option<(Uuid, Blocklist)> {
+    let id = item_uuid(ctx, b);
+    let descr_text = ctx.text(b, "description");
+    let description = description(ctx, b, descr_text).or_else(|| {
+        ctx.warn(
+            b,
+            Severity::Info,
+            "blocklist without a description; named \"Blocklist\"",
+        );
+        "Blocklist".parse().ok()
+    })?;
+    let mut bl = Blocklist::new(description);
+    bl.enabled = b.child("enabled").is_none() || ctx.bool01(b, "enabled");
+    if let Some(el) = b.child("type") {
+        let text = ctx.text(b, "type").unwrap_or_default();
+        for code in list(&text, &[',']) {
+            match KnownList::from_opnsense_code(&code) {
+                Some(l) => bl.lists.push(l),
+                None => ctx.warn(
+                    el,
+                    Severity::Degraded,
+                    format!("blocklist {code:?} is not known to sensr; add its URL instead"),
+                ),
+            }
+        }
+    }
+    bl.urls = csv::<HttpUrl>(ctx, b, "lists", "list URL");
+    if let Some(el) = b.child("allowlists") {
+        let text = ctx.text(b, "allowlists").unwrap_or_default();
+        for t in list(&text, &[',']) {
+            match allow_entry(&t) {
+                AllowEntry::Pattern(p) => match format!("/{p}/").parse::<AllowEntry>() {
+                    Ok(e) => bl.allow.push(e),
+                    Err(e) => ctx.warn(
+                        el,
+                        Severity::Invalid,
+                        format!("allowlist pattern {p:?} not imported: {e}"),
+                    ),
+                },
+                e => bl.allow.push(e),
+            }
+        }
+    }
+    bl.block = csv(ctx, b, "blocklists", "blocked domain");
+    bl.block_subtrees = csv(ctx, b, "wildcards", "wildcard domain");
+    bl.source_nets = csv(ctx, b, "source_nets", "source network");
+    let nxdomain = ctx.bool01(b, "nxdomain");
+    let address = ctx.parse::<Ipv4Addr>(b, "address");
+    bl.answer = if nxdomain {
+        BlockAnswer::Nxdomain
+    } else {
+        BlockAnswer::Address {
+            address: address.unwrap_or(Ipv4Addr::UNSPECIFIED),
+        }
+    };
+    if let Some(ttl) = ctx.parse::<u32>(b, "cache_ttl") {
+        bl.refresh_seconds = ttl;
+    }
+    Some((id, bl))
 }

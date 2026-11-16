@@ -354,8 +354,20 @@
           "rr": "A",
           "address": "192.168.50.5"
         },
+        "ptr": true,
         "description": "PBX"
       }
+    },
+    "statistics": false,
+    "register_firewall_records": true,
+    "txt_descriptions": false,
+    "tuning": {
+      "hide_identity": true,
+      "hide_version": true,
+      "prefetch": true,
+      "private_domains": [
+        "office.example.com"
+      ]
     }
   },
   "wireguard": {

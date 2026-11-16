@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 base64.workspace = true
+ipnet.workspace = true
 quick-xml.workspace = true
 sensr-schema.workspace = true
 thiserror.workspace = true

@@ -9,7 +9,8 @@ use base64::Engine as _;
 use sensr_schema::Document;
 use sensr_schema::fields::{IpFamily, NetOrAlias, PortSpec, Protocol};
 use sensr_schema::models::dhcp::{ClientMatch, Dhcp4Options};
-use sensr_schema::models::dns::{DnsRecord, LocalZoneType};
+use sensr_schema::models::dns::{AccessAction, DnsRecord, LocalZoneType};
+use sensr_schema::models::dnsbl::{AllowEntry, BlockAnswer};
 use sensr_schema::models::firewall::{
     AliasContent, AliasValue, Direction, Endpoint, RuleAction, StateType,
 };
@@ -662,6 +663,10 @@ fn unbound(doc: &Document) -> Element {
         .put(leaf("active_interface", join(&d.listen_interfaces, ",")))
         .put(leaf("dnssec", flag01(d.dnssec)))
         .put(leaf("dns64", flag01(d.dns64)))
+        .put_opt("dns64prefix", d.dns64_prefix)
+        .put(leaf("stats", flag01(d.statistics)))
+        .put(leaf("noregrecords", flag01(!d.register_firewall_records)))
+        .put(leaf("txtsupport", flag01(d.txt_descriptions)))
         .put(leaf("regdhcp", flag01(d.register_dhcp_leases)))
         .put_opt("regdhcpdomain", d.dhcp_domain.as_ref())
         .put(leaf("regdhcpstatic", flag01(d.register_dhcp_static)))
@@ -707,11 +712,130 @@ fn unbound(doc: &Document) -> Element {
             DnsRecord::Txt { data } => he.put(leaf("rr", "TXT")).put(leaf("txtdata", data)),
         };
         he.put_opt("ttl", h.ttl)
+            .put(leaf("addptr", flag01(h.ptr)))
             .put_opt("description", h.description.as_ref());
         hosts.put(he);
     }
     let mut e = Element::new("unboundplus");
-    e.put(g).put(fwd).put(dots).put(hosts);
+    e.put(g)
+        .put(unbound_advanced(doc))
+        .put(unbound_acls(doc))
+        .put(unbound_dnsbl(doc))
+        .put(fwd)
+        .put(dots)
+        .put(hosts);
+    e
+}
+
+fn unbound_advanced(doc: &Document) -> Element {
+    let t = &doc.dns.tuning;
+    let mut a = Element::new("advanced");
+    a.put(leaf("hideidentity", flag01(t.hide_identity)))
+        .put(leaf("hideversion", flag01(t.hide_version)))
+        .put(leaf("prefetch", flag01(t.prefetch)))
+        .put(leaf("prefetchkey", flag01(t.prefetch_key)))
+        .put(leaf("dnssecstripped", flag01(t.harden_dnssec_stripped)))
+        .put(leaf("belownxdomain", flag01(t.harden_below_nxdomain)))
+        .put(leaf("aggressivensec", flag01(t.aggressive_nsec)))
+        .put(leaf("serveexpired", flag01(t.serve_expired)))
+        .put_opt("serveexpiredreplyttl", t.serve_expired_reply_ttl)
+        .put_opt("serveexpiredttl", t.serve_expired_ttl)
+        .put(leaf(
+            "serveexpiredttlreset",
+            flag01(t.serve_expired_ttl_reset),
+        ))
+        .put_opt("serveexpiredclienttimeout", t.serve_expired_client_timeout)
+        .put(leaf("qnameminstrict", flag01(t.qname_minimisation_strict)))
+        .put(leaf("extendedstatistics", flag01(t.extended_statistics)))
+        .put(leaf("logqueries", flag01(t.log_queries)))
+        .put(leaf("logreplies", flag01(t.log_replies)))
+        .put(leaf("logtagqueryreply", flag01(t.log_tag_query_reply)))
+        .put(leaf("logservfail", flag01(t.log_servfail)))
+        .put(leaf("loglocalactions", flag01(t.log_local_actions)))
+        .put(leaf("logverbosity", t.log_verbosity))
+        .put(leaf("valloglevel", t.val_log_level.unwrap_or(0)))
+        .put(leaf("privatedomain", join(&t.private_domains, ",")))
+        .put(leaf("privateaddress", join(&t.private_addresses, ",")))
+        .put(leaf("insecuredomain", join(&t.insecure_domains, ",")))
+        .put_opt("msgcachesize", t.msg_cache_size)
+        .put_opt("rrsetcachesize", t.rrset_cache_size)
+        .put_opt("outgoingnumtcp", t.outgoing_num_tcp)
+        .put_opt("incomingnumtcp", t.incoming_num_tcp)
+        .put_opt("numqueriesperthread", t.num_queries_per_thread)
+        .put_opt("outgoingrange", t.outgoing_range)
+        .put_opt("jostletimeout", t.jostle_timeout)
+        .put_opt("discardtimeout", t.discard_timeout)
+        .put_opt("cachemaxttl", t.cache_max_ttl)
+        .put_opt("cachemaxnegativettl", t.cache_max_negative_ttl)
+        .put_opt("cacheminttl", t.cache_min_ttl)
+        .put_opt("infrahostttl", t.infra_host_ttl)
+        .put(leaf("infrakeepprobing", flag01(t.infra_keep_probing)))
+        .put_opt("infracachenumhosts", t.infra_cache_numhosts)
+        .put_opt("unwantedreplythreshold", t.unwanted_reply_threshold);
+    a
+}
+
+fn access_action(a: AccessAction) -> &'static str {
+    match a {
+        AccessAction::Allow => "allow",
+        AccessAction::Deny => "deny",
+        AccessAction::Refuse => "refuse",
+        AccessAction::AllowSnoop => "allow_snoop",
+        AccessAction::DenyNonLocal => "deny_non_local",
+        AccessAction::RefuseNonLocal => "refuse_non_local",
+    }
+}
+
+fn unbound_acls(doc: &Document) -> Element {
+    let a = &doc.dns.access;
+    let mut e = Element::new("acls");
+    e.put(leaf("default_action", access_action(a.default_action)));
+    for (id, l) in a.lists.iter() {
+        let mut le = Element::new("acl").attr("uuid", id.to_string());
+        le.put(leaf("enabled", flag01(l.enabled)))
+            .put(leaf("name", &l.name))
+            .put(leaf("action", access_action(l.action)))
+            .put(leaf("networks", join(&l.networks, ",")))
+            .put_opt("description", l.description.as_ref());
+        e.put(le);
+    }
+    e
+}
+
+fn unbound_dnsbl(doc: &Document) -> Element {
+    let mut e = Element::new("dnsbl");
+    for (id, b) in doc.dns.blocklists.iter() {
+        let mut be = Element::new("blocklist").attr("uuid", id.to_string());
+        let codes: Vec<&str> = b.lists.iter().map(|l| l.opnsense_code()).collect();
+        // OPNsense allowlists are regular expressions; a plain name there
+        // means exactly that name.
+        let allow: Vec<String> = b
+            .allow
+            .iter()
+            .map(|a| match a {
+                AllowEntry::Domain(d) => d.to_string(),
+                AllowEntry::Subtree(d) => format!("(.*\\.)?{}$", d.as_str().replace('.', "\\.")),
+                AllowEntry::Pattern(p) => p.clone(),
+            })
+            .collect();
+        let (address, nxdomain) = match b.answer {
+            BlockAnswer::Address { address } if address.is_unspecified() => (None, false),
+            BlockAnswer::Address { address } => (Some(address), false),
+            BlockAnswer::Nxdomain => (None, true),
+        };
+        be.put(leaf("enabled", flag01(b.enabled)))
+            .put(leaf("type", codes.join(",")))
+            .put(leaf("lists", join(&b.urls, ",")))
+            .put(leaf("allowlists", allow.join(",")))
+            .put(leaf("blocklists", join(&b.block, ",")))
+            .put(leaf("wildcards", join(&b.block_subtrees, ",")))
+            .put(leaf("source_nets", join(&b.source_nets, ",")))
+            .put_opt("address", address)
+            .put(leaf("nxdomain", flag01(nxdomain)))
+            .put(leaf("cache_ttl", b.refresh_seconds))
+            .put(leaf("description", &b.description));
+        e.put(be);
+    }
     e
 }
 

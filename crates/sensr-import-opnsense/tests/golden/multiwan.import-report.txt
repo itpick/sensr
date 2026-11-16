@@ -26,7 +26,7 @@
 /opnsense/gateways/gateway_group[@uuid='2b2d395e-cfcf-4324-be48-7f65ebbc5323']  <- gateways
 /opnsense/gateways/gateway_group[@uuid='60d77f02-8d93-4fec-b523-cf0d0af7f5dc']  <- gateways
 
-## unmapped, expected (37)
+## unmapped, expected (34)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -59,9 +59,6 @@
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='b7d2074a-8644-4801-9415-009bcd75f9bc']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Kea/dhcp4/lexpire  (Kea lease expiry tuning is not modelled yet)
 /opnsense/OPNsense/Kea/dhcp4/ha  (Kea high availability is not modelled yet)
-/opnsense/OPNsense/unboundplus/advanced  (Unbound tuning options are not modelled yet)
-/opnsense/OPNsense/unboundplus/acls  (Unbound access lists are not modelled yet)
-/opnsense/OPNsense/unboundplus/dnsbl  (DNS blocklists are not modelled yet)
 /opnsense/OPNsense/Syslog  (remote syslog is not modelled yet)
 /opnsense/OPNsense/trust  (trust store settings are not modelled yet)
 
