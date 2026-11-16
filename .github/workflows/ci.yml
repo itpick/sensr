@@ -34,6 +34,30 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      - name: Make room for the store (images and VM closures)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Let the nix sandbox use KVM (VM tests)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            system-features = nixos-test benchmark big-parallel kvm
       - run: nix flake check --all-systems --no-build
-      - run: nix build .#default
+      - name: Build sensr, the qcow image, and run the VM checks
+        run: nix flake check -L --keep-going
+      - run: nix build -L .#images.qcow
+      - name: Boot times and image size
+        run: |
+          out=$(nix build --print-out-paths .#checks.x86_64-linux.qcow-boot)
+          echo "qcow boots (s): $(tr '\n' ' ' < $out/boot-seconds)" >> "$GITHUB_STEP_SUMMARY"
+          echo "qcow image bytes: $(cat $out/image-bytes)" >> "$GITHUB_STEP_SUMMARY"
+
+  nix-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: DeterminateSystems/nix-installer-action@main
+      - run: nix build -L .#checks.aarch64-linux.sensr
