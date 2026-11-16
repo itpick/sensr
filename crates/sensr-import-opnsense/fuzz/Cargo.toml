@@ -1,0 +1,27 @@
+# cargo-fuzz harness (nightly job, docs/PLAN.md §4.5). Its own workspace so the
+# main workspace builds on stable without libfuzzer; run with
+# `cargo +nightly fuzz run fuzz_config_xml` from this crate's directory.
+[package]
+name = "sensr-import-opnsense-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# Pinned here rather than in [workspace.dependencies] because this is a separate
+# workspace; latest stable as of 2026-11-16.
+libfuzzer-sys = "0.4.13"
+sensr-import-opnsense = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_config_xml"
+path = "fuzz_targets/fuzz_config_xml.rs"
+test = false
+doc = false
+bench = false
