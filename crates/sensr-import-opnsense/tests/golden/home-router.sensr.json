@@ -199,6 +199,18 @@
         "description": "Synology-style NAS on LAN",
         "counters": false
       },
+      "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1b04": {
+        "enabled": true,
+        "name": "TRUSTED_MACS",
+        "content": {
+          "type": "mac",
+          "addresses": [
+            "02:00:5e:10:00:0a"
+          ]
+        },
+        "description": "Devices allowed from IoT to the LAN (MAC alias as a rule source)",
+        "counters": false
+      },
       "d6eb0998-efb5-4cf6-b979-8100f1948a21": {
         "enabled": true,
         "name": "RFC1918_NETS",
@@ -445,34 +457,9 @@
         "state_type": "keep",
         "description": "Allow WireGuard"
       },
-      "5a7e0c21-3f4b-4d1e-9c2a-6b8d0e1f4a40": {
-        "enabled": true,
-        "sequence": 60,
-        "action": "pass",
-        "quick": true,
-        "interfaces": [
-          "wan"
-        ],
-        "interface_not": false,
-        "direction": "in",
-        "ip_protocol": "inet",
-        "protocol": "tcp",
-        "source": {
-          "net": "any",
-          "not": false
-        },
-        "destination": {
-          "net": "192.168.1.40",
-          "not": false,
-          "port": "25565"
-        },
-        "log": false,
-        "state_type": "keep",
-        "description": "Game server via 1:1 NAT"
-      },
       "1aac7ca4-2950-47cf-af32-f24f076f55a2": {
         "enabled": true,
-        "sequence": 70,
+        "sequence": 60,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -496,7 +483,7 @@
       },
       "7fea0ed1-647a-4a21-ad39-b58e286fffa4": {
         "enabled": true,
-        "sequence": 80,
+        "sequence": 70,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -520,7 +507,7 @@
       },
       "bf449e1e-69ca-44ef-a21f-104e3a575460": {
         "enabled": true,
-        "sequence": 90,
+        "sequence": 80,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -542,6 +529,30 @@
         "log": false,
         "state_type": "keep",
         "description": "IoT: allow DNS to firewall"
+      },
+      "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a04": {
+        "enabled": true,
+        "sequence": 90,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "opt1"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "alias:TRUSTED_MACS",
+          "not": false
+        },
+        "destination": {
+          "net": "net:lan",
+          "not": false
+        },
+        "log": true,
+        "state_type": "keep",
+        "description": "IoT: trusted MACs may reach the LAN"
       },
       "6b5af314-ed14-4fe2-bc30-d6da7a0d48ac": {
         "enabled": true,
@@ -752,10 +763,6 @@
       "log_default_block": true,
       "log_default_pass": true,
       "flow_offload": false
-    },
-    "feeds": {
-      "geoip_url": "https://geoip.example.net/download/GeoLite2-Country-CSV.zip",
-      "resolve_interval": 300
     }
   },
   "nat": {
@@ -814,44 +821,6 @@
     "reflection": {
       "port_forwards": true,
       "source_nat": true
-    },
-    "one_to_one": {
-      "7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e40": {
-        "enabled": true,
-        "sequence": 10,
-        "interface": "wan",
-        "type": "binat",
-        "external": "203.0.113.40",
-        "source": {
-          "net": "192.168.1.40",
-          "not": false
-        },
-        "destination": {
-          "net": "any",
-          "not": false
-        },
-        "log": false,
-        "reflection": "enable",
-        "description": "Game server on its own public address"
-      },
-      "7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e41": {
-        "enabled": false,
-        "sequence": 20,
-        "interface": "wan",
-        "type": "nat",
-        "external": "203.0.113.50",
-        "source": {
-          "net": "net:opt1",
-          "not": false
-        },
-        "destination": {
-          "net": "198.51.100.0/24",
-          "not": false
-        },
-        "log": true,
-        "reflection": "disable",
-        "description": "IoT to the vendor cloud from a fixed address (paused)"
-      }
     }
   },
   "dhcpv4": {

@@ -427,6 +427,23 @@ U1lOVEhFVElDIEFQSSBLRVkgLSBOT1QgQSBSRUFMIENSRURFTlRJQUwgLSBzZW5zciB0ZXN0IGNvcnB1
             <categories/>
             <description>Synology-style NAS on LAN</description>
           </alias>
+          <alias uuid="4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1b04">
+            <enabled>1</enabled>
+            <name>TRUSTED_MACS</name>
+            <type>mac</type>
+            <path_expression/>
+            <proto/>
+            <interface/>
+            <counters>0</counters>
+            <updatefreq/>
+            <content>02:00:5e:10:00:0a</content>
+            <password/>
+            <username/>
+            <authtype/>
+            <expire/>
+            <categories/>
+            <description>Devices allowed from IoT to the LAN (MAC alias as a rule source)</description>
+          </alias>
           <alias uuid="d6eb0998-efb5-4cf6-b979-8100f1948a21">
             <enabled>1</enabled>
             <name>RFC1918_NETS</name>
@@ -1118,6 +1135,67 @@ U1lOVEhFVElDIEFQSSBLRVkgLSBOT1QgQSBSRUFMIENSRURFTlRJQUwgLSBzZW5zciB0ZXN0IGNvcnB1
             <shaper1/>
             <shaper2/>
             <description>IoT: allow DNS to firewall</description>
+            <audit/>
+          </rule>
+          <rule uuid="4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a04">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <state-policy/>
+            <sequence>205</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>opt1</interface>
+            <received-on-not>0</received-on-not>
+            <received-on/>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>any</protocol>
+            <icmptype/>
+            <icmp6type/>
+            <source_net>TRUSTED_MACS</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>lan</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port/>
+            <divert-to/>
+            <gateway/>
+            <replyto/>
+            <disablereplyto>0</disablereplyto>
+            <log>1</log>
+            <allowopts>0</allowopts>
+            <nosync>0</nosync>
+            <nopfsync>0</nopfsync>
+            <statetimeout/>
+            <udp-first/>
+            <udp-multiple/>
+            <udp-single/>
+            <max-src-nodes/>
+            <max-src-states/>
+            <max-src-conn/>
+            <max/>
+            <max-src-conn-rate/>
+            <max-src-conn-rates/>
+            <max-pkt-rate-number/>
+            <max-pkt-rate-seconds/>
+            <overload/>
+            <adaptivestart/>
+            <adaptiveend/>
+            <prio/>
+            <set-prio/>
+            <set-prio-low/>
+            <tag/>
+            <tagged/>
+            <tcpflags1/>
+            <tcpflags2/>
+            <tcpflags_any>0</tcpflags_any>
+            <categories/>
+            <sched/>
+            <tos/>
+            <shaper1/>
+            <shaper2/>
+            <description>IoT: trusted MACs may reach the LAN</description>
             <audit/>
           </rule>
           <rule uuid="6b5af314-ed14-4fe2-bc30-d6da7a0d48ac">

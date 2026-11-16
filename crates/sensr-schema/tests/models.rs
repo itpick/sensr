@@ -483,6 +483,26 @@ fn filter_rule_rules() {
 }
 
 #[test]
+fn mac_alias_as_rule_source() {
+    // OPNsense resolves MAC aliases to the neighbour table's addresses, so
+    // "trusted Wi-Fi devices may reach the LAN" is a valid rule
+    let mut doc = Document::factory();
+    doc.firewall.aliases.push(alias(
+        "trusted",
+        json!({"type": "mac", "addresses": ["02:00:5e:10:00:0a"]}),
+    ));
+    let r = doc.firewall.rules.push(
+        serde_json::from_value(json!({
+            "interfaces": ["lan"],
+            "source": {"net": "alias:trusted"},
+        }))
+        .unwrap(),
+    );
+    let v = doc.validate();
+    assert!(v.is_empty(), "rule {r}: {v:?}");
+}
+
+#[test]
 fn nat_rules() {
     let mut doc = Document::factory();
     let ok = doc.nat.port_forwards.push(
