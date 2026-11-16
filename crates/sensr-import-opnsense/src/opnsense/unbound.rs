@@ -4,7 +4,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 
 use ipnet::IpNet;
-use sensr_schema::fields::{Description, DomainName, HostOverrideName, HttpUrl, InterfaceId};
+use sensr_schema::fields::{
+    Description, DomainName, HostOverrideName, HttpUrl, InterfaceId, ListedName,
+};
 use sensr_schema::models::dns::{
     AccessAction, AccessList, CacheSize, DnsRecord, Forwarder, HostOverride, LocalZoneType, Tuning,
 };
@@ -434,7 +436,7 @@ fn acls<'doc>(a: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Document) 
 /// always written as plain names, which mean exactly that name.
 fn allow_entry(t: &str) -> AllowEntry {
     let t = t.trim();
-    if let Ok(d) = t.trim_end_matches('.').parse::<DomainName>() {
+    if let Ok(d) = t.parse::<ListedName>() {
         return AllowEntry::Domain(d);
     }
     AllowEntry::Pattern(t.to_owned())

@@ -34,7 +34,7 @@ pub mod well_known;
 pub use countries::{COUNTRIES, country_name};
 pub use csv_list::CsvListField;
 pub use field::{ChangeCase, Ctx, Field, FieldType, Mask};
-pub use hostname::{DomainName, Host, HostOverrideName, Hostname};
+pub use hostname::{DomainName, Host, HostOverrideName, Hostname, ListedName};
 pub use keys::{SshPublicKey, WgKey};
 pub use mac::MacAddr;
 pub use misc::{CountryCode, HexBytes, HttpUrl, Pem};

@@ -94,6 +94,38 @@ impl fmt::Display for DomainName {
 }
 string_serde!(DomainName);
 
+/// A DNS name as blocklists and allowlists hold them: like [`DomainName`],
+/// but labels may contain underscores (`_dmarc.example.com`), and it is
+/// kept lower-case.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ListedName(String);
+
+impl ListedName {
+    /// The name as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for ListedName {
+    type Err = FieldError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.strip_suffix('.').unwrap_or(s);
+        if valid_name(s, true) {
+            Ok(Self(s.to_ascii_lowercase()))
+        } else {
+            Err(FieldError::syntax("A valid domain must be specified."))
+        }
+    }
+}
+
+impl fmt::Display for ListedName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+string_serde!(ListedName);
+
 /// An IP address or a DNS name, e.g. a WireGuard endpoint or an NTP server.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Host {

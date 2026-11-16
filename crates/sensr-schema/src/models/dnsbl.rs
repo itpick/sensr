@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{check, yes};
 use crate::array::ArrayField;
-use crate::fields::{Description, DomainName, HttpUrl};
+use crate::fields::{Description, HttpUrl, ListedName};
 use crate::refs::RefContext;
 use crate::validation::{FieldError, FieldPath, Validations, ValidatorKind};
 
@@ -318,9 +318,9 @@ impl KnownList {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AllowEntry {
     /// Exactly this name (`updates.example.com`).
-    Domain(DomainName),
+    Domain(ListedName),
     /// The name and everything below it (`*.example.com`).
-    Subtree(DomainName),
+    Subtree(ListedName),
     /// Names matching a regular expression, anchored at the start and
     /// case-insensitive as in OPNsense (`/^cdn[0-9]+\./`). Applied when the
     /// lists are compiled: it removes listed names, but cannot carve a hole
@@ -344,7 +344,7 @@ impl FromStr for AllowEntry {
             Some(rest) => (true, rest),
             None => (false, s),
         };
-        let d: DomainName = name.trim_end_matches('.').to_ascii_lowercase().parse()?;
+        let d: ListedName = name.parse()?;
         Ok(if sub {
             Self::Subtree(d)
         } else {
@@ -409,10 +409,10 @@ pub struct Blocklist {
     pub urls: Vec<HttpUrl>,
     /// Names blocked exactly (OPNsense `blocklists`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub block: Vec<DomainName>,
+    pub block: Vec<ListedName>,
     /// Names blocked with all their subdomains (OPNsense `wildcards`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub block_subtrees: Vec<DomainName>,
+    pub block_subtrees: Vec<ListedName>,
     /// Names never blocked (OPNsense `allowlists`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<AllowEntry>,
