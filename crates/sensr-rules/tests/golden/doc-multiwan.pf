@@ -1,12 +1,16 @@
 # [prio: 200]
 nat on igc0 inet from (igc1:network) to any port 500 -> (igc0:0) static-port # Automatic outbound rule
-nat on igc0 inet from (igc2:network) to any port 500 -> (igc0:0) static-port # Automatic outbound rule
 nat on igc0 inet from (igc1_vlan50:network) to any port 500 -> (igc0:0) static-port # Automatic outbound rule
 nat on igc0 inet from 127.0.0.0/8 to any port 500 -> (igc0:0) static-port # Automatic outbound rule
 nat on igc0 inet from (igc1:network) to any -> (igc0:0) port 1024:65535 # Automatic outbound rule
-nat on igc0 inet from (igc2:network) to any -> (igc0:0) port 1024:65535 # Automatic outbound rule
 nat on igc0 inet from (igc1_vlan50:network) to any -> (igc0:0) port 1024:65535 # Automatic outbound rule
 nat on igc0 inet from 127.0.0.0/8 to any -> (igc0:0) port 1024:65535 # Automatic outbound rule
+nat on igc2 inet from (igc1:network) to any port 500 -> (igc2:0) static-port # Automatic outbound rule
+nat on igc2 inet from (igc1_vlan50:network) to any port 500 -> (igc2:0) static-port # Automatic outbound rule
+nat on igc2 inet from 127.0.0.0/8 to any port 500 -> (igc2:0) static-port # Automatic outbound rule
+nat on igc2 inet from (igc1:network) to any -> (igc2:0) port 1024:65535 # Automatic outbound rule
+nat on igc2 inet from (igc1_vlan50:network) to any -> (igc2:0) port 1024:65535 # Automatic outbound rule
+nat on igc2 inet from 127.0.0.0/8 to any -> (igc2:0) port 1024:65535 # Automatic outbound rule
 # [prio: 300]
 no rdr on igc1 proto tcp from {any} to {(igc1)} port {80} # Anti-lockout; prevent redirects for protected ports to this interface address
 no rdr on igc1 proto tcp from {any} to {(igc1)} port {443} # Anti-lockout; prevent redirects for protected ports to this interface address
