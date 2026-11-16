@@ -1491,7 +1491,7 @@ fn allow_entry_ok(e: &str) -> bool {
         // The pattern itself is checked by sensr-schema (it has the regex engine).
         return p.len() > 1 && p.ends_with('/');
     }
-    crate::form::is_hostname(e.strip_prefix("*.").unwrap_or(e).trim_end_matches('.'))
+    crate::form::is_listed_name(e.strip_prefix("*.").unwrap_or(e))
 }
 
 impl FormModel for Blocklist {
@@ -1509,9 +1509,9 @@ impl FormModel for Blocklist {
             F::new("allow", "Allowlist Domains", K::Lines).help(
                 "Names never blocked by this policy, one per line: name, *.name for a name and its subdomains, or /regex/. Applies only to this policy's lists.",
             ),
-            F::new("block", "Blocklist Domains", K::HostnameLines)
+            F::new("block", "Blocklist Domains", K::ListedNameLines)
                 .help("Names to block, one per line. Only exact matches."),
-            F::new("block_subtrees", "Wildcard Domains", K::HostnameLines).help(
+            F::new("block_subtrees", "Wildcard Domains", K::ListedNameLines).help(
                 "Names to block with all their subdomains, one per line. Blocking first-level domains is not supported.",
             ),
             F::new("source_nets", "Source Net(s)", K::CidrLines).help(
@@ -2277,7 +2277,7 @@ mod tests {
             ("description", "Kids"),
             (
                 "allow",
-                "ok.example\n*.cdn.example\n/^ads[0-9]+\\./\nbad name",
+                "ok.example\n*._tcp.example\n/^ads[0-9]+\\./\nbad name",
             ),
             ("refresh_seconds", "72000"),
         ]
@@ -2300,7 +2300,7 @@ mod tests {
         let mut ok = inputs.clone();
         ok.insert(
             "allow".into(),
-            "ok.example\n*.cdn.example\n/^ads[0-9]+\\./".into(),
+            "ok.example\n*._tcp.example\n/^ads[0-9]+\\./".into(),
         );
         ok.insert("urls".into(), "".into());
         ok.insert("lists".into(), "hagezi-pro\noisd-small".into());

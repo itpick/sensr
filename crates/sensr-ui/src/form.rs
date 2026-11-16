@@ -47,6 +47,9 @@ pub enum FieldKind {
     IpLines,
     /// One domain name per line.
     HostnameLines,
+    /// One name per line as blocklists hold them: like a domain name, but labels may contain
+    /// underscores (`_dmarc.example.com`) and a trailing dot is dropped.
+    ListedNameLines,
     /// Multi-line free text.
     TextArea,
     /// Hostname label(s): letters, digits, `-` and `.`.
@@ -218,6 +221,13 @@ pub fn is_hostname(s: &str) -> bool {
         })
 }
 
+/// A name as blocklists hold it: [`is_hostname`] with underscores allowed, an optional
+/// trailing dot.
+pub fn is_listed_name(s: &str) -> bool {
+    let s = s.strip_suffix('.').unwrap_or(s);
+    is_hostname(&s.replace('_', "a"))
+}
+
 fn is_mac(s: &str) -> bool {
     let parts: Vec<_> = s.split([':', '-']).collect();
     parts.len() == 6
@@ -239,6 +249,7 @@ pub fn parse_field(spec: &FieldSpec, raw: &str) -> Result<Value, String> {
             | FieldKind::CidrLines
             | FieldKind::IpLines
             | FieldKind::HostnameLines
+            | FieldKind::ListedNameLines
             | FieldKind::MultiSelect(_) => Value::Array(vec![]),
             FieldKind::Number { .. } => Value::Null,
             _ => Value::String(String::new()),
@@ -293,6 +304,7 @@ pub fn parse_field(spec: &FieldSpec, raw: &str) -> Result<Value, String> {
             Ok(Value::Array(out))
         }
         FieldKind::HostnameLines => each(is_hostname, "domain name"),
+        FieldKind::ListedNameLines => each(is_listed_name, "domain name"),
         FieldKind::Lines => Ok(Value::Array(
             lines(raw).map(|l| Value::String(l.to_owned())).collect(),
         )),
@@ -485,6 +497,13 @@ mod tests {
             Ok(json!(["a.example", "b.example"]))
         );
         assert!(parse_field(&spec, "not a domain").is_err());
+        assert!(parse_field(&spec, "_dmarc.example").is_err());
+        let spec = FieldSpec::new("b", "Block", FieldKind::ListedNameLines);
+        assert_eq!(
+            parse_field(&spec, "_dmarc.example"),
+            Ok(json!(["_dmarc.example"]))
+        );
+        assert!(parse_field(&spec, "bad name").is_err());
     }
 
     #[test]

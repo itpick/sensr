@@ -388,6 +388,7 @@ pub fn FormFields(
                 | FieldKind::CidrLines
                 | FieldKind::IpLines
                 | FieldKind::HostnameLines
+                | FieldKind::ListedNameLines
                 | FieldKind::TextArea => view! {
                     <textarea id=id.clone() rows="3" aria-describedby=described aria-invalid=invalid required=required
                         prop:value=get
