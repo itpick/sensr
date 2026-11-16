@@ -505,12 +505,21 @@ impl Engine {
             else {
                 return;
             };
-            let names: Vec<String> = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout)
-                .unwrap_or_default()
+            let links =
+                serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout).unwrap_or_default();
+            // VLANs that exist and are administratively up
+            let up: Vec<&str> = links
                 .iter()
-                .filter_map(|l| l.get("ifname")?.as_str().map(str::to_owned))
+                .filter(|l| {
+                    l.get("flags")
+                        .and_then(|f| f.as_array())
+                        .is_some_and(|f| f.iter().any(|x| x == "UP"))
+                })
+                .filter_map(|l| l.get("ifname")?.as_str())
                 .collect();
-            if m.vlans.iter().all(|v| names.contains(&v.name)) || !out.success() || names.is_empty()
+            if m.vlans.iter().all(|v| up.contains(&v.name.as_str()))
+                || !out.success()
+                || links.is_empty()
             {
                 return;
             }
