@@ -154,7 +154,7 @@ fn gateway<'doc>(
 fn num<'doc>(ctx: &mut MapContext<'doc>, g: &'doc Element, name: &str) -> Option<u32> {
     let t = ctx.non_empty(g, name)?;
     match t.trim().parse::<f64>() {
-        Ok(v) if v.is_finite() && v >= 0.0 && v < 4.0e9 => Some(v.ceil() as u32),
+        Ok(v) if (0.0..4.0e9).contains(&v) => Some(v.ceil() as u32),
         _ => {
             ctx.warn(
                 g,
