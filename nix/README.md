@@ -18,9 +18,9 @@ The module provides this; the crates may rely on it. Change both together.
 |---|---|
 | Binaries | `sensr-agent`, `sensr-api`, `sensr` (the CLI; the overlay links `sensr` to `sensr-cli` until the crate names its binary) |
 | Agent | root, `ProtectSystem=strict`, capabilities `NET_ADMIN NET_RAW NET_BIND_SERVICE SYS_ADMIN CHOWN FOWNER KILL`, writable: `/var/lib/sensr` (0700), `/run/sensr` (0755, kept across restarts), `/run/systemd/network`, the seed dir, `/boot/firmware`. `Type=exec` (switch to `notify` once the agent calls sd_notify) |
-| Agent env | `SENSR_SOCKET=/run/sensr/agent.sock`, `SENSR_RUNTIME_DIR=/run/sensr`, `SENSR_STATE_DIR=/var/lib/sensr`, `SENSR_SEED_DIR` (`/boot/sensr`, Pi `/boot/firmware/sensr`), `SENSR_NETWORKD_DIR=/run/systemd/network`, `SENSR_CONFIG_FILE` (declarative mode only) |
-| Socket | the agent creates `$SENSR_SOCKET` and makes it `0660 root:sensr` |
-| API | `DynamicUser`, group `sensr`, `CAP_NET_BIND_SERVICE` only, cannot see `/var/lib/sensr`; env `SENSR_SOCKET`, `SENSR_API_LISTEN` (default `[::]:443`) |
+| Agent env | `SENSR_AGENT_SOCKET=/run/sensr/agent.sock`, `SENSR_RUNTIME_DIR=/run/sensr`, `SENSR_STATE_DIR=/var/lib/sensr`, `SENSR_SEED_DIR` (`/boot/sensr`, Pi `/boot/firmware/sensr`), `SENSR_NETWORKD_DIR=/run/systemd/network`, `SENSR_CONFIG_FILE` (declarative mode only) |
+| Socket | the agent creates `$SENSR_AGENT_SOCKET` and makes it `0660 root:sensr` |
+| API | `DynamicUser`, group `sensr`, `CAP_NET_BIND_SERVICE` only, cannot see `/var/lib/sensr`; env `SENSR_AGENT_SOCKET`, `SENSR_API_LISTEN` (default `[::]:443`) |
 | Kea | agent writes `/run/sensr/kea/kea-dhcp4.conf`, then starts or reloads `sensr-kea-dhcp4.service` (the unit runs `kea-dhcp4 -t` first; reload is SIGHUP). Leases: `/var/lib/kea` |
 | Unbound | agent writes `/run/sensr/unbound/unbound.conf`, then starts or reloads `sensr-unbound.service` (`unbound-checkconf` first; reload is SIGHUP) |
 | networkd | agent writes `.network`/`.netdev` files to `/run/systemd/network` and runs `networkctl reload` |

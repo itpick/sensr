@@ -8,7 +8,7 @@
 # Contract with the Rust crates (also in nix/README.md):
 #
 #   sensr-agent   root, capabilities bounded, owns /var/lib/sensr (0700).
-#                 Serves IPC on $SENSR_SOCKET (/run/sensr/agent.sock); makes
+#                 Serves IPC on $SENSR_AGENT_SOCKET (/run/sensr/agent.sock); makes
 #                 it 0660 root:sensr. Renders daemon configs to
 #                 /run/sensr/<daemon>/ and networkd files to
 #                 /run/systemd/network/, then starts or reloads the units
@@ -281,7 +281,7 @@ in
     environment.systemPackages = [ cfg.package ] ++ appliedPackages;
     environment.etc."sensr/version.json".text = builtins.toJSON versionJson;
 
-    environment.variables.SENSR_SOCKET = socket;
+    environment.variables.SENSR_AGENT_SOCKET = socket;
 
     systemd.targets.sensr-net = {
       description = "sensr has applied interfaces, addresses and routes";
@@ -303,7 +303,7 @@ in
       ];
       path = appliedPackages ++ [ config.systemd.package ];
       environment = {
-        SENSR_SOCKET = socket;
+        SENSR_AGENT_SOCKET = socket;
         SENSR_RUNTIME_DIR = runtimeDir;
         SENSR_STATE_DIR = stateDir;
         SENSR_SEED_DIR = cfg.seedDir;
@@ -371,7 +371,7 @@ in
       ];
       wants = [ "sensr-agent.service" ];
       environment = {
-        SENSR_SOCKET = socket;
+        SENSR_AGENT_SOCKET = socket;
         SENSR_API_LISTEN = cfg.api.listen;
         RUST_LOG = "info";
       };
