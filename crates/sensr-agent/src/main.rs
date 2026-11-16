@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
-use sensr_agent::applier::PreviewApplier;
+use sensr_agent::applier::{Applier, PreviewApplier};
+use sensr_agent::slice_applier::SliceApplier;
 use sensr_agent::store::{ConfigStore, JsonDirStore, MemStore, NewRevision};
 use sensr_agent::{Agent, Settings};
 
@@ -37,6 +38,20 @@ struct Args {
     /// Longest commit-confirm window accepted, in seconds.
     #[arg(long, default_value_t = 86_400)]
     max_confirm_secs: u64,
+    /// Apply pipeline: `preview` plans but changes nothing on the host;
+    /// `slice` applies (networkd links, nftables, Kea, Unbound, WireGuard,
+    /// sysctls, qdiscs).
+    #[arg(long, value_enum, default_value_t = ApplierKind::Preview, env = "SENSR_APPLIER")]
+    applier: ApplierKind,
+}
+
+/// Which apply pipeline the agent runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ApplierKind {
+    /// Plan only.
+    Preview,
+    /// The routing-slice engine.
+    Slice,
 }
 
 fn parse_mode(s: &str) -> Result<u32, String> {
@@ -64,13 +79,28 @@ fn seed_store(store: &mut dyn ConfigStore, seed: Option<&PathBuf>) -> anyhow::Re
 async fn serve<S: ConfigStore>(args: Args, mut store: S) -> anyhow::Result<()> {
     seed_store(&mut store, args.seed.as_ref())?;
     let settings = Settings {
-        trusted_uids: args.trust_uids,
-        trusted_gids: args.trust_gids,
+        trusted_uids: args.trust_uids.clone(),
+        trusted_gids: args.trust_gids.clone(),
         state_file: args.state_dir.as_ref().map(|d| d.join("agent-state.json")),
         max_confirm: Duration::from_secs(args.max_confirm_secs),
         ..Settings::default()
     };
-    let agent = Agent::new(store, PreviewApplier, settings).map_err(|e| anyhow::anyhow!(e))?;
+    match args.applier {
+        ApplierKind::Preview => run_agent(args, store, PreviewApplier, settings).await,
+        ApplierKind::Slice => {
+            let applier = SliceApplier::system().context("starting the apply engine")?;
+            run_agent(args, store, applier, settings).await
+        }
+    }
+}
+
+async fn run_agent<S: ConfigStore, A: Applier>(
+    args: Args,
+    store: S,
+    applier: A,
+    settings: Settings,
+) -> anyhow::Result<()> {
+    let agent = Agent::new(store, applier, settings).map_err(|e| anyhow::anyhow!(e))?;
     if let Err(e) = agent.boot().await {
         // Keep serving: the operator needs the socket to fix the config.
         tracing::error!(error = %e, "boot apply failed");

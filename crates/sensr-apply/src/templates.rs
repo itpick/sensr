@@ -520,6 +520,7 @@ pub fn builtin_modules() -> Vec<Module> {
         SAMPLE,
         crate::appliers::unbound::MODULE,
         crate::appliers::wireguard::MODULE,
+        crate::appliers::interfaces::MODULE,
     ]
 }
 
@@ -539,7 +540,8 @@ mod tests {
                 .unwrap();
         let wg = crate::appliers::wireguard::tests::model();
         let wg = serde_json::to_value(wg.context().unwrap()).unwrap();
-        for part in [unbound, wg] {
+        let networkd = crate::appliers::interfaces::tests::context();
+        for part in [unbound, wg, networkd] {
             for (k, v) in part.as_object().unwrap() {
                 obj.insert(k.clone(), v.clone());
             }
