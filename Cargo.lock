@@ -2899,6 +2899,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sensr-monitor"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "socket2",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sensr-rules"
 version = "0.0.0"
 dependencies = [

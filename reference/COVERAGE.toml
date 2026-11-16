@@ -31,7 +31,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/etc/inc/plugins.inc.d/core.inc" = { status = "todo" }
 "core/src/etc/inc/plugins.inc.d/dhcrelay.inc" = { status = "todo" }
 "core/src/etc/inc/plugins.inc.d/dnsmasq.inc" = { status = "todo" }
-"core/src/etc/inc/plugins.inc.d/dpinger.inc" = { status = "todo" }
+"core/src/etc/inc/plugins.inc.d/dpinger.inc" = { status = "in-progress", crate = "sensr-monitor", module = "icmp, monitor", note = "probe loop per gateway with interval, loss interval, time period, data length and source bind; monitor host routes and link-local scoping are the agent's" }
 "core/src/etc/inc/plugins.inc.d/hostwatch.inc" = { status = "todo" }
 "core/src/etc/inc/plugins.inc.d/ipfw.inc" = { status = "todo" }
 "core/src/etc/inc/plugins.inc.d/ipsec.inc" = { status = "todo" }
@@ -597,7 +597,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/library/OPNsense/OpenVPN/PlainOpenVPN.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/OpenVPN/ViscosityVisz.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/System/AbstractStatus.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/library/OPNsense/System/StaticRoute.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/library/OPNsense/System/StaticRoute.php" = { status = "in-progress", crate = "sensr-monitor", module = "status, default_gw", note = "getMonitorStatus status mapping and the default-gateway switching skip list; route sync is the agent's" }
 "core/src/opnsense/mvc/app/library/OPNsense/System/Status/CaptivePortalStatus.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/System/Status/ConfigdProxyOverrideStatus.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/System/Status/CrashReporterStatus.php" = { status = "todo" }
@@ -945,12 +945,12 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/models/OPNsense/Routes/Migrations/M1_0_1.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Routes/Route.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Routes/Route.xml" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Routing/FieldTypes/GatewayField.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Routing/FieldTypes/GatewayField.php" = { status = "done", crate = "sensr-monitor", module = "settings", note = "getDpingerDefaults is MonitorSettings::default" }
 "core/src/opnsense/mvc/app/models/OPNsense/Routing/FieldTypes/GatewayGroupItemField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Routing/GatewayGroups.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Routing/GatewayGroups.php" = { status = "in-progress", crate = "sensr-monitor", module = "group", note = "gatewayIsUp, gatewayStateChange, getActiveGroups; config validation is sensr-schema" }
 "core/src/opnsense/mvc/app/models/OPNsense/Routing/GatewayGroups.xml" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Routing/Gateways.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Routing/Gateways.xml" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Routing/Gateways.php" = { status = "in-progress", crate = "sensr-monitor", module = "default_gw, settings", note = "getDefaultGW ordering and threshold/time-period validation; dynamic gateway discovery is the agent's" }
+"core/src/opnsense/mvc/app/models/OPNsense/Routing/Gateways.xml" = { status = "in-progress", crate = "sensr-monitor", module = "settings", note = "threshold and timing fields with their constraints; the gateway record itself is sensr-schema models::gateways" }
 "core/src/opnsense/mvc/app/models/OPNsense/Routing/Migrations/M1_0_0.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Syslog/ACL/ACL.xml" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Syslog/Menu/Menu.xml" = { status = "todo" }
@@ -1404,7 +1404,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/scripts/openvpn/user_pass_verify.php" = { status = "todo" }
 "core/src/opnsense/scripts/routes/del_route.py" = { status = "todo" }
 "core/src/opnsense/scripts/routes/gateway_status.php" = { status = "todo" }
-"core/src/opnsense/scripts/routes/gateway_watcher.php" = { status = "todo" }
+"core/src/opnsense/scripts/routes/gateway_watcher.php" = { status = "in-progress", crate = "sensr-monitor", module = "monitor, group", note = "status transitions as StatusChanged events, Trigger::crossed for group alarms; alarm hold-off and the alarm action are the agent's" }
 "core/src/opnsense/scripts/routes/gateways.php" = { status = "todo" }
 "core/src/opnsense/scripts/routes/show_routes.py" = { status = "todo" }
 "core/src/opnsense/scripts/shaper/dummynet_stats.py" = { status = "todo" }
