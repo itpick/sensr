@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 base64.workspace = true
 indexmap.workspace = true
+inventory.workspace = true
 ipnet.workspace = true
 serde.workspace = true
 # preserve_order: dotted-path edits round-trip the document through

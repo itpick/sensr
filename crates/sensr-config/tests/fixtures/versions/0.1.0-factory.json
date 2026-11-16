@@ -1,0 +1,174 @@
+{
+  "schema_version": "0.1.0",
+  "system": {
+    "hostname": "sensr",
+    "domain": "internal",
+    "dns_servers": [],
+    "dns_allow_override": true,
+    "timezone": "Etc/UTC",
+    "time_servers": [],
+    "ipv6_allow": true,
+    "users": {},
+    "groups": {},
+    "ssh": {
+      "enabled": false,
+      "port": "22",
+      "interfaces": [],
+      "permit_root_login": false,
+      "password_auth": false
+    }
+  },
+  "interfaces": {
+    "wan": {
+      "enabled": true,
+      "role": "wan",
+      "device": "eth0",
+      "ipv4": {
+        "mode": "dhcp",
+        "use_gateway": true
+      },
+      "ipv6": {
+        "mode": "dhcp6",
+        "prefix_delegation_len": 64,
+        "send_prefix_hint": false,
+        "prefix_only": false
+      },
+      "block_private": true,
+      "block_bogons": true,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    },
+    "lan": {
+      "enabled": true,
+      "role": "lan",
+      "device": "eth1",
+      "ipv4": {
+        "mode": "static",
+        "address": "192.168.1.1/24"
+      },
+      "ipv6": {
+        "mode": "track",
+        "interface": "wan",
+        "prefix_id": 0
+      },
+      "block_private": false,
+      "block_bogons": false,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    }
+  },
+  "firewall": {
+    "aliases": {},
+    "rules": {
+      "00000000-0000-0000-0000-00005e450001": {
+        "enabled": true,
+        "sequence": 1,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "lan"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "net:lan",
+          "not": false
+        },
+        "destination": {
+          "net": "any",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Default allow LAN to any rule"
+      },
+      "00000000-0000-0000-0000-00005e450002": {
+        "enabled": true,
+        "sequence": 11,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "lan"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet6",
+        "protocol": "any",
+        "source": {
+          "net": "net:lan",
+          "not": false
+        },
+        "destination": {
+          "net": "any",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Default allow LAN IPv6 to any rule"
+      }
+    },
+    "settings": {
+      "anti_lockout": true,
+      "log_default_block": true,
+      "log_default_pass": true,
+      "flow_offload": false
+    }
+  },
+  "nat": {
+    "outbound": {
+      "mode": "automatic",
+      "rules": {}
+    },
+    "port_forwards": {},
+    "reflection": {
+      "port_forwards": true,
+      "source_nat": false
+    }
+  },
+  "dhcpv4": {
+    "enabled": true,
+    "interfaces": [
+      "lan"
+    ],
+    "valid_lifetime": 4000,
+    "firewall_rules": true,
+    "subnets": {
+      "00000000-0000-0000-0000-00005e450003": {
+        "subnet": "192.168.1.0/24",
+        "interface": "lan",
+        "pools": [
+          "192.168.1.100-192.168.1.199"
+        ],
+        "auto_options": true,
+        "options": {},
+        "match_client_id": true
+      }
+    },
+    "reservations": {}
+  },
+  "dns": {
+    "enabled": true,
+    "port": "53",
+    "listen_interfaces": [],
+    "outgoing_interfaces": [],
+    "dnssec": false,
+    "dns64": false,
+    "register_dhcp_leases": false,
+    "register_dhcp_static": false,
+    "local_zone_type": "transparent",
+    "forwarding": {
+      "use_system_servers": false,
+      "servers": {}
+    },
+    "host_overrides": {}
+  },
+  "wireguard": {
+    "enabled": false,
+    "servers": {},
+    "peers": {}
+  }
+}
