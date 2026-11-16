@@ -146,7 +146,7 @@ test("settings form, apply with rollback window, confirm, history diff, revert",
   await expect(head).toContainText("active");
   // Revert to the revision before: a plain form post.
   await page.locator("tbody tr").nth(1).getByRole("button", { name: "Revert to this" }).click();
-  await expect(page.locator("tbody tr").first()).toContainText("Rollback to revision");
+  await expect(page.locator("tbody tr").first()).toContainText(/rollback to revision/i);
   await page.goto("/ui/system/general");
   await expect(page.getByLabel("Hostname")).not.toHaveValue("fw1");
 });

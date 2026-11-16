@@ -1,6 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// The server is the release build from `cargo leptos build --release`, run on the mock backend.
+// By default the server is the release build from `cargo leptos build --release`, run on the
+// mock backend. SENSR_UI_BASE_URL points the suite at a running stack instead (sensr-agent +
+// sensr-api --ui-root, seeded with the mock's document plus a root/sensr user).
+const external = process.env.SENSR_UI_BASE_URL;
 const root = (process.env.SENSR_UI_ROOT ?? require("node:path").resolve(__dirname, "../../..")) + "/";
 const port = Number(process.env.SENSR_UI_PORT ?? 3300);
 
@@ -12,11 +15,11 @@ export default defineConfig({
   reporter: [["list"]],
   outputDir: process.env.SENSR_UI_ARTIFACTS ? `${process.env.SENSR_UI_ARTIFACTS}/results` : "test-results",
   use: {
-    baseURL: `http://127.0.0.1:${port}`,
+    baseURL: external ?? `http://127.0.0.1:${port}`,
     trace: "retain-on-failure",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1366, height: 860 } } }],
-  webServer: {
+  webServer: external ? undefined : {
     command: process.env.SENSR_UI_BIN ?? `${root}target/release/sensr-ui-dev`,
     cwd: root,
     url: `http://127.0.0.1:${port}/healthz`,

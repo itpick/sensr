@@ -1,0 +1,379 @@
+{
+ "schema_version": "0.1.0",
+ "system": {
+  "hostname": "sensr",
+  "domain": "home.arpa",
+  "dns_servers": [
+   "9.9.9.9",
+   "2620:fe::fe"
+  ],
+  "dns_allow_override": true,
+  "timezone": "Etc/UTC",
+  "ipv6_allow": true,
+  "user": [
+   {
+    "name": "root",
+    "uid": "0",
+    "password": "$argon2id$v=19$m=19456,t=2,p=1$DTIjRUJeOpN2j+GVCY9Zvg$RqdIqklfzIY1cxXJgcHetiLzLJk2blo1s9SyibQvP4c"
+   }
+  ],
+  "group": [
+   {
+    "name": "admins",
+    "member": "0",
+    "priv": "page-all"
+   }
+  ]
+ },
+ "interfaces": {
+  "wan": {
+   "enabled": true,
+   "role": "wan",
+   "description": "WAN",
+   "device": "eth0",
+   "ipv4": {
+    "mode": "dhcp"
+   },
+   "ipv6": {
+    "mode": "dhcp6",
+    "prefix_delegation_len": 64
+   },
+   "block_private": true,
+   "block_bogons": true
+  },
+  "lan": {
+   "enabled": true,
+   "role": "lan",
+   "description": "LAN",
+   "device": "eth1",
+   "ipv4": {
+    "mode": "static",
+    "address": "192.168.1.1/24"
+   },
+   "ipv6": {
+    "mode": "track",
+    "interface": "wan"
+   }
+  },
+  "opt1": {
+   "enabled": true,
+   "role": "other",
+   "description": "WireGuard",
+   "device": "wg0",
+   "mtu": 1420,
+   "ipv4": {
+    "mode": "static",
+    "address": "10.10.0.1/24"
+   },
+   "ipv6": {
+    "mode": "none"
+   }
+  }
+ },
+ "firewall": {
+  "aliases": {
+   "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a01": {
+    "enabled": true,
+    "name": "rfc1918",
+    "content": {
+     "type": "network",
+     "entries": [
+      "10.0.0.0/8",
+      "172.16.0.0/12",
+      "192.168.0.0/16"
+     ]
+    },
+    "description": "Private networks"
+   },
+   "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a02": {
+    "enabled": true,
+    "name": "web_ports",
+    "content": {
+     "type": "port",
+     "entries": [
+      "80",
+      "443",
+      "8080-8090"
+     ]
+    },
+    "description": "HTTP(S)"
+   },
+   "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a03": {
+    "enabled": true,
+    "name": "nas",
+    "content": {
+     "type": "host",
+     "entries": [
+      "192.168.1.20"
+     ]
+    },
+    "description": "File server"
+   },
+   "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a04": {
+    "enabled": false,
+    "name": "spamhaus_drop",
+    "content": {
+     "type": "url_table",
+     "url": "https://www.spamhaus.org/drop/drop.txt"
+    },
+    "description": "Spamhaus DROP"
+   },
+   "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a05": {
+    "enabled": true,
+    "name": "admins",
+    "content": {
+     "type": "host",
+     "entries": [
+      "192.168.1.10",
+      "192.168.1.11"
+     ]
+    },
+    "description": "Admin workstations"
+   }
+  },
+  "rules": {
+   "00000000-0000-0000-0000-00005e450001": {
+    "sequence": 1,
+    "action": "pass",
+    "interfaces": [
+     "lan"
+    ],
+    "ip_protocol": "inet",
+    "source": {
+     "net": "net:lan"
+    },
+    "description": "Default allow LAN to any rule"
+   },
+   "00000000-0000-0000-0000-00005e450002": {
+    "sequence": 11,
+    "action": "pass",
+    "interfaces": [
+     "lan"
+    ],
+    "ip_protocol": "inet6",
+    "source": {
+     "net": "net:lan"
+    },
+    "description": "Default allow LAN IPv6 to any rule"
+   },
+   "a1e1c6f0-1d6e-4b1e-8f00-000000000003": {
+    "sequence": 21,
+    "action": "block",
+    "interfaces": [
+     "lan"
+    ],
+    "protocol": "tcp",
+    "source": {
+     "net": "net:lan"
+    },
+    "destination": {
+     "net": "any",
+     "port": "25"
+    },
+    "log": true,
+    "description": "No direct SMTP"
+   },
+   "a1e1c6f0-1d6e-4b1e-8f00-000000000004": {
+    "sequence": 31,
+    "action": "pass",
+    "interfaces": [
+     "wan"
+    ],
+    "protocol": "udp",
+    "destination": {
+     "net": "addr:wan",
+     "port": "51820"
+    },
+    "description": "WireGuard"
+   },
+   "a1e1c6f0-1d6e-4b1e-8f00-000000000005": {
+    "sequence": 41,
+    "action": "pass",
+    "interfaces": [
+     "wan"
+    ],
+    "protocol": "tcp",
+    "destination": {
+     "net": "alias:nas",
+     "port": "alias:web_ports"
+    },
+    "description": "NAT: web to NAS"
+   },
+   "a1e1c6f0-1d6e-4b1e-8f00-000000000006": {
+    "sequence": 51,
+    "action": "pass",
+    "interfaces": [
+     "opt1"
+    ],
+    "source": {
+     "net": "10.10.0.0/24"
+    },
+    "destination": {
+     "net": "alias:rfc1918"
+    },
+    "description": "Road warriors to LAN"
+   },
+   "a1e1c6f0-1d6e-4b1e-8f00-000000000007": {
+    "enabled": false,
+    "sequence": 61,
+    "action": "block",
+    "quick": false,
+    "interfaces": [],
+    "ip_protocol": "inet46",
+    "source": {
+     "net": "alias:spamhaus_drop"
+    },
+    "log": true,
+    "description": "Drop listed networks"
+   }
+  }
+ },
+ "nat": {
+  "outbound": {
+   "mode": "hybrid",
+   "rules": {
+    "c0ffee00-0000-4000-a000-000000000001": {
+     "interface": "wan",
+     "source": {
+      "net": "10.10.0.0/24"
+     },
+     "description": "WireGuard clients out"
+    }
+   }
+  },
+  "port_forwards": {
+   "d0d0d0d0-0000-4000-a000-000000000001": {
+    "interfaces": [
+     "wan"
+    ],
+    "protocol": "tcp",
+    "destination": {
+     "net": "addr:wan",
+     "port": "443"
+    },
+    "target": "192.168.1.20",
+    "target_port": "443",
+    "description": "NAS HTTPS"
+   },
+   "d0d0d0d0-0000-4000-a000-000000000002": {
+    "enabled": false,
+    "sequence": 2,
+    "interfaces": [
+     "wan"
+    ],
+    "protocol": "tcp/udp",
+    "destination": {
+     "net": "addr:wan",
+     "port": "25565"
+    },
+    "target": "192.168.1.30",
+    "description": "Game server"
+   }
+  }
+ },
+ "dhcpv4": {
+  "enabled": true,
+  "interfaces": [
+   "lan"
+  ],
+  "subnets": {
+   "00000000-0000-0000-0000-00005e450003": {
+    "subnet": "192.168.1.0/24",
+    "interface": "lan",
+    "pools": [
+     "192.168.1.100-192.168.1.199",
+     "192.168.1.220-192.168.1.239"
+    ],
+    "options": {
+     "domain_name": "home.arpa"
+    }
+   }
+  },
+  "reservations": {
+   "f0000000-0000-4000-a000-000000000001": {
+    "subnet": "00000000-0000-0000-0000-00005e450003",
+    "client": {
+     "hw_address": "52:54:00:aa:bb:01"
+    },
+    "ip_address": "192.168.1.20",
+    "hostname": "nas",
+    "description": "File server"
+   },
+   "f0000000-0000-4000-a000-000000000002": {
+    "subnet": "00000000-0000-0000-0000-00005e450003",
+    "client": {
+     "hw_address": "52:54:00:aa:bb:02"
+    },
+    "ip_address": "192.168.1.21",
+    "hostname": "printer",
+    "description": "Office printer"
+   }
+  }
+ },
+ "dns": {
+  "enabled": true,
+  "port": "53",
+  "dnssec": true,
+  "register_dhcp_leases": true,
+  "register_dhcp_static": true,
+  "local_zone_type": "transparent",
+  "host_overrides": {
+   "b0000000-0000-4000-a000-000000000001": {
+    "hostname": "nas",
+    "domain": "home.arpa",
+    "record": {
+     "rr": "A",
+     "address": "192.168.1.20"
+    },
+    "description": "NAS"
+   },
+   "b0000000-0000-4000-a000-000000000002": {
+    "hostname": "*",
+    "domain": "lab.home.arpa",
+    "record": {
+     "rr": "A",
+     "address": "192.168.1.40"
+    },
+    "description": "Lab wildcard"
+   }
+  }
+ },
+ "wireguard": {
+  "enabled": true,
+  "servers": {
+   "90000000-0000-4000-a000-000000000001": {
+    "name": "wg0",
+    "instance": 0,
+    "public_key": "pf9Z1Xx2TJUy0rzvQFkWsWTfNszIHhUyU0PazG/IQyc=",
+    "private_key": "RFdSBMFhe6alos1D62jnPf1MOxQSfI4eWjqrjHdkgtI=",
+    "listen_port": "51820",
+    "mtu": 1420,
+    "tunnel_addresses": [
+     "10.10.0.1/24"
+    ],
+    "peers": [
+     "91000000-0000-4000-a000-000000000001",
+     "91000000-0000-4000-a000-000000000002"
+    ]
+   }
+  },
+  "peers": {
+   "91000000-0000-4000-a000-000000000001": {
+    "name": "laptop",
+    "public_key": "SgF/lLNYzsAh3k/TS8exPiMtwhP8i24yYk9rXVhvOI4=",
+    "allowed_ips": [
+     "10.10.0.2/32"
+    ],
+    "keepalive": 25
+   },
+   "91000000-0000-4000-a000-000000000002": {
+    "name": "phone",
+    "public_key": "QI/cUp+b5XkhrNjwkflNQD3lZZ1tzY6kr9E3dj+KyDw=",
+    "allowed_ips": [
+     "10.10.0.3/32"
+    ],
+    "keepalive": 25
+   }
+  }
+ }
+}

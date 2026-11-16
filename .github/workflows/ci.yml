@@ -76,12 +76,26 @@ jobs:
           npx playwright install --with-deps chromium
           npx playwright test
           { echo '### Load timings (headless Chromium, median of 5, cold cache)'; echo '```json'; cat "$SENSR_UI_SHOTS/perf.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Browser tests against sensr-agent + sensr-api
+        run: |
+          cargo build --release -p sensr-agent -p sensr-api
+          sock=$(mktemp -u /tmp/sensr-XXXXXX.sock)
+          target/release/sensr-agent --socket "$sock" --socket-mode 600 --trust-uid "$(id -u)" \
+            --seed crates/sensr-ui/e2e/fixtures/agent-seed.json --applier preview &
+          for i in $(seq 50); do [ -S "$sock" ] && break; sleep 0.2; done
+          target/release/sensr-api --listen 127.0.0.1:3400 --socket "$sock" --ui-root target/site &
+          for i in $(seq 50); do curl -sf http://127.0.0.1:3400/healthz >/dev/null && break; sleep 0.2; done
+          cd crates/sensr-ui/e2e
+          # schema.spec.ts needs sensr-schema validation in the agent, which is not wired yet.
+          SENSR_UI_BASE_URL=http://127.0.0.1:3400 SENSR_UI_SHOTS="$GITHUB_WORKSPACE/ui-screenshots-stack" \
+            npx playwright test tests/interactions.spec.ts
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: sensr-ui-screenshots
           path: |
             ui-screenshots
+            ui-screenshots-stack
             crates/sensr-ui/e2e/test-results
           if-no-files-found: ignore
 
