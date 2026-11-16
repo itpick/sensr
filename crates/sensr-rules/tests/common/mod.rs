@@ -55,5 +55,12 @@ pub fn golden_text(file: &str, rendered: &str) {
             path.display()
         )
     });
-    pretty_assertions::assert_eq!(rendered, want, "golden {}", path.display());
+    pretty_assertions::assert_eq!(
+        rendered,
+        want,
+        "golden {} differs; if the change is intended (e.g. an importer golden \
+         this test reads changed), regenerate with \
+         SENSR_GOLDEN_UPDATE=1 cargo test -p sensr-rules and review the diff",
+        path.display()
+    );
 }
