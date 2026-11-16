@@ -705,6 +705,7 @@ impl Store {
         doc.schema_version = self.target;
         let json = canonical_json(&doc)?;
         let hash = ContentHash::of(&json).to_hex();
+        let split = crate::secrets::split(&doc)?;
 
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let head: Option<(i64, String, String)> = tx
@@ -714,6 +715,17 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
+        let head = match head {
+            Some((h, head_hash, red)) => {
+                let plain = crate::secrets::join(&red, &load_secrets(&tx, RevisionId(h))?)
+                    .map_err(|reason| StoreError::Corrupt {
+                        id: RevisionId(h),
+                        reason,
+                    })?;
+                Some((h, head_hash, plain))
+            }
+            None => None,
+        };
         if let (Some(exp), Some((h, _, _))) = (expected, &head)
             && exp.0 != *h
         {
@@ -746,7 +758,7 @@ impl Store {
                 head.as_ref().map(|h| h.0),
                 hash,
                 doc.schema_version.to_string(),
-                json,
+                split.redacted,
                 kind.as_str(),
                 meta.username,
                 time_ms,
@@ -757,6 +769,12 @@ impl Store {
             ],
         )?;
         let id = RevisionId(tx.last_insert_rowid());
+        for (pointer, value) in &split.secrets {
+            tx.execute(
+                "INSERT INTO secrets (revision, pointer, value) VALUES (?1, ?2, ?3)",
+                params![id.0, pointer, value],
+            )?;
+        }
         let detail = match restored_from {
             Some(r) => format!("{} (from revision {r})", meta.description),
             None => meta.description.clone(),
@@ -816,8 +834,10 @@ impl Store {
             )
             .optional()?
             .ok_or(StoreError::NotFound(id))?;
-        let (meta, json) = row;
+        let (meta, red) = row;
         let meta = meta?;
+        let json = crate::secrets::join(&red, &load_secrets(conn, id)?)
+            .map_err(|reason| StoreError::Corrupt { id, reason })?;
         if ContentHash::of(&json).to_hex() != meta.hash {
             return Err(StoreError::Corrupt {
                 id,
@@ -886,6 +906,14 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
 
 fn redacted_value(doc: &Document) -> Result<Value, serde_json::Error> {
     sensr_schema::fields::redacted(|| serde_json::to_value(doc))
+}
+
+fn load_secrets(conn: &Connection, id: RevisionId) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT pointer, value FROM secrets WHERE revision = ?1 ORDER BY pointer",
+    )?;
+    let rows = stmt.query_map([id.0], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
 }
 
 fn head_id(conn: &Connection) -> Result<RevisionId, StoreError> {

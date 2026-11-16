@@ -307,6 +307,71 @@ fn database_files_are_owner_only() {
 }
 
 #[test]
+fn secrets_are_stored_outside_the_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.db");
+    let store = Store::open(&path, Document::factory).unwrap();
+    let mut d = store.head().unwrap().document;
+    let key = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
+    d.set_by_path(
+        "wireguard.servers.00000000-0000-0000-0000-000000000001",
+        json!({"name": "wg0", "instance": 0, "private_key": key}),
+    )
+    .unwrap();
+    store.commit(&d, meta("wg")).unwrap();
+    // Changing only the secret is a change.
+    let mut d2 = d.clone();
+    d2.set_by_path(
+        "wireguard.servers.00000000-0000-0000-0000-000000000001.private_key",
+        json!("xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg="),
+    )
+    .unwrap();
+    let ev = store.subscribe();
+    let out = store.commit(&d2, meta("rotate")).unwrap();
+    assert_eq!(out.id(), RevisionId(3));
+    drop(ev);
+    assert_eq!(store.get(RevisionId(2)).unwrap().document, d);
+    assert_eq!(store.head().unwrap().document, d2);
+    drop(store);
+
+    let conn = rusqlite_conn(&path);
+    let docs: Vec<String> = conn
+        .prepare("SELECT document FROM revisions")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(
+        docs.iter()
+            .all(|d| !d.contains(key) && !d.contains("xTIBA5")),
+        "key material in a revision document"
+    );
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM secrets", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 2);
+    // A tampered secret fails the content hash.
+    conn.execute(
+        "UPDATE secrets SET value = '\"AAAA\"' WHERE revision = 3",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let err = Store::open(&path, Document::default).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            StoreError::Corrupt {
+                id: RevisionId(3),
+                ..
+            }
+        ),
+        "{err}"
+    );
+}
+
+#[test]
 fn commits_are_broadcast_with_changed_sections() {
     let store = mem();
     let mut rx = store.subscribe();
