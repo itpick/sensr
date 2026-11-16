@@ -59,6 +59,9 @@ pub fn export_document(doc: &Document) -> XmlDocument {
     root.push_element(system(doc));
     root.push_element(interfaces(doc));
     root.push_element(vlans(doc));
+    if let Some(g) = ifgroups(doc) {
+        root.push_element(g);
+    }
     root.push_element(nat(doc));
     root.push_element(gateway_groups(doc));
     trust(doc, &mut root);
@@ -246,7 +249,47 @@ fn interfaces(doc: &Document) -> Element {
         }
         e.put(ie);
     }
+    // plugins' automatic groups live among the interfaces
+    for g in doc
+        .firewall
+        .groups
+        .values()
+        .filter(|g| g.wireguard || is_plugin_group(g))
+    {
+        let mut ge = Element::new(g.name.as_str());
+        ge.put(leaf("internal_dynamic", "1"))
+            .put_opt("descr", g.description.as_ref())
+            .put(leaf("if", g.name.as_str()))
+            .put(leaf("virtual", "1"))
+            .put(leaf("enable", "1"))
+            .put(leaf("type", "group"));
+        e.put(ge);
+    }
     e
+}
+
+/// A memberless group named after a plugin (`openvpn`): created by that plugin.
+fn is_plugin_group(g: &sensr_schema::models::firewall::InterfaceGroup) -> bool {
+    g.members.is_empty() && matches!(g.name.as_str(), "openvpn" | "ipsec" | "enc0")
+}
+
+fn ifgroups(doc: &Document) -> Option<Element> {
+    let mut e = Element::new("ifgroups");
+    for (id, g) in doc
+        .firewall
+        .groups
+        .iter()
+        .filter(|(_, g)| !g.wireguard && !is_plugin_group(g))
+    {
+        let mut ge = Element::new("ifgroupentry").attr("uuid", id.to_string());
+        ge.put(leaf("ifname", &g.name))
+            .put(leaf("members", join(&g.members, ",")))
+            .put(leaf("nogroup", flag01(g.hidden)))
+            .put(leaf("sequence", g.sequence))
+            .put_opt("descr", g.description.as_ref());
+        e.put(ge);
+    }
+    (!e.is_empty()).then_some(e)
 }
 
 fn vlans(doc: &Document) -> Element {

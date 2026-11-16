@@ -788,9 +788,9 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/CategoryMapField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/DNatAssociatedRuleField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/DNatSequenceField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/FilterRuleField.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/FilterRuleField.php" = { status = "in-progress", crate = "sensr-schema", module = "models::firewall::Firewall::priority", note = "getPriority tiers done; serialize lives in sensr-rules::document" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/FilterSequenceField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/GroupField.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/GroupField.php" = { status = "done", crate = "sensr-schema", module = "models::firewall::InterfaceGroup" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/GroupNameField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/InterfaceField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/NetworkMappedField.php" = { status = "todo" }
@@ -802,7 +802,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Filter.php" = { status = "in-progress", crate = "sensr-schema", module = "models::firewall", note = "routing-slice subset" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Filter.xml" = { status = "in-progress", crate = "sensr-schema", module = "models::firewall", note = "routing-slice subset" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Group.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Firewall/Group.xml" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Firewall/Group.xml" = { status = "done", crate = "sensr-schema", module = "models::firewall::InterfaceGroup", features = ["FW-GRP-001"] }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Menu/Menu.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Menu/Menu.xml" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Migrations/M1_0_0.php" = { status = "todo" }

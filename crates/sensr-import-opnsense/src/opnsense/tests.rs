@@ -128,6 +128,88 @@ fn rule_order_follows_pf_priority_bands() {
 }
 
 #[test]
+fn equal_sequences_order_by_uuid_naturally() {
+    // `sortedBy(['sequence'])` keys ties by UUID in PHP's natural order, so
+    // "9…" sorts before "12…" although "1" < "9" as text.
+    let rule = |uuid: &str, d: &str| {
+        format!(
+            "<rule uuid=\"{uuid}\"><enabled>1</enabled><sequence>1</sequence><action>pass</action><interface>lan</interface><source_net>any</source_net><destination_net>any</destination_net><description>{d}</description></rule>"
+        )
+    };
+    let xml = format!(
+        "<opnsense>{IFACES}<OPNsense><Firewall><Filter><rules>{}{}{}</rules></Filter></Firewall></OPNsense></opnsense>",
+        rule("12e06f06-72e3-44dd-8f98-7c70ddc0a468", "twelve"),
+        rule("9a0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a01", "nine"),
+        rule("A0000000-0000-4000-8000-000000000000", "upper-a"),
+    );
+    let i = import_str(&xml);
+    let order: Vec<String> = i
+        .document
+        .firewall
+        .rules_in_order()
+        .into_iter()
+        .map(|(_, r)| r.description.as_ref().unwrap().to_string())
+        .collect();
+    assert_eq!(order, ["nine", "twelve", "upper-a"]);
+}
+
+#[test]
+fn interface_groups_import_with_their_tier() {
+    let xml = "<opnsense>\
+         <interfaces>\
+           <wan><if>em0</if><enable>1</enable><ipaddr>dhcp</ipaddr></wan>\
+           <lan><if>em1</if><enable>1</enable><ipaddr>192.168.1.1</ipaddr><subnet>24</subnet></lan>\
+           <opt1><if>em2</if><enable>1</enable><ipaddr>192.168.2.1</ipaddr><subnet>24</subnet></opt1>\
+           <wireguard><internal_dynamic>1</internal_dynamic><descr>WireGuard (Group)</descr><if>wireguard</if><virtual>1</virtual><enable>1</enable><type>group</type><networks/></wireguard>\
+         </interfaces>\
+         <ifgroups version=\"1.0.0\"><ifgroupentry uuid=\"00000000-0000-4000-8000-0000000000aa\"><ifname>inside</ifname><members>lan,opt1</members><nogroup>0</nogroup><sequence>4</sequence><descr>Inside</descr></ifgroupentry></ifgroups>\
+         <OPNsense><Firewall><Filter><rules>\
+           <rule uuid=\"00000000-0000-4000-8000-000000000001\"><enabled>1</enabled><sequence>1</sequence><action>pass</action><interface>lan</interface><source_net>any</source_net><destination_net>any</destination_net><description>lan</description></rule>\
+           <rule uuid=\"00000000-0000-4000-8000-000000000002\"><enabled>1</enabled><sequence>9</sequence><action>block</action><interface>inside</interface><source_net>any</source_net><destination_net>any</destination_net><description>group</description></rule>\
+           <rule uuid=\"00000000-0000-4000-8000-000000000003\"><enabled>1</enabled><sequence>9</sequence><action>pass</action><interface>wireguard</interface><source_net>any</source_net><destination_net>any</destination_net><description>wireguard</description></rule>\
+         </rules></Filter></Firewall></OPNsense></opnsense>";
+    let i = import_str(xml);
+    assert!(i.report.unmapped_unexpected.is_empty(), "{}", i.report);
+    let fw = &i.document.firewall;
+    let inside = fw.group(&"inside".parse().unwrap()).expect("inside");
+    assert_eq!(inside.sequence, 4);
+    assert_eq!(inside.members.len(), 2);
+    assert!(fw.group(&"wireguard".parse().unwrap()).unwrap().wireguard);
+    // groups (300000 + 0 for wireguard, + 4 for inside) before the interface rule
+    let order: Vec<String> = fw
+        .rules_in_order()
+        .into_iter()
+        .map(|(_, r)| r.description.as_ref().unwrap().to_string())
+        .collect();
+    assert_eq!(order, ["wireguard", "group", "lan"]);
+    assert!(
+        i.document.validate().is_empty(),
+        "{:?}",
+        i.document.validate()
+    );
+    // and back
+    let again = import_str(&super::export_config(&i.document));
+    assert_eq!(again.document.firewall.groups, i.document.firewall.groups);
+}
+
+#[test]
+fn not_any_imports_as_any_with_a_warning() {
+    let xml = format!(
+        "<opnsense>{IFACES}<OPNsense><Firewall><Filter><rules>\
+           <rule uuid=\"00000000-0000-4000-8000-000000000001\"><enabled>1</enabled><action>block</action><interface>lan</interface><source_net>lan</source_net><destination_net>any</destination_net><destination_not>1</destination_not><description>printers</description></rule>\
+         </rules></Filter></Firewall></OPNsense>\
+         <filter><rule><type>block</type><interface>lan</interface><source><any/><not/></source><destination><any/></destination><descr>legacy</descr></rule></filter></opnsense>"
+    );
+    let i = import_str(&xml);
+    for r in i.document.firewall.rules.values() {
+        assert!(!r.source.not && !r.destination.not, "{r:?}");
+    }
+    let report = i.report.to_string();
+    assert_eq!(report.matches("\"not any\"").count(), 2, "{report}");
+    assert!(i.document.validate().is_empty());
+}
+
+#[test]
 fn unsupported_rule_settings_are_reported_not_dropped() {
     // A policy-routing gateway has no sensr equivalent yet: the rule imports, the
     // gateway leaf is reported. A rule with two source networks cannot be expressed

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use sensr_schema::Document;
 use sensr_schema::fields::{DeviceName, InterfaceId, MacAddr};
 use sensr_schema::ipnet::{Ipv4Net, Ipv6Net};
+use sensr_schema::models::firewall::InterfaceGroup;
 use sensr_schema::models::interfaces::{
     Interface, InterfaceRole, Ipv4Config, Ipv6Config, Vlan, VlanProtocol,
 };
@@ -162,13 +163,18 @@ impl Mapper<Document> for InterfacesMapper {
     }
 
     fn sections(&self) -> &'static [&'static str] {
-        // VLAN devices first, so assignments can pick them up.
-        &["vlans", "interfaces"]
+        // VLAN devices first, so assignments can pick them up; groups last,
+        // their members are interfaces.
+        &["vlans", "interfaces", "ifgroups"]
     }
 
     fn map<'doc>(&self, s: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Document) {
         if s.name == "vlans" {
             self.vlans(s, ctx);
+            return;
+        }
+        if s.name == "ifgroups" {
+            ifgroups(s, ctx, out);
             return;
         }
         // Two passes: addressing that tracks another interface needs the other
@@ -179,9 +185,16 @@ impl Mapper<Document> for InterfacesMapper {
             if i.child("internal_dynamic")
                 .is_some_and(|c| c.text().trim() == "1")
             {
-                // lo0 and interface groups (e.g. the WireGuard group) are created by
-                // OPNsense itself; sensr has its own loopback and no groups yet.
                 ctx.consume_subtree(i);
+                if i.child("type").is_some_and(|t| t.text().trim() == "group")
+                    && let Ok(name) = i.name.parse::<InterfaceId>()
+                {
+                    // Plugins' automatic groups (`wireguard`, `openvpn`): rules
+                    // may name them. The WireGuard one holds every instance.
+                    dynamic_group(name, i, ctx, out);
+                    continue;
+                }
+                // lo0 is created by OPNsense itself; sensr has its own loopback.
                 ctx.warn(
                     i,
                     Severity::Info,
@@ -239,6 +252,91 @@ impl Mapper<Document> for InterfacesMapper {
 
     fn expected_unmapped(&self) -> &'static [(&'static str, &'static str)] {
         &[("interfaces/*/lock", "web GUI deletion lock")]
+    }
+}
+
+/// An automatic group of a plugin (`interfaces/<name>` with `type` group).
+fn dynamic_group(name: InterfaceId, i: &Element, ctx: &mut MapContext<'_>, out: &mut Document) {
+    let wireguard = name.as_str() == "wireguard";
+    if !wireguard {
+        ctx.warn(
+            i,
+            Severity::Info,
+            format!(
+                "interface group {name} is imported without members; sensr has no {name} devices"
+            ),
+        );
+    }
+    if out.firewall.group(&name).is_some() {
+        return;
+    }
+    let id = super::common::stable_uuid(&ctx.xpath(i));
+    out.firewall.groups.insert(
+        id,
+        InterfaceGroup {
+            description: i.child("descr").and_then(|d| d.text().trim().parse().ok()),
+            name,
+            members: Vec::new(),
+            wireguard,
+            sequence: 0,
+            hidden: false,
+        },
+    );
+}
+
+/// Firewall › Groups (`ifgroups/ifgroupentry`, `Firewall/Group.xml`).
+fn ifgroups<'doc>(s: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Document) {
+    ctx.consume(s);
+    for e in s.elements() {
+        ctx.consume(e);
+        let Some(name) = ctx
+            .non_empty(e, "ifname")
+            .and_then(|n| parse_or_warn::<InterfaceId>(ctx, e, &n, "group name"))
+        else {
+            ctx.release(e);
+            continue;
+        };
+        let mut members = Vec::new();
+        if let Some(m) = e.child("members") {
+            ctx.consume(m);
+            // `,` since the MVC model; older configs separate with spaces
+            for n in list(&m.text(), &[',', ' ']) {
+                match n.parse::<InterfaceId>() {
+                    Ok(id) if out.interfaces.get(&id).is_some() => members.push(id),
+                    _ => ctx.warn(
+                        m,
+                        Severity::Degraded,
+                        format!(
+                            "group {name}: member {n:?} is not an imported interface; left out"
+                        ),
+                    ),
+                }
+            }
+        }
+        let sequence = ctx.parse::<u32>(e, "sequence").unwrap_or(0);
+        let hidden = ctx.flag(e, "nogroup");
+        let descr = ctx.text(e, "descr");
+        let description = description(ctx, e, descr);
+        if out.firewall.group(&name).is_some() {
+            ctx.warn(
+                e,
+                Severity::Degraded,
+                format!("group {name} is defined twice; the first one is kept"),
+            );
+            continue;
+        }
+        let id = super::common::item_uuid(ctx, e);
+        out.firewall.groups.insert(
+            id,
+            InterfaceGroup {
+                name,
+                members,
+                wireguard: false,
+                sequence,
+                hidden,
+                description,
+            },
+        );
     }
 }
 
