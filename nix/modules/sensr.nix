@@ -162,6 +162,24 @@ let
     '';
   };
 
+  trialHealth = pkgs.writeShellApplication {
+    name = "sensr-trial-health";
+    runtimeInputs = with pkgs; [
+      coreutils
+      gnugrep
+      iproute2
+      dig
+      curl
+      inetutils
+      config.systemd.package
+    ];
+    # Checks fail softly and are reported; the script decides when to reboot.
+    bashOptions = [ ];
+    text = builtins.replaceStrings [ "@seedDir@" ] [ cfg.seedDir ] (
+      builtins.readFile ../pi5/trial-health.sh
+    );
+  };
+
   seedReadme = pkgs.writeText "sensr-seed-README.txt" (
     builtins.replaceStrings [ "@SEED_DIR@" ] [ cfg.seedDir ] (builtins.readFile ./seed-README.txt)
   );
@@ -310,7 +328,11 @@ in
       description = "sensr API";
     };
 
-    environment.systemPackages = [ cfg.package ] ++ appliedPackages;
+    environment.systemPackages = [
+      cfg.package
+      trialHealth
+    ]
+    ++ appliedPackages;
     environment.etc."sensr/version.json".text = builtins.toJSON versionJson;
 
     environment.variables.SENSR_AGENT_SOCKET = socket;
@@ -564,6 +586,43 @@ in
           ${config.systemd.package}/bin/systemctl reboot
         fi
       '';
+    };
+
+    # A trial boot's self-health gate and live log stream
+    # (nix/pi5/trial-health.sh): only with sensr.trial=1 on the kernel
+    # command line (the trial installer's cmdline.txt) and a
+    # trial-health.env in the seed folder.
+    systemd.services.sensr-trial-health = {
+      description = "Trial boot self-health gate (reboots to the previous OS on failure)";
+      wantedBy = [ "multi-user.target" ];
+      after = [
+        "local-fs.target"
+        "network-online.target"
+        "sensr-agent.service"
+      ];
+      wants = [ "network-online.target" ];
+      unitConfig = {
+        ConditionKernelCommandLine = "sensr.trial=1";
+        RequiresMountsFor = cfg.seedDir;
+        ConditionPathExists = "${cfg.seedDir}/trial-health.env";
+      };
+      serviceConfig.ExecStart = "${lib.getExe trialHealth} run";
+    };
+    systemd.services.sensr-trial-logstream = {
+      description = "Trial boot: stream the journal over UDP";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      unitConfig = {
+        ConditionKernelCommandLine = "sensr.trial=1";
+        RequiresMountsFor = cfg.seedDir;
+        ConditionPathExists = "${cfg.seedDir}/trial-health.env";
+      };
+      serviceConfig = {
+        ExecStart = "${lib.getExe trialHealth} stream";
+        Restart = "always";
+        RestartSec = "10s";
+      };
     };
 
     systemd.services.sensr-selftest = mkIf cfg.selftest.enable {

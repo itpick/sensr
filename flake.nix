@@ -136,8 +136,25 @@
                 xz
                 parted
                 systemd
+                e2fsprogs
               ];
               text = builtins.readFile ./nix/pi5/trial-install.sh;
+            };
+            trialHealth = pkgs.writeShellApplication {
+              name = "sensr-trial-health";
+              runtimeInputs = with pkgs; [
+                coreutils
+                gnugrep
+                iproute2
+                dig
+                curl
+                inetutils
+                systemd
+              ];
+              bashOptions = [ ];
+              text =
+                builtins.replaceStrings [ "@seedDir@" ] [ "/tmp/seed" ]
+                  (builtins.readFile ./nix/pi5/trial-health.sh);
             };
           };
           qcow-boot = import ./nix/tests/qcow-boot.nix {
