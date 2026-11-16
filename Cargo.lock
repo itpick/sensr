@@ -1153,6 +1153,7 @@ dependencies = [
  "md-5",
  "pretty_assertions",
  "proptest",
+ "sensr-schema",
  "serde",
  "serde_json",
  "thiserror",
