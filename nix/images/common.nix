@@ -10,6 +10,9 @@
   ];
 
   services.sensr.enable = true;
+  # An image routes: the agent drives the appliers (checks.slice proves
+  # them against the oracle). Tests that only need the store override it.
+  services.sensr.applier = lib.mkDefault "slice";
 
   system.stateVersion = "26.11";
   # Weaker than mkDefault so test drivers and seeds can name the box.
@@ -21,6 +24,10 @@
   boot.kernelParams = [
     "panic=10"
     "boot.panic_on_fail"
+    # The factory document (no seed) names the first two NICs eth0 (WAN)
+    # and eth1 (LAN), in enumeration order (PLAN §6). Until first boot
+    # records NICs by MAC (the ifnames seed), keep the kernel's names.
+    "net.ifnames=0"
   ];
   # PID 1 keeps a hardware watchdog fed when the board has one; a hang in
   # userspace then resets the box. Without a watchdog device this is a no-op.
