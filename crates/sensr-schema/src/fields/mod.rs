@@ -25,7 +25,7 @@ pub use names::{
 pub use net::{AddressRange, IpFamily, NetOrAlias};
 pub use port::{Port, PortRange, PortSpec};
 pub use protocol::Protocol;
-pub use secret::Secret;
+pub use secret::{REDACTED, Secret, redacted};
 
 /// Implements `Serialize`/`Deserialize` through `Display`/`FromStr`.
 macro_rules! string_serde {

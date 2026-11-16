@@ -9,9 +9,11 @@
 //! - [`Validate`] / [`RefContext`]: whole-document validation with dotted
 //!   paths ([`Validations`]).
 //! - [`PathAccess`]: `get/set_by_path` on any model.
+//! - [`migrate`]: versioned document migrations.
 
 pub mod array;
 pub mod fields;
+pub mod migrate;
 pub mod models;
 pub mod path;
 pub mod refs;

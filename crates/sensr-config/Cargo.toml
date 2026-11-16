@@ -8,6 +8,21 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+blake3.workspace = true
+rusqlite.workspace = true
+sensr-schema.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+similar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+proptest.workspace = true
+rusqlite.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
