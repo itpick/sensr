@@ -1,0 +1,22 @@
+[package]
+name = "sensr-apply"
+description = "Apply engine: plans, typed commands, actions, templates, hooks and commit-confirm (OPNsense counterpart: configd, template.py, actions.d, rc.syshook)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+minijinja = { workspace = true, features = ["serde", "json"] }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+proptest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

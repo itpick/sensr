@@ -1,0 +1,5 @@
+---
+source: crates/sensr-apply/src/templates.rs
+expression: r.contents
+---
+Welcome to sensr.home.arpa.

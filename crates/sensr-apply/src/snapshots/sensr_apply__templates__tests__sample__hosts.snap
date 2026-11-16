@@ -1,0 +1,7 @@
+---
+source: crates/sensr-apply/src/templates.rs
+expression: r.contents
+---
+127.0.0.1	localhost
+192.168.1.10	nas.home.arpa nas
+192.168.1.20	printer.home.arpa printer

@@ -1,0 +1,11 @@
+---
+source: crates/sensr-apply/src/plan.rs
+expression: "d.dry_run(&Plan::default())"
+---
+6 change(s):
+  [Firewall] load ruleset aaaaaaaaaaaa (3 rules)
+  [Sysctl] net.ipv4.ip_forward = 1 (new)
+  [Qdisc] wan0: cake bandwidth 100mbit (new)
+  [Files] create /run/sensr/unbound/unbound.conf (8 bytes)
+  [Services] reload unbound.service
+  [Hooks] run config hooks

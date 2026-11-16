@@ -1,0 +1,5 @@
+# template:destination (relative to /run/sensr/sample/)
+sample.conf:sample.conf
+sample.json:sample.json
+hosts:hosts
+motd:motd
