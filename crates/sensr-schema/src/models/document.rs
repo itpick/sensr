@@ -3,14 +3,19 @@
 use std::fmt;
 use std::str::FromStr;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::devices::{Devices, VirtualIps};
 use super::dhcp::{Dhcpv4, Pool4, Subnet4};
+use super::dhcpv6::{Dhcpv6, RouterAdvertisements};
 use super::dns::DnsResolver;
 use super::firewall::{AliasType, Endpoint, FilterRule, Firewall};
 use super::gateways::Gateways;
 use super::interfaces::{Interface, InterfaceRole, Interfaces, Ipv4Config, Ipv6Config};
 use super::nat::Nat;
+use super::ntp::Ntp;
+use super::routes::Routes;
 use super::system::System;
 use super::trust::Trust;
 use super::wireguard::WireGuard;
@@ -80,7 +85,9 @@ pub const SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(0, 1, 0);
 
 /// Top-level sections, the unit of change tracking: the apply engine
 /// re-renders only the subsystems whose section changed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Section {
     /// `system`.
@@ -101,11 +108,23 @@ pub enum Section {
     Gateways,
     /// `trust`.
     Trust,
+    /// `routes`.
+    Routes,
+    /// `devices`.
+    Devices,
+    /// `virtual_ips`.
+    VirtualIps,
+    /// `dhcpv6`.
+    Dhcpv6,
+    /// `router_advertisements`.
+    RouterAdvertisements,
+    /// `ntp`.
+    Ntp,
 }
 
 impl Section {
     /// Every section, in document order.
-    pub const ALL: [Section; 9] = [
+    pub const ALL: [Section; 15] = [
         Self::System,
         Self::Interfaces,
         Self::Firewall,
@@ -115,6 +134,12 @@ impl Section {
         Self::Wireguard,
         Self::Gateways,
         Self::Trust,
+        Self::Routes,
+        Self::Devices,
+        Self::VirtualIps,
+        Self::Dhcpv6,
+        Self::RouterAdvertisements,
+        Self::Ntp,
     ];
 
     /// The section's key in the JSON document.
@@ -129,13 +154,19 @@ impl Section {
             Self::Wireguard => "wireguard",
             Self::Gateways => "gateways",
             Self::Trust => "trust",
+            Self::Routes => "routes",
+            Self::Devices => "devices",
+            Self::VirtualIps => "virtual_ips",
+            Self::Dhcpv6 => "dhcpv6",
+            Self::RouterAdvertisements => "router_advertisements",
+            Self::Ntp => "ntp",
         }
     }
 }
 
 /// One complete configuration: everything the agent needs to render and
 /// apply the box.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Document {
     /// Schema version of this document.
@@ -167,6 +198,25 @@ pub struct Document {
     /// Certificate authorities and certificates.
     #[serde(default)]
     pub trust: Trust,
+    /// Static routes. Omitted when empty, so documents without routes
+    /// serialise as before the section existed.
+    #[serde(default, skip_serializing_if = "Routes::is_empty")]
+    pub routes: Routes,
+    /// Bridges, LAGGs and loopbacks (omitted while empty).
+    #[serde(default, skip_serializing_if = "Devices::is_empty")]
+    pub devices: Devices,
+    /// Virtual IP addresses (omitted while empty).
+    #[serde(default, skip_serializing_if = "VirtualIps::is_empty")]
+    pub virtual_ips: VirtualIps,
+    /// DHCPv6 server (omitted while unconfigured).
+    #[serde(default, skip_serializing_if = "Dhcpv6::is_empty")]
+    pub dhcpv6: Dhcpv6,
+    /// Router advertisements (omitted while empty).
+    #[serde(default, skip_serializing_if = "RouterAdvertisements::is_empty")]
+    pub router_advertisements: RouterAdvertisements,
+    /// NTP service (omitted while at defaults).
+    #[serde(default, skip_serializing_if = "Ntp::is_empty")]
+    pub ntp: Ntp,
 }
 
 impl Default for Document {
@@ -182,6 +232,12 @@ impl Default for Document {
             wireguard: WireGuard::default(),
             gateways: Gateways::default(),
             trust: Trust::default(),
+            routes: Routes::default(),
+            devices: Devices::default(),
+            virtual_ips: VirtualIps::default(),
+            dhcpv6: Dhcpv6::default(),
+            router_advertisements: RouterAdvertisements::default(),
+            ntp: Ntp::default(),
         }
     }
 }
@@ -280,7 +336,22 @@ impl Document {
         self.gateways
             .validate(self, &root.join("gateways"), &mut out);
         self.trust.validate(self, &root.join("trust"), &mut out);
+        self.routes.validate(self, &root.join("routes"), &mut out);
+        self.devices.validate(self, &root.join("devices"), &mut out);
+        self.virtual_ips
+            .validate(self, &root.join("virtual_ips"), &mut out);
+        self.dhcpv6.validate(self, &root.join("dhcpv6"), &mut out);
+        self.router_advertisements
+            .validate(self, &root.join("router_advertisements"), &mut out);
+        self.ntp
+            .validate_with(&self.system.time_servers, self, &root.join("ntp"), &mut out);
         out
+    }
+
+    /// The JSON Schema of a document (draft 2020-12), for UI forms, the
+    /// compat layer and `xtask lint-schema`.
+    pub fn json_schema() -> serde_json::Value {
+        serde_json::to_value(schemars::schema_for!(Document)).unwrap_or_default()
     }
 
     /// The sections whose content differs between `self` and `other`.
@@ -297,6 +368,14 @@ impl Document {
                 Section::Wireguard => self.wireguard != other.wireguard,
                 Section::Gateways => self.gateways != other.gateways,
                 Section::Trust => self.trust != other.trust,
+                Section::Routes => self.routes != other.routes,
+                Section::Devices => self.devices != other.devices,
+                Section::VirtualIps => self.virtual_ips != other.virtual_ips,
+                Section::Dhcpv6 => self.dhcpv6 != other.dhcpv6,
+                Section::RouterAdvertisements => {
+                    self.router_advertisements != other.router_advertisements
+                }
+                Section::Ntp => self.ntp != other.ntp,
             })
             .collect()
     }
@@ -322,6 +401,15 @@ impl RefContext for Document {
 
     fn has_gateway(&self, name: &GatewayName) -> bool {
         self.gateways.has(name)
+    }
+
+    fn gateway_family(&self, name: &GatewayName) -> Option<IpFamily> {
+        let g = self.gateways.gateway(name)?;
+        Some(match g.address {
+            Some(std::net::IpAddr::V4(_)) => IpFamily::Inet,
+            Some(std::net::IpAddr::V6(_)) => IpFamily::Inet6,
+            None => g.family,
+        })
     }
 
     fn has_group(&self, name: &GroupName) -> bool {

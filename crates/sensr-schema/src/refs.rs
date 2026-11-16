@@ -35,6 +35,14 @@ pub trait RefContext {
     fn has_gateway(&self, _name: &crate::fields::GatewayName) -> bool {
         false
     }
+    /// The address family of the gateway called `name` (`Inet6` for an
+    /// IPv6 next hop), if known.
+    fn gateway_family(
+        &self,
+        _name: &crate::fields::GatewayName,
+    ) -> Option<crate::fields::IpFamily> {
+        None
+    }
 }
 
 /// Validation of a model (or part of one) against the document.

@@ -1,6 +1,7 @@
 //! NAT: outbound (source) NAT and port forwards (OPNsense `nat/outbound`,
 //! `Firewall/Filter.xml` `snatrules`, `Firewall/DNat.xml` `nat/rule`).
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::firewall::{Endpoint, FilterRule, validate_match};
@@ -13,7 +14,7 @@ use crate::refs::{ItemKind, RefContext, Validate};
 use crate::validation::{FieldPath, Validations, ValidatorKind, messages};
 
 /// All NAT configuration.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Nat {
     /// Source NAT.
@@ -28,7 +29,7 @@ pub struct Nat {
 }
 
 /// How outbound NAT rules are produced.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundNatMode {
     /// Masquerade every internal network out of every WAN interface.
@@ -43,7 +44,7 @@ pub enum OutboundNatMode {
 }
 
 /// Outbound NAT.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OutboundNat {
     /// Rule generation mode.
@@ -55,7 +56,7 @@ pub struct OutboundNat {
 }
 
 /// A manual outbound NAT rule.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SourceNatRule {
     /// Disabled rules are kept but not loaded.
@@ -100,7 +101,7 @@ pub struct SourceNatRule {
 }
 
 /// Per-rule NAT reflection override (OPNsense `natreflection`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReflectionMode {
     /// Reflect with source NAT so internal clients reach the forward by its
@@ -113,7 +114,7 @@ pub enum ReflectionMode {
 }
 
 /// Global NAT reflection defaults (OPNsense `Filter.xml` `settings.nat`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Reflection {
     /// Reflect port forwards.
@@ -134,7 +135,7 @@ impl Default for Reflection {
 }
 
 /// Which filter rule admits a port forward's traffic.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ForwardFilter {
     /// Pass the forwarded traffic implicitly (OPNsense "pass").
@@ -147,7 +148,7 @@ pub enum ForwardFilter {
 }
 
 /// A port forward (destination NAT).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PortForward {
     /// Disabled forwards are kept but not loaded.

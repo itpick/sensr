@@ -9,10 +9,11 @@ repository.workspace = true
 
 [dependencies]
 base64.workspace = true
+fancy-regex.workspace = true
 indexmap.workspace = true
 inventory.workspace = true
 ipnet.workspace = true
-fancy-regex.workspace = true
+schemars = { workspace = true, features = ["indexmap2", "uuid1"] }
 sensr-schema-derive.workspace = true
 serde.workspace = true
 # preserve_order: dotted-path edits round-trip the document through

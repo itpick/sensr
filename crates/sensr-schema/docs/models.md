@@ -21,6 +21,12 @@ else bumps `SCHEMA_VERSION` and ships a migration.
 | `dhcpv4` | `dhcp::Dhcpv4` (subnets, pools, options, reservations) | `Kea/KeaDhcpv4.xml` (and legacy ISC/dnsmasq via the importer) |
 | `dns` | `dns::DnsResolver` (settings, forwarding, host_overrides) | `Unbound/Unbound.xml` |
 | `wireguard` | `wireguard::WireGuard` (servers, peers) | `Wireguard/{General,Server,Client}.xml` |
+| `devices` | `devices::Devices` (bridges with STP, LAGGs/bonds, loopbacks; omitted while empty) | `Interfaces/{Bridge,Lagg,Loopback}.xml` |
+| `virtual_ips` | `devices::VirtualIps` (IP alias, proxy ARP, CARP/VRRP; omitted while empty) | `Interfaces/Vip.xml` |
+| `dhcpv6` | `dhcpv6::Dhcpv6` (static or dynamic-prefix subnets, pools, DUID/MAC reservations, PD pools; omitted while unconfigured) | `Kea/KeaDhcpv6.xml` |
+| `router_advertisements` | `dhcpv6::RouterAdvertisements` (per-interface RA mode, RDNSS/DNSSL, intervals, NAT64 prefix) | `Radvd/Radvd.xml` |
+| `ntp` | `ntp::Ntp` (serve, listen interfaces, per-server prefer/noselect/iburst/pool/NTS flags, orphan stratum; servers themselves are `system.time_servers`) | `ntpd` section |
+| `routes` | `routes::Routes` (static routes to gateways by name; omitted while empty) | `Routes/Route.xml` (`staticroutes`) |
 
 ## Text grammars
 
@@ -47,3 +53,7 @@ else bumps `SCHEMA_VERSION` and ships a migration.
 | Host override `rr` + `server`/`mx`/`mxprio`/`txtdata` | `record` tagged by `rr` with only that type's data | invalid state unrepresentable |
 | Port forward `associated-rule-id` (`''`, `pass`, uuid) | `filter`: `pass`, `none`, `{"rule": uuid}` | typed relation |
 | User names may be e-mail addresses | Linux-compatible names only | accounts are real Linux users |
+| LAGG protocols `fec` and `loadbalance` | one `loadbalance` (Linux `balance-xor`) | same behaviour on Linux bonds |
+| Loopbacks `lo<n>` are FreeBSD clones | `lo<n>` Linux dummy devices | Linux has one `lo` |
+| CARP | VRRP (Holo/keepalived), same fields | PLAN §2.1 |
+| Kea6 `subnet` empty when `dynamic_prefix` | `addressing` is `static {subnet, pools}` or `dynamic_prefix` | invalid combinations unrepresentable |

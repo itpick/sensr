@@ -63,6 +63,35 @@ fn walk_mut<'v>(mut v: &'v mut Value, segs: &[&str]) -> Result<&'v mut Value, Pa
     Ok(v)
 }
 
+/// Like [`walk_mut`], but creates missing intermediate objects, so a path
+/// can reach into a section or optional struct that is omitted while empty.
+/// The typed deserialisation afterwards rejects anything invented this way
+/// that the model does not have.
+fn walk_mut_create<'v>(mut v: &'v mut Value, segs: &[&str]) -> Result<&'v mut Value, PathError> {
+    for (i, seg) in segs.iter().enumerate() {
+        v = match v {
+            Value::Object(m) => Some(
+                m.entry((*seg).to_owned())
+                    .or_insert_with(|| Value::Object(serde_json::Map::new())),
+            ),
+            Value::Array(a) => seg.parse::<usize>().ok().and_then(|n| a.get_mut(n)),
+            Value::Null => {
+                *v = Value::Object(serde_json::Map::new());
+                match v {
+                    Value::Object(m) => Some(
+                        m.entry((*seg).to_owned())
+                            .or_insert_with(|| Value::Object(serde_json::Map::new())),
+                    ),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+        .ok_or_else(|| PathError::NotFound(segs[..=i].join(".")))?;
+    }
+    Ok(v)
+}
+
 /// Dotted-path reads and edits, available on every serialisable model.
 pub trait PathAccess: Serialize + DeserializeOwned {
     /// The JSON value at `path`; an empty path returns the whole model.
@@ -75,15 +104,15 @@ pub trait PathAccess: Serialize + DeserializeOwned {
         walk(&root, &segs).cloned()
     }
 
-    /// Replaces the value at `path`. The parent must exist; the last segment
-    /// may be new (an unset optional field, a new map key or item UUID), and
-    /// the result must deserialise, so unknown fields and ill-typed values are
-    /// rejected and `self` is left unchanged.
+    /// Replaces the value at `path`. Missing segments are created (an unset
+    /// optional field, a new map key or item UUID, a section omitted while
+    /// empty); the result must deserialise, so unknown fields and ill-typed
+    /// values are rejected and `self` is left unchanged.
     fn set_by_path(&mut self, path: &str, value: Value) -> Result<(), PathError> {
         let segs = split(path)?;
         let mut root = serde_json::to_value(&*self).map_err(|e| invalid(path, e))?;
         let (last, parent) = segs.split_last().ok_or(PathError::Empty)?;
-        match walk_mut(&mut root, parent)? {
+        match walk_mut_create(&mut root, parent)? {
             Value::Object(m) => {
                 m.insert((*last).to_owned(), value);
             }
@@ -203,9 +232,13 @@ mod tests {
     fn set_by_reference_not_found_t0034() {
         let mut m = model();
         let before = m.clone();
-        assert_eq!(
+        assert!(matches!(
             m.set_by_path("general.nope.deeper", json!(1)),
-            Err(PathError::NotFound("general.nope".into()))
+            Err(PathError::Invalid { .. })
+        ));
+        assert_eq!(
+            m.set_by_path("general.FromEmail.deeper", json!(1)),
+            Err(PathError::NotFound("general.FromEmail.deeper".into()))
         );
         assert!(matches!(
             m.set_by_path("general.nope", json!(1)),

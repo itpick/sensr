@@ -1,6 +1,7 @@
 //! The trust store: certificate authorities and certificates (OPNsense
 //! `Trust/Ca.xml` and `Trust/Cert.xml`, the `ca` and `cert` sections).
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::array::{ArrayField, Relation};
@@ -9,7 +10,7 @@ use crate::refs::{RefContext, Validate};
 use crate::validation::{FieldPath, Validations, ValidatorKind};
 
 /// Authorities and certificates.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Trust {
     /// Certificate authorities (local or imported).
@@ -21,7 +22,7 @@ pub struct Trust {
 }
 
 /// A certificate authority.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CertAuthority {
     /// OPNsense reference id, kept so imported references and exports match.
@@ -42,7 +43,7 @@ pub struct CertAuthority {
 }
 
 /// A certificate, or a pending signing request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Certificate {
     /// OPNsense reference id, kept so imported references and exports match.

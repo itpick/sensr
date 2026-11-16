@@ -7,6 +7,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 use ipnet::IpNet;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{check, yes};
@@ -19,7 +20,7 @@ use crate::refs::{RefContext, Validate};
 use crate::validation::{FieldError, FieldPath, Validations, ValidatorKind, messages};
 
 /// Aliases, rules and global filter settings.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Firewall {
     /// Named address/port sets referenced by rules.
@@ -48,7 +49,7 @@ impl Firewall {
 }
 
 /// Global filter settings (OPNsense `Firewall/Filter.xml` `settings`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FirewallSettings {
     /// Keep the anti-lockout rule that admits management access on LAN
@@ -82,7 +83,7 @@ impl Default for FirewallSettings {
 }
 
 /// A named set of addresses, ports or other selectors.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Alias {
     /// Disabled aliases resolve to nothing.
@@ -101,7 +102,7 @@ pub struct Alias {
 }
 
 /// The type of an alias, without its content (what [`RefContext`] reports).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AliasType {
     /// Hosts, ranges and host names.
@@ -133,7 +134,7 @@ impl AliasType {
 
 /// Refresh period of a URL table (OPNsense `updatefreq`, in days with
 /// fractions; here split into days and hours).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Refresh {
     /// Whole days.
@@ -145,7 +146,7 @@ pub struct Refresh {
 }
 
 /// Which address families a URL or GeoIP alias loads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Families {
     /// Load IPv4 entries.
@@ -166,7 +167,7 @@ impl Default for Families {
 }
 
 /// Alias content by type.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AliasContent {
     /// Hosts: addresses, ranges, host names (resolved periodically) and
@@ -342,7 +343,7 @@ impl fmt::Display for AliasEntry {
 string_serde!(AliasEntry);
 
 /// What a matching rule does.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleAction {
     /// Allow.
@@ -355,7 +356,7 @@ pub enum RuleAction {
 }
 
 /// Which way traffic crosses the interface.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
     /// Arriving on the interface.
@@ -368,7 +369,7 @@ pub enum Direction {
 }
 
 /// Connection tracking for a pass rule (OPNsense `statetype`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StateType {
     /// Track connections.
@@ -385,7 +386,7 @@ pub enum StateType {
 }
 
 /// Source or destination of a rule.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
     /// Address operand.
@@ -416,7 +417,7 @@ impl Endpoint {
 }
 
 /// A filter rule.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FilterRule {
     /// Disabled rules are kept but not loaded.

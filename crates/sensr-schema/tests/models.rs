@@ -696,6 +696,388 @@ fn wireguard_rules() {
 }
 
 #[test]
+fn static_routes() {
+    let mut doc = Document::factory();
+    doc.set_by_path(
+        "gateways.gateways.00000000-0000-0000-0000-0000000000a1",
+        json!({"name": "WAN_GW", "interface": "wan", "address": "203.0.113.1"}),
+    )
+    .unwrap();
+    doc.set_by_path(
+        "gateways.gateways.00000000-0000-0000-0000-0000000000a6",
+        json!({"name": "WAN_GW6", "interface": "wan", "family": "inet6", "address": "2001:db8::1"}),
+    )
+    .unwrap();
+    let ok = [
+        json!({"network": "10.20.0.0/16", "gateway": "WAN_GW"}),
+        json!({"network": "10.30.0.0/16", "gateway": "WAN_GW6", "description": "RFC 5549 next hop"}),
+        json!({"network": "2001:db8:1::/48", "gateway": "WAN_GW6"}),
+    ];
+    for (i, r) in ok.iter().enumerate() {
+        doc.set_by_path(
+            &format!("routes.routes.00000000-0000-0000-0000-00000000000{i}"),
+            r.clone(),
+        )
+        .unwrap();
+    }
+    let v = doc.validate();
+    assert!(v.is_ok(), "{v}");
+    let bad = [
+        (
+            "b1",
+            json!({"network": "2001:db8:2::/48", "gateway": "WAN_GW"}),
+        ),
+        ("b2", json!({"network": "10.40.0.0/16", "gateway": "NOPE"})),
+        (
+            "b3",
+            json!({"network": "10.20.0.1/16", "gateway": "WAN_GW"}),
+        ),
+    ];
+    for (k, r) in &bad {
+        doc.set_by_path(
+            &format!("routes.routes.00000000-0000-0000-0000-0000000000{k}"),
+            r.clone(),
+        )
+        .unwrap();
+    }
+    let v = doc.validate();
+    let p = |k: &str, f: &str| format!("routes.routes.00000000-0000-0000-0000-0000000000{k}.{f}");
+    let gw = "Specify a valid gateway from the list matching the networks ip protocol.";
+    assert_eq!(messages(&v, &p("b1", "gateway")), [gw]);
+    assert_eq!(messages(&v, &p("b2", "gateway")), [gw]);
+    assert_eq!(
+        messages(&v, &p("b3", "network")),
+        [
+            "Specify a valid network matching the gateways ip protocol.".to_owned(),
+            "Network 10.20.0.0/16 already has a route (item 00000000-0000-0000-0000-000000000000)."
+                .to_owned()
+        ]
+    );
+    assert!(
+        !serde_json::to_string(&Document::factory())
+            .unwrap()
+            .contains("\"routes\""),
+        "empty section is omitted"
+    );
+}
+
+#[test]
+fn devices_and_virtual_ips() {
+    let mut doc = Document::factory();
+    let set =
+        |doc: &mut Document, path: &str, v: serde_json::Value| doc.set_by_path(path, v).unwrap();
+    set(
+        &mut doc,
+        "devices.bridges.00000000-0000-0000-0000-000000000b01",
+        json!({"device": "br0", "members": ["eth2", "eth3"], "stp": {"protocol": "rstp", "max_age": 20}}),
+    );
+    set(
+        &mut doc,
+        "devices.laggs.00000000-0000-0000-0000-000000000c01",
+        json!({"device": "bond0", "members": ["eth4", "eth5"], "protocol": "lacp", "hash": ["l3", "l4"]}),
+    );
+    set(
+        &mut doc,
+        "devices.loopbacks.00000000-0000-0000-0000-000000000d01",
+        json!({"id": 1, "description": "router id"}),
+    );
+    set(
+        &mut doc,
+        "virtual_ips.vips.00000000-0000-0000-0000-000000000e01",
+        json!({"interface": "lan", "address": "192.168.1.2/24"}),
+    );
+    set(
+        &mut doc,
+        "virtual_ips.vips.00000000-0000-0000-0000-000000000e02",
+        json!({"interface": "lan", "address": "192.168.1.254/24", "mode": {"mode": "carp", "vhid": 5, "password": "s3cret"}}),
+    );
+    let v = doc.validate();
+    assert!(v.is_ok(), "{v}");
+    assert!(doc.devices.defines(&"lo1".parse().unwrap()));
+
+    set(
+        &mut doc,
+        "devices.bridges.00000000-0000-0000-0000-000000000b02",
+        json!({"device": "bond0", "members": ["eth2", "br9"], "stp": {"edge": ["eth9"], "max_age": 2}}),
+    );
+    set(
+        &mut doc,
+        "devices.laggs.00000000-0000-0000-0000-000000000c02",
+        json!({"device": "bond1", "members": ["eth5"], "primary_member": "eth6", "mtu": 100}),
+    );
+    set(
+        &mut doc,
+        "virtual_ips.vips.00000000-0000-0000-0000-000000000e03",
+        json!({"interface": "opt9", "address": "192.168.1.0/24"}),
+    );
+    set(
+        &mut doc,
+        "virtual_ips.vips.00000000-0000-0000-0000-000000000e04",
+        json!({"interface": "lan", "address": "192.168.1.255/24", "mode": {"mode": "carp", "vhid": 5, "password": ""}}),
+    );
+    set(
+        &mut doc,
+        "virtual_ips.vips.00000000-0000-0000-0000-000000000e05",
+        json!({"interface": "lan", "address": "10.9.0.1/24", "mode": {"mode": "proxy_arp"}}),
+    );
+    let v = doc.validate();
+    let b = "devices.bridges.00000000-0000-0000-0000-000000000b02";
+    assert_eq!(
+        messages(
+            &v,
+            "devices.laggs.00000000-0000-0000-0000-000000000c01.device"
+        ),
+        [format!("Device bond0 is already defined at {b}.device.")]
+    );
+    assert_eq!(
+        messages(&v, &format!("{b}.members")),
+        ["Member eth2 is already used by br0."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{b}.stp.max_age")),
+        ["Please specify a value between 6 and 40."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{b}.stp")),
+        ["Contains non bridge members."]
+    );
+    let l = "devices.laggs.00000000-0000-0000-0000-000000000c02";
+    assert_eq!(
+        messages(&v, &format!("{l}.members")),
+        ["Members eth5 are already used in other laggs."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{l}.primary_member")),
+        ["Primary member eth6 not in member list."]
+    );
+    let vp = |k: &str| format!("virtual_ips.vips.00000000-0000-0000-0000-000000000{k}");
+    assert_eq!(
+        messages(&v, &format!("{}.interface", vp("e03"))),
+        ["The interface does not exist."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.address", vp("e03"))),
+        ["You cannot use the network address."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.address", vp("e04"))),
+        ["You cannot use the broadcast address."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.mode.password", vp("e04"))),
+        ["You must specify a CARP password that is shared between the two VHID members."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.mode.vhid", vp("e04"))),
+        ["VHID 5 is already used on lan."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.address", vp("e05"))),
+        ["Only strict subnets are allowed for Proxy ARP types."]
+    );
+    let factory = serde_json::to_string(&Document::factory()).unwrap();
+    assert!(
+        !factory.contains("\"devices\"") && !factory.contains("\"virtual_ips\""),
+        "empty sections are omitted"
+    );
+    let dbg = format!("{:?}", doc.virtual_ips);
+    assert!(!dbg.contains("s3cret"), "CARP password leaked into Debug");
+}
+
+#[test]
+fn dhcpv6_and_router_advertisements() {
+    let mut doc = Document::factory();
+    let set =
+        |doc: &mut Document, path: &str, v: serde_json::Value| doc.set_by_path(path, v).unwrap();
+    set(&mut doc, "dhcpv6.enabled", json!(true));
+    set(&mut doc, "dhcpv6.interfaces", json!(["lan"]));
+    let s1 = "00000000-0000-0000-0000-000000006001";
+    let s2 = "00000000-0000-0000-0000-000000006002";
+    set(
+        &mut doc,
+        &format!("dhcpv6.subnets.{s1}"),
+        json!({"interface": "lan", "addressing": {"mode": "static", "subnet": "2001:db8:1::/64", "pools": ["2001:db8:1::1000-2001:db8:1::2000"]}}),
+    );
+    set(
+        &mut doc,
+        &format!("dhcpv6.subnets.{s2}"),
+        json!({"interface": "lan", "addressing": {"mode": "dynamic_prefix"}}),
+    );
+    set(
+        &mut doc,
+        "dhcpv6.reservations.00000000-0000-0000-0000-000000006101",
+        json!({"subnet": s1, "client": {"duid": "00:01:00:01"}, "ip_address": "2001:db8:1::50"}),
+    );
+    set(
+        &mut doc,
+        "router_advertisements.interfaces.00000000-0000-0000-0000-000000006201",
+        json!({"interface": "lan", "mode": "assisted"}),
+    );
+    let v = doc.validate();
+    assert!(v.is_ok(), "{v}");
+
+    set(
+        &mut doc,
+        "dhcpv6.subnets.00000000-0000-0000-0000-000000006003",
+        json!({"interface": "lan", "auto_options": true, "options": {"dns_servers": ["2001:db8::53"]}, "addressing": {"mode": "dynamic_prefix"}}),
+    );
+    set(
+        &mut doc,
+        "dhcpv6.subnets.00000000-0000-0000-0000-000000006004",
+        json!({"interface": "wan", "addressing": {"mode": "static", "subnet": "2001:db8:2::1/64", "pools": ["2001:db8:3::1-2001:db8:3::9"]}}),
+    );
+    set(
+        &mut doc,
+        "dhcpv6.reservations.00000000-0000-0000-0000-000000006102",
+        json!({"subnet": s2, "client": {"hw_address": "00:11:22:33:44:55"}}),
+    );
+    set(
+        &mut doc,
+        "dhcpv6.reservations.00000000-0000-0000-0000-000000006103",
+        json!({"subnet": s1, "client": {"duid": "00:01:00:01"}, "ip_address": "2001:db8:9::1"}),
+    );
+    set(
+        &mut doc,
+        "dhcpv6.pd_pools.00000000-0000-0000-0000-000000006301",
+        json!({"subnet": s1, "prefix": "2001:db8:100::/48", "delegated_len": 40}),
+    );
+    set(
+        &mut doc,
+        "router_advertisements.interfaces.00000000-0000-0000-0000-000000006202",
+        json!({"interface": "lan", "prefix_from": "lan", "min_interval": 500, "nat64_prefix": "64:ff9b::/72", "default_lifetime": 100}),
+    );
+    let v = doc.validate();
+    let sp = |k: &str, f: &str| format!("dhcpv6.subnets.00000000-0000-0000-0000-00000000{k}.{f}");
+    assert_eq!(
+        messages(&v, &sp("6003", "interface")),
+        ["Only one dynamic prefix subnet may be configured per interface."]
+    );
+    assert_eq!(
+        messages(&v, &sp("6003", "options.dns_servers")),
+        ["DNS servers must be empty when option data autocollect is enabled."]
+    );
+    assert_eq!(
+        messages(&v, &sp("6004", "interface")),
+        ["Interface is not selected in the general settings."]
+    );
+    assert_eq!(
+        messages(&v, &sp("6004", "addressing.subnet")),
+        ["The subnet must be a network address."]
+    );
+    assert_eq!(
+        messages(&v, &sp("6004", "addressing.pools")),
+        ["Pool \"2001:db8:3::1-2001:db8:3::9\" not in specified subnet."]
+    );
+    let rp =
+        |k: &str, f: &str| format!("dhcpv6.reservations.00000000-0000-0000-0000-00000000{k}.{f}");
+    assert_eq!(
+        messages(&v, &rp("6102", "subnet")),
+        ["Reservations cannot be assigned to dynamic prefix subnets."]
+    );
+    assert_eq!(
+        messages(&v, &rp("6103", "ip_address")),
+        ["Address not in specified subnet."]
+    );
+    assert_eq!(
+        messages(&v, &rp("6103", "client")),
+        ["Duplicate entry exists."]
+    );
+    assert_eq!(
+        messages(
+            &v,
+            "dhcpv6.pd_pools.00000000-0000-0000-0000-000000006301.delegated_len"
+        ),
+        ["Please specify a value between 48 and 128."]
+    );
+    let ra = |f: &str| {
+        format!("router_advertisements.interfaces.00000000-0000-0000-0000-000000006202.{f}")
+    };
+    assert_eq!(
+        messages(&v, &ra("interface")),
+        ["Router advertisements are already configured for this interface."]
+    );
+    assert_eq!(
+        messages(&v, &ra("prefix_from")),
+        ["Constructor cannot be the same as interface."]
+    );
+    assert_eq!(
+        messages(&v, &ra("nat64_prefix")),
+        ["Prefix size must be one of 32, 40, 48, 56, 64 or 96."]
+    );
+    assert_eq!(
+        messages(&v, &ra("min_interval")),
+        ["Value cannot be greater than 450."]
+    );
+    assert_eq!(
+        messages(&v, &ra("default_lifetime")),
+        ["Value must be between 600 and 9000 seconds."]
+    );
+    let factory = serde_json::to_string(&Document::factory()).unwrap();
+    assert!(
+        !factory.contains("\"dhcpv6\"") && !factory.contains("router_advertisements"),
+        "unconfigured sections are omitted"
+    );
+}
+
+#[test]
+fn ntp_settings() {
+    let mut doc = Document::factory();
+    doc.set_by_path(
+        "system.time_servers",
+        json!(["0.pool.ntp.org", "time.cloudflare.com"]),
+    )
+    .unwrap();
+    doc.set_by_path(
+        "ntp",
+        json!({"serve": true, "listen_interfaces": ["lan"], "servers": [
+        {"host": "0.pool.ntp.org", "pool": true, "iburst": true},
+        {"host": "time.cloudflare.com", "nts": true, "prefer": true}
+    ], "orphan_stratum": 10}),
+    )
+    .unwrap();
+    let v = doc.validate();
+    assert!(v.is_ok(), "{v}");
+    assert!(
+        doc.ntp
+            .options(&"time.cloudflare.com".parse().unwrap())
+            .unwrap()
+            .nts
+    );
+    doc.set_by_path(
+        "ntp.servers",
+        json!([
+            {"host": "ntp.example.org"},
+            {"host": "0.pool.ntp.org", "prefer": true, "no_select": true},
+            {"host": "0.pool.ntp.org"}
+        ]),
+    )
+    .unwrap();
+    doc.set_by_path("ntp.orphan_stratum", json!(16)).unwrap();
+    let v = doc.validate();
+    assert_eq!(
+        messages(&v, "ntp.servers.0.host"),
+        ["ntp.example.org is not one of the configured time servers."]
+    );
+    assert_eq!(
+        messages(&v, "ntp.servers.1"),
+        ["A server cannot be both preferred and never selected."]
+    );
+    assert_eq!(
+        messages(&v, "ntp.servers.2.host"),
+        ["Duplicate entry exists."]
+    );
+    assert_eq!(
+        messages(&v, "ntp.orphan_stratum"),
+        ["Please specify a value between 1 and 15."]
+    );
+    assert!(
+        !serde_json::to_string(&Document::factory())
+            .unwrap()
+            .contains("\"ntp\"")
+    );
+}
+
+#[test]
 fn system_rules() {
     let mut doc = Document::factory();
     let user = User {

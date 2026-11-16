@@ -7,6 +7,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 use ipnet::IpNet;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::names::{AliasName, InterfaceId};
@@ -14,7 +15,7 @@ use super::string_serde;
 use crate::validation::FieldError;
 
 /// Which IP versions a rule applies to (OPNsense `ipprotocol`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum IpFamily {
     /// IPv4 only (`inet`).

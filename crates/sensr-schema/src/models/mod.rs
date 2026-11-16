@@ -11,12 +11,16 @@
 //! `"type"`, `"rr"`); list items are UUID-keyed objects
 //! ([`ArrayField`](crate::ArrayField)).
 
+pub mod devices;
 pub mod dhcp;
+pub mod dhcpv6;
 pub mod dns;
 pub mod firewall;
 pub mod gateways;
 pub mod interfaces;
 pub mod nat;
+pub mod ntp;
+pub mod routes;
 pub mod system;
 pub mod trust;
 pub mod wireguard;
