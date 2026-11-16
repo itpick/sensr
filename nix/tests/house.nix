@@ -122,10 +122,24 @@ let
       networking.useDHCP = false;
       networking.firewall.enable = false;
       virtualisation.memorySize = 512;
+      # One-shot DHCP: busybox udhcpc and a script that sets what it got.
+      environment.etc."house-udhcpc.sh" = {
+        mode = "0755";
+        text = ''
+          #!/bin/sh
+          case "$1" in
+            deconfig) ip -4 addr flush dev "$interface" ;;
+            bound|renew)
+              ip -4 addr flush dev "$interface"
+              ip addr add "$ip/$mask" dev "$interface"
+              if [ -n "$router" ]; then ip route replace default via "''${router%% *}" dev "$interface"; fi
+              ;;
+          esac
+        '';
+      };
       environment.systemPackages = with pkgs; [
         curl
         dig
-        dhcpcd
         chrony
         netcat-openbsd
         iputils
@@ -366,21 +380,25 @@ pkgs.testers.runNixOSTest {
 
     def ipv4(machine, ifname):
         out = json.loads(machine.succeed(f"ip -j -4 addr show dev {ifname}"))
-        return [a["local"] for i in out for a in i.get("addr_info", [])]
+        return [a["local"] for i in out for a in i.get("addr_info", []) if not a["local"].startswith("169.254.")]
 
 
     def client_dhcp(machine, mac, hostname=None, static=None, prefix=None, gw=None):
         """Give the client NIC this MAC, then a DHCP lease (or a static address)."""
-        machine.execute("dhcpcd -x eth1 2>/dev/null; pkill dhcpcd; sleep 1")
+        machine.execute("pkill -x udhcpc; sleep 0.5")
         machine.succeed("ip -4 addr flush dev eth1")
         if mac:
             machine.succeed(f"ip link set eth1 down && ip link set eth1 address {mac} && ip link set eth1 up")
         if static:
             machine.succeed(f"ip addr add {static}/{prefix} dev eth1 && ip route replace default via {gw}")
             return static
-        h = f"-h {q(hostname)}" if hostname else ""
-        machine.succeed(f"dhcpcd -4 -w -t 60 {h} --nohook resolv.conf eth1 >&2")
-        return ipv4(machine, "eth1")[0]
+        h = f"-x hostname:{q(hostname)}" if hostname else ""
+        machine.succeed(
+            f"timeout 90 ${pkgs.busybox}/bin/udhcpc -i eth1 -f -q -n -t 20 -T 3 {h} -s /etc/house-udhcpc.sh >&2"
+        )
+        got = ipv4(machine, "eth1")
+        assert got, "no IPv4 lease"
+        return got[0]
 
 
     # ---------------------------------------------------------------- network
@@ -433,7 +451,7 @@ pkgs.testers.runNixOSTest {
                 }],
             }
         }
-        upstream.succeed(f"mkdir -p /run/kea && echo {q(json.dumps(kea))} > /etc/house-kea6.json")
+        upstream.succeed(f"mkdir -p /run/kea /var/lib/kea && echo {q(json.dumps(kea))} > /etc/house-kea6.json")
         upstream.succeed(
             "systemd-run --unit=house-dhcp6 --setenv=KEA_LOCKFILE_DIR=/run/kea --setenv=KEA_PIDFILE_DIR=/run/kea"
             " kea-dhcp6 -c /etc/house-kea6.json"
@@ -545,7 +563,7 @@ pkgs.testers.runNixOSTest {
     D = P.get("dns", {})
     for n in D.get("names", []):
         def dns_name(n=n):
-            out = until(lan, f"dig +short +time=3 @{LAN_IP} {q(n['name'])} A", timeout=60).split()
+            out = until(lan, f"dig +short +time=2 +tries=3 @{LAN_IP} {q(n['name'])} A | grep -v '^;;'", timeout=60).split()
             assert n["want"] in out, f"{n['name']} -> {out}"
             return " ".join(out)
         check(f"dns.name:{n['name']}", dns_name)
@@ -557,7 +575,7 @@ pkgs.testers.runNixOSTest {
         check(f"dns.ptr:{p['ip']}", dns_ptr)
 
     def dns_lease():
-        out = until(lan, f"dig +short +time=3 @{LAN_IP} wifitest.{R['domain']} A", timeout=60).split()
+        out = until(lan, f"dig +short +time=2 +tries=3 @{LAN_IP} wifitest.{R['domain']} A | grep -v '^;;'", timeout=60).split()
         assert wifi_ip in out, f"wifitest -> {out}, want {wifi_ip}"
         return wifi_ip
 
