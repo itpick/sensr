@@ -887,7 +887,23 @@
     "groups": {}
   },
   "trust": {
-    "authorities": {},
-    "certificates": {}
+    "authorities": {
+      "9a7d8f90-ce35-4ce7-ae7f-952ebd95d44d": {
+        "refid": "6721b4c9a0e3f",
+        "description": "Home Example Root CA",
+        "certificate": "-----BEGIN CERTIFICATE-----\nSYNTHETIC TEST CERTIFICATE - NOT A REAL KEY - CA Home Example Root CA\n-----END CERTIFICATE-----\n",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nSYNTHETIC TEST PRIVATE KEY - NOT A REAL KEY - CA Home Example Root CA\n-----END PRIVATE KEY-----\n",
+        "serial": 2
+      }
+    },
+    "certificates": {
+      "93927b01-1517-45dd-8864-cb9cd2f776c6": {
+        "refid": "6721b4d17c58a",
+        "description": "Web GUI gw-home.home.example",
+        "certificate": "-----BEGIN CERTIFICATE-----\nSYNTHETIC TEST CERTIFICATE - NOT A REAL KEY - Web GUI gw-home.home.example\n-----END CERTIFICATE-----\n",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nSYNTHETIC TEST PRIVATE KEY - NOT A REAL KEY - Web GUI gw-home.home.example\n-----END PRIVATE KEY-----\n",
+        "issuer": "9a7d8f90-ce35-4ce7-ae7f-952ebd95d44d"
+      }
+    }
   }
 }

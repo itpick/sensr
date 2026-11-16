@@ -1,6 +1,6 @@
 # sensr import report
 
-## mapped (31)
+## mapped (33)
 /opnsense/system  <- system
 /opnsense/vlans  <- interfaces
 /opnsense/interfaces  <- interfaces
@@ -30,10 +30,12 @@
 /opnsense/OPNsense/Kea/dhcp4  <- kea-dhcp4
 /opnsense/OPNsense/unboundplus  <- unbound
 /opnsense/OPNsense/wireguard  <- wireguard
+/opnsense/ca[@uuid='9a7d8f90-ce35-4ce7-ae7f-952ebd95d44d']  <- trust
+/opnsense/cert[@uuid='93927b01-1517-45dd-8864-cb9cd2f776c6']  <- trust
 /opnsense/OPNsense/Gateways  <- gateways
 /opnsense/OPNsense/Gateways/gateway_item[@uuid='9df1d26a-e824-425b-95df-aaf0fe534a17']  <- gateways
 
-## unmapped, expected (66)
+## unmapped, expected (64)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -98,8 +100,6 @@
 /opnsense/OPNsense/unboundplus/dnsbl  (DNS blocklists are not modelled yet)
 /opnsense/OPNsense/Syslog  (remote syslog is not modelled yet)
 /opnsense/OPNsense/trust  (trust store settings are not modelled yet)
-/opnsense/ca[@uuid='9a7d8f90-ce35-4ce7-ae7f-952ebd95d44d']  (certificate authorities are not modelled yet)
-/opnsense/cert[@uuid='93927b01-1517-45dd-8864-cb9cd2f776c6']  (certificates are not modelled yet)
 
 ## unmapped, unexpected (0)
 
