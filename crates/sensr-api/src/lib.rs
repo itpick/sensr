@@ -9,6 +9,7 @@ pub mod auth;
 pub mod compat;
 pub mod error;
 pub mod native;
+pub mod ui;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -101,9 +102,23 @@ pub async fn serve(
     state: Arc<AppState>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
+    serve_with_ui(listener, state, None, shutdown).await
+}
+
+/// Like [`serve`], plus the web UI when `ui_root` (the built site with `pkg/`) is given.
+pub async fn serve_with_ui(
+    listener: tokio::net::TcpListener,
+    state: Arc<AppState>,
+    ui_root: Option<PathBuf>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let mut app = router(state.clone());
+    if let Some(root) = ui_root {
+        app = app.merge(ui::router(state, root));
+    }
     axum::serve(
         listener,
-        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown)
     .await
