@@ -174,7 +174,7 @@ impl Engine {
                 source,
             })?;
         let models = SliceModels::from_document(doc, &self.opts.secrets)?;
-        let interfaces = InterfacesModel::from_document(doc);
+        let interfaces = InterfacesModel::from_document(doc).with_routing(doc, &compiled.routing);
         let summary = format!(
             "{} rules → {} nft rules, {} verdict maps",
             report.stats.filter_rules, report.stats.nft_rules, report.stats.vmaps

@@ -12,6 +12,9 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use std::net::IpAddr;
+
+use sensr_rules::routing::{PolicyRouting, ROUTE_MASK, TargetKind};
 use sensr_schema::Document;
 use sensr_schema::models::interfaces::{InterfaceRole, Ipv4Config, Ipv6Config, VlanProtocol};
 
@@ -64,6 +67,26 @@ pub struct Track {
     pub subnet_id: String,
 }
 
+/// A default route in a policy table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PolicyRoute {
+    /// next hop, or `_dhcp4` / `_ipv6ra` for a learned one
+    pub gateway: String,
+    /// routing table
+    pub table: u32,
+}
+
+/// `ip rule fwmark <mark>/<mask> lookup <table>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PolicyRule {
+    /// `0x400/0xff00`
+    pub mark: String,
+    /// routing table
+    pub table: u32,
+    /// rule priority
+    pub priority: u32,
+}
+
 /// One `.network` file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Link {
@@ -93,6 +116,10 @@ pub struct Link {
     pub dhcp6: Option<Dhcp6>,
     /// tracked prefix
     pub track: Option<Track>,
+    /// default routes of policy tables that leave through this link
+    pub policy_routes: Vec<PolicyRoute>,
+    /// policy rules installed with this link
+    pub policy_rules: Vec<PolicyRule>,
 }
 
 /// One VLAN `.netdev` file.
@@ -234,6 +261,8 @@ impl InterfacesModel {
                 dhcp4,
                 dhcp6,
                 track,
+                policy_routes: Vec::new(),
+                policy_rules: Vec::new(),
             });
         }
         // VLAN parents that are not assigned interfaces still carry the tags
@@ -252,9 +281,64 @@ impl InterfacesModel {
                 dhcp4: None,
                 dhcp6: None,
                 track: None,
+                policy_routes: Vec::new(),
+                policy_rules: Vec::new(),
             });
         }
         InterfacesModel { links, vlans }
+    }
+
+    /// Adds the routing tables and rules policy-routed rules need
+    /// (`sensr_rules::routing`): per gateway a table with its default route
+    /// and an `fwmark` rule; per gateway group the same through its tier-1
+    /// member (failover between tiers needs gateway monitoring).
+    pub fn with_routing(mut self, doc: &Document, routing: &PolicyRouting) -> InterfacesModel {
+        let next_hop = |iface: &str, addr: Option<IpAddr>, v6: bool| -> Option<(String, String)> {
+            let i = doc
+                .interfaces
+                .iter()
+                .find(|(id, _)| id.as_str() == iface)?
+                .1;
+            let hop = match addr {
+                Some(a) => a.to_string(),
+                None if !v6 && matches!(i.ipv4, Ipv4Config::Dhcp { .. }) => "_dhcp4".into(),
+                None if v6 => "_ipv6ra".into(),
+                None => return None,
+            };
+            Some((i.device.as_str().to_owned(), hop))
+        };
+        let gateway = |name: &str| -> Option<(String, String)> {
+            let g = doc
+                .gateways
+                .gateways
+                .values()
+                .find(|g| g.name.as_str() == name && g.enabled)?;
+            next_hop(
+                g.interface.as_str(),
+                g.address,
+                g.family == sensr_schema::fields::IpFamily::Inet6,
+            )
+        };
+        for (idx, (name, t)) in routing.targets.iter().enumerate() {
+            let via = match &t.kind {
+                TargetKind::Gateway { .. } => gateway(name),
+                TargetKind::Group { members } => members.iter().find_map(|(_, m)| gateway(m)),
+            };
+            let Some((dev, hop)) = via else { continue };
+            let Some(link) = self.links.iter_mut().find(|l| l.name == dev) else {
+                continue;
+            };
+            link.policy_routes.push(PolicyRoute {
+                gateway: hop,
+                table: t.table,
+            });
+            link.policy_rules.push(PolicyRule {
+                mark: format!("0x{:x}/0x{:x}", t.mark, ROUTE_MASK),
+                table: t.table,
+                priority: 1000 + idx as u32,
+            });
+        }
+        self
     }
 
     /// Render the networkd files.
@@ -339,6 +423,31 @@ pub(crate) mod tests {
                 .iter()
                 .any(|f| f.dest.to_string_lossy().ends_with("vlan01.netdev"))
         );
+    }
+
+    #[test]
+    fn multiwan_policy_tables() {
+        let doc: Document = serde_json::from_str(include_str!(
+            "../../../sensr-import-opnsense/tests/golden/multiwan.sensr.json"
+        ))
+        .unwrap();
+        let compiled = sensr_rules::document::compile(&doc, &Default::default());
+        let m = InterfacesModel::from_document(&doc).with_routing(&doc, &compiled.routing);
+        let t = Templates::builtin().unwrap();
+        for f in m.render(&t).unwrap() {
+            let name = f.dest.file_name().unwrap().to_string_lossy().into_owned();
+            if name.contains("igc0") || name.contains("igc2") {
+                insta::assert_snapshot!(format!("multiwan__{name}"), f.contents);
+            }
+        }
+        let wan2 = m.links.iter().find(|l| l.name == "igc2").unwrap();
+        assert!(
+            wan2.policy_routes
+                .iter()
+                .any(|r| r.gateway == "198.51.100.1")
+        );
+        let wan1 = m.links.iter().find(|l| l.name == "igc0").unwrap();
+        assert!(wan1.policy_routes.iter().any(|r| r.gateway == "_dhcp4"));
     }
 
     #[test]
