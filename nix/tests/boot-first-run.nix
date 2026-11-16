@@ -11,7 +11,7 @@
 let
   pending = import ../pending.nix;
   py = b: if b then "True" else "False";
-  # parity: T-0391 T-0392 T-0393 T-0397 (T-0401 once configGet lands)
+  # parity: T-0387 T-0391 T-0392 T-0393 T-0397 T-0401
 in
 pkgs.testers.runNixOSTest {
   name = "sensr-boot-first-run";
@@ -115,7 +115,7 @@ pkgs.testers.runNixOSTest {
         if PENDING["configGet"]:
             note_pending("T-0401")
         else:
-            out = machine.succeed("sensr config get / --json")
+            out = machine.succeed("sensr config get --json")
             assert isinstance(json.loads(out), dict), out
 
     with subtest("seed folder"):

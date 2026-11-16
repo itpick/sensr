@@ -8,6 +8,8 @@
 | `images/qcow.nix` | `nix build .#images.qcow`: x86_64 UEFI qcow2, systemd-boot with boot counting |
 | `tests/boot-first-run.nix` | `checks.x86_64-linux.boot-first-run`: units, selftest rows, hardening |
 | `tests/qcow-boot.nix` | `checks.x86_64-linux.qcow-boot`: boots the real qcow2 three times, records boot seconds |
+| `tests/slice.nix` | `checks.x86_64-linux.slice` (sensr) and `slice-reference` (hand-written oracle): the routing vertical slice with 6 VMs |
+| `tests/slice/` | the slice's addressing plan (`net.nix`) and the oracle router (`reference-router.nix`) |
 | `pending.nix` | which assertions wait on crates that have not landed |
 
 ## Contract between the module and the Rust crates
@@ -32,5 +34,15 @@ The module provides this; the crates may rely on it. Change both together.
 ```sh
 nix build -L .#checks.x86_64-linux.boot-first-run   # needs KVM
 nix build -L .#checks.x86_64-linux.qcow-boot
+nix build -L .#checks.x86_64-linux.slice-reference   # proves the slice's assertions
+nix build -L .#checks.x86_64-linux.slice             # the same assertions against sensr
 nix build .#images.qcow
 ```
+
+## Turning on a slice assertion
+
+When a crate lands, flip its flag in `pending.nix` in the same PR. `slice`
+then asserts what `slice-reference` already proves: the reference router
+(`tests/slice/reference-router.nix`) is the expected outcome of importing
+`home-router.xml`, so a difference between the two is a sensr bug (or a
+mistake in the oracle, fixed in the same PR with the reason).

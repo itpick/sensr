@@ -27,6 +27,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
 
 use crate::applier::{Applier, ApplyError};
+use crate::redact;
 use crate::store::{ConfigStore, NewRevision, StoreError, now_ms, write_atomic};
 
 /// Agent policy knobs.
@@ -473,10 +474,25 @@ impl<S: ConfigStore, A: Applier> Agent<S, A> {
             }
             Op::ConfigGet { path, source } => {
                 let doc = self.resolve(inner, source)?;
-                Ok(Response::Value(path.lookup(&doc).cloned()))
+                let value = path.lookup(&doc).map(|v| {
+                    if redact::is_secret_path(&path) {
+                        redact::redacted(&serde_json::json!({"secret": v}))["secret"].take()
+                    } else {
+                        redact::redacted(v)
+                    }
+                });
+                Ok(Response::Value(value))
             }
-            Op::ConfigSet { path, value } => {
+            Op::ConfigSet { path, mut value } => {
                 let cand = self.candidate_mut(inner)?;
+                let old = path.lookup(cand).cloned();
+                if redact::is_secret_path(&path) && redact::is_masked(&value) {
+                    // Writing back the placeholder means "unchanged".
+                    return Ok(Response::Staged {
+                        dirty: self.dirty(inner)?,
+                    });
+                }
+                redact::restore(&mut value, old.as_ref());
                 path.assign(cand, value)
                     .map_err(|e| err(ErrorKind::BadRequest, e.to_string()))?;
                 Ok(Response::Staged {
@@ -494,13 +510,15 @@ impl<S: ConfigStore, A: Applier> Agent<S, A> {
                     dirty: self.dirty(inner)?,
                 })
             }
-            Op::ConfigLoad { document } => {
+            Op::ConfigLoad { mut document } => {
                 if !document.is_object() {
                     return Err(err(
                         ErrorKind::BadRequest,
                         "a config document must be a JSON object",
                     ));
                 }
+                let current = self.resolve(inner, Source::Candidate)?;
+                redact::restore(&mut document, Some(&current));
                 inner.candidate = Some(document);
                 Ok(Response::Staged {
                     dirty: self.dirty(inner)?,
@@ -553,8 +571,8 @@ impl<S: ConfigStore, A: Applier> Agent<S, A> {
                     .map_err(internal)?,
             )),
             Op::ConfigDiff { from, to } => {
-                let a = self.resolve(inner, from)?;
-                let b = self.resolve(inner, to)?;
+                let a = redact::redacted(&self.resolve(inner, from)?);
+                let b = redact::redacted(&self.resolve(inner, to)?);
                 Ok(Response::Diff(crate::diff::diff(
                     &a,
                     &b,

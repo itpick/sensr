@@ -103,6 +103,17 @@
             inherit pkgs;
             sensrModules = testModules;
           };
+          # The routing vertical slice: against sensr, and against the
+          # hand-written oracle of the same config (proves the assertions).
+          slice = import ./nix/tests/slice.nix {
+            inherit pkgs;
+            sensrModules = testModules;
+          };
+          slice-reference = import ./nix/tests/slice.nix {
+            inherit pkgs;
+            sensrModules = testModules;
+            mode = "reference";
+          };
           qcow-boot = import ./nix/tests/qcow-boot.nix {
             inherit pkgs;
             image = self.images.qcow;

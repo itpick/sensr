@@ -43,6 +43,7 @@ nftables = "0.6.3"
 pretty_assertions = "1.4.1"
 proptest = "1.12.0"
 quick-xml = { version = "0.42.0", features = ["serialize"] }
+regex = "1.13.1"
 rtnetlink = "0.24.0"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 schemars = "1.2.3"
@@ -54,6 +55,7 @@ similar = "3.2.1"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
+toml = "1.2.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.29.2", features = ["v4", "serde"] }

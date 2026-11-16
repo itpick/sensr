@@ -142,10 +142,10 @@ let
           ''row T-0401 pending "sensr config get waits on sensr-ipc/sensr-config (nix/pending.nix)"''
         else
           ''
-            if sensr config get / --json | jq -e 'type == "object"' >/dev/null; then
-              row T-0401 pass "sensr config get / returned an object"
+            if sensr config get --json | jq -e 'type == "object"' >/dev/null; then
+              row T-0401 pass "sensr config get returned an object"
             else
-              row T-0401 fail "sensr config get / --json did not return an object"
+              row T-0401 fail "sensr config get --json did not return an object"
             fi
           ''
       }

@@ -61,8 +61,11 @@ fn ruleset_text(doc: &Value) -> String {
 /// The plan both fakes compute: ruleset diff, interface steps and per-unit
 /// service changes derived from which sections changed.
 pub fn preview_plan(running: Option<&Value>, next: &Value) -> PlanView {
-    let empty = Value::Object(Default::default());
-    let running = running.unwrap_or(&empty);
+    // The preview shows section contents verbatim, so it works on masked
+    // copies: a plan must never print a private key.
+    let running = crate::redact::redacted(running.unwrap_or(&Value::Object(Default::default())));
+    let next = &crate::redact::redacted(next);
+    let running = &running;
     let nft = unified_text(
         &ruleset_text(running),
         &ruleset_text(next),
