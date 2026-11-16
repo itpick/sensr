@@ -885,5 +885,9 @@
       }
     },
     "groups": {}
+  },
+  "trust": {
+    "authorities": {},
+    "certificates": {}
   }
 }

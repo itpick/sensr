@@ -18,6 +18,7 @@ pub mod gateways;
 pub mod interfaces;
 pub mod nat;
 pub mod system;
+pub mod trust;
 pub mod wireguard;
 
 pub(crate) mod check;

@@ -37,7 +37,7 @@ pub use field::{ChangeCase, Ctx, Field, FieldType, Mask};
 pub use hostname::{DomainName, Host, HostOverrideName, Hostname};
 pub use keys::{SshPublicKey, WgKey};
 pub use mac::MacAddr;
-pub use misc::{CountryCode, HexBytes, HttpUrl};
+pub use misc::{CountryCode, HexBytes, HttpUrl, Pem};
 pub use names::{
     AliasName, Description, DeviceName, GatewayName, GroupName, InterfaceId, Timezone, Username,
     WgName,

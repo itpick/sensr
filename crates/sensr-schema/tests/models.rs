@@ -304,6 +304,58 @@ fn gateway_rules() {
     );
 }
 
+#[test]
+fn trust_rules() {
+    const PEM: &str = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----";
+    let mut doc = Document::factory();
+    doc.set_by_path(
+        "trust",
+        json!({
+            "authorities": {
+                "00000000-0000-4000-8000-000000000001": {
+                    "refid": "ca1", "description": "Root", "certificate": PEM, "serial": 2
+                }
+            },
+            "certificates": {
+                "00000000-0000-4000-8000-000000000002": {
+                    "refid": "ca1", "description": "Web", "certificate": PEM,
+                    "issuer": "00000000-0000-4000-8000-000000000001"
+                },
+                "00000000-0000-4000-8000-000000000003": {
+                    "refid": "bad id", "description": "Pending",
+                    "issuer": "00000000-0000-4000-8000-0000000000ff"
+                }
+            }
+        }),
+    )
+    .unwrap();
+    let v = doc.validate();
+    let c = |n: u8| format!("trust.certificates.00000000-0000-4000-8000-00000000000{n}");
+    assert_eq!(
+        messages(&v, &format!("{}.refid", c(2))),
+        ["This reference id is already in use."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.refid", c(3))),
+        ["A reference id must be 1 to 64 letters or digits."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.issuer", c(3))),
+        ["The issuing certificate authority does not exist."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.certificate", c(3))),
+        ["A certificate or a signing request is required."]
+    );
+    assert!(v.get(&format!("{}.issuer", c(2))).is_none());
+    assert!("not pem".parse::<sensr_schema::fields::Pem>().is_err());
+    assert!(
+        "-----BEGIN X-----\n-----END X-----\n-----BEGIN Y-----"
+            .parse::<sensr_schema::fields::Pem>()
+            .is_err()
+    );
+}
+
 fn alias(name: &str, content: serde_json::Value) -> Alias {
     serde_json::from_value(json!({"name": name, "content": content})).unwrap()
 }

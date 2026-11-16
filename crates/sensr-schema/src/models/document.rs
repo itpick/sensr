@@ -12,6 +12,7 @@ use super::gateways::Gateways;
 use super::interfaces::{Interface, InterfaceRole, Interfaces, Ipv4Config, Ipv6Config};
 use super::nat::Nat;
 use super::system::System;
+use super::trust::Trust;
 use super::wireguard::WireGuard;
 use crate::array::Uuid;
 use crate::fields::{
@@ -98,11 +99,13 @@ pub enum Section {
     Wireguard,
     /// `gateways`.
     Gateways,
+    /// `trust`.
+    Trust,
 }
 
 impl Section {
     /// Every section, in document order.
-    pub const ALL: [Section; 8] = [
+    pub const ALL: [Section; 9] = [
         Self::System,
         Self::Interfaces,
         Self::Firewall,
@@ -111,6 +114,7 @@ impl Section {
         Self::Dns,
         Self::Wireguard,
         Self::Gateways,
+        Self::Trust,
     ];
 
     /// The section's key in the JSON document.
@@ -124,6 +128,7 @@ impl Section {
             Self::Dns => "dns",
             Self::Wireguard => "wireguard",
             Self::Gateways => "gateways",
+            Self::Trust => "trust",
         }
     }
 }
@@ -159,6 +164,9 @@ pub struct Document {
     /// Gateways and gateway groups.
     #[serde(default)]
     pub gateways: Gateways,
+    /// Certificate authorities and certificates.
+    #[serde(default)]
+    pub trust: Trust,
 }
 
 impl Default for Document {
@@ -173,6 +181,7 @@ impl Default for Document {
             dns: DnsResolver::default(),
             wireguard: WireGuard::default(),
             gateways: Gateways::default(),
+            trust: Trust::default(),
         }
     }
 }
@@ -270,6 +279,7 @@ impl Document {
             .validate(self, &root.join("wireguard"), &mut out);
         self.gateways
             .validate(self, &root.join("gateways"), &mut out);
+        self.trust.validate(self, &root.join("trust"), &mut out);
         out
     }
 
@@ -286,6 +296,7 @@ impl Document {
                 Section::Dns => self.dns != other.dns,
                 Section::Wireguard => self.wireguard != other.wireguard,
                 Section::Gateways => self.gateways != other.gateways,
+                Section::Trust => self.trust != other.trust,
             })
             .collect()
     }

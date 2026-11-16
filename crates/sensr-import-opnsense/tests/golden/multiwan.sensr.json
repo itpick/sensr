@@ -425,5 +425,9 @@
         "trigger": "down"
       }
     }
+  },
+  "trust": {
+    "authorities": {},
+    "certificates": {}
   }
 }
