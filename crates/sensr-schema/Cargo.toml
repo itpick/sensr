@@ -8,6 +8,19 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
+indexmap.workspace = true
+ipnet.workspace = true
+serde.workspace = true
+# preserve_order: dotted-path edits round-trip the document through
+# serde_json::Value, which must keep UUID-keyed list order (ArrayField).
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true
