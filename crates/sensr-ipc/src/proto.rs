@@ -196,6 +196,10 @@ pub enum Op {
     Authenticate {
         /// What was presented.
         credential: Credential,
+        /// The client's address as seen by the API, for group
+        /// `source_networks` restrictions.
+        #[serde(default)]
+        remote_addr: Option<std::net::IpAddr>,
     },
     /// Stream [`Event`]s until cancelled.
     Subscribe,

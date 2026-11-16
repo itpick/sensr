@@ -18,12 +18,14 @@ sensr-config = { path = "crates/sensr-config" }
 sensr-rules = { path = "crates/sensr-rules" }
 sensr-ipc = { path = "crates/sensr-ipc" }
 sensr-auth = { path = "crates/sensr-auth" }
+sensr-agent = { path = "crates/sensr-agent" }
 
 anyhow = "1.0.104"
 argon2 = "0.6.0"
 axum = "0.8.9"
 base64 = "0.23.1"
 bcrypt = "0.19.3"
+blake3 = "1.8.7"
 ciborium = "0.2.2"
 clap = { version = "4.6.7", features = ["derive"] }
 getrandom = "0.4.3"
@@ -37,9 +39,11 @@ proptest = "1.12.0"
 quick-xml = { version = "0.42.0", features = ["serialize"] }
 rtnetlink = "0.24.0"
 schemars = "1.2.3"
+sd-notify = "0.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha-crypt = { version = "0.6.0", features = ["getrandom"] }
+similar = "3.2.1"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
