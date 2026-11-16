@@ -188,7 +188,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("printf 'WAN_IP=198.51.100.7\\n' > /tmp/health.env")
         machine.succeed(
             f"{t2} ${fakeImage} /dev/vde --boot-order {ORDER} --minutes 15 --logs-mib 128"
-            " --health /tmp/health.env --yes"
+            " --health /tmp/health.env --deadline-minutes 8 --watchdog-seconds 120 --yes"
         )
         sd = fat_files("/dev/vde1")
         assert "config.txt" not in sd and "config.txt.sensr-dormant" in sd, sd
@@ -207,6 +207,9 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed("cat /boot/firmware/sensr-trial/layout").strip() == "before"
         tb = machine.succeed("cat /boot/firmware/tryboot.txt")
         assert "os_prefix=sensr-trial/" in tb, tb
+        assert "kernel_watchdog_timeout=120" in tb, tb
+        cl = machine.succeed("cat /boot/firmware/sensr-trial/cmdline.txt")
+        assert "sensr.trial=1 sensr.trial.deadline=480" in cl, cl
         machine.succeed("grep -q 'kernel=old-os' /boot/firmware/config.txt")
         out = machine.succeed(f"{t2} --status --boot-order {ORDER}")
         assert "dormant" in out and "journalctl -D" in out, out

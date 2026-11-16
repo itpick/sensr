@@ -1,4 +1,5 @@
-# sensr-trial-health: the self-health gate of a trial boot
+# sensr-trial-health: the hard deadline and the self-health gate of a trial
+# boot
 # (sensr-pi5-trial-install). Runs only when the kernel command line has
 # sensr.trial=1 and the seed folder has trial-health.env. Every check in it
 # must pass within TRIAL_GRACE_SECONDS of boot, and keep passing until
@@ -19,6 +20,13 @@
 #   LOG_UDP=192.168.1.20:5514  stream the journal there (one line per
 #                              datagram; e.g. `nc -klu 5514` on a laptop)
 #
+#   sensr-trial-health detect    early in a trial boot (sensr-trial-detect):
+#                                marks it (/run/sensr-trial/active) and, with
+#                                sensr.trial.deadline=SECONDS on the kernel
+#                                command line, has PID 1 reboot that long after
+#                                boot whatever else happens (a transient timer:
+#                                no agent, seed folder or network involved),
+#                                and force the reboot 90 s later
 #   sensr-trial-health run       the gate (sensr-trial-health.service)
 #   sensr-trial-health confirm   keep this trial: no more checks, no timer
 #   sensr-trial-health status    what the gate saw last
@@ -31,6 +39,33 @@ REBOOT=${SENSR_TRIAL_REBOOT:-systemctl reboot}
 log() { echo "sensr-trial-health: $*"; }
 
 is_trial() { grep -qw sensr.trial=1 "${SENSR_TRIAL_CMDLINE:-/proc/cmdline}"; }
+
+cmdline_deadline() {
+  tr ' ' '\n' < "${SENSR_TRIAL_CMDLINE:-/proc/cmdline}" | sed -n 's/^sensr\.trial\.deadline=\([0-9][0-9]*\)$/\1/p' | tail -n1
+}
+
+detect() {
+  is_trial || { log "not a trial boot"; exit 0; }
+  mkdir -p "$STATE"
+  touch "$STATE/active"
+  local d
+  d=$(cmdline_deadline)
+  if [ -z "$d" ]; then log "trial boot without a deadline"; exit 0; fi
+  echo "$d" > "$STATE/deadline"
+  # Units of PID 1's own, written to /run: systemd-run would need D-Bus,
+  # which does not run yet this early (and must not be waited for).
+  local units=${SENSR_TRIAL_UNITDIR:-/run/systemd/system} name at cmd
+  mkdir -p "$units"
+  for name in sensr-trial-deadline sensr-trial-deadline-force; do
+    if [ "$name" = sensr-trial-deadline ]; then at=$d cmd="systemctl reboot"
+    else at=$((d + 90)) cmd="systemctl reboot --force --force"; fi
+    printf '[Unit]\nDescription=Trial deadline (%s s after boot): back to the previous OS\nDefaultDependencies=no\n[Timer]\nOnBootSec=%ss\nAccuracySec=1s\n' "$at" "$at" > "$units/$name.timer"
+    printf '[Unit]\nDescription=Trial deadline: reboot\nDefaultDependencies=no\n[Service]\nType=oneshot\nExecStart=%s %s\n' "$(command -v systemctl)" "${cmd#systemctl }" > "$units/$name.service"
+  done
+  systemctl daemon-reload
+  systemctl start --no-block sensr-trial-deadline.timer sensr-trial-deadline-force.timer
+  log "trial deadline armed: reboot ${d} s after boot (forced at $((d + 90)) s), whatever happens"
+}
 
 # One round of checks; prints a line per failure, returns non-zero on any.
 round() {
@@ -71,6 +106,9 @@ run() {
   . "$ENV"
   mkdir -p "$STATE"
   local grace=${TRIAL_GRACE_SECONDS:-600} limit=${TRIAL_FAILS_TO_REBOOT:-3}
+  # A typo must not switch the gate off.
+  case $grace in ''|*[!0-9]*) log "TRIAL_GRACE_SECONDS=$grace is not a number: using 600"; grace=600 ;; esac
+  case $limit in ''|*[!0-9]*|0) log "TRIAL_FAILS_TO_REBOOT=$limit is not a positive number: using 3"; limit=3 ;; esac
   local passed=0 fails=0 out
   while :; do
     if [ -e "$STATE/confirmed" ]; then log "confirmed; the gate stops"; exit 0; fi
@@ -98,6 +136,10 @@ run() {
 }
 
 confirm() {
+  if [ -e "$STATE/deadline" ]; then
+    log "this trial has a hard deadline ($(cat "$STATE/deadline") s after boot) and is measure-only: nothing to confirm"
+    exit 1
+  fi
   mkdir -p "$STATE"
   touch "$STATE/confirmed"
   rm -f "$SEED/reboot-after-minutes"
@@ -121,11 +163,12 @@ stream() {
 }
 
 case ${1:-run} in
+  detect) detect ;;
   run) run ;;
   confirm) confirm ;;
   stream) stream ;;
   status)
     cat "$STATE/health" 2>/dev/null || echo "no health result yet"
     if [ -e "$STATE/confirmed" ]; then echo confirmed; fi ;;
-  *) echo "usage: sensr-trial-health run|confirm|stream|status" >&2; exit 2 ;;
+  *) echo "usage: sensr-trial-health detect|run|confirm|stream|status" >&2; exit 2 ;;
 esac

@@ -145,6 +145,7 @@
               runtimeInputs = with pkgs; [
                 coreutils
                 gnugrep
+                gnused
                 iproute2
                 dig
                 curl
@@ -156,6 +157,11 @@
                 builtins.replaceStrings [ "@seedDir@" ] [ "/tmp/seed" ]
                   (builtins.readFile ./nix/pi5/trial-health.sh);
             };
+          };
+          # every way a trial boot can end, ending back on the previous OS
+          trial-revert = import ./nix/tests/trial-revert.nix {
+            inherit pkgs;
+            sensrModules = testModules;
           };
           qcow-boot = import ./nix/tests/qcow-boot.nix {
             inherit pkgs;

@@ -11,6 +11,12 @@
 #       --health FILE      copied to the seed folder as trial-health.env: the
 #                          checks a trial boot must pass, or it reboots back
 #                          (nix/pi5/trial-health.sh)
+#       --deadline-minutes N  a measure-only trial: sensr reboots N minutes
+#                          after boot whatever happens (PID 1's timer, no
+#                          confirmation possible; sensr.trial.deadline=)
+#       --watchdog-seconds N  kernel_watchdog_timeout in tryboot.txt
+#                          (default 300): a hang before systemd feeds the
+#                          hardware watchdog resets the board after N s
 #       --boot-order 0xHEX the EEPROM's BOOT_ORDER, when neither
 #                          rpi-eeprom-config nor vcgencmd can read it here
 #   sensr-pi5-trial-install --reboot     boot sensr once (the firmware's tryboot)
@@ -165,7 +171,7 @@ make_logs_partition() { # DEVICE MIB
 }
 
 install() {
-  local image=$1 dev=$2 seed=$3 minutes=$4 yes=$5 logs=$6 health=$7 boot mode
+  local image=$1 dev=$2 seed=$3 minutes=$4 yes=$5 logs=$6 health=$7 deadline=$8 watchdog=$9 boot mode
   [ "$(id -u)" = 0 ] || die "run as root"
   check_pi5
   boot=$(boot_dir)
@@ -233,7 +239,7 @@ install() {
   have=$(( $(df -Pk "$boot" | tail -n1 | tr -s ' ' | cut -d' ' -f4) + $(du -sk "$boot/$TRIAL" 2>/dev/null | cut -f1 || echo 0) ))
   [ "$have" -ge $((need + 8192)) ] || die "$boot has $((have / 1024)) MiB free, the trial's boot files need $((need / 1024 + 8)) MiB"
   cp -r "$fat/current" "$boot/$TRIAL.new"
-  sed -i 's/$/ sensr.trial=1/' "$boot/$TRIAL.new/cmdline.txt"
+  sed -i "s/\$/ sensr.trial=1${deadline:+ sensr.trial.deadline=$((deadline * 60))}/" "$boot/$TRIAL.new/cmdline.txt"
   echo "$dev" > "$boot/$TRIAL.new/target"
   echo "$mode" > "$boot/$TRIAL.new/layout"
   umount "$fat"
@@ -255,7 +261,7 @@ cmdline=cmdline.txt
 os_check=0
 enable_uart=1
 uart_2ndstage=1
-kernel_watchdog_timeout=300
+kernel_watchdog_timeout=$watchdog
 EOF
   mv "$boot/tryboot.txt.new" "$boot/tryboot.txt"
   sync
@@ -368,7 +374,7 @@ uncommit() {
   say "uncommitted: $dev is dormant again, plain boots start this OS"
 }
 
-seed='' minutes=30 yes=0 logs=2048 health='' opt_boot_order='' action=install args=()
+seed='' minutes=30 yes=0 logs=2048 health='' deadline='' watchdog=300 opt_boot_order='' action=install args=()
 while [ $# -gt 0 ]; do
   case $1 in
     --reboot) action=reboot; shift ;;
@@ -380,6 +386,8 @@ while [ $# -gt 0 ]; do
     --minutes) minutes=$2; shift 2 ;;
     --logs-mib) logs=$2; shift 2 ;;
     --health) health=$2; shift 2 ;;
+    --deadline-minutes) deadline=$2; shift 2 ;;
+    --watchdog-seconds) watchdog=$2; shift 2 ;;
     --boot-order) opt_boot_order=$2; shift 2 ;;
     --yes) yes=1; shift ;;
     -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit ;;
@@ -399,4 +407,6 @@ case $action in
 esac
 [ ${#args[@]} = 2 ] || die "usage: $SELF IMAGE DEVICE [--seed DIR] [--minutes N] [--logs-mib N] [--health FILE] [--boot-order 0xHEX] [--yes] (or --help)"
 case $logs in *[!0-9]*|'') die "--logs-mib takes a number" ;; esac
-install "${args[0]}" "${args[1]}" "$seed" "$minutes" "$yes" "$logs" "$health"
+case $deadline in *[!0-9]*) die "--deadline-minutes takes a number" ;; esac
+case $watchdog in *[!0-9]*|'') die "--watchdog-seconds takes a number" ;; esac
+install "${args[0]}" "${args[1]}" "$seed" "$minutes" "$yes" "$logs" "$health" "$deadline" "$watchdog"
