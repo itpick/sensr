@@ -283,10 +283,11 @@ impl ActionRegistry {
     }
 }
 
-/// Units managed through systemd for the routing slice.
+/// Units managed through systemd for the routing slice (as nix/modules/sensr.nix
+/// defines them).
 const SERVICES: &[(&str, &str)] = &[
-    ("kea", "kea-dhcp4-server.service"),
-    ("unbound", "unbound.service"),
+    ("kea", "sensr-kea-dhcp4.service"),
+    ("unbound", "sensr-unbound.service"),
     ("networkd", "systemd-networkd.service"),
 ];
 
@@ -576,7 +577,7 @@ mod tests {
         assert_eq!(
             run.call_lines(),
             [
-                "systemctl 'restart' 'unbound.service'",
+                "systemctl 'restart' 'sensr-unbound.service'",
                 "ip '-j' 'address' 'show' 'dev' 'eth0'"
             ]
         );

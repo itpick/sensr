@@ -12,9 +12,9 @@ expression: "p.diff(&Plan::default()).dry_run(&Plan::default())"
   [Sysctl] net.ipv6.conf.default.accept_ra = 2 (new)
   [Qdisc] eth0: cake bandwidth 95000kbit besteffort nat (new)
   [Files] create /run/sensr/kea/kea-dhcp4.conf (2170 bytes)
-  [Files] create /run/sensr/unbound/unbound.conf (1946 bytes)
+  [Files] create /run/sensr/unbound/unbound.conf (2006 bytes)
   [Files] create /run/systemd/network/50-sensr-wg0.netdev (550 bytes)
   [Files] create /run/systemd/network/50-sensr-wg0.network (103 bytes)
-  [Services] reload kea-dhcp4-server.service
-  [Services] reload unbound.service
+  [Services] reload sensr-kea-dhcp4.service
+  [Services] reload sensr-unbound.service
   [Hooks] run config hooks
