@@ -449,10 +449,10 @@ impl GridModel for FilterRule {
             Column::bool("enabled", "Enabled"),
             Column::text("action", "Action"),
             Column::text("protocol", "Protocol"),
-            Column::text("source", "Source"),
-            Column::text("source_port", "Port"),
-            Column::text("destination", "Destination"),
-            Column::text("destination_port", "Port"),
+            Column::endpoint("source", "Source"),
+            Column::port("source_port", "Port"),
+            Column::endpoint("destination", "Destination"),
+            Column::port("destination_port", "Port"),
             Column::text("description", "Description"),
         ];
         C
@@ -534,9 +534,9 @@ impl GridModel for SourceNatRule {
         const C: &[Column] = &[
             Column::bool("enabled", "Enabled"),
             Column::text("interface", "Interface"),
-            Column::text("source", "Source"),
-            Column::text("destination", "Destination"),
-            Column::text("target", "NAT"),
+            Column::endpoint("source", "Source"),
+            Column::endpoint("destination", "Destination"),
+            Column::endpoint("target", "NAT"),
             Column::text("description", "Description"),
         ];
         C
@@ -606,7 +606,7 @@ impl GridModel for PortForward {
             Column::bool("enabled", "Enabled"),
             Column::text("interface", "Interface"),
             Column::text("protocol", "Protocol"),
-            Column::text("destination_port", "Dest. port"),
+            Column::port("destination_port", "Dest. port"),
             Column::text("target", "Target"),
             Column::text("target_port", "Target port"),
             Column::text("description", "Description"),
