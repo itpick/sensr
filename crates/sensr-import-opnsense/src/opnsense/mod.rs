@@ -10,6 +10,7 @@ mod aliases;
 mod common;
 mod dhcpd;
 mod dnsmasq;
+mod export;
 mod filter;
 mod interfaces;
 mod kea;
@@ -23,6 +24,8 @@ use std::sync::Arc;
 
 use sensr_schema::Document as SensrDocument;
 use sensr_schema::fields::DeviceName;
+
+pub use export::export_document;
 
 use crate::mapper::{Imported, Importer};
 use crate::tree::Document;
@@ -49,6 +52,11 @@ pub fn import_config(
 /// Import an already parsed `config.xml`.
 pub fn import_document(doc: &Document, options: &ImportOptions) -> Imported<SensrDocument> {
     importer(options).import(doc)
+}
+
+/// Export `doc` as OPNsense `config.xml` text (the mapped subset; see [`export_document`]).
+pub fn export_config(doc: &SensrDocument) -> String {
+    crate::xml::to_config_string(&export_document(doc))
 }
 
 /// The importer with every OPNsense mapper and the expected-unmapped table.

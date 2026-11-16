@@ -222,10 +222,32 @@ fn device_names_can_be_mapped_to_linux() {
 }
 
 #[test]
-fn every_fixture_imports() {
+fn export_then_import_is_identical() {
+    for f in [
+        "corpus/home-router.xml",
+        "corpus/multiwan.xml",
+        "opnsense/Sample/config.xml",
+    ] {
+        let first = import(f);
+        let xml = export_config(&first.document);
+        let second = import_config(&xml, &ImportOptions::default()).expect("export parses");
+        pretty_assertions::assert_eq!(first.document, second.document, "{f}: re-import differs");
+        assert!(
+            second.report.unmapped_unexpected.is_empty(),
+            "{f}: export wrote nodes the importer does not read:\n{}",
+            second.report
+        );
+    }
+}
+
+#[test]
+fn every_fixture_imports_and_round_trips() {
     for (path, text) in fixtures::all_xml() {
         let first = import_config(&text, &ImportOptions::default())
             .unwrap_or_else(|e| panic!("{path}: {e}"));
+        let second =
+            import_config(&export_config(&first.document), &ImportOptions::default()).unwrap();
+        pretty_assertions::assert_eq!(first.document, second.document, "{path}: re-import differs");
         if std::env::var_os("SHOW_REPORTS").is_some() {
             eprintln!(
                 "==== {path}: {} unexpected",
