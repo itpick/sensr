@@ -194,7 +194,9 @@ pkgs.testers.runNixOSTest {
     lan = client {
       virtualisation.interfaces.eth1.vlan = net.lan.vlan;
       # The router is the LAN's time server (timesyncd, NixOS's default).
+      # (The test instrumentation turns timesyncd off; this test needs it.)
       networking.timeServers = [ net.lan.router ];
+      services.timesyncd.enable = lib.mkForce true;
       services.timesyncd.fallbackServers = [ ];
       systemd.network.networks."10-eth1" = {
         matchConfig.Name = "eth1";
