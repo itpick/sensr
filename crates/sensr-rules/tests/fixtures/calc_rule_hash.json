@@ -1,0 +1,119 @@
+{
+ "_comment": "Labels recorded by running OPNsense core's own Util::calcRuleHash (PHP 8.4) on each rule (json_decode assoc).",
+ "cases": [
+  {
+   "rule": {
+    "type": "pass",
+    "log": false,
+    "disablereplyto": 1,
+    "ipprotocol": "inet6",
+    "protocol": "ipv6-icmp",
+    "icmp6-type": "1,2,3,4,135,136",
+    "statetype": "keep",
+    "descr": "IPv6 RFC4890 requirements (ICMP)",
+    "disabled": false,
+    "#ref": "ui/firewall/settings#settings-filter"
+   },
+   "label": "f414a22420fc537e6b06e9055b6407c8"
+  },
+  {
+   "rule": {
+    "type": "block",
+    "log": false,
+    "disablereplyto": 1,
+    "ipprotocol": "inet46",
+    "descr": "Default deny / state violation rule",
+    "quick": false
+   },
+   "label": "8164f82fd0b4f3b0e0c494228a454c17"
+  },
+  {
+   "rule": {
+    "type": "pass",
+    "log": true,
+    "disablereplyto": 1,
+    "protocol": "udp",
+    "direction": "in",
+    "from_port": 67,
+    "to_port": 68,
+    "#ref": "interfaces.php?if=wan#type",
+    "interface": "wan",
+    "descr": "allow DHCP client on WAN"
+   },
+   "label": "f994f615e00b8be0042263f86c79913f"
+  },
+  {
+   "rule": {
+    "type": "pass",
+    "interface": "lan",
+    "ipprotocol": "inet",
+    "statetype": "keep state",
+    "direction": "in",
+    "quick": "1",
+    "source": {
+     "network": "lan"
+    },
+    "destination": {
+     "any": "1"
+    },
+    "descr": "Default allow LAN to any rule",
+    "updated": {
+     "username": "root@10.0.0.1",
+     "time": "1700000000.1234",
+     "description": "/firewall_rules_edit.php made changes"
+    },
+    "created": {
+     "username": "root",
+     "time": "1"
+    }
+   },
+   "label": "3dd3e4bd0e945bb5fd9e669100acbf0b"
+  },
+  {
+   "rule": {
+    "type": "block",
+    "interface": "wan",
+    "protocol": "tcp",
+    "source": {
+     "address": "10.0.0.0/8",
+     "not": "1",
+     "port": "1024-65535"
+    },
+    "destination": {
+     "network": "wanip",
+     "port": "443"
+    },
+    "descr": "crème brûlée / ünïcode 😀"
+   },
+   "label": "6ae4deb01d3602dc475eb7cc72c9e4e9"
+  },
+  {
+   "rule": {
+    "interface": "opt1,opt2",
+    "from": "<sshlockout>",
+    "to": "(self)",
+    "to_port": 22,
+    "protocol": "tcp",
+    "direction": "in",
+    "type": "block",
+    "Z": 1,
+    "10": "ten",
+    "9": "nine"
+   },
+   "label": "73561c17a6141e56bf0e7874348aab64"
+  },
+  {
+   "rule": {},
+   "label": "d751713988987e9331980363e24189ce"
+  },
+  {
+   "rule": {
+    "interface": "lan",
+    "label": "",
+    "tag": "crème/😀\t\u0001",
+    "max": 100
+   },
+   "label": "d741c29c058b8853c1410c21921a4a0b"
+  }
+ ]
+}

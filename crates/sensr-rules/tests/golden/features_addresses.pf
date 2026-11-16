@@ -1,0 +1,9 @@
+# [prio: 400000]
+pass in quick on eth1 inet from {(eth1:network)} to {any} label "d8fccff72e94a4a71c6a1058fe7b3ea5" # LAN to any
+pass in quick on eth1 inet6 from {(eth1:network),fe80::/10} to {any} label "d8fccff72e94a4a71c6a1058fe7b3ea5" # LAN to any
+pass in quick on eth1 inet proto tcp from $admins to {(self)} port {22} label "01ccf50dbe799244b9fe29696edc96c2"
+pass in quick on eth1 inet6 proto tcp from $admins to {(self)} port {22} label "01ccf50dbe799244b9fe29696edc96c2"
+pass in quick on eth1 inet proto tcp from {any} to {!(eth1)} port $web label "c6b613fde651614ec97b7b8489311c36"
+block in log quick on eth0 inet from {192.168.0.0/16} to {any} label "9e467dfa10748858d1f438be3c41528d"
+block return in quick on  ! eth0 inet proto {tcp udp} from {any} to {any} port {135:139} label "fb3128f0dd918e775e84d9f9b25098d3"
+pass in quick on eth1 inet proto tcp from {any} to {any} flags S/SA label "5fcc11c2b43ff3cee87710aeee7a74ec"
