@@ -584,6 +584,7 @@ fn system_rules() {
         authorized_keys: vec![],
         groups: vec!["admins".parse().unwrap()],
         shell: Some("bin/sh".into()),
+        api_keys: vec![],
     };
     let u1 = doc.system.users.push(user.clone());
     let u2 = doc.system.users.push(user);
@@ -606,6 +607,33 @@ fn system_rules() {
             ["The shell must be an absolute path."]
         );
     }
+    let key = |k: &str, h: &str| sensr_schema::models::system::ApiKey {
+        key: k.into(),
+        secret_hash: h.to_owned().into(),
+    };
+    doc.system.users.get_mut(&u1).unwrap().api_keys = vec![
+        key("a2V5MQ==", "$6$salt$hash"),
+        key("a2V5MQ==", "plain"),
+        key("bad key", "$6$x"),
+    ];
+    let v = doc.validate();
+    assert_eq!(
+        messages(&v, &format!("system.users.{u1}.api_keys.1.key")),
+        ["This API key already exists."]
+    );
+    assert_eq!(
+        messages(&v, &format!("system.users.{u1}.api_keys.1.secret_hash")),
+        ["The API secret must be stored as a crypt(3) hash."]
+    );
+    assert_eq!(
+        messages(&v, &format!("system.users.{u1}.api_keys.2.key")),
+        ["An API key must be base64 text."]
+    );
+    assert!(
+        v.get(&format!("system.users.{u1}.api_keys.0.key"))
+            .is_none()
+    );
+    doc.system.users.get_mut(&u1).unwrap().api_keys.clear();
     doc.system.groups.push(Group {
         name: "admins".parse().unwrap(),
         gid: 1999,
