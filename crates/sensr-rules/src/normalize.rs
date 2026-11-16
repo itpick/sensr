@@ -68,7 +68,7 @@ fn split(conf: &Conf, key: &str) -> Vec<Option<String>> {
 
 /// `legacyMoveAddressFields`: GUI-style `source`/`destination` arrays to the
 /// flat `from`/`to` keys.
-fn move_address_fields(rule: &mut Conf) {
+pub(crate) fn move_address_fields(rule: &mut Conf) {
     let proto = rule
         .text("protocol")
         .unwrap_or_default()
@@ -112,12 +112,15 @@ fn parse_host_or_net(s: &str) -> Option<Addr> {
 }
 
 /// One address token → IR, following `mapAddressInfo` precedence.
-fn map_address(
+/// `filter` marks filter rules, whose IPv6 interface networks also match
+/// link-local.
+pub(crate) fn map_address(
     token: Option<&str>,
     fam: Option<IpFamily>,
     ctx: &Context<'_>,
     debug: &mut Vec<String>,
     tag: &str,
+    filter: bool,
 ) -> Result<Addr, Addr> {
     let Some(t) = token.filter(|t| !t.is_empty()) else {
         return Ok(Addr::Any);
@@ -142,7 +145,7 @@ fn map_address(
     if ctx.has_device(t) {
         return Ok(Addr::IfaceNet {
             iface: t.to_owned(),
-            link_local: fam == Some(IpFamily::V6),
+            link_local: filter && fam == Some(IpFamily::V6),
         });
     }
     if let Some(base) = t.strip_suffix("ip") {
@@ -165,7 +168,7 @@ fn map_address(
 }
 
 /// Port field → IR. `Ok(None)` is "any".
-fn map_port(
+pub(crate) fn map_port(
     raw: &Value,
     ctx: &Context<'_>,
     debug: &mut Vec<String>,
@@ -181,6 +184,10 @@ fn map_port(
     }
     if port == "any" || port.is_empty() {
         return Ok(None);
+    }
+    // PHP empty("0"): upstream leaves port 0 untouched, pf matches port 0
+    if port == "0" {
+        return Ok(Some(PortMatch::Single(0)));
     }
     if ctx.is_port_alias(&port) {
         return Ok(Some(PortMatch::Alias(port)));
@@ -293,41 +300,77 @@ fn parse_icmp_list(s: &str, fam: IpFamily, debug: &mut Vec<String>) -> Result<Ve
     Ok(out)
 }
 
-/// Normalises one rule array registered at `priority` (labels are assigned by
-/// the caller, see [`crate::ruleset`]).
-pub fn filter_rule(conf: &Conf, priority: u32, ctx: &Context<'_>) -> Vec<FilterRule> {
-    let mut base = conf.clone();
-    move_address_fields(&mut base);
+/// The cartesian product upstream's `reader()` walks: from × to ×
+/// interface × family, in that nesting order.
+pub(crate) type Expansion = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<IpFamily>,
+);
 
-    let interfaces = split(&base, "interface");
-    let froms = split(&base, "from");
-    let tos = split(&base, "to");
+/// Expansions of an (address-moved) rule array.
+pub(crate) fn expansions(base: &Conf) -> Vec<Expansion> {
+    let interfaces = split(base, "interface");
+    let froms = split(base, "from");
+    let tos = split(base, "to");
     let families: Vec<Option<IpFamily>> = match base.text("ipprotocol").as_deref() {
         Some("inet46") => vec![Some(IpFamily::V4), Some(IpFamily::V6)],
         Some("inet") => vec![Some(IpFamily::V4)],
         Some("inet6") => vec![Some(IpFamily::V6)],
         _ => vec![None],
     };
-
     let mut out = Vec::new();
     for from in &froms {
         for to in &tos {
             for iface in &interfaces {
                 for fam in &families {
-                    out.push(expand_one(
-                        &base,
-                        priority,
-                        ctx,
-                        from.as_deref(),
-                        to.as_deref(),
-                        iface.as_deref(),
-                        *fam,
-                    ));
+                    out.push((from.clone(), to.clone(), iface.clone(), *fam));
                 }
             }
         }
     }
     out
+}
+
+/// `protocol` → IR; ICMP in an IPv6 rule is ICMPv6.
+pub(crate) fn parse_proto(rule: &Conf, fam: Option<IpFamily>) -> Result<ProtoMatch, String> {
+    let Some(p) = rule
+        .text("protocol")
+        .map(|p| p.to_ascii_lowercase())
+        .filter(|p| !p.is_empty() && p != "any")
+    else {
+        return Ok(ProtoMatch::Any);
+    };
+    if p == "tcp/udp" {
+        return Ok(ProtoMatch::TcpUdp);
+    }
+    let mut pr = p.parse::<Protocol>().map_err(|e| e.to_string())?;
+    if fam == Some(IpFamily::V6) && pr == Protocol::ICMP {
+        pr = Protocol::ICMP6;
+    }
+    Ok(ProtoMatch::One(pr))
+}
+
+/// Normalises one rule array registered at `priority` (labels are assigned by
+/// the caller, see [`crate::ruleset`]).
+pub fn filter_rule(conf: &Conf, priority: u32, ctx: &Context<'_>) -> Vec<FilterRule> {
+    let mut base = conf.clone();
+    move_address_fields(&mut base);
+    expansions(&base)
+        .into_iter()
+        .map(|(from, to, iface, fam)| {
+            expand_one(
+                &base,
+                priority,
+                ctx,
+                from.as_deref(),
+                to.as_deref(),
+                iface.as_deref(),
+                fam,
+            )
+        })
+        .collect()
 }
 
 fn expand_one(
@@ -343,7 +386,7 @@ fn expand_one(
     let mut enabled = rule.is_empty_at("disabled");
 
     let mut endpoint = |tok: Option<&str>, tag: &str, debug: &mut Vec<String>| -> Endpoint {
-        let addr = match map_address(tok, fam, ctx, debug, tag) {
+        let addr = match map_address(tok, fam, ctx, debug, tag, true) {
             Ok(a) => a,
             Err(a) => {
                 enabled = false;
@@ -398,29 +441,18 @@ fn expand_one(
         None => !rule.isset("floating"),
     };
 
-    let mut proto = ProtoMatch::Any;
     let proto_text = rule
         .text("protocol")
         .map(|p| p.to_ascii_lowercase())
         .filter(|p| !p.is_empty() && p != "any");
-    if let Some(p) = &proto_text {
-        if p == "tcp/udp" {
-            proto = ProtoMatch::TcpUdp;
-        } else {
-            match p.parse::<Protocol>() {
-                Ok(mut pr) => {
-                    if fam == Some(IpFamily::V6) && pr == Protocol::ICMP {
-                        pr = Protocol::ICMP6;
-                    }
-                    proto = ProtoMatch::One(pr);
-                }
-                Err(e) => {
-                    debug.push(e.to_string());
-                    enabled = false;
-                }
-            }
+    let proto = match parse_proto(rule, fam) {
+        Ok(p) => p,
+        Err(e) => {
+            debug.push(e);
+            enabled = false;
+            ProtoMatch::Any
         }
-    }
+    };
 
     // ICMP types: the GUI fields apply only to the matching family; internal
     // rules may set the pf-level keys directly.

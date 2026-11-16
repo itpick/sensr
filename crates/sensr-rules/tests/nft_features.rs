@@ -121,6 +121,7 @@ impl Fixture {
             rules,
             interfaces: &self.ifs,
             aliases: &self.resolved,
+            nat: None,
         };
         let mut buf = Vec::new();
         let report = nft::render(&policy, opts, &mut buf).expect("render");

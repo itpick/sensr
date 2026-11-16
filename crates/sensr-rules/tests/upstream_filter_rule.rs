@@ -50,6 +50,7 @@ fn nft_golden(name: &str, rules: &[FilterRule]) {
         rules,
         interfaces: &ifs,
         aliases: &aliases,
+        nat: None,
     };
     let mut buf = Vec::new();
     let report = nft::render(&policy, &nft::Options::default(), &mut buf).expect("render");

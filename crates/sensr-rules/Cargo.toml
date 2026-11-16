@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+indexmap.workspace = true
 ipnet.workspace = true
 md-5.workspace = true
 serde.workspace = true

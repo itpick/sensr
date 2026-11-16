@@ -1,0 +1,67 @@
+# [prio: 200]
+nat on eth0 inet from (eth1:network) to any port 500 -> (eth0:0) static-port # Automatic outbound rule
+nat on eth0 inet from 127.0.0.0/8 to any port 500 -> (eth0:0) static-port # Automatic outbound rule
+nat on eth0 inet from (eth1:network) to any -> (eth0:0) port 1024:65535 # Automatic outbound rule
+nat on eth0 inet from 127.0.0.0/8 to any -> (eth0:0) port 1024:65535 # Automatic outbound rule
+# [prio: 300]
+no rdr on eth1 proto tcp from {any} to {(eth1)} port {22} # Anti-lockout; prevent redirects for protected ports to this interface address
+no rdr on eth1 proto tcp from {any} to {(eth1)} port {80} # Anti-lockout; prevent redirects for protected ports to this interface address
+no rdr on eth1 proto tcp from {any} to {(eth1)} port {443} # Anti-lockout; prevent redirects for protected ports to this interface address
+# [prio: 600]
+rdr on eth0 inet proto tcp from {any} to {(eth0)} port {443} -> 192.168.1.10 port 8443 # web server
+nat on eth0 inet proto tcp from (eth0:network) to {192.168.1.10} port {8443} -> (eth0) port 1024:65535 # web server
+rdr on eth1 inet proto tcp from {any} to {(eth0)} port {443} -> 192.168.1.10 port 8443 # web server
+nat on eth1 inet proto tcp from (eth1:network) to {192.168.1.10} port {8443} -> (eth1) port 1024:65535 # web server
+# [prio: 1]
+# block in quick inet6 from {any} to {any} label "bc3ccaca485a4a80256400828ee3e385" # Block all IPv6
+block in inet from {any} to {any} label "8164f82fd0b4f3b0e0c494228a454c17" # Default deny / state violation rule
+block in inet6 from {any} to {any} label "8164f82fd0b4f3b0e0c494228a454c17" # Default deny / state violation rule
+pass in quick inet6 proto ipv6-icmp from {any} to {any} icmp6-type {1,2,3,4,135,136} keep state label "f414a22420fc537e6b06e9055b6407c8" # IPv6 RFC4890 requirements (ICMP)
+pass out quick inet6 proto ipv6-icmp from {(self)} to {fe80::/10} icmp6-type {128,129,133,134,135,136} keep state label "81883de60842fe7efc36f169b59d19f2" # IPv6 RFC4890 requirements (ICMP)
+pass out quick inet6 proto ipv6-icmp from {(self)} to {ff02::/16} icmp6-type {128,129,133,134,135,136} keep state label "81883de60842fe7efc36f169b59d19f2" # IPv6 RFC4890 requirements (ICMP)
+pass in quick inet6 proto ipv6-icmp from {fe80::/10} to {fe80::/10} icmp6-type {128,133,134,135,136} keep state label "ae6a25a80846167572205697223cac41" # IPv6 RFC4890 requirements (ICMP)
+pass in quick inet6 proto ipv6-icmp from {fe80::/10} to {ff02::/16} icmp6-type {128,133,134,135,136} keep state label "ae6a25a80846167572205697223cac41" # IPv6 RFC4890 requirements (ICMP)
+pass in quick inet6 proto ipv6-icmp from {ff02::/16} to {fe80::/10} icmp6-type {128,133,134,135,136} keep state label "d620649f5612d3f06a207b29b6fafa6b" # IPv6 RFC4890 requirements (ICMP)
+pass in quick inet6 proto ipv6-icmp from {::} to {ff02::/16} icmp6-type {128,133,134,135,136} keep state label "eac061e4bfb1837966338b5c7672af5d" # IPv6 RFC4890 requirements (ICMP)
+block in quick inet proto {tcp udp} from {any} port {0} to {any} label "4ca35a9a3e1a71295a95b2300a2d0f25" # block all targeting port 0
+block in quick inet6 proto {tcp udp} from {any} port {0} to {any} label "4ca35a9a3e1a71295a95b2300a2d0f25" # block all targeting port 0
+block in quick inet proto {tcp udp} from {any} to {any} port {0} label "0b267e85225f21e19315eec3a579fac4" # block all targeting port 0
+block in quick inet6 proto {tcp udp} from {any} to {any} port {0} label "0b267e85225f21e19315eec3a579fac4" # block all targeting port 0
+block in quick proto tcp from {<sshlockout>} to {(self)} port {22} label "1a1887c6d16f8ea2f373869a6abc1a97" # sshlockout
+block in quick proto tcp from {<sshlockout>} to {(self)} port {443} label "3eb214803105a3549c8cd116d2b3b137" # sshlockout
+block in quick from {<virusprot>} to {any} label "84a5dd52ce3d0d54334e12328b652cf2" # virusprot overload table
+pass in quick on eth0 proto udp from {any} to {fe80::/10} port {546} label "3055c982fa7b08a97ba148fc7678e841" # allow dhcpv6 client in WAN
+pass out quick on eth0 proto udp from {fe80::/10} port {546} to {fe80::/10} port {547} label "9bd5f1cd6548503f1ca07a3f56ffef54" # allow dhcpv6 client out WAN
+pass out quick on eth0 proto udp from {fe80::/10} port {546} to {ff02::/16} port {547} label "9bd5f1cd6548503f1ca07a3f56ffef54" # allow dhcpv6 client out WAN
+pass in quick on eth0 proto udp from {any} port {67} to {any} port {68} label "be8be5a43b73daab06e3338a1946114e" # allow DHCP client on WAN
+pass out quick on eth0 proto udp from {any} port {68} to {any} port {67} label "e5b7d76c120fe25d3a8ef50a99d5d46c" # allow DHCP client on WAN
+pass in quick on eth1 proto udp from {any} port {68} to {255.255.255.255} port {67} label "a7c9426f8a0482736d0e3f5e04bff635" # allow access to DHCP server
+pass in quick on eth1 proto udp from {any} port {68} to {(self)} port {67} label "683fc0f79f341fbeceb62a130d2251b7" # allow access to DHCP server
+# [prio: 5]
+block in quick on eth0 inet from {<bogons>} to {any} label "3c2cd03c70091e3732710e44c3b97506" # Block bogon IPv4 networks from WAN
+block in quick on eth0 inet6 from {<bogonsv6>} to {any} label "57401c13616c94401fc89cafa777581e" # Block bogon IPv6 networks from WAN
+block in quick on eth0 inet from {10.0.0.0/8} to {any} label "aff80939d9e2f87bb12757208f4a6a4e" # Block private networks from WAN
+block in quick on eth0 inet from {172.16.0.0/12} to {any} label "aff80939d9e2f87bb12757208f4a6a4e" # Block private networks from WAN
+block in quick on eth0 inet from {192.168.0.0/16} to {any} label "aff80939d9e2f87bb12757208f4a6a4e" # Block private networks from WAN
+block in quick on eth0 inet from {100.64.0.0/10} to {any} label "aff80939d9e2f87bb12757208f4a6a4e" # Block private networks from WAN
+block in quick on eth0 inet from {169.254.0.0/16} to {any} label "aff80939d9e2f87bb12757208f4a6a4e" # Block private networks from WAN
+block in quick on eth0 inet6 from {fd00::/8} to {any} label "e77bdfb60a5b9367391f7468293b5e91" # Block private networks from WAN
+block in quick on eth0 inet6 from {fe80::/10} to {any} label "e77bdfb60a5b9367391f7468293b5e91" # Block private networks from WAN
+# block in quick on eth1 inet from {<bogons>} to {any} label "905d384826ec270b160b1b1b666dd136" # Block bogon IPv4 networks from LAN
+# block in quick on eth1 inet6 from {<bogonsv6>} to {any} label "cc61e8783155f24fe67bf264aa30c78e" # Block bogon IPv6 networks from LAN
+# block in quick on eth1 inet from {10.0.0.0/8} to {any} label "7de7c6abba709c5d463a0e5666d5b0f3" # Block private networks from LAN
+# block in quick on eth1 inet from {172.16.0.0/12} to {any} label "7de7c6abba709c5d463a0e5666d5b0f3" # Block private networks from LAN
+# block in quick on eth1 inet from {192.168.0.0/16} to {any} label "7de7c6abba709c5d463a0e5666d5b0f3" # Block private networks from LAN
+# block in quick on eth1 inet from {100.64.0.0/10} to {any} label "7de7c6abba709c5d463a0e5666d5b0f3" # Block private networks from LAN
+# block in quick on eth1 inet from {169.254.0.0/16} to {any} label "7de7c6abba709c5d463a0e5666d5b0f3" # Block private networks from LAN
+# block in quick on eth1 inet6 from {fd00::/8} to {any} label "d7b5a533d9983a207c675ed18dfbd6cb" # Block private networks from LAN
+# block in quick on eth1 inet6 from {fe80::/10} to {any} label "d7b5a533d9983a207c675ed18dfbd6cb" # Block private networks from LAN
+pass out from {any} to {any} keep state allow-opts label "fcc89aee950e474ad952872fb6c678aa" # let out anything from firewall host itself
+pass in quick on eth1 proto tcp from {any} to {(self)} port {22} keep state label "57a35da8d9b4fe0ed9c620c0e58d40ce" # anti-lockout rule
+pass in quick on eth1 proto tcp from {any} to {(self)} port {80} keep state label "4e5699b2505b58586f0422f5e2c7b4c7" # anti-lockout rule
+pass in quick on eth1 proto tcp from {any} to {(self)} port {443} keep state label "8c9a6aa8d157215876cdee979d4f9068" # anti-lockout rule
+# [prio: 400000]
+pass in quick on eth1 inet from {(eth1:network)} to {any} keep state label "4e8c3f4d67808bbe899b63973dd3de6d" # Default allow LAN to any rule
+pass in quick on eth1 inet6 from {(eth1:network),fe80::/10} to {any} keep state label "55e82a736b972d445dc8a6d737fecdbd" # Default allow LAN IPv6 to any rule
+# [prio: 500000]
+pass in quick on eth0 inet proto tcp from {any} to {192.168.1.10} port {8443} label "4b289a2e1469c281d68c6b5dcf6fa4c8" # web server

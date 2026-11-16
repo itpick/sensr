@@ -208,3 +208,211 @@ pub fn filter_rules<'a>(
     }
     out
 }
+
+fn dev_of(i: &Option<String>, ifs: &InterfaceMap) -> Option<String> {
+    i.as_ref().map(|i| {
+        ifs.get(i)
+            .filter(|x| !x.device.is_empty())
+            .map(|x| x.device.clone())
+            .unwrap_or_else(|| format!("##{i}##"))
+    })
+}
+
+fn proto_text(p: ProtoMatch) -> Option<String> {
+    match p {
+        ProtoMatch::Any => None,
+        ProtoMatch::TcpUdp => Some("proto {tcp udp}".into()),
+        ProtoMatch::One(p) => {
+            let name = p.to_string();
+            Some(if name.contains('/') || name == "skip" {
+                format!("proto \"{name}\"")
+            } else {
+                format!("proto {name}")
+            })
+        }
+    }
+}
+
+fn plain_addr(ep: &Endpoint, ifs: &InterfaceMap) -> String {
+    let a = addr_text(&ep.addr, ifs);
+    if ep.negate { format!("!{a}") } else { a }
+}
+
+/// One port forward as `ForwardRule::__toString` renders it: the `rdr` line,
+/// then the reflection helper `nat` line when enabled.
+pub fn rdr_rule(r: &crate::nat::RdrRule, ifs: &InterfaceMap, out: &mut String) {
+    if !r.debug.is_empty() {
+        let _ = writeln!(out, "#debug:{}", r.debug.join("|"));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        let t = s.trim();
+        if !t.is_empty() {
+            parts.push(t.to_owned());
+        }
+    };
+    if !r.enabled {
+        push("#".into());
+    }
+    push(if r.nordr { "no rdr" } else { "rdr" }.into());
+    if r.pass {
+        push("pass".into());
+    }
+    if r.log {
+        push("log".into());
+    }
+    if let Some(d) = dev_of(&r.interface, ifs) {
+        push(format!("on {d}"));
+    }
+    if let Some(f) = r.family {
+        push(f.pf().into());
+    }
+    if let Some(p) = proto_text(r.proto) {
+        push(p);
+    }
+    endpoint("from", &r.src, ifs, &mut push);
+    endpoint("to", &r.dst, ifs, &mut push);
+    if let Some(t) = &r.target {
+        push(format!("-> {}", addr_text(t, ifs)));
+    }
+    if let Some(p) = &r.local_port {
+        push(format!("port {p}"));
+    }
+    if !r.descr.is_empty() {
+        push(format!("# {}", r.descr.replace(['\r', '\n'], "")));
+    }
+    out.push_str(&parts.join(" "));
+    out.push('\n');
+
+    if !r.helper {
+        return;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        let t = s.trim();
+        if !t.is_empty() {
+            parts.push(t.to_owned());
+        }
+    };
+    if !r.enabled {
+        push("#".into());
+    }
+    push("nat".into());
+    let dev = dev_of(&r.interface, ifs);
+    if let Some(d) = &dev {
+        push(format!("on {d}"));
+    }
+    if let Some(f) = r.family {
+        push(f.pf().into());
+    }
+    if let Some(p) = proto_text(r.proto) {
+        push(p);
+    }
+    if let Some(d) = &dev {
+        push(format!("from ({d}:network)"));
+    }
+    if let Some(t) = &r.target {
+        push(curly("to", &addr_text(t, ifs)));
+    }
+    if let Some(p) = &r.local_port {
+        push(curly("port", &p.to_string()));
+    }
+    if let Some(d) = &dev {
+        push(format!("-> ({d})"));
+    }
+    push("port 1024:65535".into());
+    if !r.descr.is_empty() {
+        push(format!("# {}", r.descr.replace(['\r', '\n'], "")));
+    }
+    out.push_str(&parts.join(" "));
+    out.push('\n');
+}
+
+/// One outbound rule as `SNatRule::__toString` renders it.
+pub fn snat_rule(r: &crate::nat::SnatRule, ifs: &InterfaceMap, out: &mut String) {
+    use crate::nat::SnatTarget;
+    if !r.debug.is_empty() {
+        let _ = writeln!(out, "#debug:{}", r.debug.join("|"));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        let t = s.trim();
+        if !t.is_empty() {
+            parts.push(t.to_owned());
+        }
+    };
+    if !r.enabled {
+        push("#".into());
+    }
+    let nonat = r.target == SnatTarget::NoNat;
+    push(if nonat { "no nat" } else { "nat" }.into());
+    if r.log {
+        push("log".into());
+    }
+    if let Some(d) = dev_of(&r.interface, ifs) {
+        push(format!("on {d}"));
+    }
+    if let Some(f) = r.family {
+        push(f.pf().into());
+    }
+    if let Some(p) = proto_text(r.proto) {
+        push(p);
+    }
+    push(format!("from {}", plain_addr(&r.src, ifs)));
+    if let Some(p) = &r.src.port {
+        push(format!("port {p}"));
+    }
+    push(format!("to {}", plain_addr(&r.dst, ifs)));
+    if let Some(p) = &r.dst.port {
+        push(format!("port {p}"));
+    }
+    match &r.target {
+        SnatTarget::NoNat => {}
+        SnatTarget::Interface(i) => {
+            let d = dev_of(&Some(i.clone()), ifs).unwrap_or_default();
+            push(format!("-> ({d}:0)"));
+        }
+        SnatTarget::Host(ip) => push(format!("-> {ip}")),
+        SnatTarget::Net(n) => push(format!("-> {n}")),
+        SnatTarget::Alias(a) => push(format!("-> ${a}")),
+    }
+    if !nonat && !r.static_port {
+        match &r.target_port {
+            Some(p) => push(format!("port {p}")),
+            None => push("port 1024:65535".into()),
+        }
+    }
+    if r.static_port && !nonat {
+        push("static-port".into());
+    }
+    if !r.descr.is_empty() {
+        push(format!("# {}", r.descr.replace(['\r', '\n'], "")));
+    }
+    out.push_str(&parts.join(" "));
+    out.push('\n');
+}
+
+/// The NAT section as `Plugin::outputNatRules` orders it: by priority, one
+/// header per priority, rdr and nat rules of one priority in registration
+/// order (port forwards are registered after outbound rules).
+pub fn nat_rules(nat: &crate::nat::NatRules, ifs: &InterfaceMap) -> String {
+    let mut prios: Vec<u32> = nat
+        .snat
+        .iter()
+        .map(|r| r.priority)
+        .chain(nat.rdr.iter().map(|r| r.priority))
+        .collect();
+    prios.sort_unstable();
+    prios.dedup();
+    let mut out = String::new();
+    for p in prios {
+        let _ = writeln!(out, "# [prio: {p}]");
+        for r in nat.snat.iter().filter(|r| r.priority == p) {
+            snat_rule(r, ifs, &mut out);
+        }
+        for r in nat.rdr.iter().filter(|r| r.priority == p) {
+            rdr_rule(r, ifs, &mut out);
+        }
+    }
+    out
+}

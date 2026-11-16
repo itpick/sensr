@@ -217,6 +217,117 @@ fn fam_digit(f: IpFamily) -> char {
     }
 }
 
+/// The match part of any rule-shaped object (filter, NAT).
+#[derive(Clone, Copy, Debug)]
+pub struct MatchSpec<'r> {
+    /// explicit family
+    pub family: Option<IpFamily>,
+    /// family implied by something outside the matches (a NAT target)
+    pub family_hint: Option<IpFamily>,
+    /// protocol
+    pub proto: ProtoMatch,
+    /// source
+    pub src: &'r Endpoint,
+    /// destination
+    pub dst: &'r Endpoint,
+    /// ICMP types
+    pub icmp: &'r [IcmpType],
+    /// ICMPv6 types
+    pub icmp6: &'r [IcmpType],
+    /// TCP flags
+    pub tcp_flags: Option<&'r TcpFlags>,
+}
+
+impl<'r> MatchSpec<'r> {
+    /// The match part of a filter rule.
+    pub fn of_filter(rule: &'r FilterRule) -> MatchSpec<'r> {
+        MatchSpec {
+            family: rule.family,
+            family_hint: None,
+            proto: rule.proto,
+            src: &rule.src,
+            dst: &rule.dst,
+            icmp: &rule.icmp_types,
+            icmp6: &rule.icmp6_types,
+            tcp_flags: rule.tcp_flags.as_ref(),
+        }
+    }
+}
+
+/// Lowered alternatives: each is one nft rule, for the family it names.
+pub type Alternatives = Vec<(Option<IpFamily>, Vec<Match>)>;
+
+/// Lowers a match spec into alternatives (each one nft rule), with the family
+/// each alternative is for.
+pub fn lower_matches(
+    spec: &MatchSpec<'_>,
+    ifs: &InterfaceMap,
+    refs: &mut SetRefs,
+) -> Result<Alternatives, String> {
+    let has_port = spec.src.port.is_some() || spec.dst.port.is_some();
+    // A pf port test only ever matches TCP and UDP packets, so a port
+    // without a protocol is exactly "TCP or UDP".
+    let proto = match spec.proto {
+        ProtoMatch::Any if has_port => ProtoMatch::TcpUdp,
+        p if has_port && !p.has_ports() => {
+            return Err("port match on a protocol without ports; rule skipped".into());
+        }
+        p => p,
+    };
+    let mut out = Vec::new();
+    for fam in families(spec)? {
+        let srcs = addr_alternatives(spec.src, false, fam, ifs, refs)?;
+        let dsts = addr_alternatives(spec.dst, true, fam, ifs, refs)?;
+        for s in &srcs {
+            for d in &dsts {
+                let mut matches = Vec::with_capacity(8);
+                match proto {
+                    ProtoMatch::Any => {}
+                    ProtoMatch::One(p) => matches.push(eq(Field::L4proto, Val::Proto(p.number))),
+                    ProtoMatch::TcpUdp => matches.push(eq(
+                        Field::L4proto,
+                        Val::Set(vec![Val::Proto(6), Val::Proto(17)]),
+                    )),
+                }
+                matches.extend(s.iter().cloned());
+                if let Some(p) = &spec.src.port {
+                    matches.push(eq(Field::Sport, port_val(p)));
+                }
+                matches.extend(d.iter().cloned());
+                if let Some(p) = &spec.dst.port {
+                    matches.push(eq(Field::Dport, port_val(p)));
+                }
+                if let (Some(f), Some(types)) = (fam, icmp_for(spec, fam)) {
+                    let keys = types
+                        .iter()
+                        .filter_map(|t| {
+                            t.nft_name(f)
+                                .map(IcmpKey::Name)
+                                .or_else(|| t.number(f).map(IcmpKey::Num))
+                        })
+                        .collect();
+                    matches.push(eq(Field::Icmp(f), Val::Icmp(keys)));
+                }
+                if let Some(TcpFlags::Test { set, mask }) = spec.tcp_flags {
+                    matches.push(eq(
+                        Field::TcpFlags,
+                        Val::Flags(tcp_flag_names(set), tcp_flag_names(mask)),
+                    ));
+                }
+                let implied = matches
+                    .iter()
+                    .any(|m| matches!(m.field, Field::Saddr(_) | Field::Daddr(_) | Field::Icmp(_)));
+                if let (Some(f), false) = (fam, implied) {
+                    matches.push(eq(Field::Nfproto, Val::Fam(f)));
+                }
+                matches.sort_by_key(|m| m.field);
+                out.push((fam, matches));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Lowers one expanded rule. Returns no lows for disabled rules or rules
 /// that can never match (with a warning).
 pub fn lower<'a>(
@@ -235,84 +346,19 @@ pub fn lower<'a>(
         })
     };
     degraded_features(rule, |m| warn(warnings, m));
-
-    if (rule.src.port.is_some() || rule.dst.port.is_some()) && !rule.proto.has_ports() {
-        warn(warnings, "port match without TCP/UDP; rule skipped".into());
-        return Vec::new();
-    }
-
-    let families = match families(rule) {
-        Ok(f) => f,
-        Err(m) => {
-            warn(warnings, m);
-            return Vec::new();
-        }
-    };
-
-    let mut out = Vec::new();
-    for fam in families {
-        let srcs = match addr_alternatives(&rule.src, false, fam, ifs, refs) {
-            Ok(v) => v,
-            Err(m) => {
-                warn(warnings, m);
-                return Vec::new();
-            }
-        };
-        let dsts = match addr_alternatives(&rule.dst, true, fam, ifs, refs) {
-            Ok(v) => v,
-            Err(m) => {
-                warn(warnings, m);
-                return Vec::new();
-            }
-        };
-        for s in &srcs {
-            for d in &dsts {
-                let mut matches = Vec::with_capacity(8);
-                match rule.proto {
-                    ProtoMatch::Any => {}
-                    ProtoMatch::One(p) => matches.push(eq(Field::L4proto, Val::Proto(p.number))),
-                    ProtoMatch::TcpUdp => matches.push(eq(
-                        Field::L4proto,
-                        Val::Set(vec![Val::Proto(6), Val::Proto(17)]),
-                    )),
-                }
-                matches.extend(s.iter().cloned());
-                if let Some(p) = &rule.src.port {
-                    matches.push(eq(Field::Sport, port_val(p)));
-                }
-                matches.extend(d.iter().cloned());
-                if let Some(p) = &rule.dst.port {
-                    matches.push(eq(Field::Dport, port_val(p)));
-                }
-                if let (Some(f), Some(types)) = (fam, icmp_for(rule, fam)) {
-                    let keys = types
-                        .iter()
-                        .filter_map(|t| {
-                            t.nft_name(f)
-                                .map(IcmpKey::Name)
-                                .or_else(|| t.number(f).map(IcmpKey::Num))
-                        })
-                        .collect();
-                    matches.push(eq(Field::Icmp(f), Val::Icmp(keys)));
-                }
-                if let Some(TcpFlags::Test { set, mask }) = &rule.tcp_flags {
-                    matches.push(eq(
-                        Field::TcpFlags,
-                        Val::Flags(tcp_flag_names(set), tcp_flag_names(mask)),
-                    ));
-                }
-                let implied = matches
-                    .iter()
-                    .any(|m| matches!(m.field, Field::Saddr(_) | Field::Daddr(_) | Field::Icmp(_)));
-                if let (Some(f), false) = (fam, implied) {
-                    matches.push(eq(Field::Nfproto, Val::Fam(f)));
-                }
-                matches.sort_by_key(|m| m.field);
+    match lower_matches(&MatchSpec::of_filter(rule), ifs, refs) {
+        Ok(alts) => {
+            let mut out = Vec::new();
+            for (_, matches) in alts {
                 push_verdicts(rule, matches, &mut out);
             }
+            out
+        }
+        Err(m) => {
+            warn(warnings, m);
+            Vec::new()
         }
     }
-    out
 }
 
 fn eq(field: Field, val: Val) -> Match {
@@ -376,12 +422,12 @@ fn degraded_features(rule: &FilterRule, mut warn: impl FnMut(String)) {
     }
 }
 
-fn icmp_for(rule: &FilterRule, fam: Option<IpFamily>) -> Option<&[IcmpType]> {
+fn icmp_for<'r>(spec: &MatchSpec<'r>, fam: Option<IpFamily>) -> Option<&'r [IcmpType]> {
     let v = match fam? {
-        IpFamily::V4 => &rule.icmp_types,
-        IpFamily::V6 => &rule.icmp6_types,
+        IpFamily::V4 => spec.icmp,
+        IpFamily::V6 => spec.icmp6,
     };
-    (!v.is_empty()).then_some(v.as_slice())
+    (!v.is_empty()).then_some(v)
 }
 
 fn literal_family(a: &Addr) -> Option<IpFamily> {
@@ -404,8 +450,9 @@ fn needs_family(a: &Addr) -> bool {
 }
 
 /// Family variants a rule must be rendered for.
-fn families(rule: &FilterRule) -> Result<Vec<Option<IpFamily>>, String> {
+fn families(rule: &MatchSpec<'_>) -> Result<Vec<Option<IpFamily>>, String> {
     let mut implied = BTreeSet::new();
+    implied.extend(rule.family_hint);
     for a in [&rule.src.addr, &rule.dst.addr] {
         if let Some(f) = literal_family(a) {
             implied.insert(f);
@@ -423,10 +470,10 @@ fn families(rule: &FilterRule) -> Result<Vec<Option<IpFamily>>, String> {
         }
     }
     if rule.family.is_none() {
-        if !rule.icmp_types.is_empty() {
+        if !rule.icmp.is_empty() {
             implied.insert(IpFamily::V4);
         }
-        if !rule.icmp6_types.is_empty() {
+        if !rule.icmp6.is_empty() {
             implied.insert(IpFamily::V6);
         }
     }

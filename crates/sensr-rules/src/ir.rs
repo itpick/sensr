@@ -6,10 +6,10 @@
 //! folds runs of such rules back into sets and verdict maps
 //! ([`crate::compile`]), so expansion costs nothing at packet time.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::net::IpAddr;
 
+use indexmap::IndexMap;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
@@ -414,8 +414,9 @@ impl Interface {
     }
 }
 
-/// Logical interface name → interface. Ordered, so output is deterministic.
-pub type InterfaceMap = BTreeMap<String, Interface>;
+/// Logical interface name → interface, in configuration order (upstream
+/// iterates interfaces in `config.xml` order, which the pf oracle keeps).
+pub type InterfaceMap = IndexMap<String, Interface>;
 
 /// Kind of an alias as far as rule normalisation cares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
