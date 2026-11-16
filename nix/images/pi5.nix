@@ -125,11 +125,15 @@ in
   # The FAT partition is mounted for the seed folder, boot logs and
   # bootloader installs, but the system must come up without it: the
   # benchmark's aarch64 image hung in the initrd on its vfat mount in 3 of 5
-  # boots (docs/research/07 "Boot").
+  # boots (docs/research/07 "Boot"). Here it is not an initrd mount at all,
+  # and `nofail` keeps local-fs.target from waiting for it. The device
+  # timeout only bounds how long the FAT's own users (boot logs, tryboot
+  # commit) wait: under QEMU's TCG udev's coldplug alone takes over a
+  # minute, and 15 s lost the FAT on every emulated boot.
   fileSystems.${fw} = {
     options = lib.mkForce [
       "nofail"
-      "x-systemd.device-timeout=15s"
+      "x-systemd.device-timeout=90s"
       "umask=0077"
     ];
   };

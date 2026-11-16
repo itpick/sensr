@@ -31,7 +31,11 @@ boot() { # name extra-cmdline timeout-seconds expect
   fat mcopy -o -n ::current/Image "$work/Image"
   fat mcopy -o -n ::current/initrd "$work/initrd"
   local cmdline
-  cmdline="$(fat mtype ::current/cmdline.txt | tr -d '\r\n') console=ttyAMA0,115200 $extra"
+  # The Pi's earlycon address (its PL011 at 0x107d001000) is unmapped on
+  # QEMU's virt machine: writing there hangs the kernel before it prints
+  # anything. Use QEMU's UART instead (earlycon without arguments takes it
+  # from the device tree's stdout-path).
+  cmdline="$(fat mtype ::current/cmdline.txt | tr -d '\r\n' | sed 's/earlycon=[^ ]*/earlycon/') console=ttyAMA0,115200 loglevel=6 systemd.show_status=1 $extra"
   local start end
   start=$(date +%s.%N)
   qemu-system-aarch64 -machine virt -cpu cortex-a76 -smp 4 -m 2048 \
