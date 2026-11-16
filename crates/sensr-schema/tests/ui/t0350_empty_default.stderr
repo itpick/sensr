@@ -1,0 +1,5 @@
+error: lint-model rule 3: an empty default is not a default; leave it out
+ --> tests/ui/t0350_empty_default.rs:4:33
+  |
+4 |     #[sensr(required, default = "")]
+  |                                 ^^

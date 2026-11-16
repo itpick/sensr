@@ -1,0 +1,5 @@
+error: lint-model rule 14: a validation message must end with a period
+ --> tests/ui/t0361_message_period.rs:4:33
+  |
+4 |     #[sensr(required, message = "Not a valid number")]
+  |                                 ^^^^^^^^^^^^^^^^^^^^

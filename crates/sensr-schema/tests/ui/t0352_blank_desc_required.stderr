@@ -1,0 +1,5 @@
+error: lint-model rule 5: blank_desc does not apply to a required field
+ --> tests/ui/t0352_blank_desc_required.rs:4:36
+  |
+4 |     #[sensr(required, blank_desc = "Pick one")]
+  |                                    ^^^^^^^^^^

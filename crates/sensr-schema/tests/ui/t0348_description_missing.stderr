@@ -1,0 +1,5 @@
+error: lint-model rule 1: #[sensr(description = "...")] is required
+ --> tests/ui/t0348_description_missing.rs:2:8
+  |
+2 | struct M {
+  |        ^

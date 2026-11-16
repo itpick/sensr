@@ -1,0 +1,5 @@
+error: lint-model rule 4: blank_desc = "None" is the default; leave it out
+ --> tests/ui/t0351_blank_desc_none.rs:4:26
+  |
+4 |     #[sensr(blank_desc = "None")]
+  |                          ^^^^^^

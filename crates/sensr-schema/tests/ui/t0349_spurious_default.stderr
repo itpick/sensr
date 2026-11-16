@@ -1,0 +1,5 @@
+error: lint-model rule 2: a default on a field that is not required is spurious; mark it required or drop the default
+ --> tests/ui/t0349_spurious_default.rs:4:23
+  |
+4 |     #[sensr(default = "x")]
+  |                       ^^^

@@ -1,0 +1,5 @@
+error: lint-model rule 12: separator = "," is the default; leave it out
+ --> tests/ui/t0359_default_separator.rs:4:34
+  |
+4 |     #[sensr(as_list, separator = ",")]
+  |                                  ^^^

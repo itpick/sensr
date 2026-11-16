@@ -1,0 +1,7 @@
+error: lint-model rule 1: the description must be a single, non-empty line
+ --> tests/ui/t0348_description_multiline.rs:2:23
+  |
+2 |   #[sensr(description = "two
+  |  _______________________^
+3 | | lines")]
+  | |______^
