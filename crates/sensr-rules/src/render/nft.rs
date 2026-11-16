@@ -131,6 +131,7 @@ pub fn render<W: io::Write>(
         Some(n) => Some(lower_nat(
             n,
             policy.interfaces,
+            policy.aliases,
             &mut refs,
             opts,
             &mut report.warnings,
@@ -237,14 +238,14 @@ pub fn render<W: io::Write>(
         ("out", |r: &FilterRule| r.direction.matches_out()),
     ] {
         for k in &keys {
-            let chain_lows: Vec<Low<'_>> = eval
+            let chain_lows: Vec<&Low<'_>> = eval
                 .iter()
                 .zip(&lows)
                 .filter(|(r, _)| wants(r) && applies_to(r, *k))
-                .flat_map(|(_, l)| l.iter().cloned())
+                .flat_map(|(_, l)| l.iter())
                 .collect();
             let chain = chain_name(dir, *k);
-            for item in compile::compile_chain(chain_lows, opts.chain) {
+            for item in compile::compile_chain(&chain_lows, opts.chain) {
                 emit_item(&mut w, &chain, item, opts, &mut report.stats)?;
             }
         }
@@ -568,7 +569,7 @@ fn comment(s: &str) -> Option<std::borrow::Cow<'static, str>> {
 fn emit_item<W: io::Write>(
     w: &mut Writer<'_, W>,
     chain: &str,
-    item: Item<'_>,
+    item: Item<'_, '_>,
     opts: &Options,
     stats: &mut Stats,
 ) -> io::Result<()> {
@@ -670,14 +671,6 @@ fn addr_range(n: &IpNet) -> Expr<'static> {
     )
 }
 
-fn target_family(a: &Addr) -> Option<IpFamily> {
-    match a {
-        Addr::Host(ip) => Some(IpFamily::of(ip)),
-        Addr::Net(n) => Some(IpFamily::of(&n.addr())),
-        _ => None,
-    }
-}
-
 fn common_stmts(
     head: Option<Stmt<'static>>,
     matches: &[compile::Match],
@@ -701,6 +694,7 @@ fn common_stmts(
 fn lower_nat(
     nat: &NatRules,
     ifs: &InterfaceMap,
+    aliases: &BTreeMap<String, ResolvedAlias>,
     refs: &mut SetRefs,
     opts: &Options,
     warnings: &mut Vec<Warning>,
@@ -727,7 +721,8 @@ fn lower_nat(
     };
 
     for r in nat.rdr.iter().filter(|r| r.enabled) {
-        let hint = r.target.as_ref().and_then(target_family);
+        let target = r.target.as_ref().map(|t| expand_target(t, aliases));
+        let hint = target.as_ref().and_then(|t| t.as_ref().ok()).map(|t| t.0);
         let spec = compile::MatchSpec {
             family: r.family,
             family_hint: hint,
@@ -754,7 +749,7 @@ fn lower_nat(
                 continue;
             }
             rdr_pass |= r.pass;
-            for (extra, stmt) in rdr_actions(r, fam, &mut warn) {
+            for (extra, stmt) in rdr_actions(r, target.as_ref(), fam, &mut warn) {
                 let mut m = matches.clone();
                 m.extend(extra);
                 m.sort_by_key(|x| x.field);
@@ -766,7 +761,8 @@ fn lower_nat(
                 pre.push((v, comment(&r.descr)));
             }
             if r.helper
-                && let Some(v) = hairpin(r, fam, ifs)
+                && let Some(Ok((tf, texpr))) = &target
+                && let Some(v) = hairpin(r, fam.unwrap_or(*tf), texpr, ifs)
             {
                 post_rows.push((r.priority, (v, comment(&r.descr))));
             }
@@ -846,23 +842,67 @@ fn lower_nat(
     }
 }
 
+/// A redirect target as one nft address expression: a host, a range, or
+/// round-robin over the hosts of an alias (pf's pool semantics).
+fn expand_target(
+    t: &Addr,
+    aliases: &BTreeMap<String, ResolvedAlias>,
+) -> Result<(IpFamily, Expr<'static>), String> {
+    match t {
+        Addr::Host(ip) => Ok((IpFamily::of(ip), Expr::Ip(*ip))),
+        Addr::Net(n) => Ok((IpFamily::of(&n.addr()), addr_range(n))),
+        Addr::Alias(a) => {
+            let nets = aliases.get(a).map(|r| r.nets.as_slice()).unwrap_or(&[]);
+            // pool members: hosts, or the hosts of small networks
+            let mut hosts: Vec<std::net::IpAddr> = Vec::new();
+            for n in nets {
+                match n {
+                    IpNet::V4(v) if v.prefix_len() == 32 => hosts.push(v.addr().into()),
+                    IpNet::V4(v) if v.prefix_len() >= 24 => {
+                        hosts.extend(v.hosts().map(std::net::IpAddr::V4))
+                    }
+                    IpNet::V6(v) if v.prefix_len() == 128 => hosts.push(v.addr().into()),
+                    _ => {}
+                }
+            }
+            let fam = hosts
+                .first()
+                .map(IpFamily::of)
+                .ok_or_else(|| format!("redirect alias {a} has no usable hosts"))?;
+            if hosts.iter().any(|h| IpFamily::of(h) != fam) {
+                return Err(format!("redirect alias {a} mixes address families"));
+            }
+            if hosts.len() == 1 {
+                return Ok((fam, Expr::Ip(hosts[0])));
+            }
+            Ok((
+                fam,
+                Expr::Map(
+                    Box::new(Expr::NumgenInc(hosts.len() as u32)),
+                    hosts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, h)| (Expr::Num(i as u32), Expr::Ip(*h)))
+                        .collect(),
+                ),
+            ))
+        }
+        other => Err(format!("redirect target {other:?} not supported")),
+    }
+}
+
 /// The dnat statement(s) of a forward: `(extra matches, statement)` each.
 fn rdr_actions(
     r: &RdrRule,
+    target: Option<&Result<(IpFamily, Expr<'static>), String>>,
     fam: Option<IpFamily>,
     warn: &mut impl FnMut(&str, String),
 ) -> Vec<(Vec<compile::Match>, Stmt<'static>)> {
-    let Some(target) = &r.target else {
-        return Vec::new();
-    };
     let (f, addr) = match target {
-        Addr::Host(ip) => (IpFamily::of(ip), Expr::Ip(*ip)),
-        Addr::Net(n) => (IpFamily::of(&n.addr()), addr_range(n)),
-        other => {
-            warn(
-                &r.descr,
-                format!("redirect target {other:?} not rendered yet"),
-            );
+        None => return Vec::new(),
+        Some(Ok((f, e))) => (*f, e.clone()),
+        Some(Err(m)) => {
+            warn(&r.descr, m.clone());
             return Vec::new();
         }
     };
@@ -907,10 +947,13 @@ fn rdr_actions(
 
 /// Reflection helper: hairpin SNAT on the forward's interface so replies
 /// come back through the firewall.
-fn hairpin(r: &RdrRule, fam: Option<IpFamily>, ifs: &InterfaceMap) -> Option<Vec<Stmt<'static>>> {
+fn hairpin(
+    r: &RdrRule,
+    f: IpFamily,
+    target: &Expr<'static>,
+    ifs: &InterfaceMap,
+) -> Option<Vec<Stmt<'static>>> {
     let iface = r.interface.as_ref()?;
-    let target = r.target.as_ref()?;
-    let f = fam.or_else(|| target_family(target))?;
     let mut v = vec![iface_match("oifname", &r.interface, ifs)?];
     match r.proto {
         crate::proto::ProtoMatch::Any => {}
@@ -934,14 +977,16 @@ fn hairpin(r: &RdrRule, fam: Option<IpFamily>, ifs: &InterfaceMap) -> Option<Vec
         left: saddr,
         right: Expr::set_ref(&compile::iface_net_set(iface, f)),
     });
+    let right = match target {
+        Expr::Ip(_) | Expr::Range(..) => target.clone(),
+        // round-robin pool: hairpin every member
+        Expr::Map(_, pairs) => Expr::Set(pairs.iter().map(|(_, v)| v.clone()).collect()),
+        _ => return None,
+    };
     v.push(Stmt::Match {
         op: "==",
         left: daddr,
-        right: match target {
-            Addr::Host(ip) => Expr::Ip(*ip),
-            Addr::Net(n) => Expr::Prefix(n.trunc().addr(), n.prefix_len()),
-            _ => return None,
-        },
+        right,
     });
     if let Some(p) = r.local_port.as_ref().and_then(port_expr) {
         v.push(Stmt::Match {
@@ -957,4 +1002,97 @@ fn hairpin(r: &RdrRule, fam: Option<IpFamily>, ifs: &InterfaceMap) -> Option<Vec
         flags: Vec::new(),
     }));
     Some(v)
+}
+
+/// New contents for one named set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetContents {
+    /// addresses / networks (one family, matching the set)
+    Nets(Vec<IpNet>),
+    /// inclusive port ranges
+    Ports(Vec<(u16, u16)>),
+}
+
+/// Replaces the contents of named sets in one transaction (`flush set` +
+/// `add element` per set): how DHCP address changes and alias refreshes reach
+/// the kernel without re-rendering the ruleset (07: 10k entries in 0.05 s).
+pub fn render_set_updates<W: io::Write>(
+    table: &str,
+    updates: &[(String, SetContents)],
+    out: &mut W,
+) -> io::Result<()> {
+    let mut w = Writer::new(out, FAMILY, table)?;
+    for (name, contents) in updates {
+        w.cmd(&crate::render::json::Command::Flush(Object::SetName(
+            name.clone().into(),
+        )))?;
+        let elem: Vec<Expr<'_>> = match contents {
+            SetContents::Nets(nets) => nets.iter().map(net_elem).collect(),
+            SetContents::Ports(ports) => ports
+                .iter()
+                .map(|&(lo, hi)| {
+                    if lo == hi {
+                        Expr::Num(u32::from(lo))
+                    } else {
+                        Expr::Range(
+                            Box::new(Expr::Num(u32::from(lo))),
+                            Box::new(Expr::Num(u32::from(hi))),
+                        )
+                    }
+                })
+                .collect(),
+        };
+        if !elem.is_empty() {
+            w.add(Object::Element {
+                name: name.clone().into(),
+                elem,
+            })?;
+        }
+    }
+    w.finish()
+}
+
+/// The four sets of a logical interface with its current addresses.
+pub fn interface_set_updates(
+    name: &str,
+    iface: &crate::ir::Interface,
+) -> Vec<(String, SetContents)> {
+    let mut v = Vec::new();
+    for fam in IpFamily::BOTH {
+        let nets: BTreeSet<IpNet> = iface.addrs_of(fam).filter_map(|a| a.network()).collect();
+        v.push((
+            compile::iface_net_set(name, fam),
+            SetContents::Nets(nets.into_iter().collect()),
+        ));
+        let addrs: BTreeSet<IpNet> = iface.addrs_of(fam).map(|a| IpNet::from(a.addr)).collect();
+        v.push((
+            compile::iface_addr_set(name, fam),
+            SetContents::Nets(addrs.into_iter().collect()),
+        ));
+    }
+    v
+}
+
+/// The sets of one alias with resolved contents.
+pub fn alias_set_updates(name: &str, a: &ResolvedAlias) -> Vec<(String, SetContents)> {
+    let mut v: Vec<(String, SetContents)> = IpFamily::BOTH
+        .into_iter()
+        .map(|fam| {
+            (
+                compile::alias_set(name, fam),
+                SetContents::Nets(
+                    a.nets
+                        .iter()
+                        .filter(|n| IpFamily::of(&n.addr()) == fam)
+                        .copied()
+                        .collect(),
+                ),
+            )
+        })
+        .collect();
+    v.push((
+        compile::port_alias_set(name),
+        SetContents::Ports(a.ports.clone()),
+    ));
+    v
 }

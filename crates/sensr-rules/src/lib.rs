@@ -12,6 +12,7 @@
 pub mod alias;
 pub mod compile;
 pub mod conf;
+pub mod document;
 pub mod icmp;
 pub mod ir;
 pub mod nat;
