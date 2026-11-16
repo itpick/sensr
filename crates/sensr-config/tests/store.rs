@@ -99,6 +99,30 @@ fn commit_validates_and_skips_no_ops() {
 }
 
 #[test]
+fn commit_json_value() {
+    let store = mem();
+    let mut v = serde_json::to_value(store.head().unwrap().document).unwrap();
+    v["system"]["hostname"] = json!("fromjson");
+    let out = store.commit_value(&v, meta("json")).unwrap();
+    assert_eq!(out.id(), RevisionId(2));
+    assert_eq!(
+        store.head().unwrap().document.system.hostname.as_str(),
+        "fromjson"
+    );
+    v["bogus"] = json!(1);
+    assert!(matches!(
+        store.commit_value(&v, meta("bad")),
+        Err(StoreError::Json(_))
+    ));
+    v.as_object_mut().unwrap().remove("bogus");
+    v["schema_version"] = json!("9.0.0");
+    assert!(matches!(
+        store.commit_value(&v, meta("new")),
+        Err(StoreError::Migration(_))
+    ));
+}
+
+#[test]
 fn optimistic_conflict_and_edit() {
     let store = mem();
     let base = store.head().unwrap();
@@ -257,6 +281,29 @@ fn export_is_atomic_private_and_redacted() {
         .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
         .collect();
     assert!(leftovers.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn database_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.db");
+    let store = Store::open(&path, Document::factory).unwrap();
+    store
+        .commit(&renamed(&store.head().unwrap().document, "x"), meta("x"))
+        .unwrap();
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&path), 0o600);
+    let wal = dir.path().join("config.db-wal");
+    if wal.exists() {
+        assert_eq!(mode(&wal), 0o600);
+    }
+    drop(store);
+    // An existing, too-open database is tightened on open.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    drop(Store::open(&path, Document::default).unwrap());
+    assert_eq!(mode(&path), 0o600);
 }
 
 #[test]

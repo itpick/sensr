@@ -317,6 +317,8 @@ impl Store {
         default: impl FnOnce() -> Document,
         options: StoreOptions,
     ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        restrict(path)?;
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
@@ -443,6 +445,16 @@ impl Store {
         meta: CommitMeta,
     ) -> Result<CommitOutcome, StoreError> {
         self.write(doc, meta, CommitKind::Commit, Some(expected), None, true)
+    }
+
+    /// Commits a document given as JSON (the IPC and CLI carry JSON). An
+    /// older `schema_version` is migrated first; the result must
+    /// deserialise into a [`Document`] and validate.
+    pub fn commit_value(&self, doc: &Value, meta: CommitMeta) -> Result<CommitOutcome, StoreError> {
+        let mut v = doc.clone();
+        migrate::run(&mut v, &self.migrations, self.target)?;
+        let doc: Document = serde_json::from_value(v)?;
+        self.commit(&doc, meta)
     }
 
     /// Commits a document from outside (importer, backup restore).
@@ -834,6 +846,42 @@ impl Store {
             reason: e.to_string(),
         })
     }
+}
+
+/// Makes the database owner-only before SQLite touches it: revisions hold
+/// secrets (private keys, password hashes). SQLite gives its `-wal` and
+/// `-shm` files the database's mode, so they follow.
+fn restrict(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        if !path.exists() {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)?;
+        }
+        for p in [
+            path.to_path_buf(),
+            sidecar(path, "-wal"),
+            sidecar(path, "-shm"),
+        ] {
+            if p.exists() {
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
 }
 
 fn redacted_value(doc: &Document) -> Result<Value, serde_json::Error> {
