@@ -1,0 +1,7 @@
+# [prio: 1]
+block in inet from {any} to {any} label "9a65e5f0a8ce6ac762792125e034a3e1" # Default deny
+block in inet6 from {any} to {any} label "9a65e5f0a8ce6ac762792125e034a3e1" # Default deny
+# [prio: 5]
+pass out from {any} to {any} keep state label "c88c57b1f779ce7304ca14a959f2c681" # let out
+# [prio: 400000]
+pass in quick on eth1 inet from {(eth1:network)} to {any} label "2007c3f6cafe442eec4be9bb8d974421"
