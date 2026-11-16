@@ -92,6 +92,20 @@ pub struct User {
     /// Login shell (absolute path); `None` for the system default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+    /// API key pairs for HTTP Basic `key:secret` access (OPNsense `apikeys`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_keys: Vec<ApiKey>,
+}
+
+/// One API key: the public key and a crypt(3) hash of the secret (SHA-512-crypt
+/// `$6$…` as OPNsense writes it), so imported keys keep working.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiKey {
+    /// Public key, presented as the Basic-auth user name.
+    pub key: String,
+    /// Hash of the secret; the clear secret is never stored.
+    pub secret_hash: Secret<String>,
 }
 
 /// A local group (OPNsense `system/group`).
@@ -190,6 +204,37 @@ impl Validate for System {
                     ValidatorKind::Regex,
                     "The shell must be an absolute path.",
                 );
+            }
+        }
+        let mut keys = std::collections::HashSet::new();
+        for (id, user) in &self.users {
+            for (n, k) in user.api_keys.iter().enumerate() {
+                let p = users.join(id).join("api_keys").join(n.to_string());
+                if k.key.is_empty()
+                    || !k
+                        .key
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))
+                {
+                    out.add(
+                        &p.join("key"),
+                        ValidatorKind::Regex,
+                        "An API key must be base64 text.",
+                    );
+                } else if !keys.insert(k.key.as_str()) {
+                    out.add(
+                        &p.join("key"),
+                        ValidatorKind::Constraint,
+                        "This API key already exists.",
+                    );
+                }
+                if !k.secret_hash.expose().starts_with('$') {
+                    out.add(
+                        &p.join("secret_hash"),
+                        ValidatorKind::Regex,
+                        "The API secret must be stored as a crypt(3) hash.",
+                    );
+                }
             }
         }
         let groups = at.join("groups");
