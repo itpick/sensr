@@ -12,6 +12,7 @@
 //! - [`migrate`]: versioned document migrations.
 
 pub mod array;
+pub mod constraints;
 pub mod fields;
 pub mod migrate;
 pub mod models;

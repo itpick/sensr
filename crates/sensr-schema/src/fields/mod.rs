@@ -46,6 +46,7 @@ pub use network::{
     AddressFamily, HostnameField, IpPortField, MacAddressField, NetworkField, is_domain, is_ip,
     is_ipv4, is_ipv6, is_port, is_subnet, is_subnet_strict,
 };
+pub(crate) use numbers::php_is_numeric as numbers_is_numeric;
 pub use numbers::{AutoNumberField, BooleanField, IntegerField, NumericField};
 pub use option::{CountryField, OptionEntry, OptionField, OptionList};
 pub use port::{Port, PortField, PortRange, PortSpec};
