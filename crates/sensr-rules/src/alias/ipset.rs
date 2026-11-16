@@ -17,43 +17,55 @@ use crate::ir::IpFamily;
 struct Ranges(Vec<(u128, u128)>);
 
 impl Ranges {
-    fn add(&mut self, lo: u128, hi: u128) {
-        let mut out = Vec::with_capacity(self.0.len() + 1);
-        let (mut lo, mut hi) = (lo, hi);
-        let mut placed = false;
-        for &(a, b) in &self.0 {
-            if b.saturating_add(1) < lo {
-                out.push((a, b));
-            } else if hi.saturating_add(1) < a {
-                if !placed {
-                    out.push((lo, hi));
-                    placed = true;
-                }
-                out.push((a, b));
-            } else {
-                lo = lo.min(a);
-                hi = hi.max(b);
+    /// Adds many ranges at once: one sort and one merge pass, so a 300k-entry
+    /// country list costs O(n log n), not O(n²).
+    fn add_all(&mut self, mut add: Vec<(u128, u128)>) {
+        if add.is_empty() {
+            return;
+        }
+        add.extend_from_slice(&self.0);
+        add.sort_unstable();
+        let mut out: Vec<(u128, u128)> = Vec::with_capacity(add.len());
+        for (a, b) in add {
+            match out.last_mut() {
+                // overlapping or adjacent: extend
+                Some(last) if a <= last.1.saturating_add(1) => last.1 = last.1.max(b),
+                _ => out.push((a, b)),
             }
         }
-        if !placed {
-            out.push((lo, hi));
-        }
-        out.sort_unstable();
         self.0 = out;
     }
 
-    fn remove(&mut self, lo: u128, hi: u128) {
-        let mut out = Vec::with_capacity(self.0.len() + 1);
-        for &(a, b) in &self.0 {
-            if b < lo || a > hi {
+    /// Removes many ranges at once (sorted sweep).
+    fn remove_all(&mut self, mut rm: Vec<(u128, u128)>) {
+        if rm.is_empty() || self.0.is_empty() {
+            return;
+        }
+        rm.sort_unstable();
+        let mut out = Vec::with_capacity(self.0.len());
+        let mut j = 0;
+        for &(a0, b) in &self.0 {
+            let mut a = a0;
+            // removals ending before this range are irrelevant from now on
+            while j < rm.len() && rm[j].1 < a {
+                j += 1;
+            }
+            let mut k = j;
+            let mut alive = true;
+            while k < rm.len() && rm[k].0 <= b {
+                let (lo, hi) = rm[k];
+                if lo > a {
+                    out.push((a, lo - 1));
+                }
+                if hi >= b {
+                    alive = false;
+                    break;
+                }
+                a = a.max(hi + 1);
+                k += 1;
+            }
+            if alive && a <= b {
                 out.push((a, b));
-                continue;
-            }
-            if a < lo {
-                out.push((a, lo - 1));
-            }
-            if b > hi {
-                out.push((hi + 1, b));
             }
         }
         self.0 = out;
@@ -92,17 +104,29 @@ impl AddrSet {
         let mut v: Vec<TableEntry> = entries.into_iter().collect();
         v.sort_by_key(|e| (e.net.prefix_len(), e.negate));
         let mut s = AddrSet::default();
-        for e in v {
-            let (lo, hi) = bounds(&e.net);
-            let r = match e.net {
-                IpNet::V4(_) => &mut s.v4,
-                IpNet::V6(_) => &mut s.v6,
-            };
-            if e.negate {
-                r.remove(lo, hi);
-            } else {
-                r.add(lo, hi);
+        // Consecutive entries of the same sign commute, so each run is
+        // applied in bulk; runs keep the shortest-prefix-first order.
+        let mut i = 0;
+        while i < v.len() {
+            let negate = v[i].negate;
+            let mut j = i;
+            let (mut r4, mut r6) = (Vec::new(), Vec::new());
+            while j < v.len() && v[j].negate == negate {
+                let b = bounds(&v[j].net);
+                match v[j].net {
+                    IpNet::V4(_) => r4.push(b),
+                    IpNet::V6(_) => r6.push(b),
+                }
+                j += 1;
             }
+            if negate {
+                s.v4.remove_all(r4);
+                s.v6.remove_all(r6);
+            } else {
+                s.v4.add_all(r4);
+                s.v6.add_all(r6);
+            }
+            i = j;
         }
         s
     }
