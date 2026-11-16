@@ -6,6 +6,7 @@ use std::str::FromStr;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::devices::{Devices, VirtualIps};
 use super::dhcp::{Dhcpv4, Pool4, Subnet4};
 use super::dns::DnsResolver;
 use super::firewall::{AliasType, Endpoint, FilterRule, Firewall};
@@ -107,11 +108,15 @@ pub enum Section {
     Trust,
     /// `routes`.
     Routes,
+    /// `devices`.
+    Devices,
+    /// `virtual_ips`.
+    VirtualIps,
 }
 
 impl Section {
     /// Every section, in document order.
-    pub const ALL: [Section; 10] = [
+    pub const ALL: [Section; 12] = [
         Self::System,
         Self::Interfaces,
         Self::Firewall,
@@ -122,6 +127,8 @@ impl Section {
         Self::Gateways,
         Self::Trust,
         Self::Routes,
+        Self::Devices,
+        Self::VirtualIps,
     ];
 
     /// The section's key in the JSON document.
@@ -137,6 +144,8 @@ impl Section {
             Self::Gateways => "gateways",
             Self::Trust => "trust",
             Self::Routes => "routes",
+            Self::Devices => "devices",
+            Self::VirtualIps => "virtual_ips",
         }
     }
 }
@@ -179,6 +188,12 @@ pub struct Document {
     /// serialise as before the section existed.
     #[serde(default, skip_serializing_if = "Routes::is_empty")]
     pub routes: Routes,
+    /// Bridges, LAGGs and loopbacks (omitted while empty).
+    #[serde(default, skip_serializing_if = "Devices::is_empty")]
+    pub devices: Devices,
+    /// Virtual IP addresses (omitted while empty).
+    #[serde(default, skip_serializing_if = "VirtualIps::is_empty")]
+    pub virtual_ips: VirtualIps,
 }
 
 impl Default for Document {
@@ -195,6 +210,8 @@ impl Default for Document {
             gateways: Gateways::default(),
             trust: Trust::default(),
             routes: Routes::default(),
+            devices: Devices::default(),
+            virtual_ips: VirtualIps::default(),
         }
     }
 }
@@ -294,6 +311,9 @@ impl Document {
             .validate(self, &root.join("gateways"), &mut out);
         self.trust.validate(self, &root.join("trust"), &mut out);
         self.routes.validate(self, &root.join("routes"), &mut out);
+        self.devices.validate(self, &root.join("devices"), &mut out);
+        self.virtual_ips
+            .validate(self, &root.join("virtual_ips"), &mut out);
         out
     }
 
@@ -318,6 +338,8 @@ impl Document {
                 Section::Gateways => self.gateways != other.gateways,
                 Section::Trust => self.trust != other.trust,
                 Section::Routes => self.routes != other.routes,
+                Section::Devices => self.devices != other.devices,
+                Section::VirtualIps => self.virtual_ips != other.virtual_ips,
             })
             .collect()
     }

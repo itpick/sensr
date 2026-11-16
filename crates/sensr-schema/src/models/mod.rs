@@ -11,6 +11,7 @@
 //! `"type"`, `"rr"`); list items are UUID-keyed objects
 //! ([`ArrayField`](crate::ArrayField)).
 
+pub mod devices;
 pub mod dhcp;
 pub mod dns;
 pub mod firewall;

@@ -762,6 +762,129 @@ fn static_routes() {
 }
 
 #[test]
+fn devices_and_virtual_ips() {
+    let mut doc = Document::factory();
+    let set =
+        |doc: &mut Document, path: &str, v: serde_json::Value| doc.set_by_path(path, v).unwrap();
+    set(
+        &mut doc,
+        "devices.bridges.00000000-0000-0000-0000-000000000b01",
+        json!({"device": "br0", "members": ["eth2", "eth3"], "stp": {"protocol": "rstp", "max_age": 20}}),
+    );
+    set(
+        &mut doc,
+        "devices.laggs.00000000-0000-0000-0000-000000000c01",
+        json!({"device": "bond0", "members": ["eth4", "eth5"], "protocol": "lacp", "hash": ["l3", "l4"]}),
+    );
+    set(
+        &mut doc,
+        "devices.loopbacks.00000000-0000-0000-0000-000000000d01",
+        json!({"id": 1, "description": "router id"}),
+    );
+    set(
+        &mut doc,
+        "virtual_ips.vips.00000000-0000-0000-0000-000000000e01",
+        json!({"interface": "lan", "address": "192.168.1.2/24"}),
+    );
+    set(
+        &mut doc,
+        "virtual_ips.vips.00000000-0000-0000-0000-000000000e02",
+        json!({"interface": "lan", "address": "192.168.1.254/24", "mode": {"mode": "carp", "vhid": 5, "password": "s3cret"}}),
+    );
+    let v = doc.validate();
+    assert!(v.is_ok(), "{v}");
+    assert!(doc.devices.defines(&"lo1".parse().unwrap()));
+
+    set(
+        &mut doc,
+        "devices.bridges.00000000-0000-0000-0000-000000000b02",
+        json!({"device": "bond0", "members": ["eth2", "br9"], "stp": {"edge": ["eth9"], "max_age": 2}}),
+    );
+    set(
+        &mut doc,
+        "devices.laggs.00000000-0000-0000-0000-000000000c02",
+        json!({"device": "bond1", "members": ["eth5"], "primary_member": "eth6", "mtu": 100}),
+    );
+    set(
+        &mut doc,
+        "virtual_ips.vips.00000000-0000-0000-0000-000000000e03",
+        json!({"interface": "opt9", "address": "192.168.1.0/24"}),
+    );
+    set(
+        &mut doc,
+        "virtual_ips.vips.00000000-0000-0000-0000-000000000e04",
+        json!({"interface": "lan", "address": "192.168.1.255/24", "mode": {"mode": "carp", "vhid": 5, "password": ""}}),
+    );
+    set(
+        &mut doc,
+        "virtual_ips.vips.00000000-0000-0000-0000-000000000e05",
+        json!({"interface": "lan", "address": "10.9.0.1/24", "mode": {"mode": "proxy_arp"}}),
+    );
+    let v = doc.validate();
+    let b = "devices.bridges.00000000-0000-0000-0000-000000000b02";
+    assert_eq!(
+        messages(
+            &v,
+            "devices.laggs.00000000-0000-0000-0000-000000000c01.device"
+        ),
+        [format!("Device bond0 is already defined at {b}.device.")]
+    );
+    assert_eq!(
+        messages(&v, &format!("{b}.members")),
+        ["Member eth2 is already used by br0."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{b}.stp.max_age")),
+        ["Please specify a value between 6 and 40."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{b}.stp")),
+        ["Contains non bridge members."]
+    );
+    let l = "devices.laggs.00000000-0000-0000-0000-000000000c02";
+    assert_eq!(
+        messages(&v, &format!("{l}.members")),
+        ["Members eth5 are already used in other laggs."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{l}.primary_member")),
+        ["Primary member eth6 not in member list."]
+    );
+    let vp = |k: &str| format!("virtual_ips.vips.00000000-0000-0000-0000-000000000{k}");
+    assert_eq!(
+        messages(&v, &format!("{}.interface", vp("e03"))),
+        ["The interface does not exist."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.address", vp("e03"))),
+        ["You cannot use the network address."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.address", vp("e04"))),
+        ["You cannot use the broadcast address."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.mode.password", vp("e04"))),
+        ["You must specify a CARP password that is shared between the two VHID members."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.mode.vhid", vp("e04"))),
+        ["VHID 5 is already used on lan."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.address", vp("e05"))),
+        ["Only strict subnets are allowed for Proxy ARP types."]
+    );
+    let factory = serde_json::to_string(&Document::factory()).unwrap();
+    assert!(
+        !factory.contains("\"devices\"") && !factory.contains("\"virtual_ips\""),
+        "empty sections are omitted"
+    );
+    let dbg = format!("{:?}", doc.virtual_ips);
+    assert!(!dbg.contains("s3cret"), "CARP password leaked into Debug");
+}
+
+#[test]
 fn system_rules() {
     let mut doc = Document::factory();
     let user = User {
