@@ -945,6 +945,17 @@ dependencies = [
 [[package]]
 name = "sensr-cli"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "sensr-agent",
+ "sensr-import-opnsense",
+ "sensr-ipc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "sensr-config"
