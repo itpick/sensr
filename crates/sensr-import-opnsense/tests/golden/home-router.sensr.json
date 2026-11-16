@@ -445,9 +445,34 @@
         "state_type": "keep",
         "description": "Allow WireGuard"
       },
-      "1aac7ca4-2950-47cf-af32-f24f076f55a2": {
+      "5a7e0c21-3f4b-4d1e-9c2a-6b8d0e1f4a40": {
         "enabled": true,
         "sequence": 60,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "wan"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "tcp",
+        "source": {
+          "net": "any",
+          "not": false
+        },
+        "destination": {
+          "net": "192.168.1.40",
+          "not": false,
+          "port": "25565"
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Game server via 1:1 NAT"
+      },
+      "1aac7ca4-2950-47cf-af32-f24f076f55a2": {
+        "enabled": true,
+        "sequence": 70,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -471,7 +496,7 @@
       },
       "7fea0ed1-647a-4a21-ad39-b58e286fffa4": {
         "enabled": true,
-        "sequence": 70,
+        "sequence": 80,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -495,7 +520,7 @@
       },
       "bf449e1e-69ca-44ef-a21f-104e3a575460": {
         "enabled": true,
-        "sequence": 80,
+        "sequence": 90,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -520,7 +545,7 @@
       },
       "6b5af314-ed14-4fe2-bc30-d6da7a0d48ac": {
         "enabled": true,
-        "sequence": 90,
+        "sequence": 100,
         "action": "block",
         "quick": true,
         "interfaces": [
@@ -544,7 +569,7 @@
       },
       "78acdbe1-999a-4cee-a55d-30c5cec58707": {
         "enabled": true,
-        "sequence": 100,
+        "sequence": 110,
         "action": "block",
         "quick": true,
         "interfaces": [
@@ -568,7 +593,7 @@
       },
       "e3d0f852-1cea-4e20-9ad7-cbe26eee9ad7": {
         "enabled": true,
-        "sequence": 110,
+        "sequence": 120,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -592,7 +617,7 @@
       },
       "ebd5ccfb-e396-4732-bc44-0f87bb45f5f7": {
         "enabled": true,
-        "sequence": 120,
+        "sequence": 130,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -616,7 +641,7 @@
       },
       "cf87b7c6-ccf9-4131-ac97-f2497b1370c2": {
         "enabled": true,
-        "sequence": 130,
+        "sequence": 140,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -641,7 +666,7 @@
       },
       "ab1bbef5-9d70-4722-894c-4e0ef251e651": {
         "enabled": true,
-        "sequence": 140,
+        "sequence": 150,
         "action": "block",
         "quick": true,
         "interfaces": [
@@ -665,7 +690,7 @@
       },
       "7fdf1e38-9c02-4739-9175-2108029af84a": {
         "enabled": true,
-        "sequence": 150,
+        "sequence": 160,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -690,7 +715,7 @@
       },
       "3f71ffc8-0a4b-4596-b1ff-22382acc4598": {
         "enabled": true,
-        "sequence": 160,
+        "sequence": 170,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -785,6 +810,44 @@
     "reflection": {
       "port_forwards": true,
       "source_nat": true
+    },
+    "one_to_one": {
+      "7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e40": {
+        "enabled": true,
+        "sequence": 10,
+        "interface": "wan",
+        "type": "binat",
+        "external": "203.0.113.40",
+        "source": {
+          "net": "192.168.1.40",
+          "not": false
+        },
+        "destination": {
+          "net": "any",
+          "not": false
+        },
+        "log": false,
+        "reflection": "enable",
+        "description": "Game server on its own public address"
+      },
+      "7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e41": {
+        "enabled": false,
+        "sequence": 20,
+        "interface": "wan",
+        "type": "nat",
+        "external": "203.0.113.50",
+        "source": {
+          "net": "net:opt1",
+          "not": false
+        },
+        "destination": {
+          "net": "198.51.100.0/24",
+          "not": false
+        },
+        "log": true,
+        "reflection": "disable",
+        "description": "IoT to the vendor cloud from a fixed address (paused)"
+      }
     }
   },
   "dhcpv4": {

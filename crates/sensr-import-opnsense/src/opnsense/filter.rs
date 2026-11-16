@@ -189,9 +189,10 @@ impl Mapper<Document> for FilterMapper {
                 return;
             }
             // Containers: the framework marked them read; their items map one by one.
-            "filter" | "rules" | "snatrules" => return,
-            // NPTv6 and 1:1 NAT are not modelled yet: fine while empty, reported otherwise.
-            "npt" | "onetoone" => {
+            // 1:1 rules map in the NAT mapper.
+            "filter" | "rules" | "snatrules" | "onetoone" => return,
+            // NPTv6 is not modelled yet: fine while empty, reported otherwise.
+            "npt" => {
                 if r.is_empty() {
                     ctx.consume_subtree(r);
                 } else {

@@ -632,6 +632,67 @@ U1lOVEhFVElDIEFQSSBLRVkgLSBOT1QgQSBSRUFMIENSRURFTlRJQUwgLSBzZW5zciB0ZXN0IGNvcnB1
             <description>Allow WireGuard</description>
             <audit>eyJjcmVhdGVkIjp7InVzZXJuYW1lIjoicm9vdEAxOTIuMTY4LjEuMTAwIiwidGltZSI6IjE3OTQwMTIzNDUuMTEiLCJkZXNjcmlwdGlvbiI6IlwvYXBpXC9hcGkucGhwIG1hZGUgY2hhbmdlcyJ9LCJ1cGRhdGVkIjp7InVzZXJuYW1lIjoicm9vdEAxOTIuMTY4LjEuMTAwIiwidGltZSI6IjE3OTQwMTIzNDUuMTEiLCJkZXNjcmlwdGlvbiI6IlwvYXBpXC9hcGkucGhwIG1hZGUgY2hhbmdlcyJ9LCJ1c2VyZGF0YSI6eyJub3RlIjoiIn19</audit>
           </rule>
+          <rule uuid="5a7e0c21-3f4b-4d1e-9c2a-6b8d0e1f4a40">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <state-policy/>
+            <sequence>20</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>wan</interface>
+            <received-on-not>0</received-on-not>
+            <received-on/>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>tcp</protocol>
+            <icmptype/>
+            <icmp6type/>
+            <source_net>any</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>192.168.1.40</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port>25565</destination_port>
+            <divert-to/>
+            <gateway/>
+            <replyto/>
+            <disablereplyto>0</disablereplyto>
+            <log>0</log>
+            <allowopts>0</allowopts>
+            <nosync>0</nosync>
+            <nopfsync>0</nopfsync>
+            <statetimeout/>
+            <udp-first/>
+            <udp-multiple/>
+            <udp-single/>
+            <max-src-nodes/>
+            <max-src-states/>
+            <max-src-conn/>
+            <max/>
+            <max-src-conn-rate/>
+            <max-src-conn-rates/>
+            <max-pkt-rate-number/>
+            <max-pkt-rate-seconds/>
+            <overload/>
+            <adaptivestart/>
+            <adaptiveend/>
+            <prio/>
+            <set-prio/>
+            <set-prio-low/>
+            <tag/>
+            <tagged/>
+            <tcpflags1/>
+            <tcpflags2/>
+            <tcpflags_any>0</tcpflags_any>
+            <categories/>
+            <sched/>
+            <tos/>
+            <shaper1/>
+            <shaper2/>
+            <description>Game server via 1:1 NAT</description>
+            <audit>eyJjcmVhdGVkIjp7InVzZXJuYW1lIjoicm9vdEAxOTIuMTY4LjEuMTAwIiwidGltZSI6IjE3OTQwMTIzNDUuMTEiLCJkZXNjcmlwdGlvbiI6IlwvYXBpXC9hcGkucGhwIG1hZGUgY2hhbmdlcyJ9LCJ1cGRhdGVkIjp7InVzZXJuYW1lIjoicm9vdEAxOTIuMTY4LjEuMTAwIiwidGltZSI6IjE3OTQwMTIzNDUuMTEiLCJkZXNjcmlwdGlvbiI6IlwvYXBpXC9hcGkucGhwIG1hZGUgY2hhbmdlcyJ9LCJ1c2VyZGF0YSI6eyJub3RlIjoiIn19</audit>
+          </rule>
           <rule uuid="8c3dc3ee-b23e-4170-af5a-5f23b2321d58">
             <enabled>1</enabled>
             <statetype>keep</statetype>
@@ -1395,7 +1456,40 @@ U1lOVEhFVElDIEFQSSBLRVkgLSBOT1QgQSBSRUFMIENSRURFTlRJQUwgLSBzZW5zciB0ZXN0IGNvcnB1
           </rule>
         </snatrules>
         <npt/>
-        <onetoone/>
+        <onetoone>
+          <rule uuid="7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e40">
+            <enabled>1</enabled>
+            <log>0</log>
+            <sequence>1</sequence>
+            <interface>wan</interface>
+            <type>binat</type>
+            <source_net>192.168.1.40</source_net>
+            <source_not>0</source_not>
+            <destination_net>any</destination_net>
+            <destination_not>0</destination_not>
+            <external>203.0.113.40</external>
+            <natreflection>enable</natreflection>
+            <categories/>
+            <description>Game server on its own public address</description>
+            <audit>eyJjcmVhdGVkIjp7InVzZXJuYW1lIjoicm9vdEAxOTIuMTY4LjEuMTAwIiwidGltZSI6IjE3OTQwMTIzNDUuMTEiLCJkZXNjcmlwdGlvbiI6IlwvYXBpXC9hcGkucGhwIG1hZGUgY2hhbmdlcyJ9LCJ1cGRhdGVkIjp7InVzZXJuYW1lIjoicm9vdEAxOTIuMTY4LjEuMTAwIiwidGltZSI6IjE3OTQwMTIzNDUuMTEiLCJkZXNjcmlwdGlvbiI6IlwvYXBpXC9hcGkucGhwIG1hZGUgY2hhbmdlcyJ9LCJ1c2VyZGF0YSI6eyJub3RlIjoiIn19</audit>
+          </rule>
+          <rule uuid="7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e41">
+            <enabled>0</enabled>
+            <log>1</log>
+            <sequence>2</sequence>
+            <interface>wan</interface>
+            <type>nat</type>
+            <source_net>opt1</source_net>
+            <source_not>0</source_not>
+            <destination_net>198.51.100.0/24</destination_net>
+            <destination_not>0</destination_not>
+            <external>203.0.113.50</external>
+            <natreflection>disable</natreflection>
+            <categories/>
+            <description>IoT to the vendor cloud from a fixed address (paused)</description>
+            <audit>eyJjcmVhdGVkIjp7InVzZXJuYW1lIjoicm9vdEAxOTIuMTY4LjEuMTAwIiwidGltZSI6IjE3OTQwMTIzNDUuMTEiLCJkZXNjcmlwdGlvbiI6IlwvYXBpXC9hcGkucGhwIG1hZGUgY2hhbmdlcyJ9LCJ1cGRhdGVkIjp7InVzZXJuYW1lIjoicm9vdEAxOTIuMTY4LjEuMTAwIiwidGltZSI6IjE3OTQwMTIzNDUuMTEiLCJkZXNjcmlwdGlvbiI6IlwvYXBpXC9hcGkucGhwIG1hZGUgY2hhbmdlcyJ9LCJ1c2VyZGF0YSI6eyJub3RlIjoiIn19</audit>
+          </rule>
+        </onetoone>
       </Filter>
     </Firewall>
     <Gateways version="1.0.0" persisted_at="1794012345.11" description="Gateways configuration">

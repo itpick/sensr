@@ -19,6 +19,8 @@ else bumps `SCHEMA_VERSION` and ships a migration.
 | `firewall.settings` | `firewall::FirewallSettings` | `Firewall/Filter.xml` settings |
 | `nat.outbound` | `nat::OutboundNat` (mode + manual rules) | `nat/outbound`, `Filter.xml` snatrules |
 | `nat.port_forwards` | `ArrayField<nat::PortForward>` | `Firewall/DNat.xml` (`nat/rule`) |
+| `nat.one_to_one` | `ArrayField<nat::OneToOneRule>` (interface, `type` binat/nat, external address or network, source and destination with `not`, log, reflection override; omitted while empty) | `Filter.xml` onetoone, legacy `nat/onetoone` |
+| `nat.reflection` | `nat::Reflection` (`port_forwards`, `source_nat`, `one_to_one`; the last omitted while off) | `Filter.xml` settings `reflection_dnat` / `reflection_snat` / `reflection_binat`, legacy `system` switches |
 | `dhcpv4` | `dhcp::Dhcpv4` (subnets, pools, options, reservations) | `Kea/KeaDhcpv4.xml` (and legacy ISC/dnsmasq via the importer) |
 | `dns` | `dns::DnsResolver` (settings, forwarding, host_overrides, access lists, tuning, blocklists) | `Unbound/Unbound.xml` |
 | `dns.blocklists` | `ArrayField<dnsbl::Blocklist>` (curated lists by name, URLs, extra names, allow entries, source networks, answer mode, refresh) | `unboundplus/dnsbl/blocklist` |
@@ -138,6 +140,8 @@ with sequence 9 still runs before a `lan` allow with sequence 1.
 | `ipaddr`/`subnet`/`ipaddrv6`/`track6-*` flat fields | `ipv4` / `ipv6` tagged enums (`none`, `dhcp`, `static`, `dhcp6`, `slaac`, `track`) | only meaningful combinations exist |
 | `no_antilockout` | `anti_lockout` | positive booleans |
 | Host override `rr` + `server`/`mx`/`mxprio`/`txtdata` | `record` tagged by `rr` with only that type's data | invalid state unrepresentable |
+| 1:1 `natreflection` (`''`, `enable`, `disable`) | `reflection`: absent (follow `nat.reflection.one_to_one`), `enable`, `disable` | same as port forwards |
+| 1:1 BINAT accepts any source pfctl later rejects (alias, interface, inverted, unequal masks) | validation: a BINAT source is a literal address or network, not inverted, and the external network has its size (or is a host, which takes the source's prefix) | pfctl refuses the whole ruleset otherwise |
 | Port forward `associated-rule-id` (`''`, `pass`, uuid) | `filter`: `pass`, `none`, `{"rule": uuid}` | typed relation |
 | User names may be e-mail addresses | Linux-compatible names only | accounts are real Linux users |
 | LAGG protocols `fec` and `loadbalance` | one `loadbalance` (Linux `balance-xor`) | same behaviour on Linux bonds |
