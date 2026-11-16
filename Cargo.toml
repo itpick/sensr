@@ -25,6 +25,7 @@ sensr-apply = { path = "crates/sensr-apply" }
 sensr-ui = { path = "crates/sensr-ui" }
 sensr-monitor = { path = "crates/sensr-monitor" }
 sensr-net = { path = "crates/sensr-net" }
+sensr-dns = { path = "crates/sensr-dns" }
 
 anyhow = "1.0.104"
 argon2 = "0.6.0"
@@ -83,6 +84,7 @@ tower-http = { version = "0.7.1", features = ["compression-br", "compression-gzi
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 trybuild = "1.0.125"
+ureq = "3.5.2"
 uuid = { version = "1.29.2", features = ["v4", "serde"] }
 wasm-bindgen = "0.2.130"
 web-sys = "0.3.107"
