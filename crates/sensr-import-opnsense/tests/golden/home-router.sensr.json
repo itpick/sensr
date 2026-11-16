@@ -266,12 +266,134 @@
         },
         "description": "Inbound country block",
         "counters": false
+      },
+      "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1b01": {
+        "enabled": true,
+        "name": "BLOCKLIST",
+        "content": {
+          "type": "url_table",
+          "url": "https://lists.example.net/blocklist.txt",
+          "refresh": {
+            "days": 1,
+            "hours": 0
+          },
+          "families": {
+            "ipv4": true,
+            "ipv6": true
+          }
+        },
+        "description": "Invented outbound blocklist (served by the slice test)",
+        "counters": false
+      },
+      "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1b02": {
+        "enabled": false,
+        "name": "PAUSED_FEED",
+        "content": {
+          "type": "url_table",
+          "url": "https://lists.example.net/paused.txt",
+          "refresh": {
+            "days": 1,
+            "hours": 0
+          },
+          "families": {
+            "ipv4": true,
+            "ipv6": true
+          }
+        },
+        "description": "Disabled feed: rules using it match nothing",
+        "counters": false
+      },
+      "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1b03": {
+        "enabled": true,
+        "name": "PRINTERS",
+        "content": {
+          "type": "host",
+          "entries": [
+            "192.168.30.50"
+          ]
+        },
+        "description": "Guest printer",
+        "counters": false
       }
     },
     "rules": {
-      "8c3dc3ee-b23e-4170-af5a-5f23b2321d58": {
+      "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a01": {
         "enabled": true,
         "sequence": 10,
+        "action": "block",
+        "quick": true,
+        "interfaces": [
+          "lan",
+          "opt1"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "any",
+          "not": false
+        },
+        "destination": {
+          "net": "alias:BLOCKLIST",
+          "not": false
+        },
+        "log": true,
+        "state_type": "keep",
+        "description": "Block outbound to BLOCKLIST (multi-interface: evaluated before the LAN allow)"
+      },
+      "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a02": {
+        "enabled": true,
+        "sequence": 20,
+        "action": "block",
+        "quick": true,
+        "interfaces": [
+          "lan",
+          "opt1"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "any",
+          "not": false
+        },
+        "destination": {
+          "net": "alias:PAUSED_FEED",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Block outbound to PAUSED_FEED (its alias is disabled: matches nothing)"
+      },
+      "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a03": {
+        "enabled": false,
+        "sequence": 30,
+        "action": "block",
+        "quick": true,
+        "interfaces": [
+          "opt2"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "alias:PRINTERS",
+          "not": false
+        },
+        "destination": {
+          "net": "any",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Block printers from the internet (not any)"
+      },
+      "8c3dc3ee-b23e-4170-af5a-5f23b2321d58": {
+        "enabled": true,
+        "sequence": 40,
         "action": "block",
         "quick": true,
         "interfaces": [
@@ -295,7 +417,7 @@
       },
       "2064ba71-29e9-4ca4-a655-3069cd2fb19e": {
         "enabled": true,
-        "sequence": 20,
+        "sequence": 50,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -320,7 +442,7 @@
       },
       "1aac7ca4-2950-47cf-af32-f24f076f55a2": {
         "enabled": true,
-        "sequence": 30,
+        "sequence": 60,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -344,7 +466,7 @@
       },
       "7fea0ed1-647a-4a21-ad39-b58e286fffa4": {
         "enabled": true,
-        "sequence": 40,
+        "sequence": 70,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -368,7 +490,7 @@
       },
       "bf449e1e-69ca-44ef-a21f-104e3a575460": {
         "enabled": true,
-        "sequence": 50,
+        "sequence": 80,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -393,7 +515,7 @@
       },
       "6b5af314-ed14-4fe2-bc30-d6da7a0d48ac": {
         "enabled": true,
-        "sequence": 60,
+        "sequence": 90,
         "action": "block",
         "quick": true,
         "interfaces": [
@@ -417,7 +539,7 @@
       },
       "78acdbe1-999a-4cee-a55d-30c5cec58707": {
         "enabled": true,
-        "sequence": 70,
+        "sequence": 100,
         "action": "block",
         "quick": true,
         "interfaces": [
@@ -441,7 +563,7 @@
       },
       "e3d0f852-1cea-4e20-9ad7-cbe26eee9ad7": {
         "enabled": true,
-        "sequence": 80,
+        "sequence": 110,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -465,7 +587,7 @@
       },
       "ebd5ccfb-e396-4732-bc44-0f87bb45f5f7": {
         "enabled": true,
-        "sequence": 90,
+        "sequence": 120,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -489,7 +611,7 @@
       },
       "cf87b7c6-ccf9-4131-ac97-f2497b1370c2": {
         "enabled": true,
-        "sequence": 100,
+        "sequence": 130,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -514,7 +636,7 @@
       },
       "ab1bbef5-9d70-4722-894c-4e0ef251e651": {
         "enabled": true,
-        "sequence": 110,
+        "sequence": 140,
         "action": "block",
         "quick": true,
         "interfaces": [
@@ -538,7 +660,7 @@
       },
       "7fdf1e38-9c02-4739-9175-2108029af84a": {
         "enabled": true,
-        "sequence": 120,
+        "sequence": 150,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -563,7 +685,7 @@
       },
       "3f71ffc8-0a4b-4596-b1ff-22382acc4598": {
         "enabled": true,
-        "sequence": 130,
+        "sequence": 160,
         "action": "pass",
         "quick": true,
         "interfaces": [
@@ -584,6 +706,15 @@
         "log": false,
         "state_type": "keep",
         "description": "Guest: allow internet"
+      }
+    },
+    "groups": {
+      "69e38c21-068c-817f-9b1d-fc7810b52154": {
+        "name": "wireguard",
+        "members": [],
+        "wireguard": true,
+        "sequence": 0,
+        "description": "WireGuard (Group)"
       }
     },
     "settings": {

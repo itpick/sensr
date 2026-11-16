@@ -275,9 +275,55 @@ fn family_token(f: SchemaFamily) -> &'static str {
 /// `FilterRuleContainerField::serialize` for a typed rule, with its
 /// `getPriority()`.
 pub fn filter_conf(uuid: &str, r: &fw::FilterRule, doc: &Document) -> (u32, Conf) {
+    filter_conf_in(uuid, r, doc, &interfaces(doc, &Runtime::default()))
+}
+
+/// Logical interfaces a rule's interface list stands for: interface groups
+/// become their members (pf matches a group on any member's device).
+fn rule_interfaces(r: &fw::FilterRule, doc: &Document, ifs: &InterfaceMap) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for i in &r.interfaces {
+        let members: Vec<String> = match doc.firewall.group(i) {
+            Some(g) if doc.interfaces.get(i).is_none() => group_members(g, ifs),
+            _ => vec![i.as_str().to_owned()],
+        };
+        for m in members {
+            if !out.contains(&m) {
+                out.push(m);
+            }
+        }
+    }
+    out
+}
+
+/// Members of an interface group, the automatic WireGuard membership
+/// included (every interface on a `wg<N>` device).
+pub fn group_members(g: &fw::InterfaceGroup, ifs: &InterfaceMap) -> Vec<String> {
+    let mut out: Vec<String> = g.members.iter().map(|m| m.as_str().to_owned()).collect();
+    if g.wireguard {
+        for (name, i) in ifs {
+            let wg = i
+                .device
+                .strip_prefix("wg")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if wg && !out.contains(name) {
+                out.push(name.clone());
+            }
+        }
+    }
+    out
+}
+
+fn filter_conf_in(
+    uuid: &str,
+    r: &fw::FilterRule,
+    doc: &Document,
+    ifs: &InterfaceMap,
+) -> (u32, Conf) {
+    let ifaces = rule_interfaces(r, doc, ifs);
     let mut c = conf! {
         "label" => uuid,
-        "interface" => r.interfaces.iter().map(|i| i.as_str()).collect::<Vec<_>>().join(","),
+        "interface" => ifaces.join(","),
         "interfacenot" => r.interface_not,
         "direction" => match r.direction { Direction::In => "in", Direction::Out => "out", Direction::Any => "any" },
         "ipprotocol" => family_token(r.ip_protocol),
@@ -324,18 +370,17 @@ pub fn filter_conf(uuid: &str, r: &fw::FilterRule, doc: &Document) -> (u32, Conf
     if let Some(gw) = &r.gateway {
         c.set("gateway", gw.as_str());
     }
-    let floating = r.interfaces.len() != 1 || r.interface_not;
-    if floating {
+    let prio = doc
+        .firewall
+        .priority(r, |i| doc.interfaces.get(i).is_some());
+    if prio == 200_000 {
         c.set("floating", true);
     }
-    let known = |i: &sensr_schema::fields::InterfaceId| doc.interfaces.get(i).is_some();
-    let prio = if !r.interfaces.is_empty() && !r.interfaces.iter().any(known) {
-        600_000
-    } else if floating {
-        200_000
-    } else {
-        400_000
-    };
+    if ifaces.is_empty() && !r.interfaces.is_empty() {
+        // a group without members: pf loads a rule on an empty group, and it
+        // matches nothing
+        c.set("disabled", true);
+    }
     (prio, c)
 }
 
@@ -504,7 +549,7 @@ pub fn compile(doc: &Document, rt: &Runtime<'_>) -> Compiled {
     let mut rs = Ruleset::default();
     system_rules::register(&mut rs, &settings, &ctx);
     for (uuid, r) in doc.firewall.rules_in_order() {
-        let (prio, c) = filter_conf(&uuid.to_string(), r, doc);
+        let (prio, c) = filter_conf_in(&uuid.to_string(), r, doc, &ifs);
         rs.register_filter(prio, &c, None, &ctx);
     }
 

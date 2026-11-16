@@ -2,11 +2,14 @@
 //! `OPNsense/Firewall/Filter/rules/rule`, merged into one ordered list.
 //!
 //! OPNsense evaluates rules in priority bands (`FilterRuleField::getPriority()`,
-//! `filter_core_rules_user()`): floating rules (no single interface, or an inverted
-//! interface match) at 200000, interface rules at 400000. Within a band the MVC rules
-//! come first, sorted by `sequence`, then the legacy rules in file order
-//! (`plugins_firewall()` registers before `filter_core_rules_user()`). sensr has a
-//! single `sequence`, so the importer flattens that order into it.
+//! `filter_core_rules_user()`): floating rules (no single interface, several
+//! interfaces, or an inverted interface match) at 200000, rules on an interface
+//! group at 300000 plus the group's sequence, interface rules at 400000. Within a
+//! band the MVC rules come first, sorted by `sequence` and then by UUID (the
+//! `sortedBy` key), then the legacy rules in file order (`plugins_firewall()`
+//! registers before `filter_core_rules_user()`). sensr evaluates the same bands
+//! ([`sensr_schema::models::firewall::Firewall::priority`]) and orders by one
+//! `sequence` within a band, so the importer flattens that order into it.
 
 use std::cell::RefCell;
 
@@ -35,6 +38,59 @@ struct Staged {
     key: u64,
     id: Uuid,
     rule: FilterRule,
+}
+
+impl Staged {
+    /// Registration order: band, MVC before legacy, then sequence, then (MVC
+    /// only) the UUID in PHP's natural, case-insensitive order.
+    fn order(&self, other: &Staged) -> std::cmp::Ordering {
+        (self.band, self.origin, self.key)
+            .cmp(&(other.band, other.origin, other.key))
+            .then_with(|| {
+                if self.origin == 0 {
+                    natural_cmp(&self.id.to_string(), &other.id.to_string())
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+    }
+}
+
+/// `strnatcasecmp`-style comparison: runs of digits compare by value, the
+/// rest case-insensitively.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (mut a, mut b) = (a.as_bytes(), b.as_bytes());
+    loop {
+        match (a.first(), b.first()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let run = |s: &[u8]| s.iter().take_while(|c| c.is_ascii_digit()).count();
+                let (na, nb) = (run(a), run(b));
+                let strip = |s: &[u8]| {
+                    let z = s.iter().take_while(|c| **c == b'0').count();
+                    s[z.min(s.len().saturating_sub(1))..].to_vec()
+                };
+                let (da, db) = (strip(&a[..na]), strip(&b[..nb]));
+                let o = da.len().cmp(&db.len()).then_with(|| da.cmp(&db));
+                if o != Ordering::Equal {
+                    return o;
+                }
+                a = &a[na..];
+                b = &b[nb..];
+            }
+            (Some(x), Some(y)) => {
+                let o = x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase());
+                if o != Ordering::Equal {
+                    return o;
+                }
+                a = &a[1..];
+                b = &b[1..];
+            }
+        }
+    }
 }
 
 /// MVC rule fields whose empty/default value means "off" and has no sensr
@@ -171,7 +227,7 @@ impl Mapper<Document> for FilterMapper {
 
     fn finish(&self, _doc: &XmlDocument, _ctx: &mut MapContext<'_>, out: &mut Document) {
         let mut staged = std::mem::take(&mut *self.staged.borrow_mut());
-        staged.sort_by_key(|s| (s.band, s.origin, s.key));
+        staged.sort_by(Staged::order);
         let mut seq = 0u32;
         for mut s in staged {
             seq = seq.saturating_add(SEQUENCE_STEP);
@@ -182,12 +238,9 @@ impl Mapper<Document> for FilterMapper {
 }
 
 /// pf priority band of a rule (see the module docs).
-fn band(rule: &FilterRule) -> u32 {
-    if rule.interfaces.len() != 1 || rule.interface_not {
-        200_000
-    } else {
-        400_000
-    }
+fn band(rule: &FilterRule, out: &Document) -> u32 {
+    out.firewall
+        .priority(rule, |i| out.interfaces.get(i).is_some())
 }
 
 fn interfaces(
@@ -198,7 +251,11 @@ fn interfaces(
 ) -> Option<Vec<InterfaceId>> {
     let mut ids = Vec::new();
     for name in list(text, &[',']) {
-        match interface_id(out, &name) {
+        let group = name
+            .parse::<InterfaceId>()
+            .ok()
+            .filter(|g| out.firewall.group(g).is_some());
+        match interface_id(out, &name).or(group) {
             Some(id) => ids.push(id),
             None => {
                 ctx.warn(
@@ -312,10 +369,11 @@ fn mvc_rule<'doc>(r: &'doc Element, ctx: &mut MapContext<'doc>, out: &Document) 
         state_type: state,
         description: description(ctx, r, descr),
         gateway: None,
+        floating: false,
     };
     ctx.defaults(r, MVC_DEFAULTS);
     Some(Staged {
-        band: band(&rule),
+        band: band(&rule, out),
         origin: 0,
         key,
         id,
@@ -355,7 +413,7 @@ fn mvc_endpoint<'doc>(
         ctx.consume_subtree(e);
     }
     let not = ctx.flag(r, &format!("{side}_not"));
-    Some(Endpoint { net, not, port })
+    Some(not_any(ctx, at, side, Endpoint { net, not, port }))
 }
 
 fn legacy_rule<'doc>(
@@ -411,6 +469,7 @@ fn legacy_rule<'doc>(
         state_type: state,
         description: description(ctx, r, descr),
         gateway: None,
+        floating: false,
     };
     if !floating && rule.interfaces.len() != 1 {
         ctx.warn(
@@ -420,13 +479,11 @@ fn legacy_rule<'doc>(
         );
         return None;
     }
-    if floating && rule.interfaces.len() == 1 {
-        // A floating rule on one interface still sits in the floating band.
-        rule.interface_not = false;
-    }
+    // A floating rule on one interface still sits in the floating band.
+    rule.floating = floating;
     ctx.defaults(r, LEGACY_DEFAULTS);
     Some(Staged {
-        band: if floating { 200_000 } else { 400_000 },
+        band: band(&rule, out),
         origin: 1,
         key: index,
         id,
@@ -468,5 +525,22 @@ fn legacy_endpoint<'doc>(
         None => None,
     };
     let not = ctx.flag(e, "not");
-    Some(Endpoint { net, not, port })
+    Some(not_any(ctx, e, &e.name, Endpoint { net, not, port }))
+}
+
+/// OPNsense drops the inversion of `any` (`Rule::reader` only negates real
+/// addresses), so "not any" matches every address, not none. sensr imports
+/// what the box did and says so, since the rule rarely means that.
+fn not_any(ctx: &mut MapContext<'_>, at: &Element, side: &str, mut ep: Endpoint) -> Endpoint {
+    if ep.not && ep.net.is_any() {
+        ep.not = false;
+        ctx.warn(
+            at,
+            Severity::Degraded,
+            format!(
+                "{side} is \"not any\": OPNsense ignores the inversion, so this rule matches every {side} address; imported as \"any\" to keep that behaviour (check what the rule was meant to do)"
+            ),
+        );
+    }
+    ep
 }
