@@ -1,0 +1,871 @@
+{
+  "schema_version": "0.1.0",
+  "system": {
+    "hostname": "gw-home",
+    "domain": "home.example",
+    "dns_servers": [
+      "198.51.100.53",
+      "2001:db8:53::53"
+    ],
+    "dns_allow_override": false,
+    "timezone": "Europe/Amsterdam",
+    "time_servers": [
+      "ntp1.example.net",
+      "ntp2.example.net",
+      "203.0.113.123"
+    ],
+    "ipv6_allow": true,
+    "users": {
+      "c493ce95-b248-400b-a46d-6c3c647a3b08": {
+        "name": "root",
+        "uid": 0,
+        "description": "System Administrator",
+        "disabled": false,
+        "password_hash": "$2y$11$synthetic.synthetic.synthetic.synthetic.synthetic.syn",
+        "authorized_keys": [],
+        "groups": [
+          "admins"
+        ]
+      },
+      "ad13b004-842d-4643-8b69-fb20e2e619dd": {
+        "name": "automation",
+        "uid": 2000,
+        "description": "Automation (API only)",
+        "disabled": false,
+        "password_hash": "$2y$11$synthetic.synthetic.synthetic.synthetic.synthetic.syn",
+        "authorized_keys": [],
+        "groups": [
+          "admins"
+        ],
+        "api_keys": [
+          {
+            "key": "U1lOVEhFVElDIEFQSSBLRVkgLSBOT1QgQSBSRUFMIENSRURFTlRJQUwgLSBzZW5zciB0ZXN0IGNvcnB1cyAwMQ==",
+            "secret_hash": "$6$synthetic$SYNTHETIC.secret.hash.not.real.sensr.test.corpus.only.01"
+          },
+          {
+            "key": "U1lOVEhFVElDIEFQSSBLRVkgLSBOT1QgQSBSRUFMIENSRURFTlRJQUwgLSBzZW5zciB0ZXN0IGNvcnB1cyAwMg==",
+            "secret_hash": "$6$synthetic$SYNTHETIC.secret.hash.not.real.sensr.test.corpus.only.02"
+          }
+        ]
+      }
+    },
+    "groups": {
+      "00e7e130-07d9-48d3-ac07-841808c70169": {
+        "name": "admins",
+        "gid": 1999,
+        "description": "System Administrators",
+        "privileges": [
+          "page-all"
+        ]
+      }
+    },
+    "ssh": {
+      "enabled": true,
+      "port": "22",
+      "interfaces": [
+        "lan"
+      ],
+      "permit_root_login": false,
+      "password_auth": false,
+      "group": "admins"
+    }
+  },
+  "interfaces": {
+    "wan": {
+      "enabled": true,
+      "role": "wan",
+      "description": "WAN",
+      "device": "igc0",
+      "ipv4": {
+        "mode": "dhcp",
+        "use_gateway": true
+      },
+      "ipv6": {
+        "mode": "dhcp6",
+        "prefix_delegation_len": 56,
+        "send_prefix_hint": true,
+        "prefix_only": false
+      },
+      "block_private": true,
+      "block_bogons": true,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    },
+    "lan": {
+      "enabled": true,
+      "role": "lan",
+      "description": "LAN",
+      "device": "igc1",
+      "ipv4": {
+        "mode": "static",
+        "address": "192.168.1.1/24"
+      },
+      "ipv6": {
+        "mode": "track",
+        "interface": "wan",
+        "prefix_id": 0
+      },
+      "block_private": false,
+      "block_bogons": false,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    },
+    "opt1": {
+      "enabled": true,
+      "role": "lan",
+      "description": "IOT",
+      "device": "vlan01",
+      "ipv4": {
+        "mode": "static",
+        "address": "192.168.20.1/24"
+      },
+      "ipv6": {
+        "mode": "track",
+        "interface": "wan",
+        "prefix_id": 32
+      },
+      "block_private": false,
+      "block_bogons": false,
+      "qdisc": {
+        "type": "fq_codel"
+      },
+      "vlan": {
+        "parent": "igc1",
+        "tag": 20,
+        "pcp": 0,
+        "protocol": "802.1q"
+      }
+    },
+    "opt2": {
+      "enabled": true,
+      "role": "lan",
+      "description": "GUEST",
+      "device": "vlan02",
+      "ipv4": {
+        "mode": "static",
+        "address": "192.168.30.1/24"
+      },
+      "ipv6": {
+        "mode": "none"
+      },
+      "block_private": false,
+      "block_bogons": false,
+      "qdisc": {
+        "type": "fq_codel"
+      },
+      "vlan": {
+        "parent": "igc1",
+        "tag": 30,
+        "pcp": 0,
+        "protocol": "802.1q"
+      }
+    },
+    "opt3": {
+      "enabled": true,
+      "role": "other",
+      "description": "WG_ROADWARRIOR",
+      "device": "wg0",
+      "ipv4": {
+        "mode": "none"
+      },
+      "ipv6": {
+        "mode": "none"
+      },
+      "block_private": false,
+      "block_bogons": false,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    }
+  },
+  "firewall": {
+    "aliases": {
+      "be0a160c-72a0-4835-88ee-2df1e88dc142": {
+        "enabled": true,
+        "name": "NAS_HOST",
+        "content": {
+          "type": "host",
+          "entries": [
+            "192.168.1.10"
+          ]
+        },
+        "description": "Synology-style NAS on LAN",
+        "counters": false
+      },
+      "d6eb0998-efb5-4cf6-b979-8100f1948a21": {
+        "enabled": true,
+        "name": "RFC1918_NETS",
+        "content": {
+          "type": "network",
+          "entries": [
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16"
+          ]
+        },
+        "description": "All RFC 1918 ranges (guest isolation)",
+        "counters": false
+      },
+      "66fe7ad1-fa91-4983-9df6-fbd0f1b29dc0": {
+        "enabled": true,
+        "name": "IOT_NETS",
+        "content": {
+          "type": "network",
+          "entries": [
+            "192.168.20.0/24"
+          ]
+        },
+        "description": "IoT VLAN",
+        "counters": false
+      },
+      "5007086f-73fe-49d2-b151-b1d9131ed4c6": {
+        "enabled": true,
+        "name": "WEB_PORTS",
+        "content": {
+          "type": "port",
+          "entries": [
+            "80",
+            "8080"
+          ]
+        },
+        "description": "Plain HTTP ports (HTTPS handled by NAT rule)",
+        "counters": false
+      },
+      "3735bbfc-765e-4cd1-b0c2-c02e5ef28cbe": {
+        "enabled": true,
+        "name": "DROP_FEED",
+        "content": {
+          "type": "url_table",
+          "url": "https://feeds.example.net/drop.txt",
+          "refresh": {
+            "days": 1,
+            "hours": 0
+          },
+          "families": {
+            "ipv4": true,
+            "ipv6": true
+          }
+        },
+        "description": "Invented spam/drop feed",
+        "counters": false
+      },
+      "e6a7419a-7634-4580-a51b-61dc4a16edf4": {
+        "enabled": true,
+        "name": "GEO_BLOCK",
+        "content": {
+          "type": "geo_ip",
+          "countries": [
+            "ZZ"
+          ],
+          "families": {
+            "ipv4": true,
+            "ipv6": true
+          }
+        },
+        "description": "Inbound country block",
+        "counters": false
+      }
+    },
+    "rules": {
+      "8c3dc3ee-b23e-4170-af5a-5f23b2321d58": {
+        "enabled": true,
+        "sequence": 10,
+        "action": "block",
+        "quick": true,
+        "interfaces": [
+          "wan"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "alias:GEO_BLOCK",
+          "not": false
+        },
+        "destination": {
+          "net": "any",
+          "not": false
+        },
+        "log": true,
+        "state_type": "keep",
+        "description": "Block inbound from GEO_BLOCK"
+      },
+      "2064ba71-29e9-4ca4-a655-3069cd2fb19e": {
+        "enabled": true,
+        "sequence": 20,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "wan"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "udp",
+        "source": {
+          "net": "any",
+          "not": false
+        },
+        "destination": {
+          "net": "addr:wan",
+          "not": false,
+          "port": "51820"
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Allow WireGuard"
+      },
+      "1aac7ca4-2950-47cf-af32-f24f076f55a2": {
+        "enabled": true,
+        "sequence": 30,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "lan"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "net:lan",
+          "not": false
+        },
+        "destination": {
+          "net": "any",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Default allow LAN to any rule"
+      },
+      "7fea0ed1-647a-4a21-ad39-b58e286fffa4": {
+        "enabled": true,
+        "sequence": 40,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "lan"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet6",
+        "protocol": "any",
+        "source": {
+          "net": "net:lan",
+          "not": false
+        },
+        "destination": {
+          "net": "any",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Default allow LAN IPv6 to any rule"
+      },
+      "bf449e1e-69ca-44ef-a21f-104e3a575460": {
+        "enabled": true,
+        "sequence": 50,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "opt1"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "tcp/udp",
+        "source": {
+          "net": "net:opt1",
+          "not": false
+        },
+        "destination": {
+          "net": "addr:opt1",
+          "not": false,
+          "port": "53"
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "IoT: allow DNS to firewall"
+      },
+      "6b5af314-ed14-4fe2-bc30-d6da7a0d48ac": {
+        "enabled": true,
+        "sequence": 60,
+        "action": "block",
+        "quick": true,
+        "interfaces": [
+          "opt1"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "net:opt1",
+          "not": false
+        },
+        "destination": {
+          "net": "net:lan",
+          "not": false
+        },
+        "log": true,
+        "state_type": "keep",
+        "description": "IoT: block access to LAN"
+      },
+      "78acdbe1-999a-4cee-a55d-30c5cec58707": {
+        "enabled": true,
+        "sequence": 70,
+        "action": "block",
+        "quick": true,
+        "interfaces": [
+          "opt1"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "net:opt1",
+          "not": false
+        },
+        "destination": {
+          "net": "alias:DROP_FEED",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "IoT: block DROP_FEED destinations"
+      },
+      "e3d0f852-1cea-4e20-9ad7-cbe26eee9ad7": {
+        "enabled": true,
+        "sequence": 80,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "opt1"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "net:opt1",
+          "not": false
+        },
+        "destination": {
+          "net": "any",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "IoT: allow internet"
+      },
+      "ebd5ccfb-e396-4732-bc44-0f87bb45f5f7": {
+        "enabled": true,
+        "sequence": 90,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "opt3"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "net:opt3",
+          "not": false
+        },
+        "destination": {
+          "net": "net:lan",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Road warriors to LAN"
+      },
+      "cf87b7c6-ccf9-4131-ac97-f2497b1370c2": {
+        "enabled": true,
+        "sequence": 100,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "opt3"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "tcp",
+        "source": {
+          "net": "net:opt3",
+          "not": false
+        },
+        "destination": {
+          "net": "alias:NAS_HOST",
+          "not": false,
+          "port": "alias:WEB_PORTS"
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Road warriors to NAS web ports"
+      },
+      "ab1bbef5-9d70-4722-894c-4e0ef251e651": {
+        "enabled": true,
+        "sequence": 110,
+        "action": "block",
+        "quick": true,
+        "interfaces": [
+          "opt2"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "net:opt2",
+          "not": false
+        },
+        "destination": {
+          "net": "alias:RFC1918_NETS",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Guest isolation: block access to private networks"
+      },
+      "7fdf1e38-9c02-4739-9175-2108029af84a": {
+        "enabled": true,
+        "sequence": 120,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "opt2"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "tcp/udp",
+        "source": {
+          "net": "net:opt2",
+          "not": false
+        },
+        "destination": {
+          "net": "addr:opt2",
+          "not": false,
+          "port": "53"
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Guest: allow DNS to firewall"
+      },
+      "3f71ffc8-0a4b-4596-b1ff-22382acc4598": {
+        "enabled": true,
+        "sequence": 130,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "opt2"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "net:opt2",
+          "not": false
+        },
+        "destination": {
+          "net": "any",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Guest: allow internet"
+      }
+    },
+    "settings": {
+      "anti_lockout": true,
+      "log_default_block": true,
+      "log_default_pass": true,
+      "flow_offload": false
+    }
+  },
+  "nat": {
+    "outbound": {
+      "mode": "hybrid",
+      "rules": {
+        "7d2b8cc7-2217-4d32-b029-3ba292c7751e": {
+          "enabled": true,
+          "no_nat": false,
+          "sequence": 10,
+          "interface": "wan",
+          "ip_protocol": "inet",
+          "protocol": "any",
+          "source": {
+            "net": "10.10.10.0/24",
+            "not": false
+          },
+          "destination": {
+            "net": "any",
+            "not": false
+          },
+          "target": "addr:wan",
+          "static_port": false,
+          "log": false,
+          "description": "Road warrior tunnel out via WAN"
+        }
+      }
+    },
+    "port_forwards": {
+      "fc2c1c65-ad69-489b-967c-8ff95e8f2f80": {
+        "enabled": true,
+        "sequence": 1,
+        "no_rdr": false,
+        "interfaces": [
+          "wan"
+        ],
+        "ip_protocol": "inet",
+        "protocol": "tcp",
+        "source": {
+          "net": "any",
+          "not": false
+        },
+        "destination": {
+          "net": "addr:wan",
+          "not": false,
+          "port": "443"
+        },
+        "target": "alias:NAS_HOST",
+        "target_port": "443",
+        "log": false,
+        "description": "HTTPS to NAS reverse proxy",
+        "reflection": "purenat",
+        "filter": "pass"
+      }
+    },
+    "reflection": {
+      "port_forwards": true,
+      "source_nat": true
+    }
+  },
+  "dhcpv4": {
+    "enabled": true,
+    "interfaces": [
+      "lan",
+      "opt1",
+      "opt2"
+    ],
+    "valid_lifetime": 4000,
+    "firewall_rules": true,
+    "subnets": {
+      "13bd4fc8-a09b-4bc7-a6b4-026ebf8ad3e3": {
+        "subnet": "192.168.1.0/24",
+        "description": "LAN clients",
+        "interface": "lan",
+        "pools": [
+          "192.168.1.100-192.168.1.199"
+        ],
+        "auto_options": false,
+        "options": {
+          "routers": [
+            "192.168.1.1"
+          ],
+          "dns_servers": [
+            "192.168.1.1"
+          ],
+          "domain_name": "home.example",
+          "ntp_servers": [
+            "192.168.1.1"
+          ]
+        },
+        "match_client_id": true
+      },
+      "c93638c0-fa84-4957-bb2a-a6d76374ba6e": {
+        "subnet": "192.168.20.0/24",
+        "description": "IoT devices",
+        "interface": "opt1",
+        "pools": [
+          "192.168.20.100-192.168.20.250"
+        ],
+        "auto_options": false,
+        "options": {
+          "routers": [
+            "192.168.20.1"
+          ],
+          "dns_servers": [
+            "192.168.20.1"
+          ],
+          "domain_name": "iot.home.example",
+          "ntp_servers": [
+            "192.168.20.1"
+          ]
+        },
+        "match_client_id": true
+      },
+      "206aa398-4cb1-4037-b116-8f96c9d95d73": {
+        "subnet": "192.168.30.0/24",
+        "description": "Guest WiFi",
+        "interface": "opt2",
+        "pools": [
+          "192.168.30.50-192.168.30.120",
+          "192.168.30.150-192.168.30.200"
+        ],
+        "auto_options": false,
+        "options": {
+          "routers": [
+            "192.168.30.1"
+          ],
+          "dns_servers": [
+            "192.168.30.1"
+          ],
+          "domain_name": "guest.home.example",
+          "ntp_servers": [
+            "192.168.30.1"
+          ]
+        },
+        "match_client_id": true
+      }
+    },
+    "reservations": {
+      "adc3e186-0fa1-4cb1-b6c6-734eca7e5224": {
+        "subnet": "13bd4fc8-a09b-4bc7-a6b4-026ebf8ad3e3",
+        "client": {
+          "hw_address": "02:00:5e:10:00:0a"
+        },
+        "ip_address": "192.168.1.10",
+        "hostname": "nas",
+        "description": "NAS"
+      },
+      "f6ee40db-5e49-4ff9-8d20-258ef9ee3df0": {
+        "subnet": "13bd4fc8-a09b-4bc7-a6b4-026ebf8ad3e3",
+        "client": {
+          "hw_address": "02:00:5e:10:00:14"
+        },
+        "ip_address": "192.168.1.20",
+        "hostname": "logbox",
+        "description": "Log collector / syslog"
+      },
+      "58c9a788-0a18-4079-84f7-f00673f56d26": {
+        "subnet": "c93638c0-fa84-4957-bb2a-a6d76374ba6e",
+        "client": {
+          "hw_address": "02:00:5e:20:00:0a"
+        },
+        "ip_address": "192.168.20.10",
+        "hostname": "thermostat",
+        "description": "Heating controller"
+      }
+    }
+  },
+  "dns": {
+    "enabled": true,
+    "port": "53",
+    "listen_interfaces": [],
+    "outgoing_interfaces": [],
+    "dnssec": true,
+    "dns64": false,
+    "register_dhcp_leases": true,
+    "register_dhcp_static": true,
+    "dhcp_domain": "home.example",
+    "local_zone_type": "transparent",
+    "forwarding": {
+      "use_system_servers": false,
+      "servers": {
+        "7722ecb9-a490-4b25-8a59-11b7a65c1cbd": {
+          "enabled": true,
+          "domain": "corp.example.com",
+          "address": "10.40.0.53",
+          "port": "53",
+          "description": "Work domain over site VPN"
+        },
+        "4017e280-233a-4bb8-8921-6a30f07bde12": {
+          "enabled": true,
+          "address": "203.0.113.53",
+          "port": "853",
+          "tls_name": "dns.example.net",
+          "description": "Encrypted upstream resolver"
+        }
+      }
+    },
+    "host_overrides": {
+      "820e8423-9d51-4625-94e1-1094a60d4dc0": {
+        "enabled": true,
+        "hostname": "nas",
+        "domain": "home.example",
+        "record": {
+          "rr": "A",
+          "address": "192.168.1.10"
+        },
+        "description": "NAS"
+      },
+      "bb24e45c-eddb-433e-a9da-4b8b92469713": {
+        "enabled": true,
+        "hostname": "cloud",
+        "domain": "home.example",
+        "record": {
+          "rr": "A",
+          "address": "192.168.1.10"
+        },
+        "description": "Split-horizon for the NAS proxy"
+      },
+      "07ce2f4f-e828-4eea-b9b2-53fbc78a39e1": {
+        "enabled": true,
+        "hostname": "gw-home",
+        "domain": "home.example",
+        "record": {
+          "rr": "A",
+          "address": "192.168.1.1"
+        },
+        "description": "Router GUI"
+      }
+    }
+  },
+  "wireguard": {
+    "enabled": true,
+    "servers": {
+      "b0f47197-dacd-43c1-ad57-5dc0649126d3": {
+        "enabled": true,
+        "name": "roadwarrior",
+        "instance": 0,
+        "public_key": "U1lOVEhFVElDLVdHLXNydi1wdWItTk9ULUEtUkVBTC0=",
+        "private_key": "U1lOVEhFVElDLVdHLXNydi1wcml2LU5PVC1BLVJFQUw=",
+        "listen_port": "51820",
+        "dns": [
+          "192.168.1.1"
+        ],
+        "tunnel_addresses": [
+          "10.10.10.1/24",
+          "2001:db8:10::1/64"
+        ],
+        "disable_routes": false,
+        "peers": [
+          "6df6330a-0cd5-4702-8527-04771aa9d231",
+          "d21c7ef8-0f63-4f40-9fd8-e305d2986a7c"
+        ]
+      }
+    },
+    "peers": {
+      "6df6330a-0cd5-4702-8527-04771aa9d231": {
+        "enabled": true,
+        "name": "phone",
+        "public_key": "U1lOVEhFVElDLVdHLXBob25lLXB1Yi1OT1QtQS1SRUE=",
+        "preshared_key": "U1lOVEhFVElDLVdHLXBob25lLXBzay1OT1QtQS1SRUE=",
+        "allowed_ips": [
+          "10.10.10.2/32"
+        ],
+        "keepalive": 25
+      },
+      "d21c7ef8-0f63-4f40-9fd8-e305d2986a7c": {
+        "enabled": true,
+        "name": "laptop",
+        "public_key": "U1lOVEhFVElDLVdHLWxhcHRvcC1wdWItTk9ULUEtUkU=",
+        "allowed_ips": [
+          "10.10.10.3/32",
+          "2001:db8:10::3/128"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,113 @@
+# sensr import report
+
+## mapped (29)
+/opnsense/system  <- system
+/opnsense/vlans  <- interfaces
+/opnsense/interfaces  <- interfaces
+/opnsense/OPNsense/Firewall/Alias  <- firewall-alias
+/opnsense/filter/rule[@uuid='ab1bbef5-9d70-4722-894c-4e0ef251e651']  <- filter
+/opnsense/filter/rule[@uuid='7fdf1e38-9c02-4739-9175-2108029af84a']  <- filter
+/opnsense/filter/rule[@uuid='3f71ffc8-0a4b-4596-b1ff-22382acc4598']  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='2064ba71-29e9-4ca4-a655-3069cd2fb19e']  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='8c3dc3ee-b23e-4170-af5a-5f23b2321d58']  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='1aac7ca4-2950-47cf-af32-f24f076f55a2']  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='7fea0ed1-647a-4a21-ad39-b58e286fffa4']  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='bf449e1e-69ca-44ef-a21f-104e3a575460']  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='6b5af314-ed14-4fe2-bc30-d6da7a0d48ac']  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='78acdbe1-999a-4cee-a55d-30c5cec58707']  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='e3d0f852-1cea-4e20-9ad7-cbe26eee9ad7']  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='ebd5ccfb-e396-4732-bc44-0f87bb45f5f7']  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='cf87b7c6-ccf9-4131-ac97-f2497b1370c2']  <- filter
+/opnsense/OPNsense/Firewall/Filter/general  <- filter
+/opnsense/OPNsense/Firewall/Filter/npt  <- filter
+/opnsense/OPNsense/Firewall/Filter/onetoone  <- filter
+/opnsense/filter  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules  <- filter
+/opnsense/OPNsense/Firewall/Filter/snatrules  <- filter
+/opnsense/nat/outbound  <- nat
+/opnsense/nat/rule[@uuid='fc2c1c65-ad69-489b-967c-8ff95e8f2f80']  <- nat
+/opnsense/OPNsense/Firewall/Filter/snatrules/rule[@uuid='7d2b8cc7-2217-4d32-b029-3ba292c7751e']  <- nat
+/opnsense/OPNsense/Kea/dhcp4  <- kea-dhcp4
+/opnsense/OPNsense/unboundplus  <- unbound
+/opnsense/OPNsense/wireguard  <- wireguard
+
+## unmapped, expected (67)
+/opnsense/theme  (web GUI theme)
+/opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
+/opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
+/opnsense/system/dnsallowoverride_exclude  (per-interface DNS override exclusion is not modelled yet)
+/opnsense/system/user[@uuid='c493ce95-b248-400b-a46d-6c3c647a3b08']/pwd_changed_at  (password age bookkeeping; sensr tracks its own)
+/opnsense/system/user[@uuid='c493ce95-b248-400b-a46d-6c3c647a3b08']/landing_page  (web GUI landing page)
+/opnsense/system/user[@uuid='c493ce95-b248-400b-a46d-6c3c647a3b08']/comment  (user comments are not modelled yet)
+/opnsense/system/user[@uuid='c493ce95-b248-400b-a46d-6c3c647a3b08']/email  (user e-mail addresses are not modelled yet)
+/opnsense/system/user[@uuid='c493ce95-b248-400b-a46d-6c3c647a3b08']/language  (web GUI language)
+/opnsense/system/user[@uuid='c493ce95-b248-400b-a46d-6c3c647a3b08']/dashboard  (web GUI dashboard layout)
+/opnsense/system/user[@uuid='c493ce95-b248-400b-a46d-6c3c647a3b08']/menu_favorites  (web GUI menu favourites)
+/opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/pwd_changed_at  (password age bookkeeping; sensr tracks its own)
+/opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/landing_page  (web GUI landing page)
+/opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/comment  (user comments are not modelled yet)
+/opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/email  (user e-mail addresses are not modelled yet)
+/opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/language  (web GUI language)
+/opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/dashboard  (web GUI dashboard layout)
+/opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/menu_favorites  (web GUI menu favourites)
+/opnsense/system/webgui  (web GUI listener settings are not modelled yet)
+/opnsense/system/usevirtualterminal  (FreeBSD console setting)
+/opnsense/system/disableconsolemenu  (the sensr console menu has its own setting)
+/opnsense/system/powerd_ac_mode  (FreeBSD powerd; CPU frequency scaling is a NixOS concern)
+/opnsense/system/powerd_battery_mode  (FreeBSD powerd; CPU frequency scaling is a NixOS concern)
+/opnsense/system/powerd_normal_mode  (FreeBSD powerd; CPU frequency scaling is a NixOS concern)
+/opnsense/system/bogons  (bogon list update interval; sensr ships bogon lists with the system)
+/opnsense/system/pf_share_forward  (pf-specific forwarding option)
+/opnsense/system/lb_use_sticky  (pf load-balancing stickiness)
+/opnsense/system/ssh/noauto  (install-media SSH autostart; not applicable)
+/opnsense/system/language  (web GUI language)
+/opnsense/system/prefer_ipv4  (FreeBSD resolver preference)
+/opnsense/system/backupcount  (OPNsense backup retention; sensr keeps every revision)
+/opnsense/system/firmware  (FreeBSD package mirror and plugin selection; sensr updates through NixOS generations)
+/opnsense/interfaces/opt3/lock  (web GUI deletion lock)
+/opnsense/nat/rule[@uuid='fc2c1c65-ad69-489b-967c-8ff95e8f2f80']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/filter/rule[@uuid='ab1bbef5-9d70-4722-894c-4e0ef251e651']/updated  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/filter/rule[@uuid='ab1bbef5-9d70-4722-894c-4e0ef251e651']/created  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/filter/rule[@uuid='7fdf1e38-9c02-4739-9175-2108029af84a']/updated  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/filter/rule[@uuid='7fdf1e38-9c02-4739-9175-2108029af84a']/created  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/filter/rule[@uuid='3f71ffc8-0a4b-4596-b1ff-22382acc4598']/updated  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/filter/rule[@uuid='3f71ffc8-0a4b-4596-b1ff-22382acc4598']/created  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/rrd  (RRD graphs are replaced by sensr-monitor)
+/opnsense/ntpd  (NTP server preferences are not modelled yet (system.time_servers is imported))
+/opnsense/revision  (OPNsense revision metadata; sensr keeps its own revision history)
+/opnsense/OPNsense/Firewall/Alias/geoip  (GeoIP database source is not modelled yet)
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='2064ba71-29e9-4ca4-a655-3069cd2fb19e']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='8c3dc3ee-b23e-4170-af5a-5f23b2321d58']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='1aac7ca4-2950-47cf-af32-f24f076f55a2']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='7fea0ed1-647a-4a21-ad39-b58e286fffa4']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='bf449e1e-69ca-44ef-a21f-104e3a575460']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='6b5af314-ed14-4fe2-bc30-d6da7a0d48ac']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='78acdbe1-999a-4cee-a55d-30c5cec58707']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='e3d0f852-1cea-4e20-9ad7-cbe26eee9ad7']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='ebd5ccfb-e396-4732-bc44-0f87bb45f5f7']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='cf87b7c6-ccf9-4131-ac97-f2497b1370c2']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/snatrules/rule[@uuid='7d2b8cc7-2217-4d32-b029-3ba292c7751e']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Gateways  (gateways are derived from interface addressing; monitoring is not modelled yet)
+/opnsense/OPNsense/wireguard/server/servers/server[@uuid='b0f47197-dacd-43c1-ad57-5dc0649126d3']/endpoint  (client-export defaults are not modelled yet)
+/opnsense/OPNsense/wireguard/server/servers/server[@uuid='b0f47197-dacd-43c1-ad57-5dc0649126d3']/allowed_ips  (client-export defaults are not modelled yet)
+/opnsense/OPNsense/Kea/dhcp4/lexpire  (Kea lease expiry tuning is not modelled yet)
+/opnsense/OPNsense/Kea/dhcp4/ha  (Kea high availability is not modelled yet)
+/opnsense/OPNsense/unboundplus/advanced  (Unbound tuning options are not modelled yet)
+/opnsense/OPNsense/unboundplus/acls  (Unbound access lists are not modelled yet)
+/opnsense/OPNsense/unboundplus/dnsbl  (DNS blocklists are not modelled yet)
+/opnsense/OPNsense/Syslog  (remote syslog is not modelled yet)
+/opnsense/OPNsense/trust  (trust store settings are not modelled yet)
+/opnsense/ca[@uuid='9a7d8f90-ce35-4ce7-ae7f-952ebd95d44d']  (certificate authorities are not modelled yet)
+/opnsense/cert[@uuid='93927b01-1517-45dd-8864-cb9cd2f776c6']  (certificates are not modelled yet)
+
+## unmapped, unexpected (0)
+
+## warnings (8)
+[info] /opnsense/vlans/vlan[@uuid='78d28b0c-3b6b-412b-97a4-fc677035f0ce']/if: device igc1 keeps its OPNsense name; assign the Linux device during installation
+[info] /opnsense/vlans/vlan[@uuid='111560fa-0299-4d15-8a75-07ff21a3bb53']/if: device igc1 keeps its OPNsense name; assign the Linux device during installation
+[info] /opnsense/interfaces/lo0: dynamic interface lo0 is not imported
+[info] /opnsense/interfaces/wireguard: dynamic interface wireguard is not imported
+[info] /opnsense/interfaces/wan/if: device igc0 keeps its OPNsense name; assign the Linux device during installation
+[info] /opnsense/interfaces/lan/if: device igc1 keeps its OPNsense name; assign the Linux device during installation
+[degraded] /opnsense/interfaces/wan/dhcp6_norequest_dns: "do not request DNS" is not modelled; DHCPv6-supplied DNS servers follow system.dns_allow_override
+[info] /opnsense/nat/rule[@uuid='fc2c1c65-ad69-489b-967c-8ff95e8f2f80']: OPNsense registers a filter rule for this forward at load time; sensr passes the forwarded traffic implicitly

@@ -89,6 +89,16 @@ impl<'doc> MapContext<'doc> {
         self.whole.insert(id(e));
     }
 
+    /// Undo every consumption in `e`'s subtree, so an item a mapper gave up on is
+    /// reported whole as unmapped instead of half-mapped.
+    pub fn release(&mut self, e: &Element) {
+        self.consumed.remove(&id(e));
+        self.whole.remove(&id(e));
+        for c in e.elements() {
+            self.release(c);
+        }
+    }
+
     /// The first child named `name`, marked as mapped.
     pub fn child(&mut self, parent: &'doc Element, name: &str) -> Option<&'doc Element> {
         let c = parent.child(name)?;
@@ -117,10 +127,11 @@ impl<'doc> MapContext<'doc> {
         self.text(parent, name).filter(|t| !t.is_empty())
     }
 
-    /// A legacy presence flag: `<enable/>` or `<enable>anything</enable>` means true,
-    /// absence means false (the `isset()` semantics of legacy pages).
+    /// A legacy flag: present means true (`isset()`, so `<enable/>` is true), except
+    /// an explicit `0`, which the pages that test with `empty()` treat as false and
+    /// newer pages write for "off".
     pub fn flag(&mut self, parent: &'doc Element, name: &str) -> bool {
-        self.text(parent, name).is_some()
+        self.text(parent, name).is_some_and(|t| t.trim() != "0")
     }
 
     /// An MVC boolean: `1` is true, anything else (including absence) false.
@@ -150,6 +161,24 @@ impl<'doc> MapContext<'doc> {
                     format!("value {text:?} not imported: {e}"),
                 );
                 None
+            }
+        }
+    }
+
+    /// Consume the listed leaves of `parent` when they hold their default (empty, or
+    /// the given text). A leaf with any other value stays unconsumed and so surfaces
+    /// in the report: sensr has no equivalent for it, and a non-default setting must
+    /// never vanish quietly.
+    pub fn defaults(&mut self, parent: &'doc Element, fields: &[(&str, &str)]) {
+        for (name, default) in fields {
+            for c in parent.elements().filter(|e| e.name == *name) {
+                if c.has_element_children() {
+                    continue;
+                }
+                let text = c.text();
+                if text.trim().is_empty() || text == *default {
+                    self.consume_subtree(c);
+                }
             }
         }
     }

@@ -1,0 +1,363 @@
+{
+  "schema_version": "0.1.0",
+  "system": {
+    "hostname": "edge01",
+    "domain": "office.example.com",
+    "dns_servers": [
+      "198.51.100.53",
+      "192.0.2.53"
+    ],
+    "dns_allow_override": false,
+    "timezone": "America/New_York",
+    "time_servers": [
+      "ntp1.example.net",
+      "ntp2.example.net"
+    ],
+    "ipv6_allow": true,
+    "users": {
+      "03c6af4c-3057-47b1-bd5c-98545a86db16": {
+        "name": "root",
+        "uid": 0,
+        "description": "System Administrator",
+        "disabled": false,
+        "password_hash": "$2y$11$synthetic.synthetic.synthetic.synthetic.synthetic.syn",
+        "authorized_keys": [],
+        "groups": [
+          "admins"
+        ]
+      }
+    },
+    "groups": {
+      "00e7e130-07d9-48d3-ac07-841808c70169": {
+        "name": "admins",
+        "gid": 1999,
+        "description": "System Administrators",
+        "privileges": [
+          "page-all"
+        ]
+      }
+    },
+    "ssh": {
+      "enabled": false,
+      "port": "22",
+      "interfaces": [],
+      "permit_root_login": false,
+      "password_auth": false,
+      "group": "admins"
+    }
+  },
+  "interfaces": {
+    "wan": {
+      "enabled": true,
+      "role": "wan",
+      "description": "WAN_CABLE",
+      "device": "igc0",
+      "ipv4": {
+        "mode": "dhcp",
+        "use_gateway": true
+      },
+      "ipv6": {
+        "mode": "none"
+      },
+      "block_private": true,
+      "block_bogons": true,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    },
+    "lan": {
+      "enabled": true,
+      "role": "lan",
+      "description": "LAN",
+      "device": "igc1",
+      "ipv4": {
+        "mode": "static",
+        "address": "192.168.10.1/24"
+      },
+      "ipv6": {
+        "mode": "track",
+        "interface": "wan",
+        "prefix_id": 0
+      },
+      "block_private": false,
+      "block_bogons": false,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    },
+    "opt1": {
+      "enabled": true,
+      "role": "lan",
+      "description": "WAN_FIBER",
+      "device": "igc2",
+      "ipv4": {
+        "mode": "static",
+        "address": "198.51.100.2/30"
+      },
+      "ipv6": {
+        "mode": "none"
+      },
+      "block_private": true,
+      "block_bogons": true,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    },
+    "opt2": {
+      "enabled": true,
+      "role": "lan",
+      "description": "VOICE",
+      "device": "igc1_vlan50",
+      "ipv4": {
+        "mode": "static",
+        "address": "192.168.50.1/24"
+      },
+      "ipv6": {
+        "mode": "none"
+      },
+      "block_private": false,
+      "block_bogons": false,
+      "qdisc": {
+        "type": "fq_codel"
+      },
+      "vlan": {
+        "parent": "igc1",
+        "tag": 50,
+        "pcp": 0,
+        "protocol": "802.1q"
+      }
+    }
+  },
+  "firewall": {
+    "aliases": {
+      "0203b514-3468-4730-90c7-eabcaaf208e1": {
+        "enabled": true,
+        "name": "LOCAL_NETS",
+        "content": {
+          "type": "network",
+          "entries": [
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16"
+          ]
+        },
+        "description": "Everything that must not be policy routed",
+        "counters": false
+      }
+    },
+    "rules": {
+      "2a511d4c-7829-427a-af2e-305619a096d2": {
+        "enabled": true,
+        "sequence": 10,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "opt2"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "net:opt2",
+          "not": false
+        },
+        "destination": {
+          "net": "any",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Voice VLAN via cable first"
+      },
+      "5ea88d07-4999-4bf5-8ac8-567ccb2bb10a": {
+        "enabled": true,
+        "sequence": 20,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "lan"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "net:lan",
+          "not": false
+        },
+        "destination": {
+          "net": "alias:LOCAL_NETS",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "LAN to local networks (no policy routing)"
+      },
+      "364f3330-5d7a-494f-a6c9-63c1dbbebcbb": {
+        "enabled": true,
+        "sequence": 30,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "lan"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet",
+        "protocol": "any",
+        "source": {
+          "net": "net:lan",
+          "not": false
+        },
+        "destination": {
+          "net": "any",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "LAN to internet via failover group"
+      },
+      "b7d2074a-8644-4801-9415-009bcd75f9bc": {
+        "enabled": true,
+        "sequence": 40,
+        "action": "pass",
+        "quick": true,
+        "interfaces": [
+          "lan"
+        ],
+        "interface_not": false,
+        "direction": "in",
+        "ip_protocol": "inet6",
+        "protocol": "any",
+        "source": {
+          "net": "net:lan",
+          "not": false
+        },
+        "destination": {
+          "net": "any",
+          "not": false
+        },
+        "log": false,
+        "state_type": "keep",
+        "description": "Default allow LAN IPv6 to any rule"
+      }
+    },
+    "settings": {
+      "anti_lockout": true,
+      "log_default_block": true,
+      "log_default_pass": true,
+      "flow_offload": false
+    }
+  },
+  "nat": {
+    "outbound": {
+      "mode": "automatic",
+      "rules": {}
+    },
+    "port_forwards": {},
+    "reflection": {
+      "port_forwards": false,
+      "source_nat": false
+    }
+  },
+  "dhcpv4": {
+    "enabled": true,
+    "interfaces": [
+      "lan",
+      "opt2"
+    ],
+    "valid_lifetime": 4000,
+    "firewall_rules": true,
+    "subnets": {
+      "20494acb-ee11-4323-9fed-4fc48372b4b2": {
+        "subnet": "192.168.10.0/24",
+        "description": "Office LAN",
+        "interface": "lan",
+        "pools": [
+          "192.168.10.100-192.168.10.200"
+        ],
+        "auto_options": false,
+        "options": {
+          "routers": [
+            "192.168.10.1"
+          ],
+          "dns_servers": [
+            "192.168.10.1"
+          ],
+          "domain_name": "office.example.com",
+          "ntp_servers": [
+            "192.168.10.1"
+          ]
+        },
+        "match_client_id": true
+      },
+      "2d302e1b-56ab-47c2-8fd9-9283c090be9c": {
+        "subnet": "192.168.50.0/24",
+        "description": "Desk phones",
+        "interface": "opt2",
+        "pools": [
+          "192.168.50.20-192.168.50.99"
+        ],
+        "auto_options": false,
+        "options": {
+          "routers": [
+            "192.168.50.1"
+          ],
+          "dns_servers": [
+            "192.168.50.1"
+          ],
+          "domain_name": "office.example.com",
+          "ntp_servers": [
+            "192.168.50.1"
+          ]
+        },
+        "match_client_id": true
+      }
+    },
+    "reservations": {
+      "3a49c56b-c22a-41c9-8d8b-a01cbd4505f4": {
+        "subnet": "2d302e1b-56ab-47c2-8fd9-9283c090be9c",
+        "client": {
+          "hw_address": "02:00:5e:50:00:05"
+        },
+        "ip_address": "192.168.50.5",
+        "hostname": "pbx",
+        "description": "IP PBX"
+      }
+    }
+  },
+  "dns": {
+    "enabled": true,
+    "port": "53",
+    "listen_interfaces": [],
+    "outgoing_interfaces": [],
+    "dnssec": true,
+    "dns64": false,
+    "register_dhcp_leases": true,
+    "register_dhcp_static": true,
+    "dhcp_domain": "office.example.com",
+    "local_zone_type": "transparent",
+    "forwarding": {
+      "use_system_servers": false,
+      "servers": {}
+    },
+    "host_overrides": {
+      "51ce70ee-ce20-4898-be9f-7a6f8ecd359d": {
+        "enabled": true,
+        "hostname": "pbx",
+        "domain": "office.example.com",
+        "record": {
+          "rr": "A",
+          "address": "192.168.50.5"
+        },
+        "description": "PBX"
+      }
+    }
+  },
+  "wireguard": {
+    "enabled": false,
+    "servers": {},
+    "peers": {}
+  }
+}
