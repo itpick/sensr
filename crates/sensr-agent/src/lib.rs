@@ -11,6 +11,7 @@ pub mod agent;
 pub mod applier;
 pub mod auth;
 pub mod diff;
+pub mod redact;
 pub mod store;
 pub mod systemd;
 
