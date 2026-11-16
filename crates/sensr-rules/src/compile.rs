@@ -17,6 +17,7 @@
 //!   (07-performance-evaluation: 1,000 linear rules cost 44 % of the
 //!   connection rate).
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
 
@@ -627,9 +628,9 @@ fn push_verdicts<'a>(rule: &'a FilterRule, matches: Vec<Match>, out: &mut Vec<Lo
 
 /// A compiled chain element.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Item<'a> {
-    /// one linear rule
-    Rule(Low<'a>),
+pub enum Item<'l, 'a> {
+    /// one linear rule (owned only when set merging changed it)
+    Rule(Cow<'l, Low<'a>>),
     /// one verdict-map lookup standing for a run of rules
     Vmap {
         /// key fields, in order
@@ -667,23 +668,23 @@ fn shape(low: &Low<'_>) -> Option<Vec<Field>> {
 }
 
 /// Compiles a chain's lowered rules (already in evaluation order).
-pub fn compile_chain<'a>(lows: Vec<Low<'a>>, opts: ChainOptions) -> Vec<Item<'a>> {
-    let mut items: Vec<Item<'a>> = Vec::new();
+pub fn compile_chain<'l, 'a>(lows: &[&'l Low<'a>], opts: ChainOptions) -> Vec<Item<'l, 'a>> {
+    let mut items: Vec<Item<'l, 'a>> = Vec::new();
     let mut i = 0;
     while i < lows.len() {
-        let Some(sh) = shape(&lows[i]) else {
-            items.push(Item::Rule(lows[i].clone()));
+        let Some(sh) = shape(lows[i]) else {
+            items.push(Item::Rule(Cow::Borrowed(lows[i])));
             i += 1;
             continue;
         };
         let mut j = i + 1;
-        while j < lows.len() && shape(&lows[j]).as_ref() == Some(&sh) {
+        while j < lows.len() && shape(lows[j]).as_ref() == Some(&sh) {
             j += 1;
         }
         if j - i >= opts.vmap_min {
             vmap_runs(&lows[i..j], sh, opts, &mut items);
         } else {
-            items.extend(lows[i..j].iter().cloned().map(Item::Rule));
+            items.extend(lows[i..j].iter().map(|l| Item::Rule(Cow::Borrowed(*l))));
         }
         i = j;
     }
@@ -692,7 +693,12 @@ pub fn compile_chain<'a>(lows: Vec<Low<'a>>, opts: ChainOptions) -> Vec<Item<'a>
 
 /// Turns one same-shape run into verdict maps, starting a new map whenever an
 /// element overlaps an earlier one (first match must stay first).
-fn vmap_runs<'a>(run: &[Low<'a>], fields: Vec<Field>, opts: ChainOptions, out: &mut Vec<Item<'a>>) {
+fn vmap_runs<'l, 'a>(
+    run: &[&'l Low<'a>],
+    fields: Vec<Field>,
+    opts: ChainOptions,
+    out: &mut Vec<Item<'l, 'a>>,
+) {
     // Fields exact in every element bucket the overlap search: two keys that
     // differ in an exact field can never overlap.
     let exact: Vec<bool> = (0..fields.len())
@@ -704,7 +710,7 @@ fn vmap_runs<'a>(run: &[Low<'a>], fields: Vec<Field>, opts: ChainOptions, out: &
     let flush = |entries: &mut Vec<(Vec<Val>, Verdict)>,
                  from: usize,
                  to: usize,
-                 out: &mut Vec<Item<'a>>| {
+                 out: &mut Vec<Item<'l, 'a>>| {
         if entries.len() >= opts.vmap_min {
             out.push(Item::Vmap {
                 fields: fields.clone(),
@@ -712,7 +718,7 @@ fn vmap_runs<'a>(run: &[Low<'a>], fields: Vec<Field>, opts: ChainOptions, out: &
                 labels: (run[from].label, run[to - 1].label),
             });
         } else {
-            out.extend(run[from..to].iter().cloned().map(Item::Rule));
+            out.extend(run[from..to].iter().map(|l| Item::Rule(Cow::Borrowed(*l))));
             entries.clear();
         }
     };
@@ -763,15 +769,15 @@ fn spans_overlap(a: (u128, u128), b: (u128, u128)) -> bool {
 
 /// Merges consecutive rules that differ only in one keyable value into an
 /// anonymous-set match. Same verdict, so union is exact for first-match.
-fn merge_sets(items: Vec<Item<'_>>) -> Vec<Item<'_>> {
-    let mut out: Vec<Item<'_>> = Vec::with_capacity(items.len());
+fn merge_sets<'l, 'a>(items: Vec<Item<'l, 'a>>) -> Vec<Item<'l, 'a>> {
+    let mut out: Vec<Item<'l, 'a>> = Vec::with_capacity(items.len());
     for item in items {
         if let (Some(Item::Rule(prev)), Item::Rule(cur)) = (out.last_mut(), &item)
             && let Some(k) = single_difference(prev, cur)
         {
             {
                 let add = cur.matches[k].val.clone();
-                let slot = &mut prev.matches[k].val;
+                let slot = &mut prev.to_mut().matches[k].val;
                 match slot {
                     Val::Set(v) => {
                         if !v.contains(&add) {
@@ -861,7 +867,7 @@ mod tests {
         lows.iter().find(|l| low_matches(l, p)).map(|l| l.verdict)
     }
 
-    fn compiled(items: &[Item<'_>], p: &Pkt) -> Option<Verdict> {
+    fn compiled(items: &[Item<'_, '_>], p: &Pkt) -> Option<Verdict> {
         for it in items {
             match it {
                 Item::Rule(l) => {
@@ -966,7 +972,8 @@ mod tests {
             pkts in proptest::collection::vec(arb_pkt(), 32),
             vmap_min in 2usize..10,
         ) {
-            let items = compile_chain(lows.clone(), ChainOptions { vmap_min });
+            let refs: Vec<&Low<'_>> = lows.iter().collect();
+            let items = compile_chain(&refs, ChainOptions { vmap_min });
             for p in &pkts {
                 prop_assert_eq!(linear(&lows, p), compiled(&items, p), "{:?}", p);
             }
@@ -981,10 +988,9 @@ mod tests {
             verdict: v,
             label: "",
         };
-        let items = compile_chain(
-            vec![l(Verdict::Drop), l(Verdict::Return), l(Verdict::Return)],
-            ChainOptions { vmap_min: 1 },
-        );
+        let lows = [l(Verdict::Drop), l(Verdict::Return), l(Verdict::Return)];
+        let refs: Vec<&Low<'_>> = lows.iter().collect();
+        let items = compile_chain(&refs, ChainOptions { vmap_min: 1 });
         let [Item::Vmap { entries, .. }] = &items[..] else {
             panic!("{items:?}")
         };

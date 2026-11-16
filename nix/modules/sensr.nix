@@ -13,8 +13,11 @@
 #                 /run/sensr/<daemon>/ and networkd files to
 #                 /run/systemd/network/, then starts or reloads the units
 #                 below over D-Bus. Reads seeds once from $SENSR_SEED_DIR.
-#   sensr-api     DynamicUser in group sensr: reaches the agent only through
-#                 the socket and cannot read /var/lib/sensr.
+#   sensr-api     static user sensr-api (in group sensr): reaches the agent
+#                 only through the socket and cannot read /var/lib/sensr. The
+#                 agent trusts its uid to act for the principals it
+#                 authenticated (SO_PEERCRED carries only the primary ids,
+#                 so this cannot be a DynamicUser).
 #   sensr (CLI)   members of group sensr (and root) talk to the same socket.
 {
   config,
@@ -35,6 +38,11 @@ let
   runtimeDir = "/run/sensr";
   stateDir = "/var/lib/sensr";
   socket = "${runtimeDir}/agent.sock";
+
+  # Fixed ids: the agent is told them on its command line (socket group,
+  # trusted API uid), and they must be the same on every boot.
+  sensrGid = 730;
+  apiUid = 731;
 
   # The daemons sensr-agent drives. They are in the agent's PATH and in
   # systemPackages (operators use nft/wg/unbound-control for diagnosis).
@@ -276,12 +284,23 @@ in
       "8021q"
     ];
 
-    users.groups.sensr = { };
+    users.groups.sensr.gid = sensrGid;
+    users.groups.sensr-api.gid = apiUid;
+    users.users.sensr-api = {
+      isSystemUser = true;
+      uid = apiUid;
+      group = "sensr-api";
+      extraGroups = [ "sensr" ];
+      description = "sensr API";
+    };
 
     environment.systemPackages = [ cfg.package ] ++ appliedPackages;
     environment.etc."sensr/version.json".text = builtins.toJSON versionJson;
 
     environment.variables.SENSR_AGENT_SOCKET = socket;
+
+    # networkd reads runtime config from here; the agent writes into it.
+    systemd.tmpfiles.rules = [ "d /run/systemd/network 0755 root root -" ];
 
     systemd.targets.sensr-net = {
       description = "sensr has applied interfaces, addresses and routes";
@@ -312,8 +331,30 @@ in
       }
       // lib.optionalAttrs (cfg.configFile != null) { SENSR_CONFIG_FILE = "${cfg.configFile}"; };
       serviceConfig = commonHardening // {
-        Type = "exec";
-        ExecStart = "${cfg.package}/bin/sensr-agent";
+        # READY=1 once the socket is bound and the boot apply has run; the
+        # agent also pets the watchdog.
+        Type = "notify";
+        NotifyAccess = "main";
+        WatchdogSec = "30s";
+        ExecStart = lib.escapeShellArgs (
+          [
+            "${cfg.package}/bin/sensr-agent"
+            "--socket"
+            socket
+            "--socket-mode"
+            "660"
+            "--socket-gid"
+            (toString sensrGid)
+            "--state-dir"
+            stateDir
+            "--trust-uid"
+            (toString apiUid)
+          ]
+          ++ lib.optionals (cfg.configFile != null) [
+            "--seed"
+            "${cfg.configFile}"
+          ]
+        );
         Restart = "on-failure";
         RestartSec = 2;
         # /run/sensr holds the socket and the rendered daemon configs; it
@@ -340,7 +381,8 @@ in
         ProtectSystem = "strict";
         ReadWritePaths = [
           runtimeDir
-          "/run/systemd/network"
+          # created by tmpfiles below; "-": a missing path must not stop the agent
+          "-/run/systemd/network"
           "-${cfg.seedDir}"
           "-/boot/firmware"
         ];
@@ -380,7 +422,8 @@ in
         ExecStart = "${cfg.package}/bin/sensr-api";
         Restart = "on-failure";
         RestartSec = 2;
-        DynamicUser = true;
+        User = "sensr-api";
+        Group = "sensr-api";
         SupplementaryGroups = [ "sensr" ];
         AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
         CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];

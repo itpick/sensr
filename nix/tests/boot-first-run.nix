@@ -30,6 +30,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     import json
+    from datetime import timedelta
 
     PENDING = {
         "agentDaemon": ${py pending.agentDaemon},
@@ -78,9 +79,16 @@ pkgs.testers.runNixOSTest {
                 " && systemctl show -P ExecMainStartTimestampMonotonic sensr-agent | grep -qv '^0$'"
             )
         else:
-            machine.wait_for_unit("sensr-agent.service")
+            try:
+                machine.wait_for_unit("sensr-agent.service", timeout=timedelta(seconds=60))
+            finally:
+                print(machine.execute("systemctl status sensr-agent --no-pager; journalctl -b -u sensr-agent --no-pager | tail -n 40")[1])
             machine.wait_for_file("/run/sensr/agent.sock")
             machine.succeed("stat -c '%a %U %G' /run/sensr/agent.sock | grep -qx '660 root sensr'")
+            # It survives a restart with its state (revisions on disk).
+            machine.succeed("systemctl restart sensr-agent")
+            machine.wait_for_unit("sensr-agent.service")
+            machine.succeed("test -d /var/lib/sensr/revisions")
         # Hardening that must not regress, whatever the agent does.
         props = machine.succeed(
             "systemctl show -p User -p ProtectSystem -p NoNewPrivileges -p CapabilityBoundingSet sensr-agent"
@@ -92,9 +100,11 @@ pkgs.testers.runNixOSTest {
         machine.succeed("stat -c '%a' /var/lib/sensr | grep -qx 700")
 
     with subtest("sensr-api"):
-        props = machine.succeed("systemctl show -p DynamicUser -p SupplementaryGroups sensr-api")
-        assert "DynamicUser=yes" in props, props
+        props = machine.succeed("systemctl show -p User -p SupplementaryGroups sensr-api")
+        assert "User=sensr-api" in props, props
         assert "SupplementaryGroups=sensr" in props, props
+        # The API process cannot see the store.
+        machine.fail("runuser -u sensr-api -- ls /var/lib/sensr")
         if PENDING["apiDaemon"]:
             note_pending("sensr-api as a daemon; checking the stub ran cleanly")
             machine.wait_until_succeeds("systemctl show -P ExecMainStatus sensr-api | grep -qx 0")

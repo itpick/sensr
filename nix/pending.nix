@@ -7,8 +7,8 @@
 # make CI pass; fix the code instead.
 {
   # sensr-agent stays running as a daemon and serves its IPC socket
-  # (/run/sensr/agent.sock). Until then the stub binary runs and exits 0.
-  agentDaemon = true;
+  # (/run/sensr/agent.sock). Landed with the agent skeleton (PR #12).
+  agentDaemon = false;
 
   # `sensr config get / --json` answers over IPC (T-0401; sensr-cli +
   # sensr-ipc + sensr-config).
