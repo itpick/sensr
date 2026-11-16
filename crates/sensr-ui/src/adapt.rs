@@ -116,6 +116,14 @@ fn put_list(o: &mut Map<String, Value>, key: &str, view: &Value, field: &str) {
     o.insert(key.into(), strings(view, field));
 }
 
+/// Like [`put_list`], but omits the key for an empty list (schema `skip_serializing_if`).
+fn put_list_opt(o: &mut Map<String, Value>, key: &str, view: &Value, field: &str) {
+    match strings(view, field) {
+        Value::Array(a) if a.is_empty() => drop(o.remove(key)),
+        v => drop(o.insert(key.into(), v)),
+    }
+}
+
 /// Endpoint `{net, not, port}` ⇄ (`"!net"`, `"port"`).
 fn endpoint_to_view(ep: &Value) -> (String, String) {
     let net = match get_path(ep, "net") {
@@ -200,6 +208,9 @@ pub fn store(grid: GridId, scope: &str, doc: &Value) -> Store {
         )),
         GridId::StaticMaps => Store::Map("dhcpv4.reservations".into()),
         GridId::HostOverrides => Store::Map("dns.host_overrides".into()),
+        GridId::AccessLists => Store::Map("dns.access.lists".into()),
+        GridId::Forwarders => Store::Map("dns.forwarding.servers".into()),
+        GridId::Blocklists => Store::Map("dns.blocklists".into()),
         GridId::WgInstances => Store::Map("wireguard.servers".into()),
         GridId::WgPeers => Store::Map("wireguard.peers".into()),
     }
@@ -220,6 +231,8 @@ pub fn in_scope(grid: GridId, scope: &str, doc: &Value, item: &Value) -> bool {
         GridId::FilterRules => rule_scope(item, "interfaces") == scope,
         GridId::StaticMaps => subnet_for(doc, scope)
             .is_some_and(|sub| get_path(item, "subnet").and_then(Value::as_str) == Some(&sub)),
+        // DNS over TLS servers have their own page.
+        GridId::Forwarders => get_path(item, "tls_name").is_none_or(Value::is_null),
         _ => true,
     }
 }
@@ -338,7 +351,52 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
                 "server": server,
                 "mx": mx,
                 "mxprio": prio,
+                "ttl": get_path(item, "ttl").cloned().unwrap_or(Value::Null),
+                "ptr": b(item, "ptr", true),
                 "description": s(item, "description"),
+            })
+        }
+        GridId::AccessLists => json!({
+            "enabled": b(item, "enabled", true),
+            "name": s(item, "name"),
+            "action": or_default(s(item, "action"), "allow"),
+            "networks": strings(item, "networks"),
+            "description": s(item, "description"),
+        }),
+        GridId::Forwarders => json!({
+            "enabled": b(item, "enabled", true),
+            "domain": s(item, "domain"),
+            "server": s(item, "address"),
+            "port": port_num(item, "port"),
+            "description": s(item, "description"),
+        }),
+        GridId::Blocklists => {
+            let lists = strings(item, "lists");
+            let names: Vec<Value> = lists
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|v| Value::String(crate::models::known_list_label(v).to_owned()))
+                .collect();
+            let mode = or_default(s(item, "answer.mode"), "address");
+            let address = match s(item, "answer.address").as_str() {
+                "0.0.0.0" => String::new(),
+                a => a.to_owned(),
+            };
+            json!({
+                "enabled": b(item, "enabled", true),
+                "description": s(item, "description"),
+                "lists": lists,
+                "list_names": names,
+                "urls": strings(item, "urls"),
+                "allow": strings(item, "allow"),
+                "block": strings(item, "block"),
+                "block_subtrees": strings(item, "block_subtrees"),
+                "source_nets": strings(item, "source_nets"),
+                "answer": mode,
+                "address": address,
+                "refresh_seconds": get_path(item, "refresh_seconds").cloned().unwrap_or(json!(72_000)),
             })
         }
         GridId::WgInstances => {
@@ -632,7 +690,50 @@ pub fn from_view(
             put(o, "hostname", view, "hostname");
             put(o, "domain", view, "domain");
             o.insert("record".into(), record);
+            put_opt(o, "ttl", view, "ttl");
+            put(o, "ptr", view, "ptr");
             put_opt(o, "description", view, "description");
+        }
+        GridId::AccessLists => {
+            let o = obj(&mut item);
+            put(o, "enabled", view, "enabled");
+            put(o, "name", view, "name");
+            put(o, "action", view, "action");
+            put_list(o, "networks", view, "networks");
+            put_opt(o, "description", view, "description");
+        }
+        GridId::Forwarders => {
+            let o = obj(&mut item);
+            put(o, "enabled", view, "enabled");
+            put_opt(o, "domain", view, "domain");
+            put(o, "address", view, "server");
+            put_port(o, "port", view, "port");
+            put_opt(o, "description", view, "description");
+        }
+        GridId::Blocklists => {
+            let o = obj(&mut item);
+            put(o, "enabled", view, "enabled");
+            put(o, "description", view, "description");
+            for k in [
+                "lists",
+                "urls",
+                "allow",
+                "block",
+                "block_subtrees",
+                "source_nets",
+            ] {
+                put_list_opt(o, k, view, k);
+            }
+            let answer = match (s(view, "answer").as_str(), s(view, "address").as_str()) {
+                ("nxdomain", _) => Some(json!({"mode": "nxdomain"})),
+                (_, "" | "0.0.0.0") => None,
+                (_, a) => Some(json!({"mode": "address", "address": a})),
+            };
+            match answer {
+                Some(a) => drop(o.insert("answer".into(), a)),
+                None => drop(o.remove("answer")),
+            }
+            put(o, "refresh_seconds", view, "refresh_seconds");
         }
         GridId::WgInstances => {
             let peers = get_path(doc, "wireguard.peers")
@@ -776,6 +877,29 @@ pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
             ("record", "server"),
             ("hostname", "hostname"),
             ("domain", "domain"),
+            ("ttl", "ttl"),
+        ],
+        GridId::AccessLists => &[
+            ("name", "name"),
+            ("networks", "networks"),
+            ("description", "description"),
+        ],
+        GridId::Forwarders => &[
+            ("domain", "domain"),
+            ("address", "server"),
+            ("port", "port"),
+            ("description", "description"),
+        ],
+        GridId::Blocklists => &[
+            ("description", "description"),
+            ("lists", "lists"),
+            ("urls", "urls"),
+            ("allow", "allow"),
+            ("block_subtrees", "block_subtrees"),
+            ("block", "block"),
+            ("source_nets", "source_nets"),
+            ("answer", "address"),
+            ("refresh_seconds", "refresh_seconds"),
         ],
         GridId::WgInstances => &[
             ("public_key", "pubkey"),
@@ -852,11 +976,25 @@ pub fn form_to_view(form: FormId, doc: &Value, scope: &str) -> Option<Value> {
                 "port": match port_num(dns, "port") { Value::Null => json!(53), p => p },
                 "interfaces": strings(dns, "listen_interfaces"),
                 "dnssec": b(dns, "dnssec", false),
+                "dns64": b(dns, "dns64", false),
+                "dns64_prefix": s(dns, "dns64_prefix"),
                 "register_dhcp_leases": b(dns, "register_dhcp_leases", false),
+                "dhcp_domain": s(dns, "dhcp_domain"),
                 "register_dhcp_static": b(dns, "register_dhcp_static", false),
-                "local_zone_type": s(dns, "local_zone_type"),
+                "no_register_records": !b(dns, "register_firewall_records", true),
+                "txt_descriptions": b(dns, "txt_descriptions", false),
+                "local_zone_type": or_default(s(dns, "local_zone_type"), "transparent"),
+                "statistics": b(dns, "statistics", false),
             })
         }
+        FormId::UnboundAclDefault => json!({
+            "default_action": or_default(s(doc, "dns.access.default_action"), "allow"),
+        }),
+        FormId::UnboundForwarding => json!({
+            "use_system_servers": b(doc, "dns.forwarding.use_system_servers", false),
+        }),
+        f if f.is_tuning() => tuning_to_view(f, doc),
+        _ => return None,
     })
 }
 
@@ -960,9 +1098,74 @@ pub fn form_from_view(
             ] {
                 put(dns, k, view, k);
             }
+            for k in ["dns64", "statistics", "txt_descriptions"] {
+                put(dns, k, view, k);
+            }
+            put_opt(dns, "dns64_prefix", view, "dns64_prefix");
+            put_opt(dns, "dhcp_domain", view, "dhcp_domain");
+            dns.insert(
+                "register_firewall_records".into(),
+                Value::Bool(!b(view, "no_register_records", false)),
+            );
             put_port(dns, "port", view, "port");
             put_list(dns, "listen_interfaces", view, "interfaces");
             Ok(vec!["dns"])
+        }
+        FormId::UnboundAclDefault => {
+            let dns = obj(root.entry("dns").or_insert_with(|| json!({})));
+            let acl = obj(dns.entry("access").or_insert_with(|| json!({})));
+            put(acl, "default_action", view, "default_action");
+            Ok(vec!["dns"])
+        }
+        FormId::UnboundForwarding => {
+            let dns = obj(root.entry("dns").or_insert_with(|| json!({})));
+            let fwd = obj(dns.entry("forwarding").or_insert_with(|| json!({})));
+            put(fwd, "use_system_servers", view, "use_system_servers");
+            Ok(vec!["dns"])
+        }
+        f => {
+            let dns = obj(root.entry("dns").or_insert_with(|| json!({})));
+            let tuning = obj(dns.entry("tuning").or_insert_with(|| json!({})));
+            tuning_from_view(f, tuning, view);
+            Ok(vec!["dns"])
+        }
+    }
+}
+
+/// Tuning fields stored as numbers but chosen from a select (strings in the view).
+const NUMERIC_SELECTS: &[&str] = &["log_verbosity", "val_log_level"];
+
+/// `dns.tuning` → one Advanced section. Absent fields show the schema default.
+fn tuning_to_view(form: FormId, doc: &Value) -> Value {
+    let mut view = form.default_value();
+    let tuning = get_path(doc, "dns.tuning").cloned().unwrap_or(Value::Null);
+    for f in form.fields() {
+        let v = match get_path(&tuning, f.path) {
+            Some(Value::Number(n)) if NUMERIC_SELECTS.contains(&f.path) => {
+                Value::String(n.to_string())
+            }
+            Some(v) => v.clone(),
+            None if f.path == "private_addresses" => {
+                json!(sensr_schema::models::dns::DEFAULT_PRIVATE_ADDRESSES)
+            }
+            None => continue,
+        };
+        view[f.path] = v;
+    }
+    view
+}
+
+/// One Advanced section → `dns.tuning`, leaving the other sections' fields alone.
+fn tuning_from_view(form: FormId, tuning: &mut Map<String, Value>, view: &Value) {
+    for f in form.fields() {
+        match get_path(view, f.path) {
+            None | Some(Value::Null) => drop(tuning.remove(f.path)),
+            Some(Value::String(x)) if x.is_empty() => drop(tuning.remove(f.path)),
+            Some(Value::String(x)) if NUMERIC_SELECTS.contains(&f.path) => match x.parse::<u8>() {
+                Ok(n) => drop(tuning.insert(f.path.into(), json!(n))),
+                Err(_) => drop(tuning.remove(f.path)),
+            },
+            Some(v) => drop(tuning.insert(f.path.into(), v.clone())),
         }
     }
 }
@@ -1000,7 +1203,16 @@ pub fn form_view_path(form: FormId, schema: &str) -> Option<&'static str> {
             ("dns.port", "port"),
             ("dns.listen_interfaces", "interfaces"),
             ("dns.local_zone_type", "local_zone_type"),
+            ("dns.dns64_prefix", "dns64_prefix"),
+            ("dns.dhcp_domain", "dhcp_domain"),
         ],
+        FormId::UnboundAclDefault => &[("dns.access.default_action", "default_action")],
+        FormId::UnboundForwarding => &[],
+        f => {
+            let rel = schema.strip_prefix("dns.tuning.")?;
+            let first = rel.split(['.', '[']).next().unwrap_or(rel);
+            return f.fields().iter().find(|x| x.path == first).map(|x| x.path);
+        }
     };
     map.iter()
         .find(|(k, _)| schema == *k || schema.starts_with(&format!("{k}.")) || schema.ends_with(k))
@@ -1079,6 +1291,89 @@ mod tests {
             view_path(GridId::HostOverrides, "record.address"),
             Some("server")
         );
+    }
+
+    #[test]
+    fn known_list_table_matches_the_schema() {
+        use sensr_schema::models::dnsbl::KnownList;
+        let ui: Vec<(&str, &str)> = crate::models::KNOWN_LISTS
+            .iter()
+            .flat_map(|(_, o)| o.iter().copied())
+            .collect();
+        assert_eq!(ui.len(), KnownList::all().count());
+        for l in KnownList::all() {
+            let name = serde_json::to_value(l).unwrap();
+            let name = name.as_str().unwrap();
+            let row = ui.iter().find(|(v, _)| *v == name);
+            assert_eq!(row.map(|r| r.1), Some(l.label()), "{l:?}");
+        }
+    }
+
+    #[test]
+    fn tuning_sections_keep_each_other_and_convert_selects() {
+        let doc = json!({"dns": {"tuning": {"prefetch": true, "log_verbosity": 3, "msg_cache_size": "8m"}}});
+        let log = form_to_view(FormId::UnboundLogging, &doc, "").unwrap();
+        assert_eq!(log["log_verbosity"], "3");
+        assert_eq!(log["val_log_level"], "");
+        let adv = form_to_view(FormId::UnboundAdvanced, &doc, "").unwrap();
+        assert_eq!(adv["harden_below_nxdomain"], true);
+        assert_eq!(adv["private_addresses"].as_array().unwrap().len(), 16);
+        let mut d = doc.clone();
+        let mut view = log.clone();
+        view["val_log_level"] = json!("1");
+        form_from_view(FormId::UnboundLogging, &mut d, "", &view).unwrap();
+        let t = &d["dns"]["tuning"];
+        assert_eq!(
+            (t["log_verbosity"].clone(), t["val_log_level"].clone()),
+            (json!(3), json!(1))
+        );
+        assert_eq!(t["prefetch"], true, "other sections' fields are kept");
+        assert_eq!(t["msg_cache_size"], "8m");
+        assert_eq!(
+            form_view_path(FormId::UnboundCache, "dns.tuning.msg_cache_size"),
+            Some("msg_cache_size")
+        );
+        assert_eq!(
+            form_view_path(FormId::UnboundCache, "dns.tuning.log_verbosity"),
+            None
+        );
+    }
+
+    #[test]
+    fn blocklist_answer_round_trips() {
+        let view = json!({"enabled": true, "description": "x", "lists": ["oisd-big"], "answer": "address",
+            "address": "", "refresh_seconds": 72000});
+        let item = from_view(GridId::Blocklists, &json!({}), "", None, &view);
+        assert!(
+            item.get("answer").is_none(),
+            "the default answer is omitted"
+        );
+        assert!(item.get("urls").is_none());
+        let mut v = view.clone();
+        v["address"] = json!("192.168.1.1");
+        let item = from_view(GridId::Blocklists, &json!({}), "", None, &v);
+        assert_eq!(
+            item["answer"],
+            json!({"mode": "address", "address": "192.168.1.1"})
+        );
+        let back = to_view(GridId::Blocklists, &json!({}), &item);
+        assert_eq!(
+            back["list_names"],
+            json!(["OISD Big Blocklist (incl. Ads)"])
+        );
+        assert_eq!(back["address"], "192.168.1.1");
+        assert!(in_scope(
+            GridId::Forwarders,
+            "",
+            &json!({}),
+            &json!({"address": "1.1.1.1"})
+        ));
+        assert!(!in_scope(
+            GridId::Forwarders,
+            "",
+            &json!({}),
+            &json!({"address": "1.1.1.1", "tls_name": "one.one"})
+        ));
     }
 
     #[test]

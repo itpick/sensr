@@ -37,15 +37,21 @@ fn assert_all_labelled(doc: &Html, what: &str) {
     }
 }
 
-const FORMS: [FormId; 5] = [
+const FORMS: [FormId; 11] = [
     FormId::SystemGeneral,
     FormId::Interface,
     FormId::SourceNatMode,
     FormId::DhcpSettings,
     FormId::UnboundGeneral,
+    FormId::UnboundAdvanced,
+    FormId::UnboundServeExpired,
+    FormId::UnboundLogging,
+    FormId::UnboundCache,
+    FormId::UnboundAclDefault,
+    FormId::UnboundForwarding,
 ];
 
-const GRIDS: [GridId; 10] = [
+const GRIDS: [GridId; 13] = [
     GridId::Assignments,
     GridId::Aliases,
     GridId::FilterRules,
@@ -54,6 +60,9 @@ const GRIDS: [GridId; 10] = [
     GridId::DhcpRanges,
     GridId::StaticMaps,
     GridId::HostOverrides,
+    GridId::AccessLists,
+    GridId::Forwarders,
+    GridId::Blocklists,
     GridId::WgInstances,
     GridId::WgPeers,
 ];
@@ -224,5 +233,92 @@ fn menu_tree_marks_current_page() {
         doc.select(&sel("nav[aria-label='Main menu']"))
             .next()
             .is_some()
+    );
+}
+
+#[test]
+fn blocklist_dialog_groups_curated_lists_like_opnsense() {
+    let fields = GridId::Blocklists.meta().fields;
+    let doc = render(|| {
+        let values = RwSignal::new(to_inputs(
+            fields,
+            &serde_json::json!({"lists": ["hagezi-pro", "oisd-small"]}),
+        ));
+        let errors = RwSignal::new(vec![FieldError::new("lists", "Pick one.")]);
+        view! { <FormFields fields form_id="b".to_owned() values errors/> }.into_any()
+    });
+    assert_all_labelled(&doc, "blocklist dialog");
+    let legends: Vec<String> = doc
+        .select(&sel("#b--lists fieldset > legend"))
+        .map(|l| l.text().collect())
+        .collect();
+    assert_eq!(
+        legends,
+        [
+            "General Blocklists",
+            "HaGeZi Multi - Clean the Internet",
+            "OISD Blocklists",
+            "HaGeZi Targeted Lists",
+            "Minimal Hardware Requirements"
+        ]
+    );
+    let checked: Vec<&str> = doc
+        .select(&sel("#b--lists input[checked]"))
+        .filter_map(|i| i.value().attr("value"))
+        .collect();
+    assert_eq!(checked, ["hagezi-pro", "oisd-small"]);
+    // The group is named by the field label and carries the error.
+    let group = doc.select(&sel("#b--lists")).next().unwrap();
+    assert_eq!(group.value().attr("role"), Some("group"));
+    let label_id = group.value().attr("aria-labelledby").unwrap();
+    let label = doc.select(&sel(&format!("#{label_id}"))).next().unwrap();
+    assert_eq!(label.text().collect::<String>(), "Type of DNSBL");
+    assert_eq!(group.value().attr("aria-invalid"), Some("true"));
+    assert!(
+        group
+            .value()
+            .attr("aria-describedby")
+            .unwrap()
+            .contains("b--lists-err")
+    );
+}
+
+#[test]
+fn dns_stats_panel_shows_no_data_then_figures() {
+    use sensr_ui::pages::DnsStatsPanel;
+    let empty = render(|| view! { <DnsStatsPanel stats=Default::default()/> }.into_any());
+    assert!(empty.select(&sel("#dnsbl-no-data")).next().is_some());
+    assert!(empty.select(&sel("#unbound-no-data")).next().is_some());
+    assert!(empty.select(&sel("#dnsbl-blocked-note")).next().is_some());
+
+    let doc = render(|| {
+        view! { <DnsStatsPanel stats=sensr_ui::mock::simulated_dns_stats()/> }.into_any()
+    });
+    let text = |s: &str| {
+        doc.select(&sel(s))
+            .next()
+            .unwrap()
+            .text()
+            .collect::<String>()
+    };
+    assert_eq!(text("#dnsbl-names"), "412,731");
+    assert_eq!(text("#unbound-queries"), "1,284,377");
+    let all: String = doc.root_element().text().collect();
+    assert!(all.contains("Default: 238,904 names"), "{all}");
+    assert!(all.contains("2026-11-16 03:00:15 UTC"));
+    assert!(all.contains("HTTP 503"), "source errors are shown");
+    assert!(all.contains("does not count blocked queries per blocklist"));
+    // Four sources across two policies, each table with column headers.
+    assert_eq!(doc.select(&sel("tbody tr")).count(), 4);
+    assert_eq!(doc.select(&sel("thead th[scope=col]")).count(), 10);
+
+    let broken = sensr_ui::api::DnsStats {
+        problems: vec!["/run/sensr-dns/unbound-stats.json: expected value".into()],
+        ..Default::default()
+    };
+    let doc = render(|| view! { <DnsStatsPanel stats=broken/> }.into_any());
+    assert!(
+        doc.select(&sel("[role=alert]"))
+            .any(|a| a.text().collect::<String>().contains("unbound-stats.json"))
     );
 }

@@ -237,6 +237,78 @@ pub struct SystemStatus {
     pub traffic: Vec<TrafficSeries>,
 }
 
+/// One downloaded list of a blocklist policy, as of the last refresh.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DnsblSource {
+    /// Where it was fetched from.
+    pub url: String,
+    /// Names it contributed.
+    pub entries: u64,
+    /// When it was last downloaded (RFC 3339); `None` if never.
+    pub fetched: Option<String>,
+    /// Served from the local cache instead of downloaded this time.
+    pub from_cache: bool,
+    /// Why the last download failed, if it did.
+    pub error: Option<String>,
+}
+
+/// One blocklist policy as compiled by the last refresh.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DnsblPolicy {
+    /// The policy's UUID in `dns.blocklists`.
+    pub id: String,
+    /// Its description.
+    pub description: String,
+    /// Distinct names it blocks.
+    pub names: u64,
+    /// Its lists.
+    pub sources: Vec<DnsblSource>,
+}
+
+/// What the last blocklist refresh produced (`status.json` of sensr-dns).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DnsblStatus {
+    /// When the refresh finished (RFC 3339).
+    pub updated: String,
+    /// How long it took.
+    pub duration_ms: u64,
+    /// Names in force across all policies.
+    pub names: u64,
+    /// Per policy.
+    pub policies: Vec<DnsblPolicy>,
+}
+
+/// Unbound's own counters (`unbound-control stats`, sampled every minute).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UnboundCounters {
+    /// When they were sampled (RFC 3339).
+    pub at: String,
+    /// Queries answered.
+    pub queries: u64,
+    /// Answered from the cache.
+    pub cache_hits: u64,
+    /// Answered NXDOMAIN.
+    pub nxdomain: u64,
+    /// Resolver uptime.
+    pub uptime_seconds: f64,
+}
+
+/// Everything the blocklist page shows about the running resolver. `None` means the file
+/// has not been written yet.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DnsStats {
+    /// Last blocklist refresh.
+    pub blocklists: Option<DnsblStatus>,
+    /// Resolver counters.
+    pub unbound: Option<UnboundCounters>,
+    /// Files that exist but could not be read.
+    pub problems: Vec<String>,
+}
+
 #[cfg(feature = "ssr")]
 pub use server::*;
 
@@ -280,6 +352,11 @@ mod server {
         fn status(&self) -> BoxFuture<'_, ApiResult<SystemStatus>>;
         /// The host's network cards.
         fn nics(&self) -> BoxFuture<'_, ApiResult<Vec<NetworkCard>>>;
+        /// Blocklist and resolver statistics. The default reads the files sensr-dns and the
+        /// stats timer write on this host (see [`crate::dnsstats`]).
+        fn dns_stats(&self) -> BoxFuture<'_, ApiResult<DnsStats>> {
+            Box::pin(async { Ok(crate::dnsstats::DnsStatsPaths::from_env().read()) })
+        }
     }
 
     /// A backend bound to one signed-in user (their identity and privileges travel with

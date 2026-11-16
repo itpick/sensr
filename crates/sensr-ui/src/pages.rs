@@ -2,8 +2,10 @@
 //!
 //! Pages are server-rendered; only the form, grid, banner and dashboard islands hydrate.
 
-use crate::actions::{field_choices, form_load, grid_fetch, live_status, revision_diff, revisions};
-use crate::api::DiffLine;
+use crate::actions::{
+    dns_stats, field_choices, form_load, grid_fetch, live_status, revision_diff, revisions,
+};
+use crate::api::{DiffLine, DnsStats};
 use crate::grid::GridQuery;
 use crate::islands::{DashboardLive, GridIsland, SettingsFormIsland, diff_class};
 use crate::models::*;
@@ -190,7 +192,196 @@ pub fn UnboundGeneralPage() -> impl IntoView {
 /// Services › Unbound DNS › Overrides.
 #[component]
 pub fn UnboundOverrides() -> impl IntoView {
-    view! { <Grid<HostOverride> title="Host overrides"/> }
+    view! {
+        <p class="intro">"Host overrides answer for a name with your own records instead of the upstream answer. To send a whole domain to another server (a domain override), add it under Query Forwarding."</p>
+        <Grid<HostOverride> title="Host overrides"/>
+    }
+}
+
+/// Services › Unbound DNS › Advanced.
+#[component]
+pub fn UnboundAdvancedPage() -> impl IntoView {
+    view! {
+        <SettingsForm<UnboundAdvanced> title="General settings"/>
+        <SettingsForm<UnboundServeExpired> title="Serve expired settings"/>
+        <SettingsForm<UnboundLogging> title="Logging settings"/>
+        <SettingsForm<UnboundCache> title="Cache settings"/>
+    }
+}
+
+/// Services › Unbound DNS › Access Lists.
+#[component]
+pub fn UnboundAcl() -> impl IntoView {
+    view! {
+        <SettingsForm<UnboundAclDefault> title="Default action"/>
+        <Grid<AccessList> title="Access lists"/>
+    }
+}
+
+/// Services › Unbound DNS › Query Forwarding: the system-nameserver switch and custom
+/// forwarders, which with a domain are OPNsense's domain overrides.
+#[component]
+pub fn UnboundForward() -> impl IntoView {
+    view! {
+        <p class="intro">"Forward queries to other servers instead of resolving them from the root. With a domain, an entry only forwards names under that domain (a domain override). DNS over TLS servers are configured on their own page."</p>
+        <SettingsForm<UnboundForwarding> title="Query forwarding"/>
+        <Grid<Forwarder> title="Custom forwarding"/>
+    }
+}
+
+/// Services › Unbound DNS › Blocklist: policies and what the last refresh compiled.
+#[component]
+pub fn UnboundBlocklist() -> impl IntoView {
+    let stats = || {
+        Suspend::new(async move {
+            match dns_stats().await {
+                Ok(stats) => view! { <DnsStatsPanel stats/> }.into_any(),
+                Err(e) => load_error(e),
+            }
+        })
+    };
+    view! {
+        <p class="intro">"Each policy blocks the names on its lists for the clients in its source networks (all clients when empty); the most specific network wins. Lists are downloaded and compiled by sensr itself and cached for the refresh interval."</p>
+        <Grid<Blocklist> title="Blocklist policies"/>
+        <Suspense fallback=|| ()>{stats}</Suspense>
+    }
+}
+
+/// `1234567` → `1,234,567`.
+pub fn thousands(n: u64) -> String {
+    let d = n.to_string();
+    let mut out = String::with_capacity(d.len() + d.len() / 3);
+    for (i, c) in d.chars().enumerate() {
+        if i > 0 && (d.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// An RFC 3339 UTC time as `2026-11-16 03:00:15 UTC`; other offsets are shown as given.
+pub fn rfc3339_display(t: &str) -> String {
+    match t.strip_suffix('Z') {
+        Some(base) => format!(
+            "{} UTC",
+            base.replacen('T', " ", 1).split('.').next().unwrap_or(base)
+        ),
+        None => t.replacen('T', " ", 1),
+    }
+}
+
+fn duration(secs: u64) -> String {
+    let (d, h, m) = (secs / 86_400, secs / 3_600 % 24, secs / 60 % 60);
+    if d > 0 {
+        format!("{d}d {h}h {m}m")
+    } else if h > 0 {
+        format!("{h}h {m}m")
+    } else {
+        format!("{m}m {}s", secs % 60)
+    }
+}
+
+/// The statistics card of the Blocklist page (server-rendered, no island).
+#[component]
+pub fn DnsStatsPanel(stats: DnsStats) -> impl IntoView {
+    let problems = stats
+        .problems
+        .iter()
+        .map(|p| view! { <p class="field-error" role="alert">{format!("Could not read {p}")}</p> })
+        .collect_view();
+    let lists = match stats.blocklists {
+        None => view! {
+            <p class="muted" id="dnsbl-no-data">"No data yet: the blocklists have not been compiled since the resolver started. Statistics appear after the first refresh."</p>
+        }
+        .into_any(),
+        Some(b) => {
+            let policies = b
+                .policies
+                .into_iter()
+                .map(|p| {
+                    let rows = p
+                        .sources
+                        .into_iter()
+                        .map(|src| {
+                            let fetched = src
+                                .fetched
+                                .as_deref()
+                                .map_or_else(|| "never".to_owned(), rfc3339_display);
+                            let status = match &src.error {
+                                Some(e) => view! { <span class="pill pill-off">"error"</span>" "{e.clone()} }.into_any(),
+                                None => view! { <span class="pill pill-on">"ok"</span> }.into_any(),
+                            };
+                            view! {
+                                <tr>
+                                    <td class="url">{src.url}</td>
+                                    <td class="num">{thousands(src.entries)}</td>
+                                    <td>{fetched}</td>
+                                    <td>{if src.from_cache { "cache" } else { "downloaded" }}</td>
+                                    <td>{status}</td>
+                                </tr>
+                            }
+                        })
+                        .collect_view();
+                    view! {
+                        <h3 class="stats-policy">{format!("{}: {} names", p.description, thousands(p.names))}</h3>
+                        <div class="table-wrap">
+                            <table>
+                                <thead><tr>
+                                    <th scope="col">"List"</th><th scope="col">"Entries"</th>
+                                    <th scope="col">"Last fetched"</th><th scope="col">"Source"</th>
+                                    <th scope="col">"Status"</th>
+                                </tr></thead>
+                                <tbody>{rows}</tbody>
+                            </table>
+                        </div>
+                    }
+                })
+                .collect_view();
+            view! {
+                <dl class="stat-tiles" aria-label="Blocklists">
+                    <div><dt>"Names blocked"</dt><dd id="dnsbl-names">{thousands(b.names)}</dd></div>
+                    <div><dt>"Last update"</dt><dd>{rfc3339_display(&b.updated)}</dd></div>
+                    <div><dt>"Refresh took"</dt><dd>{format!("{:.1} s", b.duration_ms as f64 / 1000.0)}</dd></div>
+                </dl>
+                {policies}
+            }
+            .into_any()
+        }
+    };
+    let resolver = match stats.unbound {
+        None => view! {
+            <p class="muted" id="unbound-no-data">"No resolver statistics yet. They are sampled every minute while Unbound runs with statistics enabled (General)."</p>
+        }
+        .into_any(),
+        Some(u) => {
+            let pct = if u.queries > 0 {
+                format!(" ({:.0}%)", u.cache_hits as f64 * 100.0 / u.queries as f64)
+            } else {
+                String::new()
+            };
+            view! {
+                <dl class="stat-tiles" aria-label="Resolver">
+                    <div><dt>"Total queries"</dt><dd id="unbound-queries">{thousands(u.queries)}</dd></div>
+                    <div><dt>"Cache hits"</dt><dd>{format!("{}{pct}", thousands(u.cache_hits))}</dd></div>
+                    <div><dt>"NXDOMAIN answers"</dt><dd>{thousands(u.nxdomain)}</dd></div>
+                    <div><dt>"Resolver uptime"</dt><dd>{duration(u.uptime_seconds.max(0.0) as u64)}</dd></div>
+                </dl>
+                <p class="muted small">{format!("Sampled {}.", rfc3339_display(&u.at))}</p>
+            }
+            .into_any()
+        }
+    };
+    view! {
+        <section class="card" aria-labelledby="dns-stats-title">
+            <h2 id="dns-stats-title">"Statistics"</h2>
+            {problems}
+            {lists}
+            <h3 class="stats-policy">"Resolver"</h3>
+            {resolver}
+            <p class="muted small" id="dnsbl-blocked-note">"Unbound does not count blocked queries per blocklist, so no blocked-query figure is shown. NXDOMAIN answers include, but are not limited to, names blocked by policies that return NXDOMAIN."</p>
+        </section>
+    }
 }
 
 /// VPN › WireGuard › Instances.
@@ -360,6 +551,26 @@ pub fn NotYet() -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::fmt_time;
+
+    #[test]
+    fn formats_numbers_and_rfc3339() {
+        use super::{rfc3339_display, thousands};
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_284_377), "1,284,377");
+        assert_eq!(
+            rfc3339_display("2026-11-16T03:00:15Z"),
+            "2026-11-16 03:00:15 UTC"
+        );
+        assert_eq!(
+            rfc3339_display("2026-11-16T03:00:15.123Z"),
+            "2026-11-16 03:00:15 UTC"
+        );
+        assert_eq!(
+            rfc3339_display("2026-11-16T04:00:15+01:00"),
+            "2026-11-16 04:00:15+01:00"
+        );
+    }
 
     #[test]
     fn formats_utc() {

@@ -61,6 +61,10 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/ui/dhcpv4/:if") view=Dhcpv4/>
                     <Route path=path!("/ui/unbound/general") view=UnboundGeneralPage/>
                     <Route path=path!("/ui/unbound/overrides") view=UnboundOverrides/>
+                    <Route path=path!("/ui/unbound/advanced") view=UnboundAdvancedPage/>
+                    <Route path=path!("/ui/unbound/acl") view=UnboundAcl/>
+                    <Route path=path!("/ui/unbound/forward") view=UnboundForward/>
+                    <Route path=path!("/ui/unbound/dnsbl") view=UnboundBlocklist/>
                     <Route path=path!("/ui/wireguard/instances") view=WireguardInstances/>
                     <Route path=path!("/ui/wireguard/peers") view=WireguardPeers/>
                     <Route path=path!("/ui/system/general") view=SystemGeneralPage/>

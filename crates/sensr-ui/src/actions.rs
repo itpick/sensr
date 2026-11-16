@@ -498,6 +498,12 @@ pub async fn live_status() -> Result<SystemStatus, ServerFnError> {
     imp::backend()?.status().await.map_err(imp::err)
 }
 
+/// Blocklist and resolver statistics for Services › Unbound DNS › Blocklist.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn dns_stats() -> Result<crate::api::DnsStats, ServerFnError> {
+    imp::backend()?.dns_stats().await.map_err(imp::err)
+}
+
 /// Session cookie name.
 pub const SESSION_COOKIE: &str = "sensr_session";
 

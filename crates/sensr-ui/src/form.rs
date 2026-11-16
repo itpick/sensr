@@ -31,6 +31,8 @@ pub enum FieldKind {
     Select(&'static [(&'static str, &'static str)]),
     /// One of a set known only at run time (e.g. the assigned interfaces).
     Choice(ChoiceSet),
+    /// Any number of a fixed set of options, shown in labelled groups; stored as a JSON array.
+    MultiSelect(&'static [OptGroup]),
     /// One value per line, stored as a JSON array of strings.
     Lines,
     /// One IP address (v4 or v6).
@@ -43,6 +45,8 @@ pub enum FieldKind {
     CidrLines,
     /// One IP address per line.
     IpLines,
+    /// One domain name per line.
+    HostnameLines,
     /// Multi-line free text.
     TextArea,
     /// Hostname label(s): letters, digits, `-` and `.`.
@@ -50,6 +54,9 @@ pub enum FieldKind {
     /// Ethernet MAC address.
     Mac,
 }
+
+/// A labelled group of `(value, label)` options for [`FieldKind::MultiSelect`].
+pub type OptGroup = (&'static str, &'static [(&'static str, &'static str)]);
 
 /// Option lists computed from the current document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -198,7 +205,8 @@ fn parse_cidr(s: &str) -> bool {
     }
 }
 
-fn is_hostname(s: &str) -> bool {
+/// Letters, digits and hyphens in dot-separated labels of at most 63 characters.
+pub fn is_hostname(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 253
         && s.split('.').all(|label| {
@@ -227,7 +235,11 @@ pub fn parse_field(spec: &FieldSpec, raw: &str) -> Result<Value, String> {
         }
         return Ok(match spec.kind {
             FieldKind::Checkbox => Value::Bool(false),
-            FieldKind::Lines | FieldKind::CidrLines | FieldKind::IpLines => Value::Array(vec![]),
+            FieldKind::Lines
+            | FieldKind::CidrLines
+            | FieldKind::IpLines
+            | FieldKind::HostnameLines
+            | FieldKind::MultiSelect(_) => Value::Array(vec![]),
             FieldKind::Number { .. } => Value::Null,
             _ => Value::String(String::new()),
         });
@@ -267,6 +279,20 @@ pub fn parse_field(spec: &FieldSpec, raw: &str) -> Result<Value, String> {
                 Err("Choose one of the listed options.".to_owned())
             }
         }
+        FieldKind::MultiSelect(groups) => {
+            let mut out = Vec::new();
+            for l in lines(raw) {
+                if !groups
+                    .iter()
+                    .any(|(_, opts)| opts.iter().any(|(v, _)| *v == l))
+                {
+                    return Err("Choose from the listed options.".to_owned());
+                }
+                out.push(Value::String(l.to_owned()));
+            }
+            Ok(Value::Array(out))
+        }
+        FieldKind::HostnameLines => each(is_hostname, "domain name"),
         FieldKind::Lines => Ok(Value::Array(
             lines(raw).map(|l| Value::String(l.to_owned())).collect(),
         )),
@@ -441,6 +467,24 @@ mod tests {
         set_path(&mut v, "a.b.c", json!(1));
         assert_eq!(v, json!({"a": {"b": {"c": 1}}}));
         assert_eq!(get_path(&v, "a.b.c"), Some(&json!(1)));
+    }
+
+    #[test]
+    fn multi_select_keeps_listed_values_only() {
+        const GROUPS: &[OptGroup] = &[
+            ("A", &[("a1", "One"), ("a2", "Two")]),
+            ("B", &[("b1", "Three")]),
+        ];
+        let spec = FieldSpec::new("lists", "Lists", FieldKind::MultiSelect(GROUPS));
+        assert_eq!(parse_field(&spec, "a2\nb1"), Ok(json!(["a2", "b1"])));
+        assert_eq!(parse_field(&spec, ""), Ok(json!([])));
+        assert!(parse_field(&spec, "a1\nnope").is_err());
+        let spec = FieldSpec::new("d", "Domains", FieldKind::HostnameLines);
+        assert_eq!(
+            parse_field(&spec, "a.example\nb.example"),
+            Ok(json!(["a.example", "b.example"]))
+        );
+        assert!(parse_field(&spec, "not a domain").is_err());
     }
 
     #[test]
