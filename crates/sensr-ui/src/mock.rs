@@ -319,10 +319,15 @@ impl Backend for MockBackend {
     fn status(&self) -> BoxFuture<'_, ApiResult<SystemStatus>> {
         ready(self.with(|s| Ok(simulated_status(&s.staged, (s.clock)()))))
     }
+}
 
+/// Sessions over a shared [`MockBackend`]; every session edits the same document.
+pub struct MockSessions(pub std::sync::Arc<MockBackend>);
+
+impl Sessions for MockSessions {
     fn login<'a>(&'a self, user: &'a str, password: &'a str) -> BoxFuture<'a, ApiResult<String>> {
-        let ok = self.users.iter().any(|(u, p)| u == user && p == password);
-        ready(self.with(|s| {
+        let ok = self.0.users.iter().any(|(u, p)| u == user && p == password);
+        ready(self.0.with(|s| {
             if !ok {
                 return Err(ApiError::Unauthorized);
             }
@@ -337,15 +342,17 @@ impl Backend for MockBackend {
         }))
     }
 
-    fn session<'a>(&'a self, token: &'a str) -> BoxFuture<'a, ApiResult<Option<String>>> {
-        ready(self.with(|s| Ok(s.sessions.get(token).cloned())))
+    fn open<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Option<Session>> {
+        let user = self.0.with(|s| s.sessions.get(token).cloned());
+        ready(user.map(|user| Session {
+            user,
+            backend: self.0.clone(),
+        }))
     }
 
-    fn logout<'a>(&'a self, token: &'a str) -> BoxFuture<'a, ApiResult<()>> {
-        ready(self.with(|s| {
-            s.sessions.remove(token);
-            Ok(())
-        }))
+    fn logout<'a>(&'a self, token: &'a str) -> BoxFuture<'a, ()> {
+        self.0.with(|s| s.sessions.remove(token));
+        ready(())
     }
 }
 
@@ -748,11 +755,12 @@ mod tests {
     #[test]
     fn sessions() {
         let (m, _) = mock_with_clock();
+        let m = MockSessions(Arc::new(m));
         assert_eq!(block(m.login("root", "nope")), Err(ApiError::Unauthorized));
         let tok = block(m.login("root", "sensr")).unwrap();
-        assert_eq!(block(m.session(&tok)).unwrap().as_deref(), Some("root"));
-        block(m.logout(&tok)).unwrap();
-        assert_eq!(block(m.session(&tok)).unwrap(), None);
+        assert_eq!(block(m.open(&tok)).map(|s| s.user).as_deref(), Some("root"));
+        block(m.logout(&tok));
+        assert!(block(m.open(&tok)).is_none());
     }
 
     #[test]

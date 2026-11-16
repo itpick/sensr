@@ -1,4 +1,6 @@
-//! Server functions: the only calls the browser islands make. Each one runs on the server
+//! Server functions, all under `/ui/fn/` so they never collide with the native API
+//! (`/api/v1`) or the OPNsense compat paths (`/api/<module>/…`) sensr-api serves beside them.
+//! They are the only calls the browser islands make. Each one runs on the server
 //! against the [`crate::api::Backend`] in context, re-validating everything it receives.
 //!
 //! Grids and forms read the whole staged document, map it to view rows through
@@ -25,8 +27,17 @@ mod imp {
     #[derive(Debug, Clone)]
     pub struct CurrentUser(pub String);
 
+    /// The signed-in user's backend (set per request by the session gate).
     pub fn backend() -> Result<BackendHandle, ServerFnError> {
-        use_context::<BackendHandle>().ok_or_else(|| ServerFnError::new("no backend in context"))
+        use_context::<axum::http::request::Parts>()
+            .and_then(|p| p.extensions.get::<BackendHandle>().cloned())
+            .or_else(use_context::<BackendHandle>)
+            .ok_or_else(|| ServerFnError::new("not signed in"))
+    }
+
+    pub fn sessions() -> Result<crate::api::SessionsHandle, ServerFnError> {
+        use_context::<crate::api::SessionsHandle>()
+            .ok_or_else(|| ServerFnError::new("no session store"))
     }
 
     pub fn user() -> String {
@@ -164,7 +175,7 @@ mod imp {
 pub use imp::CurrentUser;
 
 /// One page of a grid.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn grid_fetch(
     grid: GridId,
     scope: Option<String>,
@@ -179,7 +190,7 @@ pub async fn grid_fetch(
 }
 
 /// Adds (`key = None`) or updates a row. Returns field errors; empty means saved.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn grid_save(
     grid: GridId,
     scope: Option<String>,
@@ -256,7 +267,7 @@ pub async fn grid_save(
 }
 
 /// Deletes rows by key.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn grid_delete(
     grid: GridId,
     scope: Option<String>,
@@ -301,7 +312,7 @@ pub async fn grid_delete(
 }
 
 /// Bulk enable or disable.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn grid_toggle(
     grid: GridId,
     scope: Option<String>,
@@ -341,7 +352,7 @@ pub async fn grid_toggle(
 
 /// Moves a row before another (or to the end of its scope). Rows in other scopes keep their
 /// positions: the scope's own `sequence` values are permuted, never renumbered.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn grid_move(
     grid: GridId,
     scope: Option<String>,
@@ -389,7 +400,7 @@ pub async fn grid_move(
 }
 
 /// Saves a settings form. Returns field errors; empty means saved.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn form_save(
     form: FormId,
     scope: Option<String>,
@@ -423,13 +434,13 @@ pub async fn form_save(
 }
 
 /// Staged state for the Apply banner.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn pending_state() -> Result<Pending, ServerFnError> {
     imp::backend()?.pending().await.map_err(imp::err)
 }
 
 /// Commits staged changes, optionally with an automatic rollback window.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn apply_changes(confirm_secs: Option<u32>) -> Result<Pending, ServerFnError> {
     let b = imp::backend()?;
     let secs = confirm_secs.map(|s| s.clamp(10, 600));
@@ -438,7 +449,7 @@ pub async fn apply_changes(confirm_secs: Option<u32>) -> Result<Pending, ServerF
 }
 
 /// Keeps a commit made with a confirm window.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn confirm_changes() -> Result<Pending, ServerFnError> {
     let b = imp::backend()?;
     b.confirm().await.map_err(imp::err)?;
@@ -446,7 +457,7 @@ pub async fn confirm_changes() -> Result<Pending, ServerFnError> {
 }
 
 /// Rolls back to the revision before a pending confirm, right now.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn revert_unconfirmed() -> Result<Pending, ServerFnError> {
     let b = imp::backend()?;
     let history = b.history().await.map_err(imp::err)?;
@@ -463,7 +474,7 @@ pub async fn revert_unconfirmed() -> Result<Pending, ServerFnError> {
 }
 
 /// Drops staged changes.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn discard_changes() -> Result<Pending, ServerFnError> {
     let b = imp::backend()?;
     b.discard().await.map_err(imp::err)?;
@@ -471,7 +482,7 @@ pub async fn discard_changes() -> Result<Pending, ServerFnError> {
 }
 
 /// Rolls back to a revision. A plain form post: works without JavaScript.
-#[server(endpoint = "rollback_to")]
+#[server(prefix = "/ui/fn", endpoint = "rollback_to")]
 pub async fn rollback_to(revision: u64) -> Result<(), ServerFnError> {
     imp::backend()?
         .rollback(&imp::user(), revision)
@@ -482,7 +493,7 @@ pub async fn rollback_to(revision: u64) -> Result<(), ServerFnError> {
 }
 
 /// Live dashboard data.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn live_status() -> Result<SystemStatus, ServerFnError> {
     imp::backend()?.status().await.map_err(imp::err)
 }
@@ -491,11 +502,11 @@ pub async fn live_status() -> Result<SystemStatus, ServerFnError> {
 pub const SESSION_COOKIE: &str = "sensr_session";
 
 /// Login form target. A plain form post: works without JavaScript.
-#[server(endpoint = "login")]
+#[server(prefix = "/ui/fn", endpoint = "login")]
 pub async fn login(username: String, password: String) -> Result<(), ServerFnError> {
     use axum::http::{HeaderValue, header::SET_COOKIE};
-    let b = imp::backend()?;
-    match b.login(username.trim(), &password).await {
+    let sessions = imp::sessions()?;
+    match sessions.login(username.trim(), &password).await {
         Ok(token) => {
             let opts = expect_context::<leptos_axum::ResponseOptions>();
             let cookie = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict");
@@ -510,11 +521,11 @@ pub async fn login(username: String, password: String) -> Result<(), ServerFnErr
 }
 
 /// Logout form target.
-#[server(endpoint = "logout")]
+#[server(prefix = "/ui/fn", endpoint = "logout")]
 pub async fn logout() -> Result<(), ServerFnError> {
     use axum::http::{HeaderValue, header::SET_COOKIE};
     if let Some(token) = crate::server::session_token() {
-        let _ = imp::backend()?.logout(&token).await;
+        imp::sessions()?.logout(&token).await;
     }
     let opts = expect_context::<leptos_axum::ResponseOptions>();
     opts.insert_header(
@@ -537,7 +548,7 @@ pub struct LayoutData {
 }
 
 /// Chrome data for the page being rendered.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn chrome_data() -> Result<LayoutData, ServerFnError> {
     use serde_json::Value;
     let b = imp::backend()?;
@@ -571,7 +582,7 @@ pub async fn chrome_data() -> Result<LayoutData, ServerFnError> {
 }
 
 /// Current value of a settings form, secrets blanked.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn form_load(
     form: FormId,
     scope: Option<String>,
@@ -582,13 +593,13 @@ pub async fn form_load(
 }
 
 /// Commit history, newest first.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn revisions() -> Result<Vec<crate::api::Revision>, ServerFnError> {
     imp::backend()?.history().await.map_err(imp::err)
 }
 
 /// Diff between revisions; `to = None` is the staged document.
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn revision_diff(
     from: u64,
     to: Option<u64>,
@@ -597,7 +608,7 @@ pub async fn revision_diff(
 }
 
 /// Option lists computed from the document (assigned interfaces, …).
-#[server(input = Json)]
+#[server(prefix = "/ui/fn", input = Json)]
 pub async fn field_choices() -> Result<crate::form::Choices, ServerFnError> {
     use crate::form::ChoiceSet;
     use serde_json::Value;

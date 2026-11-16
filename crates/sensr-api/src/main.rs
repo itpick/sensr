@@ -17,6 +17,9 @@ struct Args {
     /// sensr-agent socket.
     #[arg(long, default_value = sensr_ipc::client::DEFAULT_SOCKET, env = "SENSR_AGENT_SOCKET")]
     socket: PathBuf,
+    /// Serve the web UI from this built site directory (holds `pkg/sensr-ui.*`).
+    #[arg(long, env = "SENSR_UI_ROOT")]
+    ui_root: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -46,6 +49,6 @@ async fn main() -> anyhow::Result<()> {
             _ = int.recv() => {}
         }
     };
-    sensr_api::serve(listener, state, shutdown).await?;
+    sensr_api::serve_with_ui(listener, state, args.ui_root, shutdown).await?;
     Ok(())
 }

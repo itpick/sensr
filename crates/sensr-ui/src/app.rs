@@ -194,7 +194,7 @@ pub fn TopBar(user: String) -> impl IntoView {
                     <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM2.5 14.5c.5-3 2.7-4.5 5.5-4.5s5 1.5 5.5 4.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
                     <span>{user}</span>
                 </span>
-                <form method="post" action="/api/logout">
+                <form method="post" action="/ui/fn/logout">
                     <button type="submit" class="btn btn-sm btn-ghost">"Logout"</button>
                 </form>
             </div>
@@ -255,7 +255,7 @@ pub fn Login() -> impl IntoView {
     view! {
         <Title text="Login | sensr"/>
         <main class="login-page">
-            <form class="login-card" method="post" action="/api/login">
+            <form class="login-card" method="post" action="/ui/fn/login">
                 <h1 class="login-brand"><Wordmark/></h1>
                 {failed.then(|| view! {
                     <p class="field-error" role="alert" id="login-error">"Wrong username or password."</p>

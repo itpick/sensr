@@ -102,7 +102,8 @@ impl AuthState {
             .remove(token);
     }
 
-    fn session(&self, token: &str) -> Option<Caller> {
+    /// The caller behind a live session token (refreshes its idle timer).
+    pub fn session(&self, token: &str) -> Option<Caller> {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         match sessions.get_mut(token) {
             Some((caller, at)) if at.elapsed() < SESSION_TTL => {

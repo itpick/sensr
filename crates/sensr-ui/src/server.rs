@@ -2,7 +2,7 @@
 //! session gate, and the theme cookie.
 
 use crate::actions::{CurrentUser, SESSION_COOKIE};
-use crate::api::BackendHandle;
+use crate::api::SessionsHandle;
 use crate::app::{App, shell};
 use axum::Router;
 use axum::body::Body;
@@ -53,14 +53,14 @@ pub fn current_user() -> Option<String> {
 
 fn is_public(path: &str) -> bool {
     path == "/login"
-        || path == "/api/login"
+        || path == "/ui/fn/login"
         || path.starts_with("/pkg/")
         || path == "/favicon.svg"
         || path == "/healthz"
 }
 
 async fn session_gate(
-    State(backend): State<BackendHandle>,
+    State(sessions): State<SessionsHandle>,
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
@@ -70,17 +70,18 @@ async fn session_gate(
         .iter()
         .filter_map(|v| v.to_str().ok())
         .find_map(|h| cookie(h, SESSION_COOKIE).map(str::to_owned));
-    let user = match token {
-        Some(t) => backend.session(&t).await.ok().flatten(),
+    let session = match token {
+        Some(t) => sessions.open(&t).await,
         None => None,
     };
-    match user {
-        Some(u) => {
-            req.extensions_mut().insert(CurrentUser(u));
+    match session {
+        Some(s) => {
+            req.extensions_mut().insert(CurrentUser(s.user));
+            req.extensions_mut().insert(s.backend);
             next.run(req).await
         }
         None if is_public(req.uri().path()) => next.run(req).await,
-        None if req.uri().path().starts_with("/api/") => {
+        None if req.uri().path().starts_with("/ui/fn/") => {
             (axum::http::StatusCode::UNAUTHORIZED, "session required").into_response()
         }
         None => Redirect::to("/login").into_response(),
@@ -116,15 +117,25 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
 }
 
 /// The complete UI: pages, server functions, static assets and the session gate.
-pub fn router(options: LeptosOptions, backend: BackendHandle) -> Router {
+pub fn router(options: LeptosOptions, sessions: SessionsHandle) -> Router {
     let routes = generate_route_list(App);
-    let ctx_backend = backend.clone();
+    let ctx_sessions = sessions.clone();
     let site = std::path::PathBuf::from(options.site_root.as_ref());
     // Static assets are mounted explicitly: the UI's catch-all route would otherwise swallow
     // them. Hashless names, so revalidate rather than cache forever.
     let pkg = tower_http::services::ServeDir::new(site.join(options.site_pkg_dir.as_ref()));
     Router::new()
         .route("/healthz", axum::routing::get(|| async { "ok" }))
+        // Leptos names the wasm `<output>_bg.wasm` unless LEPTOS_OUTPUT_NAME was set when the
+        // *server* was compiled (cargo-leptos does that; a plain `cargo build` of sensr-api
+        // does not). Serve both names from the one file cargo-leptos writes.
+        .route_service(
+            &format!("/{}/{}_bg.wasm", options.site_pkg_dir, options.output_name),
+            tower_http::services::ServeFile::new(
+                site.join(options.site_pkg_dir.as_ref())
+                    .join(format!("{}.wasm", options.output_name)),
+            ),
+        )
         .nest_service("/pkg", pkg)
         .route_service(
             "/favicon.svg",
@@ -133,7 +144,7 @@ pub fn router(options: LeptosOptions, backend: BackendHandle) -> Router {
         .leptos_routes_with_context(
             &options,
             routes,
-            move || provide_context(ctx_backend.clone()),
+            move || provide_context(ctx_sessions.clone()),
             {
                 let o = options.clone();
                 move || shell(o.clone())
@@ -141,7 +152,7 @@ pub fn router(options: LeptosOptions, backend: BackendHandle) -> Router {
         )
         .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(options)
-        .layer(middleware::from_fn_with_state(backend, session_gate))
+        .layer(middleware::from_fn_with_state(sessions, session_gate))
         .layer(middleware::from_fn(security_headers))
         .layer(tower_http::compression::CompressionLayer::new())
 }

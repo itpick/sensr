@@ -19,9 +19,12 @@ anyhow.workspace = true
 axum.workspace = true
 blake3.workspace = true
 clap = { workspace = true, features = ["env"] }
+futures.workspace = true
 getrandom.workspace = true
+leptos.workspace = true
 sensr-auth.workspace = true
 sensr-ipc.workspace = true
+sensr-ui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

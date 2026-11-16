@@ -288,7 +288,7 @@ pub fn History() -> impl IntoView {
                 .iter()
                 .filter(|r| r.id != head)
                 .map(|r| view! {
-                    <form id=format!("rb-{}", r.id) method="post" action="/api/rollback_to" hidden>
+                    <form id=format!("rb-{}", r.id) method="post" action="/ui/fn/rollback_to" hidden>
                         <input type="hidden" name="revision" value=r.id.to_string()/>
                     </form>
                 })
