@@ -226,6 +226,12 @@ install() {
   fi
 
   rm -rf "${boot:?}/$TRIAL.new"
+  # The running OS's boot partition may be small (an EFI system partition):
+  # make sure the kernel, initrd and device trees fit, with 8 MiB to spare.
+  local need have
+  need=$(du -sk "$fat/current" | cut -f1)
+  have=$(( $(df -Pk "$boot" | tail -n1 | tr -s ' ' | cut -d' ' -f4) + $(du -sk "$boot/$TRIAL" 2>/dev/null | cut -f1 || echo 0) ))
+  [ "$have" -ge $((need + 8192)) ] || die "$boot has $((have / 1024)) MiB free, the trial's boot files need $((need / 1024 + 8)) MiB"
   cp -r "$fat/current" "$boot/$TRIAL.new"
   sed -i 's/$/ sensr.trial=1/' "$boot/$TRIAL.new/cmdline.txt"
   echo "$dev" > "$boot/$TRIAL.new/target"
