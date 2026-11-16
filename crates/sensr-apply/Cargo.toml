@@ -12,6 +12,7 @@ ipnet.workspace = true
 minijinja = { workspace = true, features = ["serde", "json"] }
 serde.workspace = true
 serde_json.workspace = true
+sensr-rules.workspace = true
 sensr-schema.workspace = true
 thiserror.workspace = true
 

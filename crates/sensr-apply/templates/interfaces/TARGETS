@@ -1,0 +1,4 @@
+# One .network per assigned interface, one .netdev per VLAN, in /run/systemd/network/.
+# 40- sorts before WireGuard's 50- files and after nothing NixOS ships.
+interfaces.network:40-sensr-[networkd.links.%.name].network
+interfaces.netdev:40-sensr-[networkd.vlans.%.name].netdev

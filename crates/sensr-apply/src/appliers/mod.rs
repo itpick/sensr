@@ -12,6 +12,7 @@
 //! `nix shell nixpkgs#nftables nixpkgs#kea nixpkgs#unbound -c cargo test -p sensr-apply`.
 
 pub mod convert;
+pub mod interfaces;
 pub mod kea;
 pub mod nft;
 pub mod qdisc;

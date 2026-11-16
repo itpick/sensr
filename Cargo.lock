@@ -1289,6 +1289,7 @@ dependencies = [
  "ipnet",
  "minijinja",
  "proptest",
+ "sensr-rules",
  "sensr-schema",
  "serde",
  "serde_json",
