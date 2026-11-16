@@ -42,6 +42,8 @@ pub enum Expr<'a> {
     And(Box<Expr<'a>>, Box<Expr<'a>>),
     /// bitwise or `a | b`
     Or(Box<Expr<'a>>, Box<Expr<'a>>),
+    /// right shift `a >> b`
+    Shr(Box<Expr<'a>>, Box<Expr<'a>>),
     /// flag list `a | b | c` (as nft prints it)
     Flags(Vec<&'static str>),
     /// `numgen inc mod <n>`
@@ -86,6 +88,7 @@ impl Serialize for Expr<'_> {
             Expr::Fib(flags, result) => one("fib", &FibBody(flags, result), s),
             Expr::And(a, b) => one("&", &[&**a, &**b], s),
             Expr::Or(a, b) => one("|", &[&**a, &**b], s),
+            Expr::Shr(a, b) => one(">>", &[&**a, &**b], s),
             Expr::Flags(f) => {
                 if f.len() == 1 {
                     s.serialize_str(f[0])
@@ -291,6 +294,10 @@ pub enum Stmt<'a> {
     FlowAdd(Cow<'a, str>),
     /// `ct mark set ct mark | <bits>`
     CtMarkOr(u32),
+    /// `meta mark set <expr>`
+    MetaMarkSet(Expr<'a>),
+    /// `ct mark set <expr>`
+    CtMarkSet(Expr<'a>),
 }
 
 impl Serialize for Stmt<'_> {
@@ -319,6 +326,10 @@ impl Serialize for Stmt<'_> {
             Stmt::Dnat(n) => m.serialize_entry("dnat", n)?,
             Stmt::FlowAdd(ft) => m.serialize_entry("flow", &FlowBody(ft))?,
             Stmt::CtMarkOr(bits) => m.serialize_entry("mangle", &CtMarkBody(*bits))?,
+            Stmt::MetaMarkSet(e) => {
+                m.serialize_entry("mangle", &MangleBody(Expr::Meta("mark"), e))?
+            }
+            Stmt::CtMarkSet(e) => m.serialize_entry("mangle", &MangleBody(Expr::Ct("mark"), e))?,
         }
         m.end()
     }
@@ -384,6 +395,16 @@ impl Serialize for FlowBody<'_> {
         let mut m = s.serialize_map(Some(2))?;
         m.serialize_entry("op", "add")?;
         m.serialize_entry("flowtable", &format!("@{}", self.0))?;
+        m.end()
+    }
+}
+
+struct MangleBody<'a, 'b>(Expr<'static>, &'b Expr<'a>);
+impl Serialize for MangleBody<'_, '_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut m = s.serialize_map(Some(2))?;
+        m.serialize_entry("key", &self.0)?;
+        m.serialize_entry("value", self.1)?;
         m.end()
     }
 }

@@ -24,6 +24,7 @@ use crate::ir::{FilterRule, IfAddr, Interface, InterfaceMap, IpFamily, V4Mode, V
 use crate::nat::{self, NatRules, OutboundMode, ReflectionDefaults};
 use crate::normalize::Context;
 use crate::render::{nft, pf};
+use crate::routing::{PolicyRouting, TargetKind};
 use crate::ruleset::Ruleset;
 use crate::system_rules::{self, SystemSettings};
 
@@ -50,6 +51,8 @@ pub struct Compiled {
     pub aliases: Resolution,
     /// render options from the firewall settings
     pub options: nft::Options,
+    /// policy-routing targets (route-to / reply-to marks and tables)
+    pub routing: PolicyRouting,
 }
 
 impl Compiled {
@@ -60,6 +63,7 @@ impl Compiled {
             interfaces: &self.interfaces,
             aliases: &self.aliases.aliases,
             nat: Some(&self.nat),
+            routing: Some(&self.routing),
         }
     }
 
@@ -424,6 +428,48 @@ pub fn snat_conf(r: &sn::SourceNatRule) -> Conf {
     c
 }
 
+/// Gateways and groups as policy targets; on multi-WAN boxes every WAN
+/// also replies through its own gateway (upstream's automatic `reply-to`).
+fn policy_routing(doc: &Document, ifs: &InterfaceMap) -> PolicyRouting {
+    let mut targets = BTreeMap::new();
+    for g in doc.gateways.gateways.values().filter(|g| g.enabled) {
+        targets.insert(
+            g.name.as_str().to_owned(),
+            TargetKind::Gateway {
+                interface: g.interface.as_str().to_owned(),
+                address: g.address,
+            },
+        );
+    }
+    for grp in doc.gateways.groups.values() {
+        let mut members: Vec<(u8, String)> = grp
+            .members
+            .iter()
+            .map(|m| (m.tier, m.gateway.as_str().to_owned()))
+            .collect();
+        members.sort();
+        targets.insert(grp.name.as_str().to_owned(), TargetKind::Group { members });
+    }
+    let mut reply = BTreeMap::new();
+    let wans: Vec<&String> = ifs
+        .iter()
+        .filter(|(_, i)| i.gateway_v4)
+        .map(|(n, _)| n)
+        .collect();
+    if wans.len() > 1 {
+        for w in wans {
+            if let Some(g) =
+                doc.gateways.gateways.values().find(|g| {
+                    g.enabled && g.interface.as_str() == w && g.family != SchemaFamily::Inet6
+                })
+            {
+                reply.insert(w.clone(), g.name.as_str().to_owned());
+            }
+        }
+    }
+    PolicyRouting::new(targets, reply)
+}
+
 /// Compiles a document.
 pub fn compile(doc: &Document, rt: &Runtime<'_>) -> Compiled {
     let ifs = interfaces(doc, rt);
@@ -493,7 +539,9 @@ pub fn compile(doc: &Document, rt: &Runtime<'_>) -> Compiled {
     }
     nat_rules.sort();
 
+    let routing = policy_routing(doc, &ifs);
     Compiled {
+        routing,
         interfaces: ifs,
         filter: rs.rules,
         nat: nat_rules,

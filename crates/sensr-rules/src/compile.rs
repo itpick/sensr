@@ -398,9 +398,6 @@ fn tcp_flag_names(letters: &str) -> Vec<&'static str> {
 /// pf features nftables has no direct counterpart for in this renderer: the
 /// rule still loads, the import report says what changed.
 fn degraded_features(rule: &FilterRule, mut warn: impl FnMut(String)) {
-    if rule.gateway.is_some() {
-        warn("policy routing (gateway) not rendered yet; rule passes without route-to".into());
-    }
     if rule.tag.is_some() || rule.tagged.is_some() {
         warn("packet tags not rendered yet".into());
     }

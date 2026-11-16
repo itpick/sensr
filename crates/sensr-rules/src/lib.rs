@@ -19,6 +19,7 @@ pub mod nat;
 pub mod normalize;
 pub mod proto;
 pub mod render;
+pub mod routing;
 pub mod ruleset;
 pub mod services;
 pub mod system_rules;
