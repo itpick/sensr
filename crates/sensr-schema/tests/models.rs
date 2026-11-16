@@ -233,6 +233,77 @@ fn vlan_rules() {
     assert_eq!(back, doc);
 }
 
+#[test]
+fn gateway_rules() {
+    let mut doc = Document::factory();
+    doc.set_by_path(
+        "gateways",
+        json!({
+            "gateways": {
+                "00000000-0000-4000-8000-000000000001": {"name": "WAN_DHCP", "interface": "wan"},
+                "00000000-0000-4000-8000-000000000002": {
+                    "name": "WAN2", "interface": "lan", "address": "2001:db8::1",
+                    "monitor": true, "weight": 11
+                },
+                "00000000-0000-4000-8000-000000000003": {"name": "WAN3", "interface": "nope", "family": "inet46"}
+            },
+            "groups": {
+                "00000000-0000-4000-8000-000000000004": {
+                    "name": "FAILOVER",
+                    "members": [{"gateway": "WAN_DHCP", "tier": 1}, {"gateway": "GONE", "tier": 6}]
+                },
+                "00000000-0000-4000-8000-000000000005": {"name": "WAN_DHCP"}
+            }
+        }),
+    )
+    .unwrap();
+    let rule = doc.firewall.rules.keys().next().copied().unwrap();
+    doc.set_by_path_text(&format!("firewall.rules.{rule}.gateway"), "FAILOVER")
+        .unwrap();
+    let v = doc.validate();
+    let g = |n: u8| format!("gateways.gateways.00000000-0000-4000-8000-00000000000{n}");
+    assert_eq!(
+        messages(&v, &format!("{}.address", g(2))),
+        ["The address family of the address does not match the gateway's IP version."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.weight", g(2))),
+        ["Please specify a value between 1 and 10."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.interface", g(3))),
+        ["The interface does not exist."]
+    );
+    assert_eq!(
+        messages(&v, &format!("{}.family", g(3))),
+        ["A gateway is either IPv4 or IPv6."]
+    );
+    assert_eq!(
+        messages(
+            &v,
+            "gateways.groups.00000000-0000-4000-8000-000000000004.members"
+        ),
+        [
+            "Gateway GONE does not exist.",
+            "Please specify a value between 1 and 5."
+        ]
+    );
+    assert_eq!(
+        messages(
+            &v,
+            "gateways.groups.00000000-0000-4000-8000-000000000005.name"
+        ),
+        ["Gateway with this name already exists."]
+    );
+    assert!(v.get(&format!("firewall.rules.{rule}.gateway")).is_none());
+    doc.set_by_path_text(&format!("firewall.rules.{rule}.gateway"), "MISSING")
+        .unwrap();
+    assert_eq!(
+        messages(&doc.validate(), &format!("firewall.rules.{rule}.gateway")),
+        ["Gateway MISSING does not exist."]
+    );
+}
+
 fn alias(name: &str, content: serde_json::Value) -> Alias {
     serde_json::from_value(json!({"name": name, "content": content})).unwrap()
 }

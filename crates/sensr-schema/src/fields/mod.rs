@@ -20,7 +20,8 @@ pub use keys::{SshPublicKey, WgKey};
 pub use mac::MacAddr;
 pub use misc::{CountryCode, HexBytes, HttpUrl};
 pub use names::{
-    AliasName, Description, DeviceName, GroupName, InterfaceId, Timezone, Username, WgName,
+    AliasName, Description, DeviceName, GatewayName, GroupName, InterfaceId, Timezone, Username,
+    WgName,
 };
 pub use net::{AddressRange, IpFamily, NetOrAlias};
 pub use port::{Port, PortRange, PortSpec};

@@ -14,6 +14,7 @@
 pub mod dhcp;
 pub mod dns;
 pub mod firewall;
+pub mod gateways;
 pub mod interfaces;
 pub mod nat;
 pub mod system;

@@ -285,6 +285,18 @@ name_type!(
 );
 
 name_type!(
+    /// A gateway or gateway group name: 1 to 32 letters, digits, `_` or `-`
+    /// (OPNsense `Routing/Gateways.xml`).
+    GatewayName,
+    |s| ensure(
+        (1..=32).contains(&s.len())
+            && s.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')),
+        "A valid gateway name must be specified. The name may only consist of the characters \"a-zA-Z0-9_\" and must be less than 32 characters long.",
+    )
+);
+
+name_type!(
     /// A WireGuard instance or peer name: 1 to 64 letters, digits, `.`, `_`
     /// or `-`.
     WgName,
