@@ -41,7 +41,7 @@ impl Mapper<Document> for UnboundMapper {
             general(g, ctx, out);
         }
         if let Some(f) = ctx.child(s, "forwarding") {
-            out.dns.forwarding.use_system_servers = ctx.flag(f, "enabled");
+            out.dns.forwarding.use_system_servers = ctx.bool01(f, "enabled");
         }
         if let Some(dots) = ctx.child(s, "dots") {
             for d in ctx.children(dots, "dot") {
@@ -108,22 +108,24 @@ fn interfaces(
     ids
 }
 
+// The MVC model's BooleanFields: "1" is on, empty or absent is off (the
+// legacy presence flags of pre-MVC sections do not apply here).
 fn general<'doc>(g: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Document) {
     let dns = &mut out.dns;
-    dns.enabled = ctx.flag(g, "enabled");
+    dns.enabled = ctx.bool01(g, "enabled");
     if let Some(p) = ctx.parse(g, "port") {
         dns.port = p;
     }
-    dns.dnssec = ctx.flag(g, "dnssec");
-    dns.dns64 = ctx.flag(g, "dns64");
+    dns.dnssec = ctx.bool01(g, "dnssec");
+    dns.dns64 = ctx.bool01(g, "dns64");
     dns.statistics = ctx.bool01(g, "stats");
     dns.dns64_prefix = ctx.parse(g, "dns64prefix");
     if g.child("noregrecords").is_some() {
         dns.register_firewall_records = !ctx.bool01(g, "noregrecords");
     }
     dns.txt_descriptions = ctx.bool01(g, "txtsupport");
-    dns.register_dhcp_leases = ctx.flag(g, "regdhcp");
-    dns.register_dhcp_static = ctx.flag(g, "regdhcpstatic");
+    dns.register_dhcp_leases = ctx.bool01(g, "regdhcp");
+    dns.register_dhcp_static = ctx.bool01(g, "regdhcpstatic");
     if let Some(d) = ctx.non_empty(g, "regdhcpdomain") {
         dns.dhcp_domain = parse_or_warn::<DomainName>(ctx, g, &d, "domain");
     }
@@ -210,7 +212,7 @@ fn forwarder<'doc>(d: &'doc Element, ctx: &mut MapContext<'doc>) -> Option<(Uuid
             "DNS over TLS without a certificate name to verify: sensr requires one, so this upstream is imported as plain DNS",
         );
     }
-    let enabled = ctx.flag(d, "enabled");
+    let enabled = ctx.bool01(d, "enabled");
     let descr = ctx.text(d, "description");
     ctx.defaults(d, &[("forward_tcp_upstream", "0"), ("forward_first", "0")]);
     Some((
@@ -264,7 +266,7 @@ fn host<'doc>(h: &'doc Element, ctx: &mut MapContext<'doc>) -> Option<(Uuid, Hos
     let domain_el = ctx.child(h, "domain")?;
     let domain: DomainName = parse_or_warn(ctx, domain_el, &domain_el.text(), "domain")?;
     let ttl = ctx.parse(h, "ttl");
-    let enabled = ctx.flag(h, "enabled");
+    let enabled = ctx.bool01(h, "enabled");
     let descr = ctx.text(h, "description");
     // Configs from before `addptr` existed published the PTR.
     let ptr = h.child("addptr").is_none() || ctx.bool01(h, "addptr");
