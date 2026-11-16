@@ -557,7 +557,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/library/OPNsense/Base/UIModelGrid.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/Base/ViewTranslator.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/Core/Backend.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/library/OPNsense/Core/Config.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/library/OPNsense/Core/Config.php" = { status = "in-progress", crate = "sensr-config", module = "store", tests = ["T-0001", "T-0028"], note = "revisions, history, restore, locking; listtags/XML in sensr-import-opnsense" }
 "core/src/opnsense/mvc/app/library/OPNsense/Core/ConfigException.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/Core/ConfigMaintenance.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/Core/File.php" = { status = "todo" }
@@ -630,76 +630,76 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/models/OPNsense/Auth/FieldTypes/StoreB64Field.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Auth/FieldTypes/UidField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Auth/FieldTypes/UsernameField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Auth/Group.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Auth/Group.xml" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Auth/Group.php" = { status = "in-progress", crate = "sensr-schema", module = "models::system", note = "routing-slice subset" }
+"core/src/opnsense/mvc/app/models/OPNsense/Auth/Group.xml" = { status = "in-progress", crate = "sensr-schema", module = "models::system", note = "routing-slice subset" }
 "core/src/opnsense/mvc/app/models/OPNsense/Auth/Priv.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Auth/Priv.xml" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Auth/User.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Auth/User.xml" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/BaseModel.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/BaseModelMigration.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/BaseValidator.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/AllOrNoneConstraint.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/BaseConstraint.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/ComparedToFieldConstraint.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/DependConstraint.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/SetConstraint.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/SetIfConstraint.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/SingleSelectConstraint.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/UniqueConstraint.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/ArrayField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/AuthGroupField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/AuthenticationServerField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/AutoNumberField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/Base64Field.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/BaseField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/BaseListField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/BaseSetField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/BooleanField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/CSVListField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/CertificateField.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Auth/User.php" = { status = "in-progress", crate = "sensr-schema", module = "models::system", note = "routing-slice subset" }
+"core/src/opnsense/mvc/app/models/OPNsense/Auth/User.xml" = { status = "in-progress", crate = "sensr-schema", module = "models::system", note = "routing-slice subset" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/BaseModel.php" = { status = "in-progress", crate = "sensr-schema", module = "model + sensr-schema-derive", tests = ["T-0022", "T-0023", "T-0025", "T-0027", "T-0031", "T-0032", "T-0033", "T-0034", "T-0036", "T-0038", "T-0039"], note = "toXML (T-0035) is the importer export" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/BaseModelMigration.php" = { status = "done", crate = "sensr-schema", module = "migrate", tests = ["T-0024"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/BaseValidator.php" = { status = "done", crate = "sensr-schema", module = "validation" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/AllOrNoneConstraint.php" = { status = "done", crate = "sensr-schema", module = "constraints" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/BaseConstraint.php" = { status = "done", crate = "sensr-schema", module = "constraints" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/ComparedToFieldConstraint.php" = { status = "done", crate = "sensr-schema", module = "constraints" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/DependConstraint.php" = { status = "done", crate = "sensr-schema", module = "constraints" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/SetConstraint.php" = { status = "done", crate = "sensr-schema", module = "constraints" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/SetIfConstraint.php" = { status = "done", crate = "sensr-schema", module = "constraints" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/SingleSelectConstraint.php" = { status = "done", crate = "sensr-schema", module = "constraints" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Constraints/UniqueConstraint.php" = { status = "done", crate = "sensr-schema", module = "constraints" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/ArrayField.php" = { status = "done", crate = "sensr-schema", module = "array::ArrayField", tests = ["T-0029", "T-0030", "T-0037"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/AuthGroupField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0082", "T-0083", "T-0084", "T-0085", "T-0086", "T-0087", "T-0088"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/AuthenticationServerField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0074", "T-0075", "T-0076", "T-0077", "T-0078", "T-0079", "T-0080", "T-0081"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/AutoNumberField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0089", "T-0090", "T-0091", "T-0092", "T-0093"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/Base64Field.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0094", "T-0095", "T-0096", "T-0097", "T-0098", "T-0099"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/BaseField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0026"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/BaseListField.php" = { status = "done", crate = "sensr-schema", module = "fields" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/BaseSetField.php" = { status = "done", crate = "sensr-schema", module = "fields" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/BooleanField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0100", "T-0101", "T-0102", "T-0103", "T-0104", "T-0105", "T-0106"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/CSVListField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0125", "T-0126", "T-0127", "T-0128"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/CertificateField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0107", "T-0108", "T-0109", "T-0110", "T-0111", "T-0112", "T-0113", "T-0114"] }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/ConfigdActionsField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/ContainerField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/CountryField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/DescriptionField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/EmailField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/HostnameField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/IPPortField.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/ContainerField.php" = { status = "done", crate = "sensr-schema", module = "models", note = "containers are model structs" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/CountryField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0115", "T-0116", "T-0117", "T-0118", "T-0119", "T-0120", "T-0121", "T-0122", "T-0123", "T-0124"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/DescriptionField.php" = { status = "done", crate = "sensr-schema", module = "fields" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/EmailField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0129", "T-0130", "T-0131", "T-0132", "T-0133", "T-0134"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/HostnameField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0135", "T-0136", "T-0137", "T-0138", "T-0139", "T-0140", "T-0141", "T-0142", "T-0143", "T-0144", "T-0145"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/IPPortField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0164", "T-0165", "T-0166", "T-0167", "T-0168", "T-0169", "T-0170", "T-0171", "T-0172", "T-0173", "T-0174", "T-0175", "T-0176", "T-0177", "T-0178", "T-0179", "T-0180"] }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/IStructuredInput.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/IntegerField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/InterfaceField.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/IntegerField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0146", "T-0147", "T-0148", "T-0149", "T-0150", "T-0151", "T-0152", "T-0153"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/InterfaceField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0154", "T-0155", "T-0156", "T-0157", "T-0158", "T-0159", "T-0160", "T-0161", "T-0162", "T-0163"] }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/JsonAuditField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/JsonField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/JsonKeyValueStoreField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/LegacyLinkField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/MacAddressField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/ModelRelationField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/NetworkAliasField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/NetworkField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/NumericField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/OptionField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/PortField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/ProtocolField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/StrictTextField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/TextField.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/MacAddressField.php" = { status = "done", crate = "sensr-schema", module = "fields" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/ModelRelationField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0181", "T-0182", "T-0183", "T-0184", "T-0185", "T-0186", "T-0187", "T-0188", "T-0189", "T-0190", "T-0191", "T-0192", "T-0193", "T-0194", "T-0195", "T-0196", "T-0197", "T-0198", "T-0199", "T-0200", "T-0201", "T-0202", "T-0203"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/NetworkAliasField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0204", "T-0205", "T-0206", "T-0207", "T-0208", "T-0209", "T-0210"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/NetworkField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0211", "T-0212", "T-0213", "T-0214", "T-0215", "T-0216", "T-0217", "T-0218", "T-0219", "T-0220", "T-0221", "T-0222"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/NumericField.php" = { status = "done", crate = "sensr-schema", module = "fields" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/OptionField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0223", "T-0224", "T-0225", "T-0226", "T-0227", "T-0228", "T-0229"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/PortField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0230", "T-0231", "T-0232", "T-0233", "T-0234", "T-0235", "T-0236", "T-0237", "T-0238", "T-0239", "T-0240"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/ProtocolField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0241", "T-0242", "T-0243", "T-0244", "T-0245", "T-0246", "T-0247"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/StrictTextField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0248", "T-0249", "T-0250", "T-0251", "T-0252", "T-0253", "T-0254"] }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/TextField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0255", "T-0256", "T-0257", "T-0258", "T-0259", "T-0260", "T-0261", "T-0262", "T-0263", "T-0264", "T-0265", "T-0266", "T-0267", "T-0268", "T-0269", "T-0270", "T-0271", "T-0272", "T-0273", "T-0274", "T-0275", "T-0276", "T-0277", "T-0278", "T-0279", "T-0280", "T-0281", "T-0282", "T-0283", "T-0284"] }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/UniqueIdField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/UpdateOnlyTextField.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/UpdateOnlyTextField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0285", "T-0286"] }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/UrlField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/VirtualIPField.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/FieldTypes/VirtualIPField.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0287", "T-0288", "T-0289", "T-0290", "T-0291"] }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/Menu/MenuContainer.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/Menu/MenuInitException.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/Menu/MenuItem.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/Menu/MenuSystem.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Messages/Message.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Messages/Message.php" = { status = "done", crate = "sensr-schema", module = "validation" }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/ModelException.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Validation.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/ValidationException.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Validators/CallbackValidator.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Validators/IntegerValidator.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Validators/MinMaxValidator.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Validators/Numericality.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Validators/PresenceOf.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Base/Validators/Regex.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Validation.php" = { status = "done", crate = "sensr-schema", module = "validation" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/ValidationException.php" = { status = "done", crate = "sensr-schema", module = "validation" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Validators/CallbackValidator.php" = { status = "done", crate = "sensr-schema", module = "fields::field" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Validators/IntegerValidator.php" = { status = "done", crate = "sensr-schema", module = "fields::field" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Validators/MinMaxValidator.php" = { status = "done", crate = "sensr-schema", module = "fields::field" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Validators/Numericality.php" = { status = "done", crate = "sensr-schema", module = "fields::field" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Validators/PresenceOf.php" = { status = "done", crate = "sensr-schema", module = "fields::field" }
+"core/src/opnsense/mvc/app/models/OPNsense/Base/Validators/Regex.php" = { status = "done", crate = "sensr-schema", module = "fields::field" }
 "core/src/opnsense/mvc/app/models/OPNsense/Base/Validators/Url.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/CaptivePortal/ACL/ACL.xml" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/CaptivePortal/CaptivePortal.php" = { status = "todo" }
@@ -771,19 +771,19 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/models/OPNsense/Dnsmasq/Menu/Menu.xml" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Dnsmasq/Migrations/M1_0_0.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/ACL/ACL.xml" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Firewall/Alias.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Firewall/Alias.xml" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Firewall/Alias.php" = { status = "in-progress", crate = "sensr-schema", module = "models::firewall", note = "routing-slice subset" }
+"core/src/opnsense/mvc/app/models/OPNsense/Firewall/Alias.xml" = { status = "in-progress", crate = "sensr-schema", module = "models::firewall", note = "routing-slice subset" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Category.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Category.xml" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Firewall/DNat.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Firewall/DNat.xml" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Firewall/DNat.php" = { status = "in-progress", crate = "sensr-schema", module = "models::nat", note = "routing-slice subset" }
+"core/src/opnsense/mvc/app/models/OPNsense/Firewall/DNat.xml" = { status = "in-progress", crate = "sensr-schema", module = "models::nat", note = "routing-slice subset" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/DynamicAliases/CaptivePortalAliases.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/DynamicAliases/InterfaceNetworkAliases.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/DynamicAliases/README.md" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/DynamicAliases/StaticAliases.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/AliasContentField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/AliasField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/AliasNameField.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/AliasNameField.php" = { status = "done", crate = "sensr-schema", module = "fields::AliasName" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/CategoryField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/CategoryMapField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/DNatAssociatedRuleField.php" = { status = "todo" }
@@ -799,8 +799,8 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/ScheduleField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/SourceNatRuleField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/TosField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Firewall/Filter.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Firewall/Filter.xml" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Firewall/Filter.php" = { status = "in-progress", crate = "sensr-schema", module = "models::firewall", note = "routing-slice subset" }
+"core/src/opnsense/mvc/app/models/OPNsense/Firewall/Filter.xml" = { status = "in-progress", crate = "sensr-schema", module = "models::firewall", note = "routing-slice subset" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Group.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Group.xml" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Menu/Menu.php" = { status = "todo" }
@@ -911,8 +911,8 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/models/OPNsense/Kea/FieldTypes/KeaStaticRoutesField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Kea/KeaDdns.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Kea/KeaDdns.xml" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv4.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv4.xml" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv4.php" = { status = "in-progress", crate = "sensr-schema", module = "models::dhcp", note = "routing-slice subset" }
+"core/src/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv4.xml" = { status = "in-progress", crate = "sensr-schema", module = "models::dhcp", note = "routing-slice subset" }
 "core/src/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv6.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv6.xml" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Kea/Menu/Menu.xml" = { status = "todo" }
@@ -985,19 +985,19 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/models/OPNsense/Unbound/Migrations/M1_0_5.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Unbound/Migrations/M1_0_6.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Unbound/Migrations/M1_0_8.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Unbound/Unbound.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Unbound/Unbound.xml" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Unbound/Unbound.php" = { status = "in-progress", crate = "sensr-schema", module = "models::dns", note = "routing-slice subset" }
+"core/src/opnsense/mvc/app/models/OPNsense/Unbound/Unbound.xml" = { status = "in-progress", crate = "sensr-schema", module = "models::dns", note = "routing-slice subset" }
 "core/src/opnsense/mvc/app/models/OPNsense/Wireguard/ACL/ACL.xml" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Wireguard/Client.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Wireguard/Client.xml" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Wireguard/Client.php" = { status = "in-progress", crate = "sensr-schema", module = "models::wireguard", note = "routing-slice subset" }
+"core/src/opnsense/mvc/app/models/OPNsense/Wireguard/Client.xml" = { status = "in-progress", crate = "sensr-schema", module = "models::wireguard", note = "routing-slice subset" }
 "core/src/opnsense/mvc/app/models/OPNsense/Wireguard/FieldTypes/ClientField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Wireguard/FieldTypes/ServerField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Wireguard/General.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Wireguard/General.xml" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Wireguard/General.php" = { status = "in-progress", crate = "sensr-schema", module = "models::wireguard", note = "routing-slice subset" }
+"core/src/opnsense/mvc/app/models/OPNsense/Wireguard/General.xml" = { status = "in-progress", crate = "sensr-schema", module = "models::wireguard", note = "routing-slice subset" }
 "core/src/opnsense/mvc/app/models/OPNsense/Wireguard/Menu/Menu.xml" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Wireguard/Migrations/M1_0_0.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Wireguard/Server.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Wireguard/Server.xml" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Wireguard/Server.php" = { status = "in-progress", crate = "sensr-schema", module = "models::wireguard", note = "routing-slice subset" }
+"core/src/opnsense/mvc/app/models/OPNsense/Wireguard/Server.xml" = { status = "in-progress", crate = "sensr-schema", module = "models::wireguard", note = "routing-slice subset" }
 "core/src/opnsense/mvc/app/views/OPNsense/Auth/group.volt" = { status = "todo" }
 "core/src/opnsense/mvc/app/views/OPNsense/Auth/priv.volt" = { status = "todo" }
 "core/src/opnsense/mvc/app/views/OPNsense/Auth/user.volt" = { status = "todo" }
@@ -1132,46 +1132,46 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/tests/app/library/OPNsense/Interface/IdassocTest.php" = { status = "todo" }
 "core/src/opnsense/mvc/tests/app/models/OPNsense/ACL/AclConfig/config.xml" = { status = "todo" }
 "core/src/opnsense/mvc/tests/app/models/OPNsense/ACL/AclTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModel/Migrations/M0_0_1.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModel/Migrations/M1_0_0.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModel/Migrations/M1_0_1.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModel/TestModel.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModel/TestModel.xml" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModelConfig/backup/config.xml" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModelTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/Constraints/ComparedToFieldConstraintTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/Constraints/UniqueConstraintTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/AuthGroupFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/AuthGroupFieldTest/config.xml" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/AuthenticationServerFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/AuthenticationServerFieldTest/config.xml" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/AutoNumberFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/Base64FieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/BooleanFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/CSVListFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/CertificateFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/CertificateFieldTest/config.xml" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/CountryFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/EmailFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/Field_Framework_TestCase.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/HostnameFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/IPPortFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/IntegerFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/InterfaceFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/InterfaceFieldTest/config.xml" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/ModelRelationFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/ModelRelationFieldTest/config.xml" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/NetworkAliasFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/NetworkAliasFieldTest/config.xml" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/NetworkFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/OptionFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/PortFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/ProtocolFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/StrictTextFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/TextFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/UpdateOnlyTextFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/VirtualIPFieldTest.php" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/VirtualIPFieldTest/config.xml" = { status = "todo" }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModel/Migrations/M0_0_1.php" = { status = "done", crate = "sensr-schema", module = "migrate::tests", tests = ["T-0024"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModel/Migrations/M1_0_0.php" = { status = "done", crate = "sensr-schema", module = "migrate::tests", tests = ["T-0024"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModel/Migrations/M1_0_1.php" = { status = "done", crate = "sensr-schema", module = "migrate::tests", tests = ["T-0024"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModel/TestModel.php" = { status = "done", crate = "sensr-schema", module = "tests/derive.rs" }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModel/TestModel.xml" = { status = "done", crate = "sensr-schema", module = "tests/derive.rs" }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModelConfig/backup/config.xml" = { status = "done", crate = "sensr-config", module = "tests/store.rs", tests = ["T-0028"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModelTest.php" = { status = "in-progress", crate = "sensr-schema", module = "tests/derive.rs, path, array, constraints", tests = ["T-0022", "T-0023", "T-0024", "T-0025", "T-0026", "T-0027", "T-0028", "T-0029", "T-0030", "T-0031", "T-0032", "T-0033", "T-0034", "T-0035", "T-0036", "T-0037", "T-0038", "T-0039", "T-0040", "T-0041", "T-0042", "T-0043", "T-0044", "T-0045", "T-0046", "T-0047", "T-0048", "T-0049", "T-0050", "T-0051", "T-0052"], note = "T-0028 in sensr-config, T-0035 in sensr-import-opnsense" }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/Constraints/ComparedToFieldConstraintTest.php" = { status = "done", crate = "sensr-schema", module = "constraints::compared", tests = ["T-0053", "T-0054", "T-0055", "T-0056", "T-0057", "T-0058", "T-0059", "T-0060", "T-0061", "T-0062", "T-0063", "T-0064", "T-0065"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/Constraints/UniqueConstraintTest.php" = { status = "done", crate = "sensr-schema", module = "constraints::unique", tests = ["T-0066", "T-0067", "T-0068", "T-0069", "T-0070", "T-0071", "T-0072"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/AuthGroupFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0082", "T-0083", "T-0084", "T-0085", "T-0086", "T-0087", "T-0088"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/AuthGroupFieldTest/config.xml" = { status = "done", crate = "sensr-schema", module = "fields::reference", note = "fixture reproduced as Record test data" }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/AuthenticationServerFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0074", "T-0075", "T-0076", "T-0077", "T-0078", "T-0079", "T-0080", "T-0081"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/AuthenticationServerFieldTest/config.xml" = { status = "done", crate = "sensr-schema", module = "fields::reference", note = "fixture reproduced as Record test data" }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/AutoNumberFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0089", "T-0090", "T-0091", "T-0092", "T-0093"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/Base64FieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0094", "T-0095", "T-0096", "T-0097", "T-0098", "T-0099"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/BooleanFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0100", "T-0101", "T-0102", "T-0103", "T-0104", "T-0105", "T-0106"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/CSVListFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0125", "T-0126", "T-0127", "T-0128"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/CertificateFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0107", "T-0108", "T-0109", "T-0110", "T-0111", "T-0112", "T-0113", "T-0114"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/CertificateFieldTest/config.xml" = { status = "done", crate = "sensr-schema", module = "fields::reference", note = "fixture reproduced as Record test data" }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/CountryFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0115", "T-0116", "T-0117", "T-0118", "T-0119", "T-0120", "T-0121", "T-0122", "T-0123", "T-0124"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/EmailFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0129", "T-0130", "T-0131", "T-0132", "T-0133", "T-0134"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/Field_Framework_TestCase.php" = { status = "done", crate = "sensr-schema", module = "testing", tests = ["T-0073"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/HostnameFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0135", "T-0136", "T-0137", "T-0138", "T-0139", "T-0140", "T-0141", "T-0142", "T-0143", "T-0144", "T-0145"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/IPPortFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0164", "T-0165", "T-0166", "T-0167", "T-0168", "T-0169", "T-0170", "T-0171", "T-0172", "T-0173", "T-0174", "T-0175", "T-0176", "T-0177", "T-0178", "T-0179", "T-0180"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/IntegerFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0146", "T-0147", "T-0148", "T-0149", "T-0150", "T-0151", "T-0152", "T-0153"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/InterfaceFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0154", "T-0155", "T-0156", "T-0157", "T-0158", "T-0159", "T-0160", "T-0161", "T-0162", "T-0163"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/InterfaceFieldTest/config.xml" = { status = "done", crate = "sensr-schema", module = "fields::reference", note = "fixture reproduced as Record test data" }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/ModelRelationFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0181", "T-0182", "T-0183", "T-0184", "T-0185", "T-0186", "T-0187", "T-0188", "T-0189", "T-0190", "T-0191", "T-0192", "T-0193", "T-0194", "T-0195", "T-0196", "T-0197", "T-0198", "T-0199", "T-0200", "T-0201", "T-0202", "T-0203"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/ModelRelationFieldTest/config.xml" = { status = "done", crate = "sensr-schema", module = "fields::reference", note = "fixture reproduced as Record test data" }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/NetworkAliasFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0204", "T-0205", "T-0206", "T-0207", "T-0208", "T-0209", "T-0210"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/NetworkAliasFieldTest/config.xml" = { status = "done", crate = "sensr-schema", module = "fields::reference", note = "fixture reproduced as Record test data" }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/NetworkFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0211", "T-0212", "T-0213", "T-0214", "T-0215", "T-0216", "T-0217", "T-0218", "T-0219", "T-0220", "T-0221", "T-0222"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/OptionFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0223", "T-0224", "T-0225", "T-0226", "T-0227", "T-0228", "T-0229"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/PortFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0230", "T-0231", "T-0232", "T-0233", "T-0234", "T-0235", "T-0236", "T-0237", "T-0238", "T-0239", "T-0240"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/ProtocolFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0241", "T-0242", "T-0243", "T-0244", "T-0245", "T-0246", "T-0247"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/StrictTextFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0248", "T-0249", "T-0250", "T-0251", "T-0252", "T-0253", "T-0254"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/TextFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0255", "T-0256", "T-0257", "T-0258", "T-0259", "T-0260", "T-0261", "T-0262", "T-0263", "T-0264", "T-0265", "T-0266", "T-0267", "T-0268", "T-0269", "T-0270", "T-0271", "T-0272", "T-0273", "T-0274", "T-0275", "T-0276", "T-0277", "T-0278", "T-0279", "T-0280", "T-0281", "T-0282", "T-0283", "T-0284"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/UpdateOnlyTextFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0285", "T-0286"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/VirtualIPFieldTest.php" = { status = "done", crate = "sensr-schema", module = "fields", tests = ["T-0287", "T-0288", "T-0289", "T-0290", "T-0291"] }
+"core/src/opnsense/mvc/tests/app/models/OPNsense/Base/FieldTypes/VirtualIPFieldTest/config.xml" = { status = "done", crate = "sensr-schema", module = "fields::reference", note = "fixture reproduced as Record test data" }
 "core/src/opnsense/mvc/tests/app/models/OPNsense/CaptivePortal/FieldTypes/OriginFieldTest.php" = { status = "todo" }
 "core/src/opnsense/mvc/tests/app/models/OPNsense/Dnsmasq/FieldTypes/HostnameFieldTest.php" = { status = "todo" }
 "core/src/opnsense/mvc/tests/app/models/OPNsense/Interfaces/NetworkInterfaceTest.php" = { status = "todo" }
