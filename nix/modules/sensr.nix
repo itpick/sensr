@@ -244,6 +244,18 @@ in
       '';
     };
 
+    ssh.enable = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Run sshd, key-only. Keys come from /run/sensr/ssh/authorized_keys/<user>
+        (rendered by the agent from the config's users) and, until the agent
+        imports it, from the seed folder's authorized_keys (for root). The
+        WAN never reaches it: sensr's rules drop WAN traffic to the box
+        unless a rule passes it.
+      '';
+    };
+
     seedDir = mkOption {
       type = types.str;
       default = "/boot/sensr";
@@ -673,6 +685,42 @@ in
       timerConfig = {
         OnCalendar = "*-*-* 04:00:00";
         Persistent = true;
+      };
+    };
+
+    services.openssh = mkIf cfg.ssh.enable {
+      enable = true;
+      # sensr owns the packet filter (and networking.firewall is off).
+      openFirewall = false;
+      settings = {
+        PasswordAuthentication = false;
+        KbdInteractiveAuthentication = false;
+        PermitRootLogin = "prohibit-password";
+      };
+      authorizedKeysFiles = [ "/run/sensr/ssh/authorized_keys/%u" ];
+    };
+    # Stopgap until the agent imports the seed's authorized_keys into the
+    # config: give root the seed's keys at boot, unless the agent has
+    # already rendered keys for root.
+    systemd.services.sensr-seed-ssh-keys = mkIf cfg.ssh.enable {
+      description = "SSH keys for root from the seed folder";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "sshd.service" ];
+      after = [ "local-fs.target" ];
+      unitConfig = {
+        RequiresMountsFor = cfg.seedDir;
+        ConditionPathExists = "${cfg.seedDir}/authorized_keys";
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = pkgs.writeShellScript "sensr-seed-ssh-keys" ''
+          set -eu
+          d=/run/sensr/ssh/authorized_keys
+          mkdir -p -m 0755 /run/sensr/ssh "$d"
+          if [ ! -s "$d/root" ]; then
+            ${pkgs.coreutils}/bin/install -m 0644 ${cfg.seedDir}/authorized_keys "$d/root"
+          fi
+        '';
       };
     };
 

@@ -131,6 +131,13 @@ pkgs.testers.runNixOSTest {
             machine.succeed(f"systemctl cat {unit}.service")
             machine.wait_until_succeeds(f"test -s /run/sensr/{conf} && systemctl is-active {unit}.service", timeout=60)
 
+    with subtest("sshd: key-only, keys from the seed folder"):
+        machine.wait_for_unit("sshd.service")
+        cfg = machine.succeed("sshd -T").lower()
+        assert "passwordauthentication no" in cfg, cfg
+        assert "permitrootlogin without-password" in cfg or "permitrootlogin prohibit-password" in cfg, cfg
+        assert "/run/sensr/ssh/authorized_keys/%u" in cfg, cfg
+
     with subtest("nothing failed"):
         machine.succeed("test -z \"$(systemctl list-units --failed --no-legend)\" || (systemctl list-units --failed; false)")
   '';

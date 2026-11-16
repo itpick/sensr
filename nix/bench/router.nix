@@ -1,6 +1,5 @@
-# The boot-time benchmark's router: images.qcow plus what the benchmark
-# probes need and sensr does not provide yet (an SSH server for the
-# "SSH up" milestone; sensr's own SSH comes with the authorized_keys seed).
+# The boot-time benchmark's router: images.qcow plus the bench SSH key for
+# root (what the authorized_keys seed would give it).
 # variant "home": home-router.xml sits in the seed folder at first boot,
 # with the FreeBSD device names replaced by the Linux ones (what the import
 # report asks the installer to do: igc0 -> eth0, igc1 -> eth1).
@@ -15,10 +14,6 @@ in
 {
   imports = [ ../images/qcow.nix ];
   image.baseName = lib.mkForce "sensr-bench-${variant}";
-  services.openssh = {
-    enable = true;
-    settings.PermitRootLogin = "prohibit-password";
-  };
   users.users.root.openssh.authorizedKeys.keyFiles = [ ./bench_key.pub ];
   # The "kernel" milestone is the kernel banner on the serial console
   # (07's method), a notice-level message the image's default loglevel (4)
