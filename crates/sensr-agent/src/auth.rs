@@ -62,7 +62,7 @@ fn truthy(v: Option<&Value>) -> bool {
 }
 
 /// Items of a list, or the values of a UUID-keyed map.
-fn items<'a>(v: Option<&'a Value>) -> Vec<&'a Value> {
+fn items(v: Option<&Value>) -> Vec<&Value> {
     match v {
         Some(Value::Object(m)) => m.values().collect(),
         other => list(other),
