@@ -17,6 +17,7 @@ pub mod firewall;
 pub mod gateways;
 pub mod interfaces;
 pub mod nat;
+pub mod routes;
 pub mod system;
 pub mod trust;
 pub mod wireguard;

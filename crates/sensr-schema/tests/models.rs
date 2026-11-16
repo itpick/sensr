@@ -696,6 +696,72 @@ fn wireguard_rules() {
 }
 
 #[test]
+fn static_routes() {
+    let mut doc = Document::factory();
+    doc.set_by_path(
+        "gateways.gateways.00000000-0000-0000-0000-0000000000a1",
+        json!({"name": "WAN_GW", "interface": "wan", "address": "203.0.113.1"}),
+    )
+    .unwrap();
+    doc.set_by_path(
+        "gateways.gateways.00000000-0000-0000-0000-0000000000a6",
+        json!({"name": "WAN_GW6", "interface": "wan", "family": "inet6", "address": "2001:db8::1"}),
+    )
+    .unwrap();
+    let ok = [
+        json!({"network": "10.20.0.0/16", "gateway": "WAN_GW"}),
+        json!({"network": "10.30.0.0/16", "gateway": "WAN_GW6", "description": "RFC 5549 next hop"}),
+        json!({"network": "2001:db8:1::/48", "gateway": "WAN_GW6"}),
+    ];
+    for (i, r) in ok.iter().enumerate() {
+        doc.set_by_path(
+            &format!("routes.routes.00000000-0000-0000-0000-00000000000{i}"),
+            r.clone(),
+        )
+        .unwrap();
+    }
+    let v = doc.validate();
+    assert!(v.is_ok(), "{v}");
+    let bad = [
+        (
+            "b1",
+            json!({"network": "2001:db8:2::/48", "gateway": "WAN_GW"}),
+        ),
+        ("b2", json!({"network": "10.40.0.0/16", "gateway": "NOPE"})),
+        (
+            "b3",
+            json!({"network": "10.20.0.1/16", "gateway": "WAN_GW"}),
+        ),
+    ];
+    for (k, r) in &bad {
+        doc.set_by_path(
+            &format!("routes.routes.00000000-0000-0000-0000-0000000000{k}"),
+            r.clone(),
+        )
+        .unwrap();
+    }
+    let v = doc.validate();
+    let p = |k: &str, f: &str| format!("routes.routes.00000000-0000-0000-0000-0000000000{k}.{f}");
+    let gw = "Specify a valid gateway from the list matching the networks ip protocol.";
+    assert_eq!(messages(&v, &p("b1", "gateway")), [gw]);
+    assert_eq!(messages(&v, &p("b2", "gateway")), [gw]);
+    assert_eq!(
+        messages(&v, &p("b3", "network")),
+        [
+            "Specify a valid network matching the gateways ip protocol.".to_owned(),
+            "Network 10.20.0.0/16 already has a route (item 00000000-0000-0000-0000-000000000000)."
+                .to_owned()
+        ]
+    );
+    assert!(
+        !serde_json::to_string(&Document::factory())
+            .unwrap()
+            .contains("\"routes\""),
+        "empty section is omitted"
+    );
+}
+
+#[test]
 fn system_rules() {
     let mut doc = Document::factory();
     let user = User {

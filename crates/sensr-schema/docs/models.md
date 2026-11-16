@@ -21,6 +21,7 @@ else bumps `SCHEMA_VERSION` and ships a migration.
 | `dhcpv4` | `dhcp::Dhcpv4` (subnets, pools, options, reservations) | `Kea/KeaDhcpv4.xml` (and legacy ISC/dnsmasq via the importer) |
 | `dns` | `dns::DnsResolver` (settings, forwarding, host_overrides) | `Unbound/Unbound.xml` |
 | `wireguard` | `wireguard::WireGuard` (servers, peers) | `Wireguard/{General,Server,Client}.xml` |
+| `routes` | `routes::Routes` (static routes to gateways by name; omitted while empty) | `Routes/Route.xml` (`staticroutes`) |
 
 ## Text grammars
 

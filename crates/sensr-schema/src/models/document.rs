@@ -12,6 +12,7 @@ use super::firewall::{AliasType, Endpoint, FilterRule, Firewall};
 use super::gateways::Gateways;
 use super::interfaces::{Interface, InterfaceRole, Interfaces, Ipv4Config, Ipv6Config};
 use super::nat::Nat;
+use super::routes::Routes;
 use super::system::System;
 use super::trust::Trust;
 use super::wireguard::WireGuard;
@@ -104,11 +105,13 @@ pub enum Section {
     Gateways,
     /// `trust`.
     Trust,
+    /// `routes`.
+    Routes,
 }
 
 impl Section {
     /// Every section, in document order.
-    pub const ALL: [Section; 9] = [
+    pub const ALL: [Section; 10] = [
         Self::System,
         Self::Interfaces,
         Self::Firewall,
@@ -118,6 +121,7 @@ impl Section {
         Self::Wireguard,
         Self::Gateways,
         Self::Trust,
+        Self::Routes,
     ];
 
     /// The section's key in the JSON document.
@@ -132,6 +136,7 @@ impl Section {
             Self::Wireguard => "wireguard",
             Self::Gateways => "gateways",
             Self::Trust => "trust",
+            Self::Routes => "routes",
         }
     }
 }
@@ -170,6 +175,10 @@ pub struct Document {
     /// Certificate authorities and certificates.
     #[serde(default)]
     pub trust: Trust,
+    /// Static routes. Omitted when empty, so documents without routes
+    /// serialise as before the section existed.
+    #[serde(default, skip_serializing_if = "Routes::is_empty")]
+    pub routes: Routes,
 }
 
 impl Default for Document {
@@ -185,6 +194,7 @@ impl Default for Document {
             wireguard: WireGuard::default(),
             gateways: Gateways::default(),
             trust: Trust::default(),
+            routes: Routes::default(),
         }
     }
 }
@@ -283,6 +293,7 @@ impl Document {
         self.gateways
             .validate(self, &root.join("gateways"), &mut out);
         self.trust.validate(self, &root.join("trust"), &mut out);
+        self.routes.validate(self, &root.join("routes"), &mut out);
         out
     }
 
@@ -306,6 +317,7 @@ impl Document {
                 Section::Wireguard => self.wireguard != other.wireguard,
                 Section::Gateways => self.gateways != other.gateways,
                 Section::Trust => self.trust != other.trust,
+                Section::Routes => self.routes != other.routes,
             })
             .collect()
     }
@@ -331,6 +343,15 @@ impl RefContext for Document {
 
     fn has_gateway(&self, name: &GatewayName) -> bool {
         self.gateways.has(name)
+    }
+
+    fn gateway_family(&self, name: &GatewayName) -> Option<IpFamily> {
+        let g = self.gateways.gateway(name)?;
+        Some(match g.address {
+            Some(std::net::IpAddr::V4(_)) => IpFamily::Inet,
+            Some(std::net::IpAddr::V6(_)) => IpFamily::Inet6,
+            None => g.family,
+        })
     }
 
     fn has_group(&self, name: &GroupName) -> bool {
