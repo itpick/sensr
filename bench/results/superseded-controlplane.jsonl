@@ -1,0 +1,10 @@
+{"router": "vyosL", "part": "apply", "ts": 1794827087.203958, "host_loadavg1": 0.61, "rep": 0, "commit_s": 1.966280460357666, "total_s": 3.440570116043091, "active_after": true, "method": "vbash configure/set/commit", "error": null}
+{"router": "vyosL", "part": "apply", "ts": 1794827091.3634079, "host_loadavg1": 0.8, "rep": 1, "commit_s": 1.841080904006958, "total_s": 2.2119827270507812, "active_after": true, "method": "vbash configure/set/commit", "error": null}
+{"router": "vyosL", "part": "apply", "ts": 1794827095.5425658, "host_loadavg1": 0.8, "rep": 2, "commit_s": 1.8358793258666992, "total_s": 2.201226234436035, "active_after": true, "method": "vbash configure/set/commit", "error": null}
+{"router": "vyosL", "part": "apply", "ts": 1794827099.7777975, "host_loadavg1": 0.81, "rep": 3, "commit_s": 1.8508577346801758, "total_s": 2.2138772010803223, "active_after": true, "method": "vbash configure/set/commit", "error": null}
+{"router": "vyosL", "part": "apply", "ts": 1794827103.965038, "host_loadavg1": 0.91, "rep": 4, "commit_s": 1.8512446880340576, "total_s": 2.2171993255615234, "active_after": true, "method": "vbash configure/set/commit", "error": null}
+{"router": "vyosL", "part": "api", "ts": 1794827128.5934951, "host_loadavg1": 1.28, "query": "get_one_rule", "n": 50, "p50_ms": 451.3726234436035, "p95_ms": 475.14820098876953}
+{"router": "vyosL", "part": "api", "ts": 1794827165.2641268, "host_loadavg1": 1.53, "query": "get_all_rules", "n": 50, "p50_ms": 728.7988662719727, "p95_ms": 751.9872188568115}
+{"router": "vyosL", "part": "apply_api", "ts": 1794827167.9565253, "host_loadavg1": 1.57, "rep": 0, "total_s": 2.667329788208008, "response": "{\"success\": true, \"data\": \"\", \"error\": null}"}
+{"router": "vyosL", "part": "apply_api", "ts": 1794827173.3418927, "host_loadavg1": 1.52, "rep": 1, "total_s": 2.693150281906128, "response": "{\"success\": true, \"data\": \"\", \"error\": null}"}
+{"router": "vyosL", "part": "apply_api", "ts": 1794827178.7579513, "host_loadavg1": 1.48, "rep": 2, "total_s": 2.732207775115967, "response": "{\"success\": true, \"data\": \"\", \"error\": null}"}

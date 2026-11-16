@@ -1,0 +1,919 @@
+{
+ "aliases": [
+  {
+   "alias": {
+    "enabled": "1",
+    "name": "iot_devices",
+    "type": "host",
+    "content": "192.168.1.20\n192.168.1.21\n192.168.1.22\n192.168.1.23\n192.168.1.24\n192.168.1.25\n192.168.1.26\n192.168.1.27",
+    "description": "iot_devices"
+   }
+  },
+  {
+   "alias": {
+    "enabled": "1",
+    "name": "kids_devices",
+    "type": "host",
+    "content": "192.168.1.40\n192.168.1.41\n192.168.1.42\n192.168.1.43",
+    "description": "kids_devices"
+   }
+  },
+  {
+   "alias": {
+    "enabled": "1",
+    "name": "admin_hosts",
+    "type": "host",
+    "content": "192.168.1.10\n192.168.1.11",
+    "description": "admin_hosts"
+   }
+  },
+  {
+   "alias": {
+    "enabled": "1",
+    "name": "work_vpn_nets",
+    "type": "network",
+    "content": "203.0.113.0/24\n198.51.100.0/24",
+    "description": "work_vpn_nets"
+   }
+  },
+  {
+   "alias": {
+    "enabled": "1",
+    "name": "blocklist_v4",
+    "type": "network",
+    "content": "83.77.202.19\n211.48.187.233\n130.109.19.0/24\n108.35.123.0/24\n109.30.63.162\n161.31.203.0/24\n57.23.68.0/24\n37.60.157.175\n47.52.96.141\n183.32.30.128\n175.218.160.237\n117.185.153.0/24\n47.124.41.135\n88.229.147.19\n31.214.84.39\n126.215.20.20\n196.160.174.153\n128.233.35.242\n70.242.33.0/24\n180.158.228.0/24\n99.177.11.91\n44.59.252.0/24\n197.147.66.102\n101.254.41.0/24\n103.142.70.222\n141.142.212.175\n98.118.77.0/24\n39.118.119.0/24\n213.93.134.0/24\n38.214.189.82\n33.27.233.200\n175.200.203.27\n124.205.31.0/24\n54.225.83.0/24\n154.26.52.0/24\n39.51.186.19\n54.192.76.245\n89.186.242.0/24\n218.249.238.80\n22.73.52.190\n68.245.82.53\n136.185.75.235\n7.152.46.67\n133.187.85.58\n137.168.114.202\n195.99.122.190\n206.116.102.92\n188.14.14.121\n67.99.176.240\n186.178.186.0/24\n27.116.240.0/24\n53.247.0.168\n89.43.61.201\n183.102.244.112\n163.170.44.249\n185.202.237.243\n22.81.87.8\n39.238.74.153\n122.179.79.34\n6.7.52.240\n36.222.99.55\n8.128.108.0/24\n62.166.132.214\n34.31.181.170\n150.215.66.135\n131.9.225.156\n2.76.88.0/24\n159.61.31.133\n136.247.54.15\n64.97.141.0/24\n26.231.14.234\n17.226.166.130\n156.102.141.137\n207.244.126.225\n67.103.229.0/24\n32.200.226.172\n62.219.37.0/24\n78.62.79.165\n170.187.73.0/24\n36.239.112.25\n102.249.83.214\n58.82.220.104\n87.215.100.24\n185.187.9.118\n113.9.196.160\n76.32.57.202\n59.53.43.0/24\n11.92.138.210\n109.132.207.0/24\n132.253.167.0/24\n15.93.217.69\n5.45.133.0/24\n220.113.34.0/24\n32.232.5.142\n107.137.66.0/24\n182.122.56.68\n13.92.103.161\n79.105.148.173\n46.138.177.65\n4.9.97.63\n115.54.221.140\n214.201.157.252\n59.175.101.181\n187.71.207.252\n14.66.7.0/24\n190.130.220.0/24\n22.195.144.178\n76.23.235.0/24\n69.228.1.0/24\n85.165.125.0/24\n80.111.182.0/24\n86.195.42.129\n168.102.127.2\n24.135.45.0/24\n151.21.201.0/24\n78.119.43.136\n219.79.199.185\n39.145.74.0/24\n214.219.71.193\n130.8.117.0/24\n11.68.184.97\n214.231.25.161\n137.125.250.0/24\n117.35.47.17\n191.242.129.217\n68.120.105.0/24\n167.235.252.20\n123.147.23.165\n51.39.75.167\n191.155.68.0/24\n16.248.137.26\n178.111.250.0/24\n133.146.237.197\n31.102.159.240\n122.8.148.210\n130.230.137.235\n54.38.46.0/24\n135.134.184.0/24\n210.143.57.60\n128.248.201.0/24\n1.251.230.187\n37.213.176.31\n216.169.0.87\n215.203.61.51\n183.6.148.0/24\n17.201.199.151\n20.184.219.219\n13.143.52.0/24\n170.146.76.0/24\n69.223.161.0/24\n96.219.14.162\n103.104.41.0/24\n188.210.230.36\n165.146.248.0/24\n141.65.87.88\n73.152.130.250\n168.133.207.78\n124.201.61.0/24\n42.38.106.208\n128.112.231.195\n116.218.71.63\n24.89.175.82\n62.188.132.52\n6.211.196.135\n54.192.138.16\n128.142.184.0/24\n129.110.47.0/24\n64.196.204.111\n80.11.65.0/24\n182.242.250.0/24\n101.239.229.0/24\n28.114.79.0/24\n175.55.234.0/24\n199.20.0.60\n146.19.155.161\n65.223.57.0/24\n77.98.198.0/24\n154.0.5.118\n72.161.124.61\n141.126.14.181\n167.157.28.0/24\n128.215.41.0/24\n171.217.189.0/24\n9.173.215.102\n51.3.149.130\n18.105.253.80\n197.99.118.68\n195.151.55.127\n157.95.114.234\n171.28.74.14\n55.12.72.182\n16.94.201.183\n81.57.40.85\n49.94.239.0/24\n171.193.191.114\n44.55.1.0/24\n21.179.215.32\n144.106.194.211\n80.221.44.0/24\n122.100.190.115",
+    "description": "blocklist_v4"
+   }
+  },
+  {
+   "alias": {
+    "enabled": "1",
+    "name": "web_ports",
+    "type": "port",
+    "content": "80\n443\n8080\n8443",
+    "description": "web_ports"
+   }
+  },
+  {
+   "alias": {
+    "enabled": "1",
+    "name": "mail_ports",
+    "type": "port",
+    "content": "25\n465\n587\n993\n995",
+    "description": "mail_ports"
+   }
+  }
+ ],
+ "rules": [
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "10",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "lan",
+    "destination_net": "(self)",
+    "destination_port": "53",
+    "description": "DNS to router",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "20",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "lan",
+    "destination_net": "(self)",
+    "destination_port": "53",
+    "description": "DNS/TCP to router",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "30",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "lan",
+    "destination_net": "(self)",
+    "destination_port": "123",
+    "description": "NTP to router",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "40",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "lan",
+    "destination_net": "(self)",
+    "destination_port": "67",
+    "description": "DHCP",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "50",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "admin_hosts",
+    "destination_net": "(self)",
+    "destination_port": "22",
+    "description": "admin SSH",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "60",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "admin_hosts",
+    "destination_net": "(self)",
+    "destination_port": "443",
+    "description": "admin GUI",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "70",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "ICMP",
+    "source_net": "lan",
+    "destination_net": "(self)",
+    "destination_port": "",
+    "description": "ping router",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "80",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "any",
+    "source_net": "lan",
+    "destination_net": "blocklist_v4",
+    "destination_port": "",
+    "description": "blocklist",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "90",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "iot_devices",
+    "destination_net": "any",
+    "destination_port": "mail_ports",
+    "description": "IoT no mail",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "100",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "any",
+    "source_net": "iot_devices",
+    "destination_net": "work_vpn_nets",
+    "destination_port": "",
+    "description": "IoT not to work",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "110",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "iot_devices",
+    "destination_net": "any",
+    "destination_port": "web_ports",
+    "description": "IoT web",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "120",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "iot_devices",
+    "destination_net": "any",
+    "destination_port": "123",
+    "description": "IoT NTP",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "130",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "any",
+    "source_net": "iot_devices",
+    "destination_net": "any",
+    "destination_port": "",
+    "description": "IoT default deny",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "140",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "kids_devices",
+    "destination_net": "any",
+    "destination_port": "6881-6889",
+    "description": "kids no bittorrent",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "150",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "kids_devices",
+    "destination_net": "any",
+    "destination_port": "3478-3480",
+    "description": "kids no STUN",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "160",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "kids_devices",
+    "destination_net": "any",
+    "destination_port": "web_ports",
+    "description": "kids web",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "170",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "any",
+    "source_net": "kids_devices",
+    "destination_net": "any",
+    "destination_port": "",
+    "description": "kids default deny",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "180",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "lan",
+    "destination_net": "any",
+    "destination_port": "445",
+    "description": "no SMB out",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "190",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "lan",
+    "destination_net": "any",
+    "destination_port": "135-139",
+    "description": "no NetBIOS out",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "200",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "lan",
+    "destination_net": "any",
+    "destination_port": "137-138",
+    "description": "no NetBIOS/udp out",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "210",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "lan",
+    "destination_net": "any",
+    "destination_port": "1900",
+    "description": "no SSDP out",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "220",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "lan",
+    "destination_net": "any",
+    "destination_port": "23",
+    "description": "no telnet out",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "230",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "192.168.1.60",
+    "destination_net": "198.18.0.0/24",
+    "destination_port": "7000",
+    "description": "host exception 0",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "240",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.61",
+    "destination_net": "198.18.1.0/24",
+    "destination_port": "7001",
+    "description": "host exception 1",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "250",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.62",
+    "destination_net": "198.18.2.0/24",
+    "destination_port": "7002",
+    "description": "host exception 2",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "260",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "192.168.1.63",
+    "destination_net": "198.18.3.0/24",
+    "destination_port": "7003",
+    "description": "host exception 3",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "270",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.64",
+    "destination_net": "198.18.4.0/24",
+    "destination_port": "7004",
+    "description": "host exception 4",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "280",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.65",
+    "destination_net": "198.18.5.0/24",
+    "destination_port": "7005",
+    "description": "host exception 5",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "290",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "192.168.1.66",
+    "destination_net": "198.18.6.0/24",
+    "destination_port": "7006",
+    "description": "host exception 6",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "300",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.67",
+    "destination_net": "198.18.7.0/24",
+    "destination_port": "7007",
+    "description": "host exception 7",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "310",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.68",
+    "destination_net": "198.18.8.0/24",
+    "destination_port": "7008",
+    "description": "host exception 8",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "320",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "192.168.1.69",
+    "destination_net": "198.18.9.0/24",
+    "destination_port": "7009",
+    "description": "host exception 9",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "330",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.70",
+    "destination_net": "198.18.10.0/24",
+    "destination_port": "7010",
+    "description": "host exception 10",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "340",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.71",
+    "destination_net": "198.18.11.0/24",
+    "destination_port": "7011",
+    "description": "host exception 11",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "350",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "192.168.1.72",
+    "destination_net": "198.18.12.0/24",
+    "destination_port": "7012",
+    "description": "host exception 12",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "360",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.73",
+    "destination_net": "198.18.13.0/24",
+    "destination_port": "7013",
+    "description": "host exception 13",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "370",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.74",
+    "destination_net": "198.18.14.0/24",
+    "destination_port": "7014",
+    "description": "host exception 14",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "380",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "192.168.1.75",
+    "destination_net": "198.18.15.0/24",
+    "destination_port": "7015",
+    "description": "host exception 15",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "390",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.76",
+    "destination_net": "198.18.16.0/24",
+    "destination_port": "7016",
+    "description": "host exception 16",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "400",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.77",
+    "destination_net": "198.18.17.0/24",
+    "destination_port": "7017",
+    "description": "host exception 17",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "410",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "192.168.1.78",
+    "destination_net": "198.18.18.0/24",
+    "destination_port": "7018",
+    "description": "host exception 18",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "420",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.79",
+    "destination_net": "198.18.19.0/24",
+    "destination_port": "7019",
+    "description": "host exception 19",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "430",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.80",
+    "destination_net": "198.18.20.0/24",
+    "destination_port": "7020",
+    "description": "host exception 20",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "440",
+    "action": "block",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "UDP",
+    "source_net": "192.168.1.81",
+    "destination_net": "198.18.21.0/24",
+    "destination_port": "7021",
+    "description": "host exception 21",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "450",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "192.168.1.82",
+    "destination_net": "198.18.22.0/24",
+    "destination_port": "7022",
+    "description": "host exception 22",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "460",
+    "action": "pass",
+    "quick": "1",
+    "interface": "lan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "any",
+    "source_net": "lan",
+    "destination_net": "any",
+    "destination_port": "",
+    "description": "LAN to any",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "470",
+    "action": "block",
+    "quick": "1",
+    "interface": "wan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "any",
+    "source_net": "blocklist_v4",
+    "destination_net": "any",
+    "destination_port": "",
+    "description": "WAN blocklist",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "480",
+    "action": "pass",
+    "quick": "1",
+    "interface": "wan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "ICMP",
+    "source_net": "any",
+    "destination_net": "(self)",
+    "destination_port": "",
+    "description": "WAN ping",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "490",
+    "action": "block",
+    "quick": "1",
+    "interface": "wan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "any",
+    "destination_net": "(self)",
+    "destination_port": "22",
+    "description": "WAN SSH",
+    "log": "0"
+   }
+  },
+  {
+   "rule": {
+    "enabled": "1",
+    "sequence": "500",
+    "action": "block",
+    "quick": "1",
+    "interface": "wan",
+    "direction": "in",
+    "ipprotocol": "inet",
+    "protocol": "TCP",
+    "source_net": "any",
+    "destination_net": "(self)",
+    "destination_port": "443",
+    "description": "WAN GUI",
+    "log": "0"
+   }
+  }
+ ]
+}

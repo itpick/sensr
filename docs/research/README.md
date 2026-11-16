@@ -16,6 +16,7 @@ plan that assigns everything here to phases is [`../PLAN.md`](../PLAN.md).
 | [04b Plugin issues](04b-issues-plugins.md) | `ISS-P-001`..`030`, plugin tiers (core / first-party / community / drop) | PLG-* phase and community-tier assignment, framework rules for `sensr-services` |
 | [05 Business features](05-business-features.md) | `BIZ-001`..`032`, BE inventory, licensing stance | Phase 3 and Phase 4 scope, §7 owner questions |
 | [06 Rust + NixOS stack](06-rust-nixos-stack.md) | opnsense-pi lessons L1–L14, dependency pins, freshness policy (§5) | §2.1 decisions, §5 pins, §6 images and first-boot contract |
+| [07 Performance evaluation](07-performance-evaluation.md) | — (measurements; scripts and raw data in `bench/`) | evidence for the Linux/nftables base and the lean agent model (§1 goals, §2.3–2.4); which gains are kernel (A), OS (B) or control plane (C) |
 
 Rules: IDs are never renumbered, only appended. When the upstream pin is
 bumped (`scripts/fetch-reference.sh --latest`), new tests become new `T-` rows

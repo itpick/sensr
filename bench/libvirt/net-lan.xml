@@ -1,0 +1,7 @@
+<network>
+  <name>sensrbench-lan</name>
+  <bridge name='sbbr-lan' stp='off' delay='0'/>
+  <mtu size='1500'/>
+  <dns enable='no'/>
+  <ip address='192.168.1.254' netmask='255.255.255.0'/>
+</network>

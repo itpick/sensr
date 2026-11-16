@@ -1,0 +1,22 @@
+# copied to $BENCH/keys/ssh_config; every router answers on 192.168.1.1
+Host opn nixr obsd router
+  HostName 192.168.1.1
+  User root
+Host vyos
+  HostName 192.168.1.1
+  User vyos
+Host client
+  HostName 192.168.1.100
+  User root
+Host server
+  HostName 10.99.0.10
+  User root
+Host *
+  IdentityFile /mnt/vms/sensr/bench/keys/id_bench
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  LogLevel ERROR
+  ConnectTimeout 3
+  ControlMaster auto
+  ControlPath /mnt/vms/sensr/bench/keys/cm-%n
+  ControlPersist 120
