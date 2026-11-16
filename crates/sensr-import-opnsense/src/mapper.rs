@@ -183,9 +183,31 @@ impl<'doc> MapContext<'doc> {
         }
     }
 
+    /// Consume the listed children of `parent` whose whole subtree carries no text
+    /// (`<numberoptions><item/></numberoptions>`): the form wrote an empty list. A
+    /// list with any value stays unconsumed and surfaces in the report.
+    pub fn blank(&mut self, parent: &'doc Element, names: &[&str]) {
+        fn is_blank(e: &Element) -> bool {
+            e.text().trim().is_empty() && e.elements().all(is_blank)
+        }
+        for name in names {
+            for c in parent.elements().filter(|e| e.name == *name) {
+                if is_blank(c) {
+                    self.consume_subtree(c);
+                }
+            }
+        }
+    }
+
     /// Attach a warning to `at`.
     pub fn warn(&mut self, at: &Element, severity: Severity, message: impl Into<String>) {
         let xpath = self.xpath(at);
+        self.warn_xpath(xpath, severity, message);
+    }
+
+    /// Attach a warning to the element at `xpath` (as returned by [`Self::xpath`]),
+    /// for cross-section fix-ups that run after the element is out of reach.
+    pub fn warn_xpath(&mut self, xpath: String, severity: Severity, message: impl Into<String>) {
         self.warnings.push(Warning {
             xpath,
             severity,

@@ -26,9 +26,15 @@ pub struct Firewall {
     /// Named address/port sets referenced by rules.
     #[serde(default)]
     pub aliases: ArrayField<Alias>,
-    /// Filter rules; evaluated by `sequence`, then by position.
+    /// Filter rules; evaluated by priority tier (floating and
+    /// multi-interface, then interface groups, then single interfaces), then
+    /// by `sequence`, then by position.
     #[serde(default)]
     pub rules: ArrayField<FilterRule>,
+    /// Interface groups rules can name like an interface (OPNsense
+    /// `Firewall/Group.xml`, Firewall › Groups).
+    #[serde(default, skip_serializing_if = "ArrayField::is_empty")]
+    pub groups: ArrayField<InterfaceGroup>,
     /// Global behaviour.
     #[serde(default)]
     pub settings: FirewallSettings,
@@ -40,12 +46,67 @@ impl Firewall {
         self.aliases.values().find(|a| &a.name == name)
     }
 
-    /// Rules in evaluation order: by `sequence`, ties by position.
+    /// Rules by `sequence`, ties by position. The renderer evaluates them
+    /// by priority tier first (see [`Firewall::priority`]).
     pub fn rules_in_order(&self) -> Vec<(&crate::Uuid, &FilterRule)> {
         let mut v: Vec<_> = self.rules.iter().collect();
         v.sort_by_key(|(_, r)| r.sequence);
         v
     }
+
+    /// The interface group called `name`.
+    pub fn group(&self, name: &InterfaceId) -> Option<&InterfaceGroup> {
+        self.groups.values().find(|g| &g.name == name)
+    }
+
+    /// The evaluation tier of a rule, as OPNsense's
+    /// `FilterRuleField::getPriority()` computes it: floating and
+    /// multi-interface rules (and inverted interface matches) at 200000, a
+    /// rule on one interface group at 300000 plus the group's sequence, a rule
+    /// on one interface at 400000. Rules naming no existing interface at all
+    /// are never loaded (600000). Lower tiers are evaluated first; `sequence`
+    /// only orders rules within a tier.
+    pub fn priority(&self, rule: &FilterRule, has_interface: impl Fn(&InterfaceId) -> bool) -> u32 {
+        let known = |i: &InterfaceId| has_interface(i) || self.group(i).is_some();
+        if !rule.interfaces.is_empty() && !rule.interfaces.iter().any(known) {
+            return 600_000;
+        }
+        if rule.interfaces.len() != 1 || rule.interface_not || rule.floating {
+            return 200_000;
+        }
+        match self.group(&rule.interfaces[0]) {
+            Some(g) if !has_interface(&rule.interfaces[0]) => 300_000 + g.sequence,
+            _ => 400_000,
+        }
+    }
+}
+
+/// An interface group: a name rules use for several interfaces at once
+/// (pf interface groups). A rule on a group matches traffic on any member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InterfaceGroup {
+    /// The name rules use (OPNsense `ifname`); must differ from every
+    /// interface identifier.
+    pub name: InterfaceId,
+    /// Member interfaces.
+    #[serde(default)]
+    pub members: Vec<InterfaceId>,
+    /// Every WireGuard instance is a member too, assigned or not (OPNsense's
+    /// automatic `wireguard` group).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wireguard: bool,
+    /// Orders rule tiers between groups: rules on a group with a lower
+    /// sequence are evaluated first (priority 300000 + sequence).
+    #[serde(default)]
+    pub sequence: u32,
+    /// Hide the group from the interface menu (OPNsense `nogroup`); rules
+    /// still apply.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// Free text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<Description>,
 }
 
 /// Global filter settings (OPNsense `Firewall/Filter.xml` `settings`).
@@ -468,6 +529,10 @@ pub struct FilterRule {
     /// instead of the routing table (pass rules only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<GatewayName>,
+    /// Evaluate in the floating tier even with a single interface (a legacy
+    /// floating rule); rules on several interfaces are floating anyway.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub floating: bool,
 }
 
 fn one() -> u32 {
@@ -492,6 +557,7 @@ impl Default for FilterRule {
             state_type: StateType::Keep,
             description: None,
             gateway: None,
+            floating: false,
         }
     }
 }
@@ -549,10 +615,48 @@ impl Validate for Firewall {
         }
         detect_alias_cycles(self, &aliases, out);
 
+        let groups = at.join("groups");
+        check::unique(
+            self.groups
+                .iter()
+                .map(|(id, g)| (groups.join(id), Some(g.name.clone()))),
+            "name",
+            "An interface group with this name already exists.",
+            out,
+        );
+        for (id, g) in &self.groups {
+            let p = groups.join(id);
+            if ctx.has_interface(&g.name) {
+                out.add(
+                    &p.join("name"),
+                    ValidatorKind::Callback,
+                    "An interface with this name already exists.",
+                );
+            }
+            check::interfaces(ctx, &g.members, &p.join("members"), out);
+        }
+
         let rules = at.join("rules");
         for (id, rule) in &self.rules {
             let p = rules.join(id);
-            check::interfaces(ctx, &rule.interfaces, &p.join("interfaces"), out);
+            for i in &rule.interfaces {
+                if !ctx.has_interface(i) && self.group(i).is_none() {
+                    out.add(
+                        &p.join("interfaces"),
+                        ValidatorKind::Callback,
+                        format!("Interface {i} does not exist."),
+                    );
+                }
+            }
+            for (side, ep) in [("source", &rule.source), ("destination", &rule.destination)] {
+                if ep.not && ep.net.is_any() {
+                    out.add(
+                        &p.join(side).join("not"),
+                        ValidatorKind::Callback,
+                        "Inverting \"any\" would match nothing, and OPNsense ignores the inversion (the rule matches every address); clear the inversion or choose an address.",
+                    );
+                }
+            }
             validate_match(
                 ctx,
                 rule.ip_protocol,

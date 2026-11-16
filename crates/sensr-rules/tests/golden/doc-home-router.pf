@@ -105,7 +105,13 @@ pass out log from {any} to {any} keep state allow-opts label "fae559338f65e11c53
 pass in log quick on igc1 proto tcp from {any} to {(self)} port {22} keep state label "125db1a425b9fffa681fbacb8023720f" # anti-lockout rule
 pass in log quick on igc1 proto tcp from {any} to {(self)} port {80} keep state label "58d2221c91b735e99192dc8437637bd5" # anti-lockout rule
 pass in log quick on igc1 proto tcp from {any} to {(self)} port {443} keep state label "9a848dfc8ff33b16d39603d170c32486" # anti-lockout rule
+# [prio: 200000]
+block in log quick on igc1 inet from {any} to $BLOCKLIST label "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a01" # Block outbound to BLOCKLIST (multi-interface: evaluated before the LAN allow)
+block in log quick on vlan01 inet from {any} to $BLOCKLIST label "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a01" # Block outbound to BLOCKLIST (multi-interface: evaluated before the LAN allow)
+block in quick on igc1 inet from {any} to $PAUSED_FEED label "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a02" # Block outbound to PAUSED_FEED (its alias is disabled: matches nothing)
+block in quick on vlan01 inet from {any} to $PAUSED_FEED label "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a02" # Block outbound to PAUSED_FEED (its alias is disabled: matches nothing)
 # [prio: 400000]
+# block in quick on vlan02 inet from $PRINTERS to {any} label "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a03" # Block printers from the internet (not any)
 block in log quick on igc0 inet from $GEO_BLOCK to {any} label "8c3dc3ee-b23e-4170-af5a-5f23b2321d58" # Block inbound from GEO_BLOCK
 pass in quick on igc0 inet proto udp from {any} to {(igc0)} port {51820} keep state label "2064ba71-29e9-4ca4-a655-3069cd2fb19e" # Allow WireGuard
 pass in quick on igc1 inet from {(igc1:network)} to {any} keep state label "1aac7ca4-2950-47cf-af32-f24f076f55a2" # Default allow LAN to any rule

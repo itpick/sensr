@@ -14,7 +14,8 @@ else bumps `SCHEMA_VERSION` and ships a migration.
 | `system` | `system::System` (hostname, domain, dns_servers, timezone, time_servers, users, groups, ssh) | `system`, `Auth/User.xml`, `Auth/Group.xml` |
 | `interfaces.<id>` | `interfaces::Interface` (role, device, match_mac, spoof_mac, mtu, ipv4, ipv6, block_private, block_bogons, qdisc) | `interfaces/<id>` |
 | `firewall.aliases` | `ArrayField<firewall::Alias>` | `Firewall/Alias.xml` |
-| `firewall.rules` | `ArrayField<firewall::FilterRule>` | `Firewall/Filter.xml` rules, legacy `filter/rule` |
+| `firewall.rules` | `ArrayField<firewall::FilterRule>` (evaluated by tier, then `sequence`: see below) | `Firewall/Filter.xml` rules, legacy `filter/rule` |
+| `firewall.groups` | `ArrayField<firewall::InterfaceGroup>` (members, automatic WireGuard membership, tier sequence; omitted while empty) | `Firewall/Group.xml` (`ifgroups`), plugin groups in `interfaces` |
 | `firewall.settings` | `firewall::FirewallSettings` | `Firewall/Filter.xml` settings |
 | `nat.outbound` | `nat::OutboundNat` (mode + manual rules) | `nat/outbound`, `Filter.xml` snatrules |
 | `nat.port_forwards` | `ArrayField<nat::PortForward>` | `Firewall/DNat.xml` (`nat/rule`) |
@@ -38,6 +39,15 @@ else bumps `SCHEMA_VERSION` and ships a migration.
 | `Protocol` | `any`, `tcp/udp`, IANA names or numbers, case-insensitive; displays lower-case |
 | `Pool4` | `start-end` or CIDR; displays `start-end` |
 
+## Rule evaluation order
+
+`Firewall::priority` reproduces `FilterRuleField::getPriority()`: rules on no
+single interface, on several interfaces, with an inverted interface match or
+marked `floating` are evaluated first (200000), then rules on one interface
+group (300000 plus the group's `sequence`), then rules on one interface
+(400000). `sequence` orders rules only within a tier, so a `lan,opt1` block
+with sequence 9 still runs before a `lan` allow with sequence 1.
+
 ## Differences from OPNsense
 
 | OPNsense | sensr | Why |
@@ -56,4 +66,6 @@ else bumps `SCHEMA_VERSION` and ships a migration.
 | LAGG protocols `fec` and `loadbalance` | one `loadbalance` (Linux `balance-xor`) | same behaviour on Linux bonds |
 | Loopbacks `lo<n>` are FreeBSD clones | `lo<n>` Linux dummy devices | Linux has one `lo` |
 | CARP | VRRP (Holo/keepalived), same fields | PLAN §2.1 |
+| "not any" (`source_not` on `any`) is accepted and silently means "any" | rejected by validation; the importer imports it as `any` and warns | the inversion never did anything, and it surprised people |
+| Legacy rules on a plugin group (`wireguard`) sit in the interface tier | every rule on a group is in the group tier | one rule, one tier |
 | Kea6 `subnet` empty when `dynamic_prefix` | `addressing` is `static {subnet, pools}` or `dynamic_prefix` | invalid combinations unrepresentable |

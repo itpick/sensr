@@ -17,6 +17,8 @@ pub mod dhcpv6;
 pub mod dns;
 pub mod firewall;
 pub mod gateways;
+pub mod ids;
+pub mod insight;
 pub mod interfaces;
 pub mod nat;
 pub mod ntp;

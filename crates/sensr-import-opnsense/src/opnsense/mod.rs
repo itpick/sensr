@@ -8,11 +8,13 @@
 
 mod aliases;
 mod common;
+mod dhcp_servers;
 mod dhcpd;
 mod dnsmasq;
 mod export;
 mod filter;
 mod gateways;
+mod ids;
 mod interfaces;
 mod kea;
 mod nat;
@@ -22,6 +24,7 @@ mod unbound;
 mod wireguard;
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use sensr_schema::Document as SensrDocument;
@@ -67,19 +70,23 @@ pub fn export_config(doc: &SensrDocument) -> String {
 /// services refer to them.
 pub fn importer(options: &ImportOptions) -> Importer<SensrDocument> {
     let options = Arc::new(options.clone());
+    let dhcp = dhcp_servers::SharedLedger::default();
     let mut importer = Importer::new()
         .with_mapper(system::SystemMapper)
         .with_mapper(interfaces::InterfacesMapper::new(Arc::clone(&options)))
         .with_mapper(aliases::AliasMapper)
         .with_mapper(filter::FilterMapper::default())
         .with_mapper(nat::NatMapper::default())
-        // ISC first so Kea's settings win when both are enabled.
-        .with_mapper(dhcpd::DhcpdMapper)
-        .with_mapper(dnsmasq::DnsmasqMapper)
-        .with_mapper(kea::KeaMapper)
+        // Kea last: it sees whether ISC or dnsmasq serve, and its finish step
+        // reconciles the three (see dhcp_servers).
+        .with_mapper(dhcpd::DhcpdMapper::new(Rc::clone(&dhcp)))
+        .with_mapper(dnsmasq::DnsmasqMapper::new(Rc::clone(&dhcp)))
+        .with_mapper(kea::KeaMapper::new(dhcp))
         .with_mapper(unbound::UnboundMapper)
         .with_mapper(wireguard::WireGuardMapper)
         .with_mapper(trust::TrustMapper)
+        .with_mapper(ids::IdsMapper)
+        .with_mapper(ids::NetflowMapper)
         // Last: its fix-ups need the interfaces and the rules the others built.
         .with_mapper(gateways::GatewayMapper);
     for (pattern, reason) in EXPECTED_UNMAPPED {
