@@ -995,6 +995,7 @@ dependencies = [
 name = "sensr-rules"
 version = "0.0.0"
 dependencies = [
+ "indexmap",
  "ipnet",
  "md-5",
  "pretty_assertions",

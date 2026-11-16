@@ -25,8 +25,9 @@ use ipnet::IpNet;
 use crate::compile::{
     self, ChainOptions, Field, Item, Low, SetRefs, Val, Verdict as LowVerdict, Warning,
 };
-use crate::ir::{FilterRule, InterfaceMap, IpFamily};
-use crate::render::json::{Expr, Hook, Object, SetType, Stmt, Verdict, Writer};
+use crate::ir::{Addr, FilterRule, InterfaceMap, IpFamily, PortMatch};
+use crate::nat::{NatRules, RdrRule, SnatTarget};
+use crate::render::json::{Expr, Hook, Nat, Object, SetType, Stmt, Verdict, Writer};
 
 /// Contents of one alias after resolution (nested aliases flattened).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -73,6 +74,8 @@ pub struct Policy<'a> {
     pub interfaces: &'a InterfaceMap,
     /// resolved alias contents
     pub aliases: &'a BTreeMap<String, ResolvedAlias>,
+    /// NAT rules; `None` renders no NAT chains
+    pub nat: Option<&'a NatRules>,
 }
 
 /// Counts that make the compilation visible (and benchmarkable).
@@ -124,6 +127,16 @@ pub fn render<W: io::Write>(
         .iter()
         .map(|r| compile::lower(r, policy.interfaces, &mut refs, &mut report.warnings))
         .collect();
+    let nat = match policy.nat {
+        Some(n) => Some(lower_nat(
+            n,
+            policy.interfaces,
+            &mut refs,
+            opts,
+            &mut report.warnings,
+        )),
+        None => None,
+    };
 
     let mut w = Writer::new(out, FAMILY, &opts.table)?;
     // add + delete + add replaces only our table, atomically
@@ -171,6 +184,22 @@ pub fn render<W: io::Write>(
             }),
         })?;
     }
+    if nat.is_some() {
+        for (name, hook, prio) in [
+            ("nat_pre", "prerouting", -100),
+            ("nat_post", "postrouting", 100),
+        ] {
+            w.add(Object::Chain {
+                name: name.into(),
+                hook: Some(Hook {
+                    kind: "nat",
+                    hook,
+                    prio,
+                    policy: "accept",
+                }),
+            })?;
+        }
+    }
     for dir in ["in", "out"] {
         w.add(Object::Chain {
             name: format!("{dir}_dispatch").into(),
@@ -184,7 +213,19 @@ pub fn render<W: io::Write>(
         }
     }
 
-    base_chains(&mut w, opts, !devices.is_empty())?;
+    let rdr_pass = nat.as_ref().is_some_and(|n| n.rdr_pass);
+    base_chains(&mut w, opts, !devices.is_empty(), rdr_pass)?;
+    if let Some(n) = nat {
+        for (chain, rules) in [("nat_pre", n.pre), ("nat_post", n.post)] {
+            for (expr, comment) in rules {
+                w.add(Object::Rule {
+                    chain: chain.into(),
+                    expr,
+                    comment,
+                })?;
+            }
+        }
+    }
     dispatch(&mut w, "in", "iifname", policy.interfaces)?;
     dispatch(&mut w, "out", "oifname", policy.interfaces)?;
 
@@ -254,6 +295,7 @@ fn base_chains<W: io::Write>(
     w: &mut Writer<'_, W>,
     opts: &Options,
     has_devices: bool,
+    rdr_pass: bool,
 ) -> io::Result<()> {
     let lo = |key: &'static str| Stmt::Match {
         op: "==",
@@ -283,6 +325,24 @@ fn base_chains<W: io::Write>(
         )?;
     }
     add_rule(w, "forward", vec![ct_state_fast_path()])?;
+    if rdr_pass {
+        // `rdr pass`: the redirect marked the connection; skip the filter
+        add_rule(
+            w,
+            "forward",
+            vec![
+                Stmt::Match {
+                    op: "==",
+                    left: Expr::And(
+                        Box::new(Expr::Ct("mark")),
+                        Box::new(Expr::Num(RDR_PASS_MARK)),
+                    ),
+                    right: Expr::Num(RDR_PASS_MARK),
+                },
+                accept(),
+            ],
+        )?;
+    }
     add_rule(w, "forward", vec![jump("in_dispatch")])?;
     add_rule(w, "forward", vec![jump("out_dispatch")])?;
     add_rule(w, "forward", vec![accept()])?;
@@ -559,4 +619,342 @@ fn concat(mut v: Vec<Expr<'static>>) -> Expr<'static> {
     } else {
         Expr::Concat(v)
     }
+}
+
+/// conntrack mark bit set by `rdr pass` redirects.
+pub const RDR_PASS_MARK: u32 = 0x0001_0000;
+
+type RuleStmts = (Vec<Stmt<'static>>, Option<std::borrow::Cow<'static, str>>);
+
+struct LoweredNat {
+    pre: Vec<RuleStmts>,
+    post: Vec<RuleStmts>,
+    rdr_pass: bool,
+}
+
+fn nat_family(f: IpFamily) -> &'static str {
+    match f {
+        IpFamily::V4 => "ip",
+        IpFamily::V6 => "ip6",
+    }
+}
+
+fn iface_match(
+    meta: &'static str,
+    iface: &Option<String>,
+    ifs: &InterfaceMap,
+) -> Option<Stmt<'static>> {
+    let dev = ifs.get(iface.as_ref()?)?.device.clone();
+    Some(Stmt::Match {
+        op: "==",
+        left: Expr::Meta(meta),
+        right: Expr::Str(dev.into()),
+    })
+}
+
+fn port_expr(p: &PortMatch) -> Option<Expr<'static>> {
+    match p {
+        PortMatch::Single(n) => Some(Expr::Num(u32::from(*n))),
+        PortMatch::Range(a, b) => Some(Expr::Range(
+            Box::new(Expr::Num(u32::from(*a))),
+            Box::new(Expr::Num(u32::from(*b))),
+        )),
+        PortMatch::Alias(_) => None,
+    }
+}
+
+fn addr_range(n: &IpNet) -> Expr<'static> {
+    Expr::Range(
+        Box::new(Expr::Ip(n.network())),
+        Box::new(Expr::Ip(n.broadcast())),
+    )
+}
+
+fn target_family(a: &Addr) -> Option<IpFamily> {
+    match a {
+        Addr::Host(ip) => Some(IpFamily::of(ip)),
+        Addr::Net(n) => Some(IpFamily::of(&n.addr())),
+        _ => None,
+    }
+}
+
+fn common_stmts(
+    head: Option<Stmt<'static>>,
+    matches: &[compile::Match],
+    log: bool,
+    opts: &Options,
+) -> Vec<Stmt<'static>> {
+    let mut v: Vec<Stmt<'static>> = head.into_iter().collect();
+    v.extend(matches.iter().map(match_stmt));
+    if opts.counters {
+        v.push(Stmt::Counter);
+    }
+    if log {
+        v.push(Stmt::Log {
+            prefix: "nat".into(),
+            group: opts.log_group,
+        });
+    }
+    v
+}
+
+fn lower_nat(
+    nat: &NatRules,
+    ifs: &InterfaceMap,
+    refs: &mut SetRefs,
+    opts: &Options,
+    warnings: &mut Vec<Warning>,
+) -> LoweredNat {
+    let carp = || {
+        vec![
+            Stmt::Match {
+                op: "==",
+                left: Expr::Meta("l4proto"),
+                right: Expr::Num(112),
+            },
+            Stmt::Verdict(Verdict::Accept),
+        ]
+    };
+    // "no nat proto carp all" / "no rdr proto carp all"
+    let mut pre: Vec<RuleStmts> = vec![(carp(), None)];
+    let mut post_rows: Vec<(u32, RuleStmts)> = Vec::new();
+    let mut rdr_pass = false;
+    let mut warn = |descr: &str, m: String| {
+        warnings.push(Warning {
+            label: descr.to_owned(),
+            message: m,
+        })
+    };
+
+    for r in nat.rdr.iter().filter(|r| r.enabled) {
+        let hint = r.target.as_ref().and_then(target_family);
+        let spec = compile::MatchSpec {
+            family: r.family,
+            family_hint: hint,
+            proto: r.proto,
+            src: &r.src,
+            dst: &r.dst,
+            icmp: &[],
+            icmp6: &[],
+            tcp_flags: None,
+        };
+        let alts = match compile::lower_matches(&spec, ifs, refs) {
+            Ok(a) => a,
+            Err(m) => {
+                warn(&r.descr, m);
+                continue;
+            }
+        };
+        for (fam, matches) in alts {
+            let head = iface_match("iifname", &r.interface, ifs);
+            if r.nordr {
+                let mut v = common_stmts(head, &matches, r.log, opts);
+                v.push(Stmt::Verdict(Verdict::Accept));
+                pre.push((v, comment(&r.descr)));
+                continue;
+            }
+            rdr_pass |= r.pass;
+            for (extra, stmt) in rdr_actions(r, fam, &mut warn) {
+                let mut m = matches.clone();
+                m.extend(extra);
+                m.sort_by_key(|x| x.field);
+                let mut v = common_stmts(head.clone(), &m, r.log, opts);
+                if r.pass {
+                    v.push(Stmt::CtMarkOr(RDR_PASS_MARK));
+                }
+                v.push(stmt);
+                pre.push((v, comment(&r.descr)));
+            }
+            if r.helper
+                && let Some(v) = hairpin(r, fam, ifs)
+            {
+                post_rows.push((r.priority, (v, comment(&r.descr))));
+            }
+        }
+    }
+
+    for r in nat.snat.iter().filter(|r| r.enabled) {
+        let hint = match &r.target {
+            SnatTarget::Host(ip) => Some(IpFamily::of(ip)),
+            SnatTarget::Net(n) => Some(IpFamily::of(&n.addr())),
+            _ => None,
+        };
+        let spec = compile::MatchSpec {
+            family: r.family,
+            family_hint: hint,
+            proto: r.proto,
+            src: &r.src,
+            dst: &r.dst,
+            icmp: &[],
+            icmp6: &[],
+            tcp_flags: None,
+        };
+        let alts = match compile::lower_matches(&spec, ifs, refs) {
+            Ok(a) => a,
+            Err(m) => {
+                warn(&r.descr, m);
+                continue;
+            }
+        };
+        for (fam, matches) in alts {
+            let head = iface_match("oifname", &r.interface, ifs);
+            let mut v = common_stmts(head, &matches, r.log, opts);
+            let port = match &r.target_port {
+                Some(p) if r.proto.has_ports() => port_expr(p),
+                Some(_) => {
+                    warn(&r.descr, "translation port needs TCP/UDP; ignored".into());
+                    None
+                }
+                None => None,
+            };
+            let stmt = match &r.target {
+                SnatTarget::NoNat => Stmt::Verdict(Verdict::Accept),
+                SnatTarget::Interface(_) => Stmt::Masquerade(Nat {
+                    family: None,
+                    addr: None,
+                    port,
+                    flags: Vec::new(),
+                }),
+                SnatTarget::Host(ip) => Stmt::Snat(Nat {
+                    family: Some(nat_family(fam.unwrap_or(IpFamily::of(ip)))),
+                    addr: Some(Expr::Ip(*ip)),
+                    port,
+                    flags: Vec::new(),
+                }),
+                SnatTarget::Net(n) => Stmt::Snat(Nat {
+                    family: Some(nat_family(fam.unwrap_or(IpFamily::of(&n.addr())))),
+                    addr: Some(addr_range(n)),
+                    port,
+                    flags: Vec::new(),
+                }),
+                SnatTarget::Alias(a) => {
+                    warn(&r.descr, format!("alias pool target {a} not rendered yet"));
+                    continue;
+                }
+            };
+            v.push(stmt);
+            post_rows.push((r.priority, (v, comment(&r.descr))));
+        }
+    }
+    post_rows.sort_by_key(|(p, _)| *p);
+    let mut post: Vec<RuleStmts> = vec![(carp(), None)];
+    post.extend(post_rows.into_iter().map(|(_, r)| r));
+    LoweredNat {
+        pre,
+        post,
+        rdr_pass,
+    }
+}
+
+/// The dnat statement(s) of a forward: `(extra matches, statement)` each.
+fn rdr_actions(
+    r: &RdrRule,
+    fam: Option<IpFamily>,
+    warn: &mut impl FnMut(&str, String),
+) -> Vec<(Vec<compile::Match>, Stmt<'static>)> {
+    let Some(target) = &r.target else {
+        return Vec::new();
+    };
+    let (f, addr) = match target {
+        Addr::Host(ip) => (IpFamily::of(ip), Expr::Ip(*ip)),
+        Addr::Net(n) => (IpFamily::of(&n.addr()), addr_range(n)),
+        other => {
+            warn(
+                &r.descr,
+                format!("redirect target {other:?} not rendered yet"),
+            );
+            return Vec::new();
+        }
+    };
+    if fam.is_some_and(|x| x != f) {
+        return Vec::new();
+    }
+    let dnat = |port: Option<Expr<'static>>| {
+        Stmt::Dnat(Nat {
+            family: Some(nat_family(f)),
+            addr: Some(addr.clone()),
+            port,
+            flags: Vec::new(),
+        })
+    };
+    match (&r.local_port, &r.dst.port) {
+        (None, _) => vec![(Vec::new(), dnat(None))],
+        (Some(PortMatch::Single(p)), _) => vec![(Vec::new(), dnat(Some(Expr::Num(u32::from(*p)))))],
+        // same range: ports are kept
+        (Some(PortMatch::Range(a, _)), Some(PortMatch::Range(lo, _))) if a == lo => {
+            vec![(Vec::new(), dnat(None))]
+        }
+        // shifted range: one rule per port keeps the offset exact
+        (Some(PortMatch::Range(a, _)), Some(PortMatch::Range(lo, hi))) if hi - lo < 64 => (0..=hi
+            - lo)
+            .map(|k| {
+                (
+                    vec![compile::Match {
+                        field: compile::Field::Dport,
+                        neg: false,
+                        val: Val::Port(lo + k),
+                    }],
+                    dnat(Some(Expr::Num(u32::from(a + k)))),
+                )
+            })
+            .collect(),
+        _ => {
+            warn(&r.descr, "redirect port mapping not rendered yet".into());
+            Vec::new()
+        }
+    }
+}
+
+/// Reflection helper: hairpin SNAT on the forward's interface so replies
+/// come back through the firewall.
+fn hairpin(r: &RdrRule, fam: Option<IpFamily>, ifs: &InterfaceMap) -> Option<Vec<Stmt<'static>>> {
+    let iface = r.interface.as_ref()?;
+    let target = r.target.as_ref()?;
+    let f = fam.or_else(|| target_family(target))?;
+    let mut v = vec![iface_match("oifname", &r.interface, ifs)?];
+    match r.proto {
+        crate::proto::ProtoMatch::Any => {}
+        crate::proto::ProtoMatch::One(p) => v.push(Stmt::Match {
+            op: "==",
+            left: Expr::Meta("l4proto"),
+            right: Expr::Num(u32::from(p.number)),
+        }),
+        crate::proto::ProtoMatch::TcpUdp => v.push(Stmt::Match {
+            op: "==",
+            left: Expr::Meta("l4proto"),
+            right: Expr::Set(vec![Expr::Num(6), Expr::Num(17)]),
+        }),
+    }
+    let (saddr, daddr) = match f {
+        IpFamily::V4 => (Expr::Payload("ip", "saddr"), Expr::Payload("ip", "daddr")),
+        IpFamily::V6 => (Expr::Payload("ip6", "saddr"), Expr::Payload("ip6", "daddr")),
+    };
+    v.push(Stmt::Match {
+        op: "==",
+        left: saddr,
+        right: Expr::set_ref(&compile::iface_net_set(iface, f)),
+    });
+    v.push(Stmt::Match {
+        op: "==",
+        left: daddr,
+        right: match target {
+            Addr::Host(ip) => Expr::Ip(*ip),
+            Addr::Net(n) => Expr::Prefix(n.trunc().addr(), n.prefix_len()),
+            _ => return None,
+        },
+    });
+    if let Some(p) = r.local_port.as_ref().and_then(port_expr) {
+        v.push(Stmt::Match {
+            op: "==",
+            left: Expr::Payload("th", "dport"),
+            right: p,
+        });
+    }
+    v.push(Stmt::Masquerade(Nat {
+        family: None,
+        addr: None,
+        port: None,
+        flags: Vec::new(),
+    }));
+    Some(v)
 }

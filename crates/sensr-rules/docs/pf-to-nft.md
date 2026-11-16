@@ -59,6 +59,31 @@ left alone.
 | rules differing in one value | one rule with an anonymous set | `features_quick` |
 | `set skip on lo0` | `iifname`/`oifname lo accept` before dispatch | all |
 
+## NAT
+
+Chains `nat_pre` (nat prerouting, prio −100) and `nat_post` (nat postrouting,
+prio 100) in the same table. pf NAT rules are first-match; so are nft NAT
+statements. Golden: `slice`; `scripts/netns-slice-test.sh` checks the slice
+golden with real packets in network namespaces.
+
+| pf (OPNsense) | nftables |
+|---|---|
+| `no nat proto carp all`, `no rdr proto carp all` | `meta l4proto 112 accept` first in both chains |
+| `nat on wan from (lan:network) to any -> (wan:0)` | `oifname "<wan>" ip saddr @if_lan_n4 masquerade` |
+| `… port 1024:65535` (pf's default source-port range) | plain `masquerade` (conntrack keeps the port unless it clashes) |
+| `… static-port` | `masquerade` (same) |
+| `nat … -> 203.0.113.5` / `-> 203.0.113.0/29` | `snat ip to 203.0.113.5` / `snat ip to <first>-<last>` |
+| `no nat …` | `accept` (stops NAT evaluation) |
+| automatic outbound (`filter_auto_source_nat`) | the same rule list, generated from interfaces with/without gateways |
+| `rdr on wan proto tcp to (wan) port 443 -> 192.168.1.10 port 8443` | `iifname "<wan>" meta l4proto 6 ip daddr @if_wan_a4 th dport 443 dnat ip to 192.168.1.10:8443` |
+| `rdr … port 1000:1010 -> … port 2000` (shifted range) | one rule per port (≤ 64), so the offset is exact |
+| `rdr pass …` | `ct mark set ct mark \| 0x10000` before `dnat`; `forward` accepts marked connections before the filter |
+| `no rdr …` (anti-lockout: `filter_auto_destination_nat`) | `accept` before the redirects |
+| NAT reflection (`natreflection` enable/purenat) | the `rdr` repeated on every interface without a gateway |
+| reflection helper (`enablenatreflectionhelper`) | `oifname "<if>" ip saddr @if_<if>_n4 ip daddr <target> th dport <port> masquerade` in `nat_post` |
+| a port forward with filter association "rule" | its filter rule at priority 500000 (destination = target, port = local port) |
+| port given without protocol | `meta l4proto { 6, 17 }` — a pf port test only ever matches TCP/UDP |
+
 ## Degraded on import (warning, rule still loads)
 
 | pf | Status |
@@ -69,6 +94,7 @@ left alone.
 | `modulate state` | no nftables equivalent |
 | `synproxy state` | not rendered yet |
 | state limits (`max`, `max-src-conn`, …) | not rendered yet |
+| NAT to an alias pool, `rdr` to an alias | not rendered yet |
 | `allow-opts` | Linux does not block IP options by default |
 
 ## Fast path
