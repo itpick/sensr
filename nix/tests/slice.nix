@@ -193,11 +193,21 @@ pkgs.testers.runNixOSTest {
 
     lan = client {
       virtualisation.interfaces.eth1.vlan = net.lan.vlan;
-      # The router is the LAN's time server (timesyncd, NixOS's default).
-      # (The test instrumentation turns timesyncd off; this test needs it.)
-      networking.timeServers = [ net.lan.router ];
-      services.timesyncd.enable = lib.mkForce true;
-      services.timesyncd.fallbackServers = [ ];
+      # The router is the LAN's time server: a client that syncs from it
+      # alone (ntpd-rs; the test instrumentation keeps timesyncd off).
+      services.ntpd-rs = {
+        enable = true;
+        useNetworkingTimeServers = false;
+        settings = {
+          source = [
+            {
+              mode = "server";
+              address = net.lan.router;
+            }
+          ];
+          synchronization.minimum-agreeing-sources = 1;
+        };
+      };
       systemd.network.networks."10-eth1" = {
         matchConfig.Name = "eth1";
         networkConfig.DHCP = "ipv4";
@@ -459,13 +469,11 @@ pkgs.testers.runNixOSTest {
             # The router answers only once it is synchronised itself
             # (stratum 16 before), so the client's sync proves the chain.
             try:
-                lan.wait_until_succeeds(
-                    "timedatectl show-timesync --property=ServerAddress --value | grep -qx ${net.lan.router}"
-                    " && timedatectl show --property=NTPSynchronized --value | grep -qx yes",
-                    timeout=300,
-                )
+                # Stratum 3: the client follows the router (2), which follows
+                # the internet's server (1); unsynchronised is 16.
+                lan.wait_until_succeeds("ntp-ctl status | grep -Eq 'Stratum: +3$'", timeout=300)
             finally:
-                print(lan.execute("timedatectl timesync-status; journalctl -b -u systemd-timesyncd --no-pager | tail -n 20")[1])
+                print(lan.execute("ntp-ctl status; journalctl -b -u ntpd-rs --no-pager | tail -n 20")[1])
                 print(router.execute("for c in /run/sensr/ntp/ntp.toml /etc/ntpd-rs/ntp.toml; do [ -e $c ] && cat $c && ntp-ctl -c $c status; done; journalctl -b -u sensr-ntpd -u ntpd-rs --no-pager | tail -n 30")[1])
                 print(internet.execute("ntp-ctl status; journalctl -b -u ntpd-rs --no-pager | tail -n 20")[1])
 
