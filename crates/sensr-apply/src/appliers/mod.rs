@@ -90,7 +90,7 @@ impl SliceModels {
                 },
             );
             p.units.insert(
-                "kea-dhcp4-server.service".into(),
+                "sensr-kea-dhcp4.service".into(),
                 UnitSpec {
                     action: UnitAction::Reload,
                     inputs: [path].into(),
@@ -100,7 +100,7 @@ impl SliceModels {
         if let Some(u) = &self.unbound {
             let files = staging.plan_files(&u.render(templates)?);
             p.units.insert(
-                "unbound.service".into(),
+                "sensr-unbound.service".into(),
                 UnitSpec {
                     action: UnitAction::Reload,
                     inputs: files.keys().cloned().collect(),
@@ -145,7 +145,7 @@ mod tests {
         assert_eq!(d.files.len(), 1);
         assert_eq!(
             d.units.keys().collect::<Vec<_>>(),
-            ["kea-dhcp4-server.service"]
+            ["sensr-kea-dhcp4.service"]
         );
         assert!(d.nft.is_none() && d.sysctls.is_empty());
     }

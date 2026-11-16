@@ -429,7 +429,7 @@ pub(crate) mod tests {
             m.control_socket = dir.path().join("ctl");
             // Unprivileged: no user switch, no fixed listen addresses.
             m.listen.clear();
-            let conf = render(&m).replace("username: \"unbound\"", "username: \"\"");
+            let conf = render(&m);
             let f = dir.path().join("unbound.conf");
             std::fs::write(&f, conf).unwrap();
             let msg = check(&SystemRunner, &f).unwrap().unwrap();

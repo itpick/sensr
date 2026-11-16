@@ -63,3 +63,16 @@ UplinkInterface={{ item.track.uplink }}
 SubnetId={{ item.track.subnet_id }}
 Announce=yes
 {% endif %}
+{% for r in item.policy_routes %}
+
+[Route]
+Gateway={{ r.gateway }}
+Table={{ r.table }}
+{% endfor %}
+{% for r in item.policy_rules %}
+
+[RoutingPolicyRule]
+FirewallMark={{ r.mark }}
+Table={{ r.table }}
+Priority={{ r.priority }}
+{% endfor %}

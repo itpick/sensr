@@ -233,7 +233,7 @@ mod tests {
         assert!(
             plan.services
                 .iter()
-                .any(|s| s.unit == "kea-dhcp4-server.service")
+                .any(|s| s.unit == "sensr-kea-dhcp4.service")
         );
         a.apply(None, &doc).unwrap();
         assert!(
