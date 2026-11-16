@@ -12,6 +12,8 @@ use super::dhcpv6::{Dhcpv6, RouterAdvertisements};
 use super::dns::DnsResolver;
 use super::firewall::{AliasType, Endpoint, FilterRule, Firewall};
 use super::gateways::Gateways;
+use super::ids::Ids;
+use super::insight::Insight;
 use super::interfaces::{Interface, InterfaceRole, Interfaces, Ipv4Config, Ipv6Config};
 use super::nat::Nat;
 use super::ntp::Ntp;
@@ -120,11 +122,15 @@ pub enum Section {
     RouterAdvertisements,
     /// `ntp`.
     Ntp,
+    /// `ids`.
+    Ids,
+    /// `insight`.
+    Insight,
 }
 
 impl Section {
     /// Every section, in document order.
-    pub const ALL: [Section; 15] = [
+    pub const ALL: [Section; 17] = [
         Self::System,
         Self::Interfaces,
         Self::Firewall,
@@ -140,6 +146,8 @@ impl Section {
         Self::Dhcpv6,
         Self::RouterAdvertisements,
         Self::Ntp,
+        Self::Ids,
+        Self::Insight,
     ];
 
     /// The section's key in the JSON document.
@@ -160,6 +168,8 @@ impl Section {
             Self::Dhcpv6 => "dhcpv6",
             Self::RouterAdvertisements => "router_advertisements",
             Self::Ntp => "ntp",
+            Self::Ids => "ids",
+            Self::Insight => "insight",
         }
     }
 }
@@ -217,6 +227,12 @@ pub struct Document {
     /// NTP service (omitted while at defaults).
     #[serde(default, skip_serializing_if = "Ntp::is_empty")]
     pub ntp: Ntp,
+    /// Intrusion detection (omitted while at defaults).
+    #[serde(default, skip_serializing_if = "Ids::is_empty")]
+    pub ids: Ids,
+    /// Traffic accounting (omitted while at defaults).
+    #[serde(default, skip_serializing_if = "Insight::is_empty")]
+    pub insight: Insight,
 }
 
 impl Default for Document {
@@ -238,6 +254,8 @@ impl Default for Document {
             dhcpv6: Dhcpv6::default(),
             router_advertisements: RouterAdvertisements::default(),
             ntp: Ntp::default(),
+            ids: Ids::default(),
+            insight: Insight::default(),
         }
     }
 }
@@ -345,6 +363,8 @@ impl Document {
             .validate(self, &root.join("router_advertisements"), &mut out);
         self.ntp
             .validate_with(&self.system.time_servers, self, &root.join("ntp"), &mut out);
+        self.ids.validate(self, &root.join("ids"), &mut out);
+        self.insight.validate(self, &root.join("insight"), &mut out);
         out
     }
 
@@ -376,6 +396,8 @@ impl Document {
                     self.router_advertisements != other.router_advertisements
                 }
                 Section::Ntp => self.ntp != other.ntp,
+                Section::Ids => self.ids != other.ids,
+                Section::Insight => self.insight != other.insight,
             })
             .collect()
     }
