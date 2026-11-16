@@ -8,6 +8,7 @@
 pub mod legacy;
 pub mod listtags;
 pub mod mapper;
+pub mod opnsense;
 pub mod report;
 pub mod tree;
 pub mod view;

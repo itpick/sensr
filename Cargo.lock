@@ -982,9 +982,12 @@ version = "0.0.0"
 name = "sensr-import-opnsense"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "pretty_assertions",
  "proptest",
  "quick-xml",
+ "sensr-schema",
+ "serde_json",
  "thiserror",
 ]
 

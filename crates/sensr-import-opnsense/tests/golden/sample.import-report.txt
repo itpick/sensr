@@ -1,0 +1,41 @@
+# sensr import report
+
+## mapped (12)
+/opnsense/system  <- system
+/opnsense/interfaces  <- interfaces
+/opnsense/OPNsense/Firewall/Filter/rules/rule[1]  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[2]  <- filter
+/opnsense/OPNsense/Firewall/Filter/npt  <- filter
+/opnsense/OPNsense/Firewall/Filter/onetoone  <- filter
+/opnsense/filter  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules  <- filter
+/opnsense/OPNsense/Firewall/Filter/snatrules  <- filter
+/opnsense/nat/outbound  <- nat
+/opnsense/dnsmasq  <- dnsmasq-dhcp
+/opnsense/unbound  <- unbound
+
+## unmapped, expected (15)
+/opnsense/trigger_initial_wizard  (OPNsense setup wizard marker)
+/opnsense/theme  (web GUI theme)
+/opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
+/opnsense/system/dnsallowoverride_exclude  (per-interface DNS override exclusion is not modelled yet)
+/opnsense/system/webgui  (web GUI listener settings are not modelled yet)
+/opnsense/system/usevirtualterminal  (FreeBSD console setting)
+/opnsense/system/disableconsolemenu  (the sensr console menu has its own setting)
+/opnsense/system/powerd_ac_mode  (FreeBSD powerd; CPU frequency scaling is a NixOS concern)
+/opnsense/system/powerd_battery_mode  (FreeBSD powerd; CPU frequency scaling is a NixOS concern)
+/opnsense/system/powerd_normal_mode  (FreeBSD powerd; CPU frequency scaling is a NixOS concern)
+/opnsense/system/bogons  (bogon list update interval; sensr ships bogon lists with the system)
+/opnsense/system/pf_share_forward  (pf-specific forwarding option)
+/opnsense/system/lb_use_sticky  (pf load-balancing stickiness)
+/opnsense/rrd  (RRD graphs are replaced by sensr-monitor)
+/opnsense/ntpd  (NTP server preferences are not modelled yet (system.time_servers is imported))
+
+## unmapped, unexpected (2)
+/opnsense/dnsmasq/dhcp/enable_ra
+/opnsense/dnsmasq/dhcp_ranges[2]
+
+## warnings (3)
+[info] /opnsense/interfaces/wan/if: device mismatch1 keeps its OPNsense name; assign the Linux device during installation
+[info] /opnsense/interfaces/lan/if: device mismatch0 keeps its OPNsense name; assign the Linux device during installation
+[info] /opnsense/dnsmasq/port: dnsmasq's DNS service is not imported; Unbound answers DNS in sensr
