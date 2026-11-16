@@ -1,0 +1,19 @@
+[package]
+name = "sensr-schema-derive"
+description = "#[derive(SensrModel)] and #[derive(SensrOptions)]: model metadata, validation and lint-model rules as compile errors (OPNsense counterpart: BaseModel, Mk/lint.mk lint-model)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
+
+[lints]
+workspace = true

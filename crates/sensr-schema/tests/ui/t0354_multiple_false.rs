@@ -1,0 +1,7 @@
+#[derive(sensr_schema::SensrModel)]
+#[sensr(description = "M")]
+struct M {
+    #[sensr(multiple = false)]
+    a: String,
+}
+fn main() {}

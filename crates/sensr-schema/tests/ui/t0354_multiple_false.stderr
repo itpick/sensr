@@ -1,0 +1,5 @@
+error: lint-model rule 7: multiple = false is the default; leave it out
+ --> tests/ui/t0354_multiple_false.rs:4:24
+  |
+4 |     #[sensr(multiple = false)]
+  |                        ^^^^^

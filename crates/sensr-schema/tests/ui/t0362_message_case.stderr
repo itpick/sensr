@@ -1,0 +1,5 @@
+error: lint-model rule 15: a validation message must start with an upper-case letter
+ --> tests/ui/t0362_message_case.rs:4:33
+  |
+4 |     #[sensr(required, message = "not a valid number.")]
+  |                                 ^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: lint-model rule 13: as_list = false is the default; leave it out
+ --> tests/ui/t0360_as_list_false.rs:4:23
+  |
+4 |     #[sensr(as_list = false)]
+  |                       ^^^^^

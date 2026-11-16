@@ -10,11 +10,14 @@
 //!   paths ([`Validations`]).
 //! - [`PathAccess`]: `get/set_by_path` on any model.
 //! - [`migrate`]: versioned document migrations.
+//! - [`model`] + `#[derive(SensrModel)]`: model metadata, defaults,
+//!   validation and lint-model rules at compile time.
 
 pub mod array;
 pub mod constraints;
 pub mod fields;
 pub mod migrate;
+pub mod model;
 pub mod models;
 pub mod path;
 pub mod refs;
@@ -26,6 +29,12 @@ pub use models::{Document, SCHEMA_VERSION, SchemaVersion, Section};
 pub use path::{PathAccess, PathError};
 pub use refs::{ItemKind, RefContext, Validate};
 pub use validation::{FieldError, FieldPath, Validations, ValidatorKind};
+
+pub use model::{SensrItem, SensrModel, SensrOptions};
+pub use sensr_schema_derive::{SensrModel, SensrOptions};
+
+// Lets the derive's `::sensr_schema::` paths resolve inside this crate too.
+extern crate self as sensr_schema;
 
 /// Re-exported so dependants use the same network types.
 pub use ipnet;
