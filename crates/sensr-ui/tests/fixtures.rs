@@ -20,9 +20,5 @@ fn agent_seed_matches_the_mock_document() {
         s.remove("users");
         s.remove("groups");
     }
-    assert_eq!(
-        fixture,
-        mock,
-        "regenerate e2e/fixtures/agent-seed.json"
-    );
+    assert_eq!(fixture, mock, "regenerate e2e/fixtures/agent-seed.json");
 }
