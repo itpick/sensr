@@ -9,7 +9,8 @@ use serde_json::Value;
 /// One step of a [`ConfigPath`]: an object key or a list index.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Segment {
-    /// An object member name (`[A-Za-z0-9_-]+`).
+    /// An object member name (`[A-Za-z0-9_@-]+`; `@` for the importer's
+    /// `@attributes` keys).
     Key(String),
     /// A zero-based list position.
     Index(usize),
@@ -165,7 +166,7 @@ impl FromStr for ConfigPath {
                 }
                 if let Some(bad) = seg
                     .chars()
-                    .find(|c| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '-'))
+                    .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '@')))
                 {
                     return Err(PathError::InvalidChar(bad));
                 }

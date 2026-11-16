@@ -19,6 +19,7 @@ sensr-rules = { path = "crates/sensr-rules" }
 sensr-ipc = { path = "crates/sensr-ipc" }
 sensr-auth = { path = "crates/sensr-auth" }
 sensr-agent = { path = "crates/sensr-agent" }
+sensr-import-opnsense = { path = "crates/sensr-import-opnsense" }
 
 anyhow = "1.0.104"
 argon2 = "0.6.0"
