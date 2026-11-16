@@ -201,15 +201,28 @@ in
   # failed) it writes its journal to the FAT partition before
   # boot.panic_on_fail panics and panic=10 reboots.
   boot.initrd.systemd.storePaths = [ "${config.boot.initrd.systemd.package}/bin/journalctl" ];
+  boot.initrd.systemd.extraBin.blkid = "${config.boot.initrd.systemd.package.util-linux}/bin/blkid";
   boot.initrd.systemd.services.sensr-bootlog-initrd = {
     description = "Initrd failure log to the FAT partition";
     wantedBy = [ "emergency.target" ];
     before = [ "panic-on-fail.service" ];
     unitConfig.DefaultDependencies = false;
     serviceConfig.Type = "oneshot";
+    # The initrd may give up before udev has loaded the storage drivers or
+    # made /dev/disk/by-label, so load them and find the partition by its
+    # label directly, for up to 20 s.
     script = ''
+      for m in mmc_block nvme pcie-brcmstb rp1_pci usb_storage uas vfat nls_cp437 nls_iso8859_1; do
+        modprobe -q "$m" || true
+      done
+      dev=
+      for _ in $(seq 1 40); do
+        dev=$(blkid -L ${config.sdImage.firmwarePartitionName} 2>/dev/null) && [ -n "$dev" ] && break
+        sleep 0.5
+      done
+      [ -n "$dev" ] || exit 0
       mkdir -p /run/sensr-fat
-      mount -t vfat /dev/disk/by-label/${config.sdImage.firmwarePartitionName} /run/sensr-fat || exit 0
+      mount -t vfat "$dev" /run/sensr-fat || exit 0
       mkdir -p /run/sensr-fat/sensr/boot-log
       ${config.boot.initrd.systemd.package}/bin/journalctl -b --no-pager -o short-monotonic \
         > /run/sensr-fat/sensr/boot-log/initrd-emergency-$(cat /proc/sys/kernel/random/boot_id).txt
