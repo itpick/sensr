@@ -235,8 +235,10 @@ pub enum AliasType {
 
 impl AliasType {
     /// True if the alias can stand where an address or network is expected.
+    /// MAC aliases do: as in OPNsense they stand for the addresses the
+    /// neighbour (ARP/NDP) table currently holds for their MACs.
     pub fn holds_addresses(self) -> bool {
-        !matches!(self, Self::Port | Self::Mac)
+        !matches!(self, Self::Port)
     }
 }
 

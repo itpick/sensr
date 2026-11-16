@@ -1,10 +1,14 @@
 # sensr import report
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 ## mapped (37)
 =======
 ## mapped (36)
 >>>>>>> dbb4b2b (aliases: URL tables, GeoIP, ASN, host and MAC feeds refreshed with last-good retention)
+=======
+## mapped (37)
+>>>>>>> edade14 (firewall: MAC aliases are valid rule sources (resolved through the neighbour table))
 /opnsense/system  <- system
 /opnsense/vlans  <- interfaces
 /opnsense/interfaces  <- interfaces
@@ -20,6 +24,7 @@
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a03']  <- filter
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='7fea0ed1-647a-4a21-ad39-b58e286fffa4']  <- filter
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='bf449e1e-69ca-44ef-a21f-104e3a575460']  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a04']  <- filter
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='6b5af314-ed14-4fe2-bc30-d6da7a0d48ac']  <- filter
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='78acdbe1-999a-4cee-a55d-30c5cec58707']  <- filter
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='e3d0f852-1cea-4e20-9ad7-cbe26eee9ad7']  <- filter
@@ -35,10 +40,14 @@
 /opnsense/nat/rule[@uuid='fc2c1c65-ad69-489b-967c-8ff95e8f2f80']  <- nat
 /opnsense/OPNsense/Firewall/Filter/snatrules/rule[@uuid='7d2b8cc7-2217-4d32-b029-3ba292c7751e']  <- nat
 <<<<<<< HEAD
+<<<<<<< HEAD
 /opnsense/OPNsense/Kea/dhcp4  <- kea
 =======
 /opnsense/OPNsense/Kea/dhcp4  <- kea-dhcp4
 >>>>>>> dbb4b2b (aliases: URL tables, GeoIP, ASN, host and MAC feeds refreshed with last-good retention)
+=======
+/opnsense/OPNsense/Kea/dhcp4  <- kea-dhcp4
+>>>>>>> edade14 (firewall: MAC aliases are valid rule sources (resolved through the neighbour table))
 /opnsense/OPNsense/unboundplus  <- unbound
 /opnsense/OPNsense/wireguard  <- wireguard
 /opnsense/ntpd  <- ntpd
@@ -116,6 +125,7 @@
 /opnsense/filter/rule[@uuid='3f71ffc8-0a4b-4596-b1ff-22382acc4598']/created  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/rrd  (RRD graphs are replaced by sensr-monitor)
 /opnsense/revision  (OPNsense revision metadata; sensr keeps its own revision history)
+/opnsense/OPNsense/Firewall/Alias/geoip  (GeoIP database source is not modelled yet)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='2064ba71-29e9-4ca4-a655-3069cd2fb19e']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='8c3dc3ee-b23e-4170-af5a-5f23b2321d58']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='1aac7ca4-2950-47cf-af32-f24f076f55a2']/audit  (OPNsense change metadata; sensr keeps its own audit log)
@@ -124,6 +134,7 @@
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a03']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='7fea0ed1-647a-4a21-ad39-b58e286fffa4']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='bf449e1e-69ca-44ef-a21f-104e3a575460']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a04']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='6b5af314-ed14-4fe2-bc30-d6da7a0d48ac']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='78acdbe1-999a-4cee-a55d-30c5cec58707']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='e3d0f852-1cea-4e20-9ad7-cbe26eee9ad7']/audit  (OPNsense change metadata; sensr keeps its own audit log)
