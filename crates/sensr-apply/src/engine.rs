@@ -188,6 +188,9 @@ impl Engine {
             self.staging
                 .plan_files(&interfaces.render(&self.templates)?),
         );
+        // the system hostname is a kernel tunable too
+        plan.sysctls
+            .insert("kernel.hostname".into(), doc.system.hostname.to_string());
         let secrets = convert::secret_files(doc, &self.opts.secrets)
             .into_iter()
             .map(|(p, c)| (self.rooted(&p), c))
@@ -229,7 +232,10 @@ impl Engine {
         p.plan.diff(&applied).dry_run(&applied)
     }
 
-    /// Runs every backend checker on `p`; nothing goes live.
+    /// Runs the backend checkers that can judge `p` before anything goes
+    /// live: `nft -c` and `unbound-checkconf`. Kea's check needs its
+    /// interfaces to exist, so [`commit`](Self::commit) runs it after the
+    /// links stage.
     pub fn check(&self, p: &Prepared) -> Result<(), EngineError> {
         let r = self.runner.as_ref();
         if r.has_program("nft") {
@@ -241,11 +247,19 @@ impl Engine {
                 other => EngineError::Nft(other),
             })?;
         }
-        // stage the files a checker reads, check, throw the copies away
+        self.check_files(p, &["unbound.conf"])
+    }
+
+    /// Stages the named files, runs their checkers, throws the copies away.
+    fn check_files(&self, p: &Prepared, which: &[&str]) -> Result<(), EngineError> {
+        let r = self.runner.as_ref();
         let scratch = self.opts.root.join("run/sensr/.check");
         let mut staged = Vec::new();
         for (path, spec) in &p.plan.files {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            if !name.as_deref().is_some_and(|n| which.contains(&n)) {
+                continue;
+            }
             let checker: Option<(&'static str, Checker)> = match name.as_deref() {
                 Some("kea-dhcp4.conf") => Some(("kea-dhcp4", kea::check)),
                 Some("unbound.conf") => Some(("unbound-checkconf", unbound::check)),
@@ -253,7 +267,11 @@ impl Engine {
             };
             if let Some((backend, f)) = checker {
                 let tmp = scratch.join(name.unwrap_or_default());
-                write_atomic(&tmp, &spec.contents, spec.mode)?;
+                let mut contents = spec.contents.clone();
+                if backend == "unbound-checkconf" {
+                    contents = self.unbound_check_copy(&contents, &scratch, &mut staged)?;
+                }
+                write_atomic(&tmp, &contents, spec.mode)?;
                 staged.push(tmp.clone());
                 if let Some(msg) = f(r, &tmp)?
                     && !msg.is_empty()
@@ -272,6 +290,48 @@ impl Engine {
             let _ = std::fs::remove_file(s);
         }
         Ok(())
+    }
+
+    /// unbound-checkconf follows `directory:` and `include:`, which only
+    /// exist once the unit runs (its state directory) or the files are live:
+    /// check a copy pointing at the scratch directory instead.
+    fn unbound_check_copy(
+        &self,
+        conf: &[u8],
+        scratch: &Path,
+        staged: &mut Vec<PathBuf>,
+    ) -> Result<Vec<u8>, EngineError> {
+        let text = String::from_utf8_lossy(conf);
+        let mut out = String::with_capacity(text.len());
+        for line in text.lines() {
+            let t = line.trim_start();
+            let quoted = |k: &str| {
+                t.strip_prefix(k)
+                    .map(|v| v.trim().trim_matches('"').to_owned())
+            };
+            if let Some(dir) = quoted("directory:") {
+                let _ = dir;
+                out.push_str(&format!("  directory: \"{}\"\n", scratch.display()));
+            } else if let Some((key, file)) = ["include:", "auto-trust-anchor-file:"]
+                .iter()
+                .find_map(|k| quoted(k).map(|f| (*k, f)))
+            {
+                // the lease include and the root anchor appear at run time
+                let local = scratch.join(Path::new(&file).file_name().unwrap_or_default());
+                write_atomic(&local, b"", 0o644)?;
+                staged.push(local.clone());
+                if key == "auto-trust-anchor-file:" {
+                    // an empty anchor file is not an anchor: check without it
+                    out.push_str("  # auto-trust-anchor-file checked at unit start\n");
+                } else {
+                    out.push_str(&format!("  {key} \"{}\"\n", local.display()));
+                }
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        Ok(out.into_bytes())
     }
 
     fn run(&self, cmd: &Cmd, report: &mut CommitReport) -> Result<(), EngineError> {
@@ -328,18 +388,40 @@ impl Engine {
         let applied = self.applied.as_ref().unwrap_or(&empty);
         let r = self.runner.as_ref();
 
+        // networkd (user systemd-network) reads the WireGuard key files:
+        // files 0640 and every directory below the secrets root 0750, group
+        // systemd-network
+        let network_gid = group_id(&self.opts.root, "systemd-network");
+        let secrets_root = self.rooted(&self.opts.secrets.0);
         for (path, contents) in &p.secrets {
             write_atomic(path, contents.as_bytes(), 0o640)?;
+            let Some(gid) = network_gid else { continue };
+            let dirs = path
+                .ancestors()
+                .skip(1)
+                .take_while(|d| d.starts_with(&secrets_root));
+            for p in std::iter::once(path.as_path()).chain(dirs) {
+                let io = |source| EngineError::Io {
+                    path: p.to_owned(),
+                    source,
+                };
+                std::os::unix::fs::chown(p, None, Some(gid)).map_err(io)?;
+                if p != path.as_path() {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o750))
+                        .map_err(io)?;
+                }
+            }
         }
 
         if !delta.sysctls.is_empty() {
             Sysctl::new(&self.opts.root).apply(&p.models.sysctl)?;
-            for (k, v) in p.models.qdisc.sysctls() {
-                if delta.sysctls.contains_key(&k) {
-                    let path = self.opts.root.join("proc/sys").join(k.replace('.', "/"));
-                    std::fs::write(&path, format!("{v}\n"))
-                        .map_err(|source| EngineError::Io { path, source })?;
-                }
+            // the rest (qdisc default, hostname) are written as they are
+            let own = p.models.sysctl.to_map().unwrap_or_default();
+            for (k, v) in delta.sysctls.iter().filter(|(k, _)| !own.contains_key(*k)) {
+                let path = self.opts.root.join("proc/sys").join(k.replace('.', "/"));
+                std::fs::write(&path, format!("{v}\n"))
+                    .map_err(|source| EngineError::Io { path, source })?;
             }
         }
 
@@ -359,6 +441,11 @@ impl Engine {
         }
         for c in p.interfaces.commands(&applied.interfaces) {
             self.run(&c, &mut report)?;
+        }
+        if self.opts.check && delta.files.keys().any(|f| f.ends_with("kea-dhcp4.conf")) {
+            // networkd creates VLANs asynchronously after the reload
+            self.wait_for_links(&p.interfaces);
+            self.check_files(p, &["kea-dhcp4.conf"])?;
         }
 
         if !delta.qdiscs.is_empty() || p.models.qdisc != applied.models.qdisc {
@@ -404,6 +491,40 @@ impl Engine {
             }
         }
         Ok(report)
+    }
+
+    /// Waits (up to 10 s) until every VLAN device of `m` exists.
+    fn wait_for_links(&self, m: &InterfacesModel) {
+        if m.vlans.is_empty() {
+            return;
+        }
+        for _ in 0..20 {
+            let Ok(out) = self
+                .runner
+                .run(&Cmd::new("ip").args(["-j", "link", "show"]), None)
+            else {
+                return;
+            };
+            let links =
+                serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout).unwrap_or_default();
+            // VLANs that exist and are administratively up
+            let up: Vec<&str> = links
+                .iter()
+                .filter(|l| {
+                    l.get("flags")
+                        .and_then(|f| f.as_array())
+                        .is_some_and(|f| f.iter().any(|x| x == "UP"))
+                })
+                .filter_map(|l| l.get("ifname")?.as_str())
+                .collect();
+            if m.vlans.iter().all(|v| up.contains(&v.name.as_str()))
+                || !out.success()
+                || links.is_empty()
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
     }
 
     /// Current global addresses of the document's interfaces (`ip -j addr`),
@@ -454,6 +575,17 @@ impl Engine {
         nft::load(self.runner.as_ref(), &buf)?;
         Ok(())
     }
+}
+
+/// A group's id from `<root>/etc/group`.
+fn group_id(root: &Path, name: &str) -> Option<u32> {
+    std::fs::read_to_string(root.join("etc/group"))
+        .ok()?
+        .lines()
+        .find_map(|l| {
+            let mut f = l.split(':');
+            (f.next()? == name).then(|| f.nth(1)?.parse().ok())?
+        })
 }
 
 /// `ip -j addr show` → logical interface → global addresses.
@@ -515,6 +647,7 @@ mod tests {
             .into_keys()
             .collect();
         keys.push("net.core.default_qdisc".into());
+        keys.push("kernel.hostname".into());
         for k in keys {
             let path = root.join("proc/sys").join(k.replace('.', "/"));
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -570,6 +703,12 @@ mod tests {
                 .unwrap()
                 .trim(),
             "1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("proc/sys/kernel/hostname"))
+                .unwrap()
+                .trim(),
+            doc.system.hostname.to_string()
         );
 
         // the same document again: nothing to do

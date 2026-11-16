@@ -468,7 +468,13 @@ pub fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<(), Templ
         source,
     };
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    // the daemons reading these files run as other users, and the agent's
+    // umask is strict: directories it creates are made 0755 explicitly
+    let missing: Vec<&Path> = dir.ancestors().take_while(|d| !d.exists()).collect();
     std::fs::create_dir_all(dir).map_err(io)?;
+    for d in missing {
+        set_mode(d, 0o755).map_err(io)?;
+    }
     let file_name = path
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())

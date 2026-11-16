@@ -2,40 +2,106 @@
 //! (networkd links, the `sensr-rules` nft ruleset, Kea, Unbound, WireGuard,
 //! sysctls, qdiscs) behind the agent's [`Applier`] boundary.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use sensr_apply::cmd::{Runner, SystemRunner};
 use sensr_apply::engine::{Engine, EngineError, EngineOptions, Prepared};
 use sensr_apply::plan::UnitAction;
 use sensr_ipc::{FileDiff, PlanView, ServiceAction, ServiceChange, ValidationIssue};
 use sensr_rules::document::Runtime;
+use sensr_rules::ir::IfAddr;
 use sensr_schema::Document;
 use serde_json::Value;
 
 use crate::applier::{Applier, ApplyError};
 use crate::diff::unified_text;
 
+/// The applied document and the link addresses its ruleset knows.
+type Applied = Option<(Document, BTreeMap<String, Vec<IfAddr>>)>;
+
 /// Applies documents to the host through [`Engine`].
 pub struct SliceApplier {
-    engine: Mutex<Engine>,
+    engine: Arc<Mutex<Engine>>,
+    applied: Arc<Mutex<Applied>>,
+    watch: Option<Duration>,
+    watching: bool,
+}
+
+/// How often link addresses are compared with the ruleset's sets.
+const ADDRESS_POLL: Duration = Duration::from_secs(2);
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    // a panic mid-apply leaves nothing half-held worth protecting
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl SliceApplier {
-    /// On the host (`/`, real commands).
+    /// On the host (`/`, real commands), following address changes.
     pub fn system() -> Result<SliceApplier, EngineError> {
-        Self::new(EngineOptions::default(), Arc::new(SystemRunner))
+        let opts = EngineOptions {
+            // under /run/sensr (0755): networkd must reach the WireGuard
+            // keys, which /var/lib/sensr (0700) would hide
+            secrets: sensr_apply::appliers::convert::SecretsDir("/run/sensr/secrets".into()),
+            ..EngineOptions::default()
+        };
+        let mut a = Self::new(opts, Arc::new(SystemRunner))?;
+        a.watch = Some(ADDRESS_POLL);
+        Ok(a)
     }
 
-    /// With explicit options and runner (tests).
+    /// With explicit options and runner, without the address watcher (tests).
     pub fn new(opts: EngineOptions, runner: Arc<dyn Runner>) -> Result<SliceApplier, EngineError> {
         Ok(SliceApplier {
-            engine: Mutex::new(Engine::new(opts, runner)?),
+            engine: Arc::new(Mutex::new(Engine::new(opts, runner)?)),
+            applied: Arc::new(Mutex::new(None)),
+            watch: None,
+            watching: false,
         })
     }
 
     fn engine(&self) -> std::sync::MutexGuard<'_, Engine> {
-        // a panic mid-apply leaves nothing half-held worth protecting
-        self.engine.lock().unwrap_or_else(|e| e.into_inner())
+        lock(&self.engine)
+    }
+
+    /// Links get their addresses after the apply (DHCP, SLAAC, tracked
+    /// prefixes) and keep changing them; the ruleset's interface sets follow
+    /// without a re-render.
+    fn start_watcher(&mut self) {
+        let (Some(every), false) = (self.watch, self.watching) else {
+            return;
+        };
+        self.watching = true;
+        let engine = Arc::clone(&self.engine);
+        let applied = Arc::clone(&self.applied);
+        std::thread::Builder::new()
+            .name("sensr-addr-watch".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(every);
+                    let mut cur = lock(&applied);
+                    let Some((doc, known)) = cur.as_mut() else {
+                        continue;
+                    };
+                    let e = lock(&engine);
+                    let Ok(now) = e.current_addrs(doc) else {
+                        continue;
+                    };
+                    if now == *known {
+                        continue;
+                    }
+                    match e.update_interface_sets(doc, &now) {
+                        Ok(()) => {
+                            tracing::info!(addresses = ?now, "interface sets updated");
+                            *known = now;
+                        }
+                        Err(err) => tracing::warn!(error = %err, "updating interface sets"),
+                    }
+                }
+            })
+            .map(|_| ())
+            .unwrap_or_else(|e| tracing::error!(error = %e, "address watcher not started"));
     }
 }
 
@@ -56,6 +122,7 @@ fn document(v: &Value) -> Result<Document, ApplyError> {
         .map_err(|e| ApplyError::Invalid(vec![issue("", format!("not a sensr document: {e}"))]))?;
     let v = doc.validate();
     if !v.is_empty() {
+        tracing::warn!(issues = ?v, "document does not validate");
         return Err(ApplyError::Invalid(
             v.iter()
                 .flat_map(|(path, errs)| {
@@ -68,19 +135,24 @@ fn document(v: &Value) -> Result<Document, ApplyError> {
     Ok(doc)
 }
 
-fn prepare(engine: &Engine, doc: &Document) -> Result<Prepared, EngineError> {
+fn prepare(
+    engine: &Engine,
+    doc: &Document,
+) -> Result<(Prepared, BTreeMap<String, Vec<IfAddr>>), EngineError> {
     // what DHCP/SLAAC gave the links right now; sets follow later changes
     let addrs = engine.current_addrs(doc).unwrap_or_default();
-    engine.prepare(
+    let p = engine.prepare(
         doc,
         &Runtime {
-            addrs,
+            addrs: addrs.clone(),
             sources: None,
         },
-    )
+    )?;
+    Ok((p, addrs))
 }
 
 fn rejected(e: EngineError) -> ApplyError {
+    tracing::warn!(error = %e, "apply engine");
     match e {
         EngineError::Rejected { backend, message } => {
             ApplyError::Invalid(vec![issue(backend, message.trim().to_owned())])
@@ -93,12 +165,12 @@ impl Applier for SliceApplier {
     fn plan(&self, running: Option<&Value>, next: &Value) -> Result<PlanView, ApplyError> {
         let doc = document(next)?;
         let engine = self.engine();
-        let p = prepare(&engine, &doc).map_err(rejected)?;
+        let (p, _) = prepare(&engine, &doc).map_err(rejected)?;
         engine.check(&p).map_err(rejected)?;
         let delta = engine.delta(&p);
         let old_ruleset = match running.map(document) {
             Some(Ok(old)) => prepare(&engine, &old)
-                .map(|o| String::from_utf8_lossy(&o.ruleset).into_owned())
+                .map(|(o, _)| String::from_utf8_lossy(&o.ruleset).into_owned())
                 .unwrap_or_default(),
             _ => String::new(),
         };
@@ -158,7 +230,7 @@ impl Applier for SliceApplier {
     fn apply(&mut self, _running: Option<&Value>, next: &Value) -> Result<(), ApplyError> {
         let doc = document(next)?;
         let mut engine = self.engine();
-        let p = prepare(&engine, &doc).map_err(rejected)?;
+        let (p, addrs) = prepare(&engine, &doc).map_err(rejected)?;
         for w in &p.warnings {
             tracing::warn!(rule = %w, "firewall rule degraded");
         }
@@ -172,6 +244,9 @@ impl Applier for SliceApplier {
             nft = report.nft_loaded,
             "applied"
         );
+        drop(engine);
+        *lock(&self.applied) = Some((doc, addrs));
+        self.start_watcher();
         Ok(())
     }
 }
@@ -213,6 +288,7 @@ mod tests {
             .into_keys()
             .collect();
         keys.push("net.core.default_qdisc".into());
+        keys.push("kernel.hostname".into());
         for k in keys {
             let p = root.path().join("proc/sys").join(k.replace('.', "/"));
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();

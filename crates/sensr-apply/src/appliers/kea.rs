@@ -112,6 +112,8 @@ struct KeaDhcp4 {
 struct KeaInterfaces {
     interfaces: Vec<String>,
     dhcp_socket_type: &'static str,
+    service_sockets_max_retries: u32,
+    service_sockets_retry_wait_time: u32,
 }
 
 #[derive(Serialize)]
@@ -331,6 +333,10 @@ impl Dhcp4Model {
                     interfaces: self.interfaces.iter().map(ToString::to_string).collect(),
                     // Raw sockets: clients without an address yet need them.
                     dhcp_socket_type: "raw",
+                    // Kea may start while networkd still brings a VLAN up;
+                    // keep trying for a minute instead of giving up on it
+                    service_sockets_max_retries: 60,
+                    service_sockets_retry_wait_time: 1000,
                 },
                 lease_database: KeaLeaseDb {
                     kind: "memfile",
