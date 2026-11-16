@@ -239,18 +239,36 @@ mod server {
         fn diff(&self, from: u64, to: Option<u64>) -> BoxFuture<'_, ApiResult<Vec<DiffLine>>>;
         /// Live status for the dashboard.
         fn status(&self) -> BoxFuture<'_, ApiResult<SystemStatus>>;
+    }
+
+    /// A backend bound to one signed-in user (their identity and privileges travel with
+    /// every call, so the agent enforces ACLs, not the UI).
+    pub type BackendHandle = Arc<dyn Backend>;
+
+    /// A signed-in session.
+    #[derive(Clone)]
+    pub struct Session {
+        /// Login name.
+        pub user: String,
+        /// The backend acting as that user.
+        pub backend: BackendHandle,
+    }
+
+    /// Logins and session tokens. sensr-api implements this over its session table; the
+    /// mock keeps its own.
+    pub trait Sessions: Send + Sync + 'static {
         /// Checks credentials and opens a session, returning its token.
         fn login<'a>(
             &'a self,
             user: &'a str,
             password: &'a str,
         ) -> BoxFuture<'a, ApiResult<String>>;
-        /// The user owning session `token`, if it is valid.
-        fn session<'a>(&'a self, token: &'a str) -> BoxFuture<'a, ApiResult<Option<String>>>;
+        /// The session behind `token`, if it is valid.
+        fn open<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Option<Session>>;
         /// Ends session `token`.
-        fn logout<'a>(&'a self, token: &'a str) -> BoxFuture<'a, ApiResult<()>>;
+        fn logout<'a>(&'a self, token: &'a str) -> BoxFuture<'a, ()>;
     }
 
-    /// Shared handle the pages find in Leptos context.
-    pub type BackendHandle = Arc<dyn Backend>;
+    /// Shared handle the server finds in Leptos context.
+    pub type SessionsHandle = Arc<dyn Sessions>;
 }
