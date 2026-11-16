@@ -29,6 +29,7 @@ bcrypt = "0.19.3"
 blake3 = "1.8.7"
 ciborium = "0.2.2"
 clap = { version = "4.6.7", features = ["derive"] }
+fancy-regex = "0.20.2"
 getrandom = "0.4.3"
 indexmap = { version = "2.14.2", features = ["serde"] }
 insta = "1.49.0"
@@ -40,7 +41,6 @@ nftables = "0.6.3"
 pretty_assertions = "1.4.1"
 proptest = "1.12.0"
 quick-xml = { version = "0.42.0", features = ["serialize"] }
-regex = "1.13.1"
 rtnetlink = "0.24.0"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 schemars = "1.2.3"

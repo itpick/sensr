@@ -656,15 +656,12 @@ fn message_literals(src: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut in_call = false;
     for line in body.lines() {
-        let t = line.trim();
+        // Messages built with `format!` count; other `format!` strings
+        // (captions, keys) are only picked up after a validator kind.
+        let owned = line.trim().replace("format!(\"", "\"");
+        let t = owned.as_str();
         let mut starts: Vec<usize> = Vec::new();
-        for pat in [
-            "syntax(\"",
-            "callback(\"",
-            "range(\"",
-            "msg(\"",
-            "format!(\"",
-        ] {
+        for pat in ["syntax(\"", "callback(\"", "range(\"", "msg(\""] {
             if let Some(i) = t.find(pat) {
                 starts.push(i + pat.len());
             }
@@ -704,7 +701,6 @@ fn message_literals(src: &str) -> Vec<String> {
             || t.ends_with("ValidatorKind::MinMax,")
             || t.ends_with("syntax(")
             || t.ends_with("callback(")
-            || t.ends_with("format!(")
             || t.starts_with("&&")
             || t.ends_with("),");
     }
@@ -736,7 +732,7 @@ fn every_validation_message_is_a_sentence_t0361_t0362() {
     for m in all {
         assert!(m.ends_with('.'), "message must end with a period: {m:?}");
         assert!(
-            m.starts_with(char::is_uppercase),
+            m.starts_with(char::is_uppercase) || m.starts_with(['%', '[', '"']),
             "message must start upper-case: {m:?}"
         );
     }

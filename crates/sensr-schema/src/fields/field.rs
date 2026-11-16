@@ -11,7 +11,7 @@
 
 use std::fmt;
 
-use regex::{Regex, RegexBuilder};
+use fancy_regex::{Regex, RegexBuilder};
 
 use crate::validation::{FieldError, ValidatorKind};
 
@@ -58,7 +58,11 @@ impl PartialEq for Mask {
 impl Mask {
     /// Parses `/pattern/flags` (flags `i`, `m`, `s`, `x`, `u`; `u` is the
     /// default here). A pattern without delimiters is taken as is.
-    pub fn new(source: &str) -> Result<Self, regex::Error> {
+    ///
+    /// Look-around and back-references work (upstream filters such as
+    /// `/^((?!dhcp).)*$/` use them); matching gives up after the backtracking
+    /// limit and counts as no match.
+    pub fn new(source: &str) -> Result<Self, fancy_regex::Error> {
         let src = source.trim();
         let (pattern, flags) = match src.chars().next() {
             Some(d) if !d.is_alphanumeric() && d != '\\' && src.len() > 1 => {
@@ -83,7 +87,13 @@ impl Mask {
 
     /// True if the first match is the whole value.
     pub fn matches(&self, value: &str) -> bool {
-        self.re.find(value).is_some_and(|m| m.as_str() == value)
+        matches!(self.re.find(value), Ok(Some(m)) if m.as_str() == value)
+    }
+
+    /// True if the pattern matches anywhere in the value (PHP `preg_match`,
+    /// as used by option filters).
+    pub fn matches_partial(&self, value: &str) -> bool {
+        self.re.is_match(value).unwrap_or(false)
     }
 
     /// The pattern as written.
@@ -382,6 +392,8 @@ mod tests {
         let m = Mask::new("#^a/b$#").unwrap();
         assert!(m.matches("a/b"));
         assert!(Mask::new("/(/").is_err());
+        let m = Mask::new("/^((?!dhcp).)*$/").unwrap();
+        assert!(m.matches("192.168.1.1") && !m.matches("dhcp"));
     }
 
     /// `getDefault` / `isDefault` / `applyDefault` / `setDefault`.

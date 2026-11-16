@@ -21,10 +21,12 @@ mod mac;
 mod misc;
 mod names;
 mod net;
+mod network;
 mod numbers;
 mod option;
 mod port;
 mod protocol;
+mod reference;
 mod secret;
 mod text;
 pub mod well_known;
@@ -40,10 +42,19 @@ pub use names::{
     AliasName, Description, DeviceName, GroupName, InterfaceId, Timezone, Username, WgName,
 };
 pub use net::{AddressRange, IpFamily, NetOrAlias};
+pub use network::{
+    AddressFamily, HostnameField, IpPortField, MacAddressField, NetworkField, is_domain, is_ip,
+    is_ipv4, is_ipv6, is_port, is_subnet, is_subnet_strict,
+};
 pub use numbers::{AutoNumberField, BooleanField, IntegerField, NumericField};
 pub use option::{CountryField, OptionEntry, OptionField, OptionList};
 pub use port::{Port, PortField, PortRange, PortSpec};
 pub use protocol::{Protocol, ProtocolField};
+pub use reference::{
+    AllowDynamic, CertKind, InterfaceOptions, ListField, ModelRelationField, NetworkAliasField,
+    ParentDevices, Record, auth_group_options, auth_server_options, certificate_options,
+    natcasecmp, virtual_ip_options,
+};
 pub use secret::{REDACTED, Secret, redacted};
 pub use text::{Base64Field, EmailField, TextField, UpdateOnlyTextField, is_email};
 

@@ -6,8 +6,9 @@ use std::str::FromStr;
 use super::string_serde;
 use crate::validation::FieldError;
 
-/// A 48-bit Ethernet address. Accepts `:` or `-` separated hex pairs in any
-/// case; displays lower-case with colons (the form Linux tools print).
+/// A 48-bit Ethernet address. Accepts `:` or `-` separated hex pairs or
+/// Cisco-style `aabb.ccdd.eeff`, in any case; displays lower-case with colons
+/// (the form Linux tools print).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MacAddr(pub [u8; 6]);
 
@@ -32,6 +33,17 @@ impl FromStr for MacAddr {
     type Err = FieldError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let err = || FieldError::syntax("Please enter a valid MAC address.");
+        if let [a, b, c] = s.split('.').collect::<Vec<_>>()[..] {
+            let mut out = [0u8; 6];
+            for (i, group) in [a, b, c].into_iter().enumerate() {
+                if group.len() != 4 || !group.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(err());
+                }
+                let v = u16::from_str_radix(group, 16).map_err(|_| err())?;
+                out[2 * i..2 * i + 2].copy_from_slice(&v.to_be_bytes());
+            }
+            return Ok(Self(out));
+        }
         let sep = if s.contains('-') { '-' } else { ':' };
         let mut out = [0u8; 6];
         let mut parts = s.split(sep);
@@ -66,6 +78,8 @@ mod tests {
         let m: MacAddr = "00:1A:2b:3c:4D:5e".parse().unwrap();
         assert_eq!(m.to_string(), "00:1a:2b:3c:4d:5e");
         assert_eq!("00-1a-2b-3c-4d-5e".parse::<MacAddr>().unwrap(), m);
+        assert_eq!("001A.2b3c.4D5e".parse::<MacAddr>().unwrap(), m);
+        assert!("001a.2b3c".parse::<MacAddr>().is_err());
     }
 
     #[test]
