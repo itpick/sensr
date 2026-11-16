@@ -15,7 +15,7 @@
   configGet = false;
 
   # sensr-api stays running and answers HTTP on the management address.
-  apiDaemon = true;
+  apiDaemon = false;
 
   # The agent imports an OPNsense config.xml from the seed folder
   # (sensr-import-opnsense) and applies it (sensr-apply, sensr-net,

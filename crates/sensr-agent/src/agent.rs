@@ -105,6 +105,37 @@ pub fn system_principal() -> Principal {
     }
 }
 
+/// The `Groups:` line of `/proc/<pid>/status` (empty off Linux or when the
+/// process is gone). The peer cannot change it under us without exec'ing,
+/// and the connection was opened by that process.
+fn supplementary_groups(pid: i32) -> Vec<u32> {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|l| l.strip_prefix("Groups:"))
+                .map(|g| {
+                    g.split_whitespace()
+                        .filter_map(|n| n.parse().ok())
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
+}
+
+/// Resolves a group name in `/etc/group`.
+pub fn group_id(name: &str) -> Option<u32> {
+    std::fs::read_to_string("/etc/group")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let mut f = line.split(':');
+            (f.next()? == name).then_some(())?;
+            f.nth(1)?.parse().ok()
+        })
+}
+
 /// Looks a uid up in `/etc/passwd` (no NSS: the agent only needs local
 /// system accounts).
 fn unix_user_name(uid: u32) -> String {
@@ -177,7 +208,7 @@ impl<S: ConfigStore, A: Applier> Agent<S, A> {
             }
         }
         // A failed rollback stays pending and the timer retries it.
-        self.expire_pending().await;
+        self.expire_pending(true).await;
         Ok(())
     }
 
@@ -235,10 +266,7 @@ impl<S: ConfigStore, A: Applier> Agent<S, A> {
     /// different claimed user (sudo), that user is recorded as
     /// `impersonated_by`.
     pub fn resolve_principal(&self, peer: PeerCred, claimed: Principal) -> Principal {
-        let trusted = peer.uid == 0
-            || self.settings.trusted_uids.contains(&peer.uid)
-            || self.settings.trusted_gids.contains(&peer.gid);
-        if !trusted {
+        if !self.is_trusted_peer(peer) {
             return Principal {
                 user: unix_user_name(peer.uid),
                 via: AuthMethod::Unix { uid: peer.uid },
@@ -268,10 +296,25 @@ impl<S: ConfigStore, A: Applier> Agent<S, A> {
         }
     }
 
+    /// Root, a trusted uid, or a process whose primary or supplementary
+    /// groups include a trusted gid. `SO_PEERCRED` only reports the primary
+    /// gid; supplementary groups (how the `DynamicUser` API is marked) come
+    /// from `/proc/<pid>/status`.
     fn is_trusted_peer(&self, peer: PeerCred) -> bool {
-        peer.uid == 0
+        if peer.uid == 0
             || self.settings.trusted_uids.contains(&peer.uid)
             || self.settings.trusted_gids.contains(&peer.gid)
+        {
+            return true;
+        }
+        if self.settings.trusted_gids.is_empty() {
+            return false;
+        }
+        peer.pid.map(supplementary_groups).is_some_and(|groups| {
+            groups
+                .iter()
+                .any(|g| self.settings.trusted_gids.contains(g))
+        })
     }
 
     fn resolve(&self, inner: &Inner<S, A>, source: Source) -> Result<Value, IpcError> {
@@ -381,16 +424,23 @@ impl<S: ConfigStore, A: Applier> Agent<S, A> {
 
     /// Rolls back an expired provisional commit. Returns the instant to
     /// check again (next deadline), if any.
-    async fn expire_pending(&self) -> Option<i64> {
+    async fn expire_pending(&self, at_startup: bool) -> Option<i64> {
         let mut inner = self.inner.lock().await;
         let p = inner.pending.clone()?;
         if now_ms() < p.deadline_ms {
             return Some(p.deadline_ms);
         }
-        let desc = format!(
-            "commit-confirm timeout: revision {} not confirmed, restoring revision {}",
-            p.revision, p.rollback_to
-        );
+        let desc = if at_startup {
+            format!(
+                "commit-confirm: agent restarted before revision {} was confirmed, restoring revision {}",
+                p.revision, p.rollback_to
+            )
+        } else {
+            format!(
+                "commit-confirm timeout: revision {} not confirmed, restoring revision {}",
+                p.revision, p.rollback_to
+            )
+        };
         match self
             .restore(&mut inner, p.rollback_to, &system_principal(), desc)
             .await
@@ -438,7 +488,7 @@ impl<S: ConfigStore, A: Applier> Agent<S, A> {
             };
             tokio::select! {
                 _ = tokio::time::sleep(sleep), if deadline.is_some() => {
-                    self.expire_pending().await;
+                    self.expire_pending(false).await;
                 }
                 _ = tokio::time::sleep(sleep), if deadline.is_none() => {}
                 _ = self.confirm_changed.notified() => {}
