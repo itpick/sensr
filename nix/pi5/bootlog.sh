@@ -2,7 +2,10 @@
 # so a box that never reaches the network still leaves a post-mortem any
 # laptop can read (06 §1 L4, vyos-pi PR #6). Keeps the last 10 boots.
 #   @seedDir@/boot-log/<boot>-<stage>.txt
-set -uo pipefail
+# Best effort: a diagnostic that fails half-way must still write what it
+# has (writeShellApplication turns on errexit; switch it off).
+set +e
+set -u
 stage=$1
 logdir=@seedDir@/boot-log
 mkdir -p "$logdir" || exit 0

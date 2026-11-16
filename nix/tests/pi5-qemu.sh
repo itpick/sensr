@@ -31,11 +31,15 @@ boot() { # name extra-cmdline timeout-seconds expect
   fat mcopy -o -n ::current/Image "$work/Image"
   fat mcopy -o -n ::current/initrd "$work/initrd"
   local cmdline
-  # The Pi's earlycon address (its PL011 at 0x107d001000) is unmapped on
-  # QEMU's virt machine: writing there hangs the kernel before it prints
-  # anything. Use QEMU's UART instead (earlycon without arguments takes it
-  # from the device tree's stdout-path).
-  cmdline="$(fat mtype ::current/cmdline.txt | tr -d '\r\n' | sed 's/earlycon=[^ ]*/earlycon/') console=ttyAMA0,115200 loglevel=6 systemd.show_status=1 $extra"
+  # Board-specific consoles do not exist on QEMU's virt machine and both
+  # stall the emulated boot: the Pi's earlycon address (its PL011 at
+  # 0x107d001000) is unmapped, so the kernel hangs before printing
+  # anything, and with console=ttyAMA10 (the Pi 5 debug UART's name under
+  # the mainline tree, absent here) the boot stops in the initrd. Use QEMU's
+  # UART instead (earlycon without arguments takes it from the device
+  # tree's stdout-path).
+  cmdline="$(fat mtype ::current/cmdline.txt | tr -d '\r\n' \
+    | sed -e 's/earlycon=[^ ]*/earlycon/' -e 's/console=ttyAMA10[^ ]*//') console=ttyAMA0,115200 loglevel=6 systemd.show_status=1 $extra"
   local start end
   start=$(date +%s.%N)
   qemu-system-aarch64 -machine virt -cpu cortex-a76 -smp 4 -m 2048 \
