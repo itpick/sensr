@@ -521,3 +521,68 @@ async fn shutdown_is_clean() {
         .await
         .unwrap();
 }
+
+/// Secrets never leave the agent; masked placeholders written back keep the
+/// stored value (PLAN §2.4 item 7).
+#[tokio::test]
+async fn secrets_are_masked_on_read_and_kept_on_write_back() {
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    let hash = hash_password("pw").unwrap();
+    set(
+        &mut c,
+        "system.user",
+        json!([{"name": "admin", "uid": "1000", "password": hash}]),
+    )
+    .await;
+    set(&mut c, "wireguard.privkey", json!("PRIVATE")).await;
+    commit(&mut c, None).await.unwrap();
+
+    let users = get(&mut c, "system.user", Source::Head).await.unwrap();
+    let masked = users[0]["password"].as_str().unwrap().to_owned();
+    assert!(masked.starts_with("***"), "{masked}");
+    let bare = get(&mut c, "wireguard.privkey", Source::Head)
+        .await
+        .unwrap();
+    assert!(bare.as_str().unwrap().starts_with("***"));
+    let whole = get(&mut c, "/", Source::Head).await.unwrap().to_string();
+    assert!(!whole.contains(&hash) && !whole.contains("PRIVATE"));
+
+    // Read-modify-write of the user list keeps the hash.
+    let mut edited = users.clone();
+    edited[0]["uid"] = json!("1001");
+    set(&mut c, "system.user", edited).await;
+    set(&mut c, "wireguard.privkey", bare).await;
+    commit(&mut c, None).await.unwrap();
+    let applied = fx.applied();
+    let last = applied.last().unwrap();
+    assert_eq!(last["system"]["user"][0]["password"], json!(hash));
+    assert_eq!(last["system"]["user"][0]["uid"], json!("1001"));
+    assert_eq!(last["wireguard"]["privkey"], json!("PRIVATE"));
+
+    // A changed secret shows up in the diff as a changed marker only.
+    set(&mut c, "wireguard.privkey", json!("NEWKEY")).await;
+    let Response::Diff(d) = c
+        .call(Op::ConfigDiff {
+            from: Source::Head,
+            to: Source::Candidate,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(d.changes.len(), 1);
+    assert!(!d.unified.contains("NEWKEY") && !d.unified.contains("PRIVATE"));
+    let Response::Plan(p) = c
+        .call(Op::ApplyDryRun {
+            source: Source::Candidate,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let shown = serde_json::to_string(&p).unwrap();
+    assert!(!shown.contains("NEWKEY") && !shown.contains("PRIVATE"));
+}
