@@ -23,7 +23,6 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/etc/inc/console.inc" = { status = "todo" }
 "core/src/etc/inc/filter.inc" = { status = "todo" }
 "core/src/etc/inc/filter.lib.inc" = { status = "todo" }
-"core/src/etc/inc/interfaces.inc" = { status = "in-progress", crate = "sensr-apply", module = "appliers::interfaces", note = "interface_dhcp_configure, DHCP6_Config_File_Basic, track6 prefix ids via networkd; PPP/6rd/GIF/GRE and dhcp6c advanced mode open" }
 "core/src/etc/inc/interfaces.inc" = { status = "in-progress", crate = "sensr-net", module = "ipv6::pd", note = "track6/dhcp6c prefix paths only (sla-id carving, PD lifetimes); the rest of the file is open" }
 "core/src/etc/inc/interfaces.lib.inc" = { status = "todo" }
 "core/src/etc/inc/legacy_bindings.inc" = { status = "todo" }
