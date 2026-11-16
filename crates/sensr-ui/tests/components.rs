@@ -63,7 +63,10 @@ fn settings_forms_render_every_field_labelled() {
     let seed = sensr_ui::mock::seed();
     for form in FORMS {
         let initial = sensr_ui::adapt::form_to_view(form, &seed, &form.scope(&None)).unwrap();
-        let doc = render(|| view! { <SettingsFormIsland form scope=None initial/> }.into_any());
+        let doc = render(|| {
+            view! { <SettingsFormIsland form scope=None initial choices=Default::default()/> }
+                .into_any()
+        });
         assert_all_labelled(&doc, &format!("{form:?}"));
         let controls = doc
             .select(&sel("form input, form select, form textarea"))
@@ -132,7 +135,7 @@ fn grids_render_rows_with_table_semantics() {
         let n = page.rows.len();
         assert!(n > 0, "{grid:?}: seed has rows");
         let doc = render(|| {
-            view! { <GridIsland grid scope=None initial=page label="item".to_owned()/> }.into_any()
+            view! { <GridIsland grid scope=None initial=page label="item".to_owned() choices=Default::default()/> }.into_any()
         });
         assert_all_labelled(&doc, &format!("{grid:?}"));
         assert_eq!(doc.select(&sel("tbody tr")).count(), n, "{grid:?}");

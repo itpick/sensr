@@ -7,7 +7,7 @@
 //! exports form descriptions.
 
 use crate::api::FieldError;
-use crate::form::{FieldKind as K, FieldSpec as F, FormModel, Inputs, apply_inputs};
+use crate::form::{ChoiceSet, FieldKind as K, FieldSpec as F, FormModel, Inputs, apply_inputs};
 use crate::grid::{Column, GridModel};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -340,7 +340,7 @@ pub const PROTOCOLS: &[(&str, &str)] = &[
     ("gre", "GRE"),
 ];
 
-/// Interfaces a rule can be placed on (mock inventory).
+/// Interfaces a rule can be placed on, when the document is not at hand (tests).
 pub const RULE_INTERFACES: &[(&str, &str)] = &[
     ("floating", "Floating"),
     ("wan", "WAN"),
@@ -395,7 +395,7 @@ impl FormModel for FilterRule {
             F::new("action", "Action", K::Select(ACTIONS)).required(),
             F::new("quick", "Quick", K::Checkbox)
                 .help("Apply the action immediately on match, without evaluating later rules."),
-            F::new("interface", "Interface", K::Select(RULE_INTERFACES)).required(),
+            F::new("interface", "Interface", K::Choice(ChoiceSet::RuleInterfaces)).required(),
             F::new("direction", "Direction", K::Select(DIRECTIONS)),
             F::new("ipprotocol", "Version", K::Select(IPPROTO)),
             F::new("protocol", "Protocol", K::Select(PROTOCOLS)),
@@ -516,7 +516,7 @@ impl FormModel for SourceNatRule {
         const FIELDS: &[F] = &[
             F::new("enabled", "Enabled", K::Checkbox),
             F::new("nonat", "Do not NAT", K::Checkbox),
-            F::new("interface", "Interface", K::Select(NAT_INTERFACES)).required(),
+            F::new("interface", "Interface", K::Choice(ChoiceSet::Interfaces)).required(),
             F::new("protocol", "Protocol", K::Select(PROTOCOLS)),
             F::new("source", "Source", K::Text).required(),
             F::new("destination", "Destination", K::Text),
@@ -573,7 +573,7 @@ impl FormModel for PortForward {
     fn fields() -> &'static [F] {
         const FIELDS: &[F] = &[
             F::new("enabled", "Enabled", K::Checkbox),
-            F::new("interface", "Interface", K::Select(NAT_INTERFACES)).required(),
+            F::new("interface", "Interface", K::Choice(ChoiceSet::Interfaces)).required(),
             F::new("protocol", "Protocol", K::Select(PROTOCOLS)),
             F::new("destination", "Destination", K::Text)
                 .help("Usually 'addr:wan', the WAN address."),

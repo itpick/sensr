@@ -595,3 +595,38 @@ pub async fn revision_diff(
 ) -> Result<Vec<crate::api::DiffLine>, ServerFnError> {
     imp::backend()?.diff(from, to).await.map_err(imp::err)
 }
+
+/// Option lists computed from the document (assigned interfaces, …).
+#[server(input = Json)]
+pub async fn field_choices() -> Result<crate::form::Choices, ServerFnError> {
+    use crate::form::ChoiceSet;
+    use serde_json::Value;
+    let ifs = imp::backend()?.get("interfaces").await.map_err(imp::err)?;
+    let list: Vec<(String, String)> = ifs
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, i)| {
+            let d = i
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            (
+                id.clone(),
+                if d.is_empty() {
+                    id.to_uppercase()
+                } else {
+                    d.to_owned()
+                },
+            )
+        })
+        .collect();
+    let mut rules = vec![("floating".to_owned(), "Floating".to_owned())];
+    rules.extend(list.iter().cloned());
+    Ok([
+        (ChoiceSet::Interfaces, list),
+        (ChoiceSet::RuleInterfaces, rules),
+    ]
+    .into_iter()
+    .collect())
+}
