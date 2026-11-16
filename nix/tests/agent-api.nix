@@ -40,6 +40,12 @@ let
 in
 pkgs.testers.runNixOSTest {
   name = "sensr-agent-api";
+  # A LAN client, to see the web GUI's interface restriction from outside.
+  nodes.client =
+    { ... }:
+    {
+      environment.systemPackages = [ pkgs.curl ];
+    };
   nodes.machine =
     { ... }:
     {
@@ -47,7 +53,6 @@ pkgs.testers.runNixOSTest {
       virtualisation.memorySize = 1024;
       users.users.root.hashedPassword = pkgs.lib.mkForce null;
       services.sensr.seedDir = "/boot/sensr";
-      services.sensr.api.listen = "127.0.0.1:8080";
       systemd.tmpfiles.rules = [ "d /boot 0755 root root -" ];
       environment.etc."sensr-test/users.json".text = users;
       environment.etc."sensr-test/groups.json".text = groups;
@@ -55,6 +60,7 @@ pkgs.testers.runNixOSTest {
         pkgs.curl
         pkgs.jq
         pkgs.sqlite
+        pkgs.openssl
       ];
     };
 
@@ -131,24 +137,38 @@ pkgs.testers.runNixOSTest {
         print(out)
         machine.succeed("sensr status --json | jq -e '.candidate_dirty == false'")
 
-    api = "http://127.0.0.1:8080"
+    api = "https://localhost"
+    with subtest("HTTPS with the certificate from the local CA (created at first boot)"):
+        machine.succeed("stat -c '%a %U' /var/lib/sensr/tls/ca.key /var/lib/sensr/tls/server.key | grep -c '^600 root$' | grep -qx 2")
+        machine.succeed("cp /var/lib/sensr/tls/ca.pem /tmp/ca.pem")
+        machine.wait_until_succeeds(f"curl --cacert /tmp/ca.pem -s -o /dev/null {api}/api/v1/status", timeout=30)
+        # Without the CA, curl refuses the certificate (exit 60).
+        rc, _ = machine.execute(f"curl -s -o /dev/null {api}/api/v1/status")
+        assert rc == 60, rc
+        out = machine.succeed("openssl s_client -connect localhost:443 -servername localhost </dev/null 2>/dev/null | openssl x509 -noout -issuer -ext subjectAltName")
+        print(out)
+        assert "sensr local CA" in out, out
+
+    with subtest("HTTP on port 80 redirects to HTTPS"):
+        out = machine.succeed("curl -s -o /dev/null -w '%{http_code} %{redirect_url}' 'http://localhost/ui/login?x=1'")
+        assert out == "308 https://localhost/ui/login?x=1", out
     with subtest("API authenticates and enforces ACLs"):
-        machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' {api}/api/v1/status | grep -qx 401")
-        machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' -u root:wrong {api}/api/v1/status | grep -qx 401")
-        machine.succeed(f"curl -sf -u root:opnsense {api}/api/v1/status | jq -e '.applied >= 8'")
-        machine.succeed(f"curl -sf -u viewer:opnsense {api}/api/v1/status >/dev/null")
-        machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' -u viewer:opnsense {api}/api/v1/config/doc | grep -qx 403")
+        machine.succeed(f"curl --cacert /tmp/ca.pem -s -o /dev/null -w '%{{http_code}}' {api}/api/v1/status | grep -qx 401")
+        machine.succeed(f"curl --cacert /tmp/ca.pem -s -o /dev/null -w '%{{http_code}}' -u root:wrong {api}/api/v1/status | grep -qx 401")
+        machine.succeed(f"curl --cacert /tmp/ca.pem -sf -u root:opnsense {api}/api/v1/status | jq -e '.applied >= 8'")
+        machine.succeed(f"curl --cacert /tmp/ca.pem -sf -u viewer:opnsense {api}/api/v1/status >/dev/null")
+        machine.succeed(f"curl --cacert /tmp/ca.pem -s -o /dev/null -w '%{{http_code}}' -u viewer:opnsense {api}/api/v1/config/doc | grep -qx 403")
 
     with subtest("API writes go through commit"):
-        machine.succeed(f"curl -sf -u root:opnsense -X PUT -H 'Content-Type: application/json' -d '\"from-api\"' {api}/api/v1/config/doc/system/hostname")
-        out = json.loads(machine.succeed(f"curl -sf -u root:opnsense -X POST -H 'Content-Type: application/json' -d '{{\"description\": \"api\"}}' {api}/api/v1/config/commit"))
+        machine.succeed(f"curl --cacert /tmp/ca.pem -sf -u root:opnsense -X PUT -H 'Content-Type: application/json' -d '\"from-api\"' {api}/api/v1/config/doc/system/hostname")
+        out = json.loads(machine.succeed(f"curl --cacert /tmp/ca.pem -sf -u root:opnsense -X POST -H 'Content-Type: application/json' -d '{{\"description\": \"api\"}}' {api}/api/v1/config/commit"))
         assert out["revision"]["username"] == "root@ui", out
         assert applied("system.hostname") == "from-api"
 
     with subtest("OPNsense compat reads"):
-        machine.succeed(f"curl -sf -u root:opnsense {api}/api/core/firmware/info | jq -e '.product.product_name == \"sensr\"'")
-        machine.succeed(f"curl -sf -u root:opnsense {api}/api/interfaces/overview/interfaces_info | jq -e '.rows | type == \"array\"'")
-        machine.succeed(f"curl -sf -u root:opnsense {api}/api/firewall/alias/search_item | jq -e '.total == 0'")
+        machine.succeed(f"curl --cacert /tmp/ca.pem -sf -u root:opnsense {api}/api/core/firmware/info | jq -e '.product.product_name == \"sensr\"'")
+        machine.succeed(f"curl --cacert /tmp/ca.pem -sf -u root:opnsense {api}/api/interfaces/overview/interfaces_info | jq -e '.rows | type == \"array\"'")
+        machine.succeed(f"curl --cacert /tmp/ca.pem -sf -u root:opnsense {api}/api/firewall/alias/search_item | jq -e '.total == 0'")
 
     with subtest("duplicate alias names are rejected on the real stack"):
         alias = lambda name: json.dumps({"name": name, "content": {"type": "port", "entries": ["443"]}})
@@ -158,20 +178,45 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"sensr config set {a} --json '{web}'")
         machine.succeed("sensr config commit -m alias")
         code = machine.succeed(
-            f"curl -s -o /tmp/dup.json -w '%{{http_code}}' -u root:opnsense -X PUT -H 'Content-Type: application/json'"
+            f"curl --cacert /tmp/ca.pem -s -o /tmp/dup.json -w '%{{http_code}}' -u root:opnsense -X PUT -H 'Content-Type: application/json'"
             f" -d '{web}' {api}/api/v1/config/doc/firewall/aliases/{b}"
         )
         print(machine.succeed("cat /tmp/dup.json"))
         assert code == "422", code
         machine.succeed("jq -e '.validations | keys | any(contains(\"firewall.aliases\"))' /tmp/dup.json")
-        machine.succeed(f"curl -sf -u root:opnsense {api}/api/firewall/alias/search_item | jq -e '.total == 1'")
+        machine.succeed(f"curl --cacert /tmp/ca.pem -sf -u root:opnsense {api}/api/firewall/alias/search_item | jq -e '.total == 1'")
+
+    with subtest("the listener follows system.webgui"):
+        machine.succeed("sensr config set system.webgui --json '{\"port\": \"8443\"}'")
+        machine.succeed("sensr config commit -m 'web GUI on 8443'")
+        machine.wait_until_succeeds("curl --cacert /tmp/ca.pem -sf -u root:opnsense https://localhost:8443/api/v1/status", timeout=30)
+        machine.wait_until_fails("curl --cacert /tmp/ca.pem -s -o /dev/null https://localhost/api/v1/status", timeout=30)
+        out = machine.succeed("curl -s -o /dev/null -w '%{redirect_url}' http://localhost/")
+        assert out == "https://localhost:8443/", out
+
+        lan = machine.succeed("ip -4 -o addr show dev eth1 | awk '{print $4}' | cut -d/ -f1").strip()
+        probe = f"curl -sk -o /dev/null -w '%{{http_code}}' --connect-timeout 3 https://{lan}:8443/api/v1/status"
+        client.wait_for_unit("multi-user.target")
+        client.succeed(f"{probe} | grep -qx 401")
+        # Only WAN: a LAN client is refused, the box itself still gets in.
+        machine.succeed("sensr config set system.webgui.interfaces --json '[\"wan\"]'")
+        machine.succeed("sensr config commit -m 'web GUI on WAN only'")
+        client.wait_until_fails(probe + " | grep -qx 401", timeout=30)
+        machine.succeed("curl --cacert /tmp/ca.pem -sf -u root:opnsense https://localhost:8443/api/v1/status >/dev/null")
+        machine.succeed("sensr config set system.webgui.interfaces --json '[\"lan\"]'")
+        machine.succeed("sensr config commit -m 'web GUI on LAN'")
+        client.wait_until_succeeds(f"{probe} | grep -qx 401", timeout=30)
+        machine.succeed("sensr config delete system.webgui.interfaces")
+        machine.succeed("sensr config delete system.webgui.port")
+        machine.succeed("sensr config commit -m 'web GUI default'")
+        machine.wait_until_succeeds(f"curl --cacert /tmp/ca.pem -sf -o /dev/null -u root:opnsense {api}/api/v1/status", timeout=30)
 
     with subtest("latency"):
         # 200 CLI round trips (process start included).
         cli = float(machine.succeed("s=$(date +%s%N); for i in $(seq 200); do sensr config get system.hostname >/dev/null; done; e=$(date +%s%N); echo $(( (e - s) / 200000 ))").strip()) / 1000
         # 200 API reads on one keep-alive connection (credential cache warm).
         urls = " ".join([f"{api}/api/v1/config/doc/system/hostname"] * 200)
-        out = machine.succeed(f"curl -s -u root:opnsense -w '\\nT=%{{time_total}}\\n' {urls}")
+        out = machine.succeed(f"curl --cacert /tmp/ca.pem -s -u root:opnsense -w '\\nT=%{{time_total}}\\n' {urls}")
         times = [float(line[2:]) for line in out.splitlines() if line.startswith("T=")]
         assert len(times) == 200, len(times)
         times.sort()

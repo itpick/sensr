@@ -148,6 +148,7 @@ async fn serve(args: Args) -> anyhow::Result<()> {
         trusted_uids: args.trust_uids.clone(),
         trusted_gids,
         max_confirm: Duration::from_secs(args.max_confirm_secs),
+        tls_dir: args.state_dir.as_ref().map(|d| d.join("tls")),
         ..Settings::default()
     };
     match args.applier {

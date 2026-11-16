@@ -1018,7 +1018,10 @@ fn webgui_listener_settings_are_imported() {
     let w = &doc.system.webgui;
     assert_eq!((w.protocol, w.listen_port()), (WebProtocol::Https, 8443));
     let cert = w.certificate.expect("ssl-certref resolved");
-    assert_eq!(doc.trust.certificates.get(&cert.id()).unwrap().refid, "6723f0a91b2c4");
+    assert_eq!(
+        doc.trust.certificates.get(&cert.id()).unwrap().refid,
+        "6723f0a91b2c4"
+    );
 
     let i = import_str(
         "<opnsense><interfaces><lan><if>igc1</if><enable>1</enable></lan></interfaces>\
@@ -1028,8 +1031,15 @@ fn webgui_listener_settings_are_imported() {
     );
     let w = &i.document.system.webgui;
     assert_eq!((w.protocol, w.listen_port()), (WebProtocol::Http, 8080));
-    assert_eq!(w.interfaces.iter().map(|i| i.as_str()).collect::<Vec<_>>(), ["lan"]);
+    assert_eq!(
+        w.interfaces.iter().map(|i| i.as_str()).collect::<Vec<_>>(),
+        ["lan"]
+    );
     assert!(!w.http_redirect);
     assert!(w.certificate.is_none());
-    assert!(i.report.to_string().contains("not in the trust store"), "{}", i.report);
+    assert!(
+        i.report.to_string().contains("not in the trust store"),
+        "{}",
+        i.report
+    );
 }

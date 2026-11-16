@@ -203,6 +203,9 @@ pub enum Op {
     },
     /// Stream [`Event`]s until cancelled.
     Subscribe,
+    /// The web GUI listener and its TLS material (trusted peers only: the
+    /// reply carries a private key).
+    WebListener,
 }
 
 impl Op {
@@ -468,6 +471,44 @@ pub enum Response {
     Authenticated(AuthInfo),
     /// The request opened a stream; items follow as stream frames.
     StreamOpened,
+    /// Reply to [`Op::WebListener`].
+    WebListener(Box<WebListener>),
     /// The request failed.
     Error(IpcError),
+}
+
+/// Where and how sensr-api serves the web GUI (from `system.webgui` of the
+/// applied document), with the certificate to present.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebListener {
+    /// TLS; `false` serves plain HTTP.
+    pub https: bool,
+    /// The GUI port.
+    pub port: u16,
+    /// A plain-HTTP listener that redirects to HTTPS, when enabled.
+    pub redirect_port: Option<u16>,
+    /// Kernel devices to listen on (`lo` included); empty means all.
+    pub devices: Vec<String>,
+    /// PEM certificate chain, leaf first.
+    pub cert_chain_pem: String,
+    /// PEM private key of the leaf.
+    pub key_pem: String,
+    /// PEM of the local CA that signed a generated certificate, for
+    /// clients to trust; `None` for a trust-store certificate.
+    pub ca_pem: Option<String>,
+    /// Where the certificate comes from (`generated` or the trust-store
+    /// certificate's description).
+    pub certificate: String,
+}
+
+impl std::fmt::Debug for WebListener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebListener")
+            .field("https", &self.https)
+            .field("port", &self.port)
+            .field("redirect_port", &self.redirect_port)
+            .field("devices", &self.devices)
+            .field("certificate", &self.certificate)
+            .finish_non_exhaustive()
+    }
 }

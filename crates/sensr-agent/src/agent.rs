@@ -48,6 +48,9 @@ pub struct Settings {
     pub max_confirm: Duration,
     /// Delay before retrying a rollback whose apply failed.
     pub rollback_retry: Duration,
+    /// Where the web GUI's local CA and certificate live; `None` keeps them
+    /// in memory (tests).
+    pub tls_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for Settings {
@@ -57,6 +60,7 @@ impl Default for Settings {
             trusted_gids: Vec::new(),
             max_confirm: Duration::from_secs(24 * 3600),
             rollback_retry: Duration::from_secs(5),
+            tls_dir: None,
         }
     }
 }
@@ -92,6 +96,7 @@ pub struct Agent<A> {
     confirm_changed: Notify,
     started: Instant,
     settings: Settings,
+    tls: crate::tls::LocalCa,
 }
 
 fn internal(e: StoreError) -> IpcError {
@@ -236,6 +241,7 @@ impl<A: Applier> Agent<A> {
             events,
             confirm_changed: Notify::new(),
             started: Instant::now(),
+            tls: crate::tls::LocalCa::new(settings.tls_dir.clone()),
             settings,
         }))
     }
@@ -243,6 +249,14 @@ impl<A: Applier> Agent<A> {
     /// Boot path = apply path (§2.4 step 5): roll back a confirm left
     /// pending by a previous run, else apply head in full.
     pub async fn boot(&self) -> Result<(), IpcError> {
+        {
+            // First boot creates the web GUI's CA and certificate, so they
+            // exist before sensr-api asks.
+            let inner = self.inner.lock().await;
+            if let Err(e) = self.tls.ensure(&inner.head.1) {
+                tracing::error!(error = %e, "creating the web GUI certificate");
+            }
+        }
         {
             let mut inner = self.inner.lock().await;
             match inner.store.pending_confirm().map_err(internal)? {
@@ -769,6 +783,15 @@ impl<A: Applier> Agent<A> {
                     .ok_or_else(|| err(ErrorKind::Unauthenticated, "invalid credentials"))
             }
             Op::Subscribe => Err(err(ErrorKind::BadRequest, "subscribe opens a stream")),
+            Op::WebListener => {
+                // What runs, not what is staged: the listener moves when a
+                // change is applied.
+                let doc = inner.applied.as_ref().map_or(&inner.head.1, |(_, d)| d);
+                self.tls
+                    .listener(doc)
+                    .map(|l| Response::WebListener(Box::new(l)))
+                    .map_err(|e| err(ErrorKind::Internal, e.to_string()))
+            }
         }
     }
 
@@ -882,6 +905,13 @@ impl<A: Applier> Handler for Agent<A> {
             ))
             .into();
         }
+        if matches!(req.op, Op::WebListener) && !self.is_trusted_peer(peer) {
+            return Response::Error(err(
+                ErrorKind::Forbidden,
+                "the web GUI key is reserved for sensr-api",
+            ))
+            .into();
+        }
         let principal = self.resolve_principal(peer, req.principal);
         if matches!(req.op, Op::Subscribe) {
             let mut events = self.subscribe();
@@ -928,6 +958,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::ApplyDryRun { .. } => "apply.dry_run",
         Op::Authenticate { .. } => "authenticate",
         Op::Subscribe => "subscribe",
+        Op::WebListener => "web_listener",
     }
 }
 

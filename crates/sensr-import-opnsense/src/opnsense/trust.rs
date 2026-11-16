@@ -62,7 +62,11 @@ impl Mapper<Document> for TrustMapper {
 /// `system/webgui/ssl-certref`: the web GUI's certificate, by refid. A
 /// certificate without its key cannot serve TLS; the listener then uses
 /// sensr's own self-signed certificate.
-fn webgui_certificate<'doc>(doc: &'doc XmlDocument, ctx: &mut MapContext<'doc>, out: &mut Document) {
+fn webgui_certificate<'doc>(
+    doc: &'doc XmlDocument,
+    ctx: &mut MapContext<'doc>,
+    out: &mut Document,
+) {
     let Some(el) = doc
         .root
         .child("system")

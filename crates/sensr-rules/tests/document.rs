@@ -78,7 +78,10 @@ fn anti_lockout_follows_the_webgui_port() {
     };
     let mut doc = sensr_schema::Document::factory();
     let default = lockout(&doc);
-    assert!(default.contains("443") && default.contains("80"), "{default}");
+    assert!(
+        default.contains("443") && default.contains("80"),
+        "{default}"
+    );
 
     doc.system.webgui.port = sensr_schema::fields::Port::new(8443);
     let moved = lockout(&doc);
@@ -86,7 +89,10 @@ fn anti_lockout_follows_the_webgui_port() {
 
     doc.system.webgui.http_redirect = false;
     let no_redirect = lockout(&doc);
-    assert!(!no_redirect.contains("80 ") && !no_redirect.contains(", 80"), "{no_redirect}");
+    assert!(
+        !no_redirect.contains("80 ") && !no_redirect.contains(", 80"),
+        "{no_redirect}"
+    );
 
     doc.system.webgui.protocol = WebProtocol::Http;
     doc.system.webgui.port = None;
