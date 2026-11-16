@@ -7,7 +7,7 @@
 //! exports form descriptions.
 
 use crate::api::FieldError;
-use crate::form::{FieldKind as K, FieldSpec as F, FormModel, Inputs, apply_inputs};
+use crate::form::{ChoiceSet, FieldKind as K, FieldSpec as F, FormModel, Inputs, apply_inputs};
 use crate::grid::{Column, GridModel};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -44,14 +44,12 @@ pub struct SystemGeneral {
     pub domain: String,
     /// IANA time zone.
     pub timezone: String,
-    /// UI language.
-    pub language: String,
     /// Upstream DNS servers.
     pub dns_servers: Vec<String>,
     /// Let DHCP/PPP on WAN override the DNS servers.
     pub dns_allow_override: bool,
-    /// Do not use the local resolver as a nameserver for the system.
-    pub dns_local_disabled: bool,
+    /// Allow IPv6 traffic at all.
+    pub ipv6_allow: bool,
 }
 
 const TIMEZONES: &[(&str, &str)] = &[
@@ -66,14 +64,6 @@ const TIMEZONES: &[(&str, &str)] = &[
     ("Australia/Sydney", "Australia/Sydney"),
 ];
 
-const LANGUAGES: &[(&str, &str)] = &[
-    ("en_US", "English"),
-    ("de_DE", "Deutsch"),
-    ("es_ES", "Español"),
-    ("fr_FR", "Français"),
-    ("nl_NL", "Nederlands"),
-];
-
 impl FormModel for SystemGeneral {
     fn fields() -> &'static [F] {
         const FIELDS: &[F] = &[
@@ -84,16 +74,12 @@ impl FormModel for SystemGeneral {
                 .required()
                 .help("Do not use 'local' as a domain name; it breaks local name resolution."),
             F::new("timezone", "Timezone", K::Select(TIMEZONES)),
-            F::new("language", "Language", K::Select(LANGUAGES)),
             F::new("dns_servers", "DNS servers", K::IpLines)
                 .help("One address per line. Used by the system and offered to DHCP clients."),
             F::new("dns_allow_override", "DNS server options", K::Checkbox)
                 .help("Allow DNS server list to be overridden by DHCP/PPP on WAN."),
-            F::new(
-                "dns_local_disabled",
-                "Do not use the local DNS service as a nameserver",
-                K::Checkbox,
-            ),
+            F::new("ipv6_allow", "Allow IPv6", K::Checkbox)
+                .help("Allow IPv6 traffic. When off, all IPv6 is blocked."),
         ];
         FIELDS
     }
@@ -239,9 +225,9 @@ pub const ALIAS_TYPES: &[(&str, &str)] = &[
     ("network", "Network(s)"),
     ("port", "Port(s)"),
     ("url", "URL (IPs)"),
-    ("urltable", "URL Table (IPs)"),
-    ("geoip", "GeoIP"),
-    ("networkgroup", "Network group"),
+    ("url_table", "URL Table (IPs)"),
+    ("geo_ip", "GeoIP"),
+    ("network_group", "Network group"),
     ("mac", "MAC address"),
     ("external", "External (advanced)"),
 ];
@@ -295,16 +281,20 @@ impl FormModel for Alias {
         }
         let bad = |entry: &str| -> bool {
             match self.kind.as_str() {
+                _ if entry.starts_with("alias:") => false,
                 "host" => {
-                    entry.parse::<std::net::IpAddr>().is_err()
-                        && !entry.contains('.')
-                        && !entry.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    let e = entry.trim_start_matches('!');
+                    e.parse::<std::net::IpAddr>().is_err() && !e.contains(['.', '-', ':'])
                 }
-                "network" => !entry.contains('/') && entry.parse::<std::net::IpAddr>().is_err(),
-                "port" => !entry
-                    .split(':')
-                    .all(|p| p.parse::<u16>().is_ok_and(|n| n > 0)),
-                "url" | "urltable" => {
+                "network" => {
+                    let e = entry.trim_start_matches('!');
+                    !e.contains('/') && e.parse::<std::net::IpAddr>().is_err()
+                }
+                "port" => !entry.split(['-', ':']).all(|p| {
+                    p.parse::<u16>().is_ok_and(|n| n > 0)
+                        || p.chars().all(|c| c.is_ascii_alphanumeric())
+                }),
+                "url" | "url_table" => {
                     !(entry.starts_with("http://") || entry.starts_with("https://"))
                 }
                 _ => false,
@@ -336,26 +326,31 @@ impl GridModel for Alias {
 // ---------------------------------------------------------------- Firewall › Rules
 
 const ACTIONS: &[(&str, &str)] = &[("pass", "Pass"), ("block", "Block"), ("reject", "Reject")];
-const DIRECTIONS: &[(&str, &str)] = &[("in", "in"), ("out", "out")];
+const DIRECTIONS: &[(&str, &str)] = &[("in", "in"), ("out", "out"), ("any", "any")];
 const IPPROTO: &[(&str, &str)] = &[("inet", "IPv4"), ("inet6", "IPv6"), ("inet46", "IPv4+IPv6")];
-const PROTOCOLS: &[(&str, &str)] = &[
+/// Protocols as the schema spells them.
+pub const PROTOCOLS: &[(&str, &str)] = &[
     ("any", "any"),
-    ("TCP", "TCP"),
-    ("UDP", "UDP"),
-    ("TCP/UDP", "TCP/UDP"),
-    ("ICMP", "ICMP"),
-    ("IPV6-ICMP", "IPV6-ICMP"),
-    ("ESP", "ESP"),
-    ("GRE", "GRE"),
+    ("tcp", "TCP"),
+    ("udp", "UDP"),
+    ("tcp/udp", "TCP/UDP"),
+    ("icmp", "ICMP"),
+    ("ipv6-icmp", "IPV6-ICMP"),
+    ("esp", "ESP"),
+    ("gre", "GRE"),
 ];
 
-/// Interfaces a rule can be placed on (mock inventory).
+/// Interfaces a rule can be placed on, when the document is not at hand (tests).
 pub const RULE_INTERFACES: &[(&str, &str)] = &[
     ("floating", "Floating"),
     ("wan", "WAN"),
     ("lan", "LAN"),
-    ("wg0", "WireGuard"),
+    ("opt1", "WireGuard"),
 ];
+
+/// Interfaces NAT rules can egress/ingress on.
+pub const NAT_INTERFACES: &[(&str, &str)] =
+    &[("wan", "WAN"), ("lan", "LAN"), ("opt1", "WireGuard")];
 
 /// A filter rule. List order is evaluation order.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -363,6 +358,8 @@ pub const RULE_INTERFACES: &[(&str, &str)] = &[
 pub struct FilterRule {
     /// Object key.
     pub uuid: String,
+    /// Evaluation order (lowest first); changed by reordering, not edited.
+    pub sequence: Option<u32>,
     /// Enabled.
     pub enabled: bool,
     /// Pass, block or reject.
@@ -398,11 +395,13 @@ impl FormModel for FilterRule {
             F::new("action", "Action", K::Select(ACTIONS)).required(),
             F::new("quick", "Quick", K::Checkbox)
                 .help("Apply the action immediately on match, without evaluating later rules."),
-            F::new("interface", "Interface", K::Select(RULE_INTERFACES)).required(),
+            F::new("interface", "Interface", K::Choice(ChoiceSet::RuleInterfaces)).required(),
             F::new("direction", "Direction", K::Select(DIRECTIONS)),
             F::new("ipprotocol", "Version", K::Select(IPPROTO)),
             F::new("protocol", "Protocol", K::Select(PROTOCOLS)),
-            F::new("source", "Source", K::Text).help("Address, network, alias name or 'any'."),
+            F::new("source", "Source", K::Text).help(
+                "'any', an address or network, 'net:lan' / 'addr:lan', 'alias:name' or 'self'; prefix '!' to invert.",
+            ),
             F::new("source_port", "Source port", K::Text),
             F::new("destination", "Destination", K::Text),
             F::new("destination_port", "Destination port", K::Text),
@@ -417,11 +416,12 @@ impl FormModel for FilterRule {
         let ports_ok = |p: &str| {
             p.is_empty()
                 || p == "any"
+                || p.starts_with("alias:")
                 || p.split(['-', ':'])
                     .all(|n| n.parse::<u16>().is_ok_and(|n| n > 0))
-                || p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                || p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
         };
-        let l4 = matches!(self.protocol.as_str(), "TCP" | "UDP" | "TCP/UDP");
+        let l4 = matches!(self.protocol.as_str(), "tcp" | "udp" | "tcp/udp");
         for (path, v) in [
             ("source_port", &self.source_port),
             ("destination_port", &self.destination_port),
@@ -434,7 +434,7 @@ impl FormModel for FilterRule {
             } else if !ports_ok(v) {
                 e.push(FieldError::new(
                     path,
-                    "Enter a port, a range (80-90) or an alias.",
+                    "Enter a port, a range (80-90) or alias:name.",
                 ));
             }
         }
@@ -465,7 +465,7 @@ impl GridModel for FilterRule {
 pub const SNAT_MODES: &[(&str, &str)] = &[
     ("automatic", "Automatic outbound NAT rule generation"),
     ("hybrid", "Hybrid outbound NAT rule generation"),
-    ("advanced", "Manual outbound NAT rule generation"),
+    ("manual", "Manual outbound NAT rule generation"),
     ("disabled", "Disable outbound NAT rule generation"),
 ];
 
@@ -491,6 +491,8 @@ impl FormModel for SourceNatMode {
 pub struct SourceNatRule {
     /// Object key.
     pub uuid: String,
+    /// Evaluation order (lowest first); changed by reordering, not edited.
+    pub sequence: Option<u32>,
     /// Enabled.
     pub enabled: bool,
     /// Do not NAT matching traffic.
@@ -503,7 +505,7 @@ pub struct SourceNatRule {
     pub source: String,
     /// Destination.
     pub destination: String,
-    /// Translation target (`wanip`, an address or alias).
+    /// Translation target; empty for the interface address.
     pub target: String,
     /// Description.
     pub description: String,
@@ -514,12 +516,12 @@ impl FormModel for SourceNatRule {
         const FIELDS: &[F] = &[
             F::new("enabled", "Enabled", K::Checkbox),
             F::new("nonat", "Do not NAT", K::Checkbox),
-            F::new("interface", "Interface", K::Select(RULE_INTERFACES)).required(),
+            F::new("interface", "Interface", K::Choice(ChoiceSet::Interfaces)).required(),
             F::new("protocol", "Protocol", K::Select(PROTOCOLS)),
             F::new("source", "Source", K::Text).required(),
             F::new("destination", "Destination", K::Text),
             F::new("target", "Translation / target", K::Text)
-                .help("'wanip' for the interface address, or an address or alias."),
+                .help("Leave empty for the interface address, or enter an address or alias:name."),
             F::new("description", "Description", K::Text),
         ];
         FIELDS
@@ -547,6 +549,8 @@ impl GridModel for SourceNatRule {
 pub struct PortForward {
     /// Object key.
     pub uuid: String,
+    /// Evaluation order (lowest first); changed by reordering, not edited.
+    pub sequence: Option<u32>,
     /// Enabled.
     pub enabled: bool,
     /// Ingress interface.
@@ -569,11 +573,14 @@ impl FormModel for PortForward {
     fn fields() -> &'static [F] {
         const FIELDS: &[F] = &[
             F::new("enabled", "Enabled", K::Checkbox),
-            F::new("interface", "Interface", K::Select(RULE_INTERFACES)).required(),
+            F::new("interface", "Interface", K::Choice(ChoiceSet::Interfaces)).required(),
             F::new("protocol", "Protocol", K::Select(PROTOCOLS)),
-            F::new("destination", "Destination", K::Text).help("e.g. 'wanip'."),
+            F::new("destination", "Destination", K::Text)
+                .help("Usually 'addr:wan', the WAN address."),
             F::new("destination_port", "Destination port", K::Text).required(),
-            F::new("target", "Redirect target IP", K::Ip).required(),
+            F::new("target", "Redirect target IP", K::Text)
+                .required()
+                .help("An address or alias:name."),
             F::new("target_port", "Redirect target port", K::Text),
             F::new("description", "Description", K::Text),
         ];
@@ -582,7 +589,7 @@ impl FormModel for PortForward {
 
     fn validate(&self) -> Vec<FieldError> {
         let mut e = Vec::new();
-        if !matches!(self.protocol.as_str(), "TCP" | "UDP" | "TCP/UDP") {
+        if !matches!(self.protocol.as_str(), "tcp" | "udp" | "tcp/udp") {
             e.push(FieldError::new(
                 "protocol",
                 "Port forwards need protocol TCP, UDP or TCP/UDP.",
@@ -610,28 +617,22 @@ impl GridModel for PortForward {
 
 // ---------------------------------------------------------------- Services › DHCPv4
 
-/// Per-interface DHCPv4 server settings.
+/// Per-interface DHCPv4 server settings (the interface's subnet in the schema).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DhcpSettings {
     /// Serve DHCP on this interface.
     pub enabled: bool,
-    /// Primary range start.
-    pub range_from: String,
-    /// Primary range end.
-    pub range_to: String,
+    /// The subnet served (from the interface address; shown, not edited).
+    pub subnet: String,
     /// DNS servers handed out; empty for the interface address.
     pub dns_servers: Vec<String>,
     /// Gateway handed out; empty for the interface address.
     pub gateway: String,
     /// Domain name handed out.
     pub domain: String,
-    /// Default lease time, seconds.
-    pub default_lease: Option<u32>,
-    /// Maximum lease time, seconds.
-    pub max_lease: Option<u32>,
-    /// Register leases in the DNS resolver.
-    pub register_dns: bool,
+    /// Lease time, seconds; empty for the server default.
+    pub lease: Option<u32>,
 }
 
 fn ipv4_num(s: &str) -> Option<u32> {
@@ -643,85 +644,42 @@ impl FormModel for DhcpSettings {
         const FIELDS: &[F] = &[
             F::new("enabled", "Enable", K::Checkbox)
                 .help("Enable the DHCP server on this interface."),
-            F::new("range_from", "Range from", K::Ipv4),
-            F::new("range_to", "Range to", K::Ipv4),
             F::new("dns_servers", "DNS servers", K::IpLines)
                 .help("Leave empty to hand out this interface's address."),
             F::new("gateway", "Gateway", K::Ipv4)
                 .help("Leave empty to hand out this interface's address."),
             F::new("domain", "Domain name", K::Hostname),
             F::new(
-                "default_lease",
-                "Default lease time (seconds)",
+                "lease",
+                "Lease time (seconds)",
                 K::Number {
                     min: 60,
                     max: 31_536_000,
                 },
-            ),
-            F::new(
-                "max_lease",
-                "Maximum lease time (seconds)",
-                K::Number {
-                    min: 60,
-                    max: 31_536_000,
-                },
-            ),
-            F::new("register_dns", "Register leases in DNS", K::Checkbox),
+            )
+            .help("Leave empty for the server default."),
         ];
         FIELDS
     }
-
-    fn validate(&self) -> Vec<FieldError> {
-        let mut e = Vec::new();
-        if self.enabled && (self.range_from.is_empty() || self.range_to.is_empty()) {
-            e.push(FieldError::new(
-                "range_from",
-                "A range is required to enable the server.",
-            ));
-        }
-        if let (Some(a), Some(b)) = (ipv4_num(&self.range_from), ipv4_num(&self.range_to))
-            && a > b
-        {
-            e.push(FieldError::new(
-                "range_to",
-                "The range end must not be before its start.",
-            ));
-        }
-        if let (Some(d), Some(m)) = (self.default_lease, self.max_lease)
-            && d > m
-        {
-            e.push(FieldError::new(
-                "max_lease",
-                "The maximum lease time must be at least the default lease time.",
-            ));
-        }
-        e
-    }
 }
 
-/// An additional DHCPv4 pool.
+/// A DHCPv4 address pool.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DhcpRange {
-    /// Object key.
+    /// Row key (pool index).
     pub uuid: String,
-    /// Enabled.
-    pub enabled: bool,
     /// First address.
     pub from: String,
     /// Last address.
     pub to: String,
-    /// Description.
-    pub description: String,
 }
 
 impl FormModel for DhcpRange {
     fn fields() -> &'static [F] {
         const FIELDS: &[F] = &[
-            F::new("enabled", "Enabled", K::Checkbox),
             F::new("from", "From", K::Ipv4).required(),
             F::new("to", "To", K::Ipv4).required(),
-            F::new("description", "Description", K::Text),
         ];
         FIELDS
     }
@@ -738,13 +696,9 @@ impl FormModel for DhcpRange {
 }
 
 impl GridModel for DhcpRange {
+    const TOGGLE: Option<&'static str> = None;
     fn columns() -> &'static [Column] {
-        const C: &[Column] = &[
-            Column::bool("enabled", "Enabled"),
-            Column::text("from", "From"),
-            Column::text("to", "To"),
-            Column::text("description", "Description"),
-        ];
+        const C: &[Column] = &[Column::text("from", "From"), Column::text("to", "To")];
         C
     }
 }
@@ -816,11 +770,17 @@ pub struct UnboundGeneral {
 
 const ZONE_TYPES: &[(&str, &str)] = &[
     ("transparent", "transparent"),
-    ("always_nxdomain", "always_nxdomain"),
-    ("deny", "deny"),
-    ("refuse", "refuse"),
+    ("typetransparent", "typetransparent"),
     ("static", "static"),
+    ("refuse", "refuse"),
+    ("deny", "deny"),
     ("redirect", "redirect"),
+    ("inform", "inform"),
+    ("inform_deny", "inform_deny"),
+    ("nodefault", "nodefault"),
+    ("always_transparent", "always_transparent"),
+    ("always_refuse", "always_refuse"),
+    ("always_nxdomain", "always_nxdomain"),
 ];
 
 impl FormModel for UnboundGeneral {
@@ -883,7 +843,7 @@ impl FormModel for HostOverride {
                 .help("Use '*' to create a wildcard entry."),
             F::new("domain", "Domain", K::Hostname).required(),
             F::new("rr", "Type", K::Select(RR_TYPES)).required(),
-            F::new("server", "IP address", K::Text),
+            F::new("server", "IP address", K::Text).help("For TXT records: the text."),
             F::new("mx", "MX Host", K::Text),
             F::new("mxprio", "MX Priority", K::Number { min: 0, max: 65535 }),
             F::new("description", "Description", K::Text),
@@ -960,6 +920,8 @@ pub struct WgInstance {
     pub enabled: bool,
     /// Name.
     pub name: String,
+    /// Instance number (wgN); assigned when empty.
+    pub instance: Option<u32>,
     /// Public key.
     pub pubkey: String,
     /// Private key (write-only).
@@ -974,6 +936,8 @@ pub struct WgInstance {
     pub dns: Vec<String>,
     /// Do not install routes for peers' allowed IPs.
     pub disableroutes: bool,
+    /// Peer names.
+    pub peers: Vec<String>,
 }
 
 impl FormModel for WgInstance {
@@ -982,9 +946,11 @@ impl FormModel for WgInstance {
             F::new("enabled", "Enabled", K::Checkbox),
             F::new("name", "Name", K::Text).required(),
             F::new("pubkey", "Public key", K::Text).required(),
-            F::new("privkey", "Private key", K::Secret)
-                .required()
-                .help("Write-only: leave empty to keep the stored key."),
+            F::new("instance", "Instance", K::Number { min: 0, max: 9999 })
+                .help("Device number (wg0, wg1, …). Leave empty to pick the next free one."),
+            F::new("privkey", "Private key", K::Secret).help(
+                "Write-only: required for a new instance, leave empty to keep the stored key.",
+            ),
             F::new("port", "Listen port", K::Number { min: 1, max: 65535 }),
             F::new(
                 "mtu",
@@ -997,6 +963,7 @@ impl FormModel for WgInstance {
             F::new("tunneladdress", "Tunnel address", K::CidrLines),
             F::new("dns", "DNS servers", K::IpLines),
             F::new("disableroutes", "Disable routes", K::Checkbox),
+            F::new("peers", "Peers", K::Lines).help("Peer names, one per line."),
         ];
         FIELDS
     }
@@ -1007,6 +974,12 @@ impl FormModel for WgInstance {
             e.push(FieldError::new(
                 "pubkey",
                 "Not a valid WireGuard key (44 characters base64).",
+            ));
+        }
+        if self.uuid.is_empty() && self.privkey.is_empty() {
+            e.push(FieldError::new(
+                "privkey",
+                "A new instance needs a private key.",
             ));
         }
         if !self.privkey.is_empty() && !is_wg_key(&self.privkey) {
@@ -1052,7 +1025,7 @@ pub struct WgPeer {
     pub serveraddress: String,
     /// Endpoint port.
     pub serverport: Option<u16>,
-    /// Instance names this peer belongs to.
+    /// Instance names this peer belongs to (computed; edit on the instance).
     pub servers: Vec<String>,
     /// Keepalive interval, seconds.
     pub keepalive: Option<u16>,
@@ -1073,7 +1046,6 @@ impl FormModel for WgPeer {
                 "Endpoint port",
                 K::Number { min: 1, max: 65535 },
             ),
-            F::new("servers", "Instances", K::Lines).help("Instance names, one per line."),
             F::new(
                 "keepalive",
                 "Keepalive interval",
@@ -1156,36 +1128,11 @@ pub enum GridId {
     WgPeers,
 }
 
-/// Where a form's value lives in the config document.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Location {
-    /// An object at a path.
-    Path(String),
-    /// The element of the list at `list` whose `key` field equals `value`.
-    Item {
-        /// Path of the list.
-        list: String,
-        /// Key field name.
-        key: &'static str,
-        /// Key value.
-        value: String,
-    },
-}
-
-/// Where a grid's rows live, and which subset (scope) it shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GridLocation {
-    /// Path of the list.
-    pub list: String,
-    /// Only rows whose field equals the value; new rows get it set.
-    pub filter: Option<(&'static str, String)>,
-}
-
-fn scope_or(scope: &Option<String>, default: &str) -> String {
+fn sanitize(scope: &Option<String>, default: &str) -> String {
     scope
         .as_deref()
+        .filter(|s| !s.is_empty() && s.len() <= 32)
         .filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-        .filter(|s| !s.is_empty())
         .unwrap_or(default)
         .to_owned()
 }
@@ -1217,20 +1164,11 @@ impl FormId {
         }
     }
 
-    /// Config location for `scope`.
-    pub fn location(self, scope: &Option<String>) -> Location {
+    /// The scope a form edits (an interface id), sanitised; defaults to LAN.
+    pub fn scope(self, scope: &Option<String>) -> String {
         match self {
-            Self::SystemGeneral => Location::Path("system.general".into()),
-            Self::Interface => Location::Item {
-                list: "interfaces".into(),
-                key: "id",
-                value: scope_or(scope, "lan"),
-            },
-            Self::SourceNatMode => Location::Path("nat.source.settings".into()),
-            Self::DhcpSettings => {
-                Location::Path(format!("dhcpd.{}.settings", scope_or(scope, "lan")))
-            }
-            Self::UnboundGeneral => Location::Path("unbound.general".into()),
+            Self::Interface | Self::DhcpSettings => sanitize(scope, "lan"),
+            _ => String::new(),
         }
     }
 }
@@ -1286,26 +1224,11 @@ impl GridId {
         }
     }
 
-    /// Config location for `scope`.
-    pub fn location(self, scope: &Option<String>) -> GridLocation {
-        let at = |p: &str| GridLocation {
-            list: p.to_owned(),
-            filter: None,
-        };
+    /// The scope a grid shows (an interface id), sanitised; defaults to LAN.
+    pub fn scope(self, scope: &Option<String>) -> String {
         match self {
-            Self::Assignments => at("interfaces"),
-            Self::Aliases => at("firewall.alias"),
-            Self::FilterRules => GridLocation {
-                list: "firewall.filter".into(),
-                filter: Some(("interface", scope_or(scope, "lan"))),
-            },
-            Self::SourceNat => at("nat.source.rules"),
-            Self::PortForwards => at("nat.destination"),
-            Self::DhcpRanges => at(&format!("dhcpd.{}.ranges", scope_or(scope, "lan"))),
-            Self::StaticMaps => at(&format!("dhcpd.{}.staticmaps", scope_or(scope, "lan"))),
-            Self::HostOverrides => at("unbound.hosts"),
-            Self::WgInstances => at("wireguard.server"),
-            Self::WgPeers => at("wireguard.client"),
+            Self::FilterRules | Self::DhcpRanges | Self::StaticMaps => sanitize(scope, "lan"),
+            _ => String::new(),
         }
     }
 
@@ -1329,14 +1252,10 @@ impl GridId {
                 Self::HostOverrides => &[("rr", "A")],
                 Self::PortForwards => &[
                     ("interface", "wan"),
-                    ("protocol", "TCP"),
-                    ("destination", "wanip"),
+                    ("protocol", "tcp"),
+                    ("destination", "addr:wan"),
                 ],
-                Self::SourceNat => &[
-                    ("interface", "wan"),
-                    ("protocol", "any"),
-                    ("target", "wanip"),
-                ],
+                Self::SourceNat => &[("interface", "wan"), ("protocol", "any"), ("source", "any")],
                 Self::Assignments => &[("ipv4_type", "none"), ("ipv6_type", "none")],
                 _ => &[],
             };
@@ -1420,7 +1339,7 @@ mod tests {
 
     #[test]
     fn alias_rejects_bad_names_and_entries() {
-        let inputs: Inputs = [("name", "1bad"), ("type", "port"), ("content", "80\nhttp")]
+        let inputs: Inputs = [("name", "1bad"), ("type", "port"), ("content", "80\nhttp!")]
             .iter()
             .map(|(a, b)| ((*a).into(), (*b).into()))
             .collect();
@@ -1478,9 +1397,7 @@ mod tests {
 
     #[test]
     fn scope_is_sanitised() {
-        assert_eq!(
-            GridId::DhcpRanges.location(&Some("lan.evil".into())).list,
-            "dhcpd.lan.ranges"
-        );
+        assert_eq!(GridId::DhcpRanges.scope(&Some("lan.evil".into())), "lan");
+        assert_eq!(GridId::FilterRules.scope(&Some("opt1".into())), "opt1");
     }
 }

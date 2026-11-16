@@ -2,7 +2,7 @@
 //!
 //! Pages are server-rendered; only the form, grid, banner and dashboard islands hydrate.
 
-use crate::actions::{form_load, grid_fetch, live_status, revision_diff, revisions};
+use crate::actions::{field_choices, form_load, grid_fetch, live_status, revision_diff, revisions};
 use crate::api::DiffLine;
 use crate::grid::GridQuery;
 use crate::islands::{DashboardLive, GridIsland, SettingsFormIsland, diff_class};
@@ -30,11 +30,12 @@ pub fn SettingsForm<T: FormKind>(
         let scope = scope.clone();
         let title = title.clone();
         Suspend::new(async move {
+            let choices = field_choices().await.unwrap_or_default();
             match form_load(T::ID, scope.clone()).await {
                 Ok(initial) => view! {
                     <section class="card">
                         <h2>{title}</h2>
-                        <SettingsFormIsland form=T::ID scope initial/>
+                        <SettingsFormIsland form=T::ID scope initial choices/>
                     </section>
                 }
                 .into_any(),
@@ -60,11 +61,12 @@ pub fn Grid<T: GridKind>(
         let scope = scope.clone();
         let title = title.clone();
         Suspend::new(async move {
+            let choices = field_choices().await.unwrap_or_default();
             match grid_fetch(T::ID, scope.clone(), GridQuery::default()).await {
                 Ok(initial) => view! {
                     <section class="card">
                         {title.map(|t| view! { <h2>{t}</h2> })}
-                        <GridIsland grid=T::ID scope initial label=T::NOUN.to_owned()/>
+                        <GridIsland grid=T::ID scope initial label=T::NOUN.to_owned() choices/>
                     </section>
                 }
                 .into_any(),
@@ -119,18 +121,35 @@ pub fn Aliases() -> impl IntoView {
 #[component]
 pub fn Rules() -> impl IntoView {
     let current = param("if").unwrap_or_else(|| "lan".to_owned());
-    let tabs = RULE_INTERFACES
-        .iter()
-        .map(|(id, label)| {
-            let active = *id == current;
-            view! {
-                <a class="tab" class:active=active aria-current=active.then_some("page")
-                    href=format!("/ui/firewall/filter/{id}")>{*label}</a>
-            }
-        })
-        .collect_view();
+    let tabs = {
+        let current = current.clone();
+        move || {
+            let current = current.clone();
+            Suspend::new(async move {
+                let choices = field_choices().await.unwrap_or_default();
+                let tabs = choices
+                    .get(&crate::form::ChoiceSet::RuleInterfaces)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        RULE_INTERFACES
+                            .iter()
+                            .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+                            .collect()
+                    });
+                tabs.into_iter()
+                    .map(|(id, label)| {
+                        let active = id == current;
+                        view! {
+                            <a class="tab" class:active=active aria-current=active.then_some("page")
+                                href=format!("/ui/firewall/filter/{id}")>{label}</a>
+                        }
+                    })
+                    .collect_view()
+            })
+        }
+    };
     view! {
-        <nav class="tabs" aria-label="Interface">{tabs}</nav>
+        <nav class="tabs" aria-label="Interface"><Suspense fallback=|| ()>{tabs}</Suspense></nav>
         <p class="intro">"Rules are evaluated top to bottom; with Quick set, the first match wins. Drag a row or use the arrows to change the order."</p>
         <Grid<FilterRule> scope=current/>
     }

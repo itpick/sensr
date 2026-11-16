@@ -1,5 +1,9 @@
 //! Server functions: the only calls the browser islands make. Each one runs on the server
 //! against the [`crate::api::Backend`] in context, re-validating everything it receives.
+//!
+//! Grids and forms read the whole staged document, map it to view rows through
+//! [`crate::adapt`], and write back the touched section; validation errors from the backend
+//! come back with schema paths and are mapped to the view's field paths.
 
 use crate::api::{FieldError, Pending, SystemStatus};
 use crate::form::Inputs;
@@ -10,11 +14,12 @@ use leptos::server_fn::codec::Json;
 
 #[cfg(feature = "ssr")]
 mod imp {
-    use crate::api::{ApiError, BackendHandle};
+    use crate::adapt::{self, Store};
+    use crate::api::{ApiError, BackendHandle, FieldError};
     use crate::form::get_path;
-    use crate::models::{GridId, GridLocation};
+    use crate::models::GridId;
     use leptos::prelude::*;
-    use serde_json::Value;
+    use serde_json::{Map, Value};
 
     /// The user a request was authenticated as (set by the session middleware).
     #[derive(Debug, Clone)]
@@ -34,36 +39,124 @@ mod imp {
         ServerFnError::new(e.to_string())
     }
 
-    pub async fn load_list(path: &str) -> Result<Vec<Value>, ServerFnError> {
-        let v = backend()?.get(path).await.map_err(err)?;
-        Ok(v.as_array().cloned().unwrap_or_default())
+    pub async fn doc() -> Result<Value, ServerFnError> {
+        backend()?.get("").await.map_err(err)
     }
 
-    pub async fn store_list(path: &str, rows: Vec<Value>) -> Result<(), ServerFnError> {
-        backend()?.set(path, Value::Array(rows)).await.map_err(err)
+    /// One grid row: its key, the stored item and the view.
+    pub struct Row {
+        pub key: String,
+        pub item: Value,
+        pub view: Value,
     }
 
-    pub fn visible(loc: &GridLocation) -> impl Fn(&Value) -> bool + '_ {
-        move |row| match &loc.filter {
-            Some((field, want)) => get_path(row, field).and_then(Value::as_str) == Some(want),
-            None => true,
+    /// Rows of `grid` in `scope`, in display order (by `sequence` where the schema has one).
+    pub fn rows(grid: GridId, scope: &str, doc: &Value) -> Vec<Row> {
+        let key_field = grid.meta().key;
+        let mut out: Vec<Row> = match adapt::store(grid, scope, doc) {
+            Store::Map(path) => get_path(doc, &path)
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .filter(|(_, item)| adapt::in_scope(grid, scope, doc, item))
+                .map(|(k, item)| (k.clone(), item.clone()))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|(key, item)| {
+                    let mut view = adapt::to_view(grid, doc, &item);
+                    view[key_field] = Value::String(key.clone());
+                    adapt::decorate(grid, doc, &key, &mut view);
+                    Row { key, item, view }
+                })
+                .collect(),
+            Store::Array(path) => get_path(doc, &path)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .map(|(i, item)| {
+                    let key = i.to_string();
+                    let mut view = adapt::to_view(grid, doc, item);
+                    view[key_field] = Value::String(key.clone());
+                    Row {
+                        key,
+                        item: item.clone(),
+                        view,
+                    }
+                })
+                .collect(),
+        };
+        if adapt::sequenced(grid) {
+            out.sort_by_key(|r| r.item.get("sequence").and_then(Value::as_u64).unwrap_or(1));
         }
+        out
     }
 
-    pub fn keys_in_scope(
-        rows: &[Value],
-        grid: GridId,
-        loc: &GridLocation,
-        keys: Vec<String>,
-    ) -> Vec<String> {
-        let key = grid.meta().key;
-        let vis = visible(loc);
-        keys.into_iter()
-            .filter(|k| {
-                rows.iter()
-                    .any(|r| vis(r) && r.get(key).and_then(Value::as_str) == Some(k))
-            })
-            .collect()
+    /// The top-level section a path lives in.
+    pub fn section(path: &str) -> &str {
+        path.split('.').next().unwrap_or(path)
+    }
+
+    /// Writes one section back and maps validation errors to view fields under `prefix`
+    /// (the edited item's schema path).
+    pub async fn store(
+        doc: &Value,
+        sections: &[&str],
+        map: impl Fn(&str) -> Option<String>,
+    ) -> Result<Vec<FieldError>, ServerFnError> {
+        let b = backend()?;
+        for s in sections {
+            let v = doc.get(*s).cloned().unwrap_or(Value::Object(Map::new()));
+            match b.set(s, v).await {
+                Ok(()) => {}
+                Err(ApiError::Validation(errors)) => {
+                    let mapped: Vec<FieldError> = errors
+                        .iter()
+                        .filter_map(|e| map(&e.path).map(|v| FieldError::new(v, e.message.clone())))
+                        .collect();
+                    // A uniqueness clash is reported on both items; the other one's copy
+                    // adds nothing next to the field message.
+                    let other = errors
+                        .into_iter()
+                        .filter(|e| map(&e.path).is_none())
+                        .filter(|e| !mapped.iter().any(|m| m.message == e.message))
+                        .map(|e| FieldError::new("", format!("{}: {}", e.path, e.message)))
+                        .collect::<Vec<_>>();
+                    return Ok(mapped.into_iter().chain(other).collect());
+                }
+                Err(e) => return Err(err(e)),
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    /// Mutable access to the collection a grid stores into.
+    pub fn collection<'a>(doc: &'a mut Value, store: &Store) -> &'a mut Value {
+        let (path, empty) = match store {
+            Store::Map(p) => (p, Value::Object(Map::new())),
+            Store::Array(p) => (p, Value::Array(Vec::new())),
+        };
+        let mut cur = doc;
+        for k in path.split('.') {
+            if !cur.is_object() {
+                *cur = Value::Object(Map::new());
+            }
+            cur = cur
+                .as_object_mut()
+                .expect("just made it an object")
+                .entry(k.to_owned())
+                .or_insert(Value::Null);
+        }
+        if cur.is_null() {
+            *cur = empty;
+        }
+        cur
+    }
+
+    pub fn store_path(store: &Store) -> &str {
+        match store {
+            Store::Map(p) | Store::Array(p) => p,
+        }
     }
 }
 
@@ -77,13 +170,10 @@ pub async fn grid_fetch(
     scope: Option<String>,
     query: GridQuery,
 ) -> Result<GridPage, ServerFnError> {
-    let loc = grid.location(&scope);
-    let rows = imp::load_list(&loc.list).await?;
-    let vis = imp::visible(&loc);
-    let rows: Vec<_> = rows
+    let doc = imp::doc().await?;
+    let rows: Vec<_> = imp::rows(grid, &grid.scope(&scope), &doc)
         .into_iter()
-        .filter(|r| vis(r))
-        .map(|r| grid.redact(&r))
+        .map(|r| r.view)
         .collect();
     Ok(crate::grid::run_query(&rows, grid.columns(), &query))
 }
@@ -96,60 +186,73 @@ pub async fn grid_save(
     key: Option<String>,
     inputs: Inputs,
 ) -> Result<Vec<FieldError>, ServerFnError> {
+    use crate::adapt::{self, Store};
     use serde_json::Value;
-    let loc = grid.location(&scope);
-    let meta = grid.meta();
-    let mut rows = imp::load_list(&loc.list).await?;
-    let vis = imp::visible(&loc);
-    let idx = match &key {
+    let scope = grid.scope(&scope);
+    let mut doc = imp::doc().await?;
+    let rows = imp::rows(grid, &scope, &doc);
+    let existing = match &key {
         Some(k) => Some(
             rows.iter()
-                .position(|r| vis(r) && r.get(meta.key).and_then(Value::as_str) == Some(k))
+                .find(|r| r.key == *k)
                 .ok_or_else(|| ServerFnError::new("row not found"))?,
         ),
         None => None,
     };
-    let base = idx.map_or_else(|| grid.new_row(), |i| rows[i].clone());
-    let mut row = match grid.apply(&base, &inputs) {
+    let view_base = existing.map_or_else(|| grid.new_row(), |r| r.view.clone());
+    let mut view = match grid.apply(&view_base, &inputs) {
         Ok(v) => v,
         Err(errors) => return Ok(errors),
     };
-    if let Some(obj) = row.as_object_mut() {
-        if let Some((field, value)) = &loc.filter {
-            obj.insert((*field).to_owned(), Value::String(value.clone()));
-        }
-        match (&key, meta.key) {
-            (Some(k), field) => {
-                obj.insert(field.to_owned(), Value::String(k.clone()));
-            }
-            (None, "uuid") => {
-                obj.insert("uuid".into(), Value::String(crate::models::new_uuid()));
-            }
-            (None, field) => {
-                // Natural keys (interface ids) must be unique.
-                let k = obj
-                    .get(field)
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                if k.is_empty() {
-                    let n = rows.len();
-                    obj.insert(field.to_owned(), Value::String(format!("opt{n}")));
-                } else if rows
-                    .iter()
-                    .any(|r| r.get(field).and_then(Value::as_str) == Some(&k))
-                {
-                    return Ok(vec![FieldError::new(field, "This name is already in use.")]);
-                }
+    if grid == GridId::FilterRules
+        && view
+            .get("interface")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        view["interface"] = Value::String(scope.clone());
+    }
+    let mut item = adapt::from_view(grid, &doc, &scope, existing.map(|r| &r.item), &view);
+    let store = adapt::store(grid, &scope, &doc);
+    let new_key = match (&key, &store) {
+        (Some(k), _) => k.clone(),
+        (None, Store::Array(_)) => rows.len().to_string(),
+        (None, Store::Map(_)) if grid == GridId::Assignments => {
+            let taken = |id: &str| rows.iter().any(|r| r.key == id);
+            match (1..).map(|n| format!("opt{n}")).find(|id| !taken(id)) {
+                Some(id) => id,
+                None => return Err(ServerFnError::new("no free interface name")),
             }
         }
+        (None, Store::Map(_)) => crate::models::new_uuid(),
+    };
+    if key.is_none() && adapt::sequenced(grid) {
+        let next = rows
+            .iter()
+            .filter_map(|r| r.item.get("sequence").and_then(Value::as_u64))
+            .max()
+            .unwrap_or(0)
+            + 10;
+        item["sequence"] = Value::from(next);
     }
-    match idx {
-        Some(i) => rows[i] = row,
-        None => rows.push(row),
+    match imp::collection(&mut doc, &store) {
+        Value::Object(m) => {
+            m.insert(new_key.clone(), item);
+        }
+        Value::Array(a) => match new_key.parse::<usize>() {
+            Ok(i) if i < a.len() => a[i] = item,
+            _ => a.push(item),
+        },
+        _ => return Err(ServerFnError::new("unexpected document shape")),
     }
-    imp::store_list(&loc.list, rows).await?;
-    Ok(Vec::new())
+    let prefix = format!("{}.{new_key}.", imp::store_path(&store));
+    let sections = [imp::section(imp::store_path(&store))];
+    imp::store(&doc, &sections, |p| {
+        p.strip_prefix(&prefix)
+            .and_then(|rel| adapt::view_path(grid, rel))
+            .map(str::to_owned)
+    })
+    .await
 }
 
 /// Deletes rows by key.
@@ -159,12 +262,40 @@ pub async fn grid_delete(
     scope: Option<String>,
     keys: Vec<String>,
 ) -> Result<usize, ServerFnError> {
-    let loc = grid.location(&scope);
-    let mut rows = imp::load_list(&loc.list).await?;
-    let keys = imp::keys_in_scope(&rows, grid, &loc, keys);
-    let n = crate::grid::delete(&mut rows, grid.meta().key, &keys);
+    use serde_json::Value;
+    let scope = grid.scope(&scope);
+    let mut doc = imp::doc().await?;
+    let visible: Vec<String> = imp::rows(grid, &scope, &doc)
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    let keys: Vec<String> = keys.into_iter().filter(|k| visible.contains(k)).collect();
+    let store = crate::adapt::store(grid, &scope, &doc);
+    let n = match imp::collection(&mut doc, &store) {
+        Value::Object(m) => keys
+            .iter()
+            .filter(|k| m.shift_remove(k.as_str()).is_some())
+            .count(),
+        Value::Array(a) => {
+            let mut idx: Vec<usize> = keys
+                .iter()
+                .filter_map(|k| k.parse().ok())
+                .filter(|i| *i < a.len())
+                .collect();
+            idx.sort_unstable_by(|x, y| y.cmp(x));
+            idx.dedup();
+            for i in &idx {
+                a.remove(*i);
+            }
+            idx.len()
+        }
+        _ => 0,
+    };
     if n > 0 {
-        imp::store_list(&loc.list, rows).await?;
+        let errors = imp::store(&doc, &[imp::section(imp::store_path(&store))], |_| None).await?;
+        if let Some(e) = errors.first() {
+            return Err(ServerFnError::new(e.message.clone()));
+        }
     }
     Ok(n)
 }
@@ -177,21 +308,39 @@ pub async fn grid_toggle(
     keys: Vec<String>,
     enabled: bool,
 ) -> Result<usize, ServerFnError> {
-    let meta = grid.meta();
-    let Some(field) = meta.toggle else {
+    use serde_json::Value;
+    let Some(field) = grid.meta().toggle else {
         return Err(ServerFnError::new("this grid has no enable switch"));
     };
-    let loc = grid.location(&scope);
-    let mut rows = imp::load_list(&loc.list).await?;
-    let keys = imp::keys_in_scope(&rows, grid, &loc, keys);
-    let n = crate::grid::set_enabled(&mut rows, meta.key, field, &keys, enabled);
+    let scope = grid.scope(&scope);
+    let mut doc = imp::doc().await?;
+    let visible: Vec<String> = imp::rows(grid, &scope, &doc)
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    let store = crate::adapt::store(grid, &scope, &doc);
+    let mut n = 0;
+    if let Value::Object(m) = imp::collection(&mut doc, &store) {
+        for k in keys.iter().filter(|k| visible.contains(k)) {
+            if let Some(Value::Object(item)) = m.get_mut(k.as_str())
+                && item.get(field).and_then(Value::as_bool).unwrap_or(true) != enabled
+            {
+                item.insert(field.to_owned(), Value::Bool(enabled));
+                n += 1;
+            }
+        }
+    }
     if n > 0 {
-        imp::store_list(&loc.list, rows).await?;
+        let errors = imp::store(&doc, &[imp::section(imp::store_path(&store))], |_| None).await?;
+        if let Some(e) = errors.first() {
+            return Err(ServerFnError::new(e.message.clone()));
+        }
     }
     Ok(n)
 }
 
-/// Moves a row before another (or to the end of its scope).
+/// Moves a row before another (or to the end of its scope). Rows in other scopes keep their
+/// positions: the scope's own `sequence` values are permuted, never renumbered.
 #[server(input = Json)]
 pub async fn grid_move(
     grid: GridId,
@@ -199,26 +348,44 @@ pub async fn grid_move(
     key: String,
     before: Option<String>,
 ) -> Result<(), ServerFnError> {
-    if !grid.meta().ordered {
+    use serde_json::Value;
+    if !grid.meta().ordered || !crate::adapt::sequenced(grid) {
         return Err(ServerFnError::new("this grid is not ordered"));
     }
-    let loc = grid.location(&scope);
-    let mut rows = imp::load_list(&loc.list).await?;
-    let mut keys = vec![key.clone()];
-    keys.extend(before.clone());
-    if imp::keys_in_scope(&rows, grid, &loc, keys.clone()).len() != keys.len() {
+    let scope = grid.scope(&scope);
+    let mut doc = imp::doc().await?;
+    let rows = imp::rows(grid, &scope, &doc);
+    let mut order: Vec<Value> = rows.iter().map(|r| r.view.clone()).collect();
+    let key_field = grid.meta().key;
+    if !crate::grid::move_before(&mut order, key_field, &key, before.as_deref(), |_| true) {
         return Err(ServerFnError::new("row not found"));
     }
-    if crate::grid::move_before(
-        &mut rows,
-        grid.meta().key,
-        &key,
-        before.as_deref(),
-        imp::visible(&loc),
-    ) {
-        imp::store_list(&loc.list, rows).await?;
+    let mut seqs: Vec<u64> = rows
+        .iter()
+        .map(|r| r.item.get("sequence").and_then(Value::as_u64).unwrap_or(1))
+        .collect();
+    seqs.sort_unstable();
+    // Equal sequences would make the new order ambiguous; spread them out.
+    for i in 1..seqs.len() {
+        if seqs[i] <= seqs[i - 1] {
+            seqs[i] = seqs[i - 1] + 1;
+        }
     }
-    Ok(())
+    let store = crate::adapt::store(grid, &scope, &doc);
+    if let Value::Object(m) = imp::collection(&mut doc, &store) {
+        for (row, seq) in order.iter().zip(seqs) {
+            if let Some(k) = row.get(key_field).and_then(Value::as_str)
+                && let Some(item) = m.get_mut(k)
+            {
+                item["sequence"] = Value::from(seq);
+            }
+        }
+    }
+    let errors = imp::store(&doc, &[imp::section(imp::store_path(&store))], |_| None).await?;
+    match errors.first() {
+        Some(e) => Err(ServerFnError::new(e.message.clone())),
+        None => Ok(()),
+    }
 }
 
 /// Saves a settings form. Returns field errors; empty means saved.
@@ -228,38 +395,31 @@ pub async fn form_save(
     scope: Option<String>,
     inputs: Inputs,
 ) -> Result<Vec<FieldError>, ServerFnError> {
-    use crate::models::Location;
-    use serde_json::Value;
-    let b = imp::backend()?;
-    match form.location(&scope) {
-        Location::Path(path) => {
-            let base = b.get(&path).await.map_err(imp::err)?;
-            match form.apply(&base, &inputs) {
-                Ok(v) => b.set(&path, v).await.map_err(imp::err)?,
-                Err(e) => return Ok(e),
-            }
+    use crate::adapt;
+    let scope = form.scope(&scope);
+    let mut doc = imp::doc().await?;
+    let Some(base) = adapt::form_to_view(form, &doc, &scope) else {
+        return Err(ServerFnError::new("not found"));
+    };
+    let view = match form.apply(&base, &inputs) {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let sections = match adapt::form_from_view(form, &mut doc, &scope, &view) {
+        Ok(s) => s,
+        Err(e) => return Ok(e),
+    };
+    let iface_prefix = format!("interfaces.{scope}.");
+    imp::store(&doc, &sections, |p| {
+        if form == FormId::Interface {
+            p.strip_prefix(&iface_prefix)
+                .and_then(|rel| adapt::view_path(GridId::Assignments, rel))
+                .map(str::to_owned)
+        } else {
+            adapt::form_view_path(form, p).map(str::to_owned)
         }
-        Location::Item { list, key, value } => {
-            let mut rows = imp::load_list(&list).await?;
-            let Some(i) = rows
-                .iter()
-                .position(|r| r.get(key).and_then(Value::as_str) == Some(&value))
-            else {
-                return Err(ServerFnError::new("not found"));
-            };
-            match form.apply(&rows[i], &inputs) {
-                Ok(mut v) => {
-                    if let Some(o) = v.as_object_mut() {
-                        o.insert(key.to_owned(), Value::String(value));
-                    }
-                    rows[i] = v;
-                }
-                Err(e) => return Ok(e),
-            }
-            imp::store_list(&list, rows).await?;
-        }
-    }
-    Ok(Vec::new())
+    })
+    .await
 }
 
 /// Staged state for the Apply banner.
@@ -381,24 +541,25 @@ pub struct LayoutData {
 pub async fn chrome_data() -> Result<LayoutData, ServerFnError> {
     use serde_json::Value;
     let b = imp::backend()?;
-    let rows = imp::load_list("interfaces").await?;
-    let interfaces = rows
-        .iter()
-        .map(|r| {
-            let s = |k: &str| {
-                r.get(k)
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned()
-            };
+    let doc = b.get("interfaces").await.map_err(imp::err)?;
+    let interfaces = doc
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, r)| {
+            let desc = r
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             crate::menu::MenuInterface {
-                id: s("id"),
-                description: if s("description").is_empty() {
-                    s("id").to_uppercase()
+                id: id.clone(),
+                description: if desc.is_empty() {
+                    id.to_uppercase()
                 } else {
-                    s("description")
+                    desc.to_owned()
                 },
-                dhcp_capable: s("ipv4_type") == "static",
+                dhcp_capable: crate::form::get_path(r, "ipv4.mode").and_then(Value::as_str)
+                    == Some("static"),
             }
         })
         .collect();
@@ -415,18 +576,9 @@ pub async fn form_load(
     form: FormId,
     scope: Option<String>,
 ) -> Result<serde_json::Value, ServerFnError> {
-    use crate::models::Location;
-    use serde_json::Value;
-    let b = imp::backend()?;
-    let v = match form.location(&scope) {
-        Location::Path(p) => b.get(&p).await.map_err(imp::err)?,
-        Location::Item { list, key, value } => imp::load_list(&list)
-            .await?
-            .into_iter()
-            .find(|r| r.get(key).and_then(Value::as_str) == Some(&value))
-            .ok_or_else(|| ServerFnError::new(format!("{value} not found")))?,
-    };
-    Ok(v)
+    let doc = imp::backend()?.get("").await.map_err(imp::err)?;
+    crate::adapt::form_to_view(form, &doc, &form.scope(&scope))
+        .ok_or_else(|| ServerFnError::new("not found"))
 }
 
 /// Commit history, newest first.
@@ -442,4 +594,39 @@ pub async fn revision_diff(
     to: Option<u64>,
 ) -> Result<Vec<crate::api::DiffLine>, ServerFnError> {
     imp::backend()?.diff(from, to).await.map_err(imp::err)
+}
+
+/// Option lists computed from the document (assigned interfaces, …).
+#[server(input = Json)]
+pub async fn field_choices() -> Result<crate::form::Choices, ServerFnError> {
+    use crate::form::ChoiceSet;
+    use serde_json::Value;
+    let ifs = imp::backend()?.get("interfaces").await.map_err(imp::err)?;
+    let list: Vec<(String, String)> = ifs
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, i)| {
+            let d = i
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            (
+                id.clone(),
+                if d.is_empty() {
+                    id.to_uppercase()
+                } else {
+                    d.to_owned()
+                },
+            )
+        })
+        .collect();
+    let mut rules = vec![("floating".to_owned(), "Floating".to_owned())];
+    rules.extend(list.iter().cloned());
+    Ok([
+        (ChoiceSet::Interfaces, list),
+        (ChoiceSet::RuleInterfaces, rules),
+    ]
+    .into_iter()
+    .collect())
 }

@@ -22,6 +22,8 @@ default = ["ssr"]
 ssr = [
   "dep:anyhow",
   "dep:axum",
+  "dep:sensr-schema",
+  "dep:serde_path_to_error",
   "dep:leptos_axum",
   "dep:similar",
   "dep:tokio",
@@ -50,6 +52,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 # ssr
+sensr-schema = { workspace = true, optional = true }
+serde_path_to_error = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 leptos_axum = { workspace = true, optional = true }

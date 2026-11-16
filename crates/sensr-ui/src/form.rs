@@ -6,7 +6,7 @@
 //! this code, so a submit gets instant feedback and the server never trusts the browser.
 
 use crate::api::FieldError;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -29,6 +29,8 @@ pub enum FieldKind {
     Checkbox,
     /// One of a fixed set of `(value, label)` options.
     Select(&'static [(&'static str, &'static str)]),
+    /// One of a set known only at run time (e.g. the assigned interfaces).
+    Choice(ChoiceSet),
     /// One value per line, stored as a JSON array of strings.
     Lines,
     /// One IP address (v4 or v6).
@@ -48,6 +50,18 @@ pub enum FieldKind {
     /// Ethernet MAC address.
     Mac,
 }
+
+/// Option lists computed from the current document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ChoiceSet {
+    /// Assigned interfaces.
+    Interfaces,
+    /// "Floating" plus the assigned interfaces (filter rules).
+    RuleInterfaces,
+}
+
+/// Runtime option lists, `(value, label)`, per set.
+pub type Choices = std::collections::BTreeMap<ChoiceSet, Vec<(String, String)>>;
 
 /// One field of a form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +249,14 @@ pub fn parse_field(spec: &FieldSpec, raw: &str) -> Result<Value, String> {
             Err(_) => Err("Enter a whole number.".to_owned()),
         },
         FieldKind::Checkbox => Ok(Value::Bool(matches!(raw, "true" | "on" | "1" | "yes"))),
+        // Membership is the backend's call: the list may have changed since the page loaded.
+        FieldKind::Choice(_) => {
+            if raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                Ok(Value::String(raw.to_owned()))
+            } else {
+                Err("Choose one of the listed options.".to_owned())
+            }
+        }
         FieldKind::Select(options) => {
             if options.iter().any(|(v, _)| *v == raw) {
                 Ok(Value::String(raw.to_owned()))

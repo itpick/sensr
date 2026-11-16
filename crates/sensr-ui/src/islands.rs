@@ -5,7 +5,7 @@
 
 use crate::actions::*;
 use crate::api::{DiffKind, FieldError, GatewayHealth, Pending, SystemStatus};
-use crate::form::{FieldKind, FieldSpec, Inputs, to_inputs};
+use crate::form::{Choices, FieldKind, FieldSpec, Inputs, to_inputs};
 use crate::grid::{ColumnKind, GridPage, GridQuery, SortDir, cell_text};
 use crate::models::{FormId, GridId};
 use leptos::prelude::*;
@@ -262,6 +262,9 @@ pub fn FormFields(
     form_id: String,
     values: RwSignal<Inputs>,
     errors: RwSignal<Vec<FieldError>>,
+    /// Runtime option lists for [`FieldKind::Choice`] fields.
+    #[prop(optional)]
+    choices: Choices,
 ) -> impl IntoView {
     fields
         .iter()
@@ -310,6 +313,25 @@ pub fn FormFields(
                     </select>
                 }
                 .into_any(),
+                FieldKind::Choice(choice_set) => {
+                    let mut options = choices.get(&choice_set).cloned().unwrap_or_default();
+                    // Keep a stored value selectable even if it is not (or no longer) listed.
+                    let current = get();
+                    if !current.is_empty() && !options.iter().any(|(v, _)| *v == current) {
+                        options.push((current.clone(), current));
+                    }
+                    view! {
+                        <select id=id.clone() aria-describedby=described aria-invalid=invalid required=required
+                            prop:value=get
+                            on:change=move |ev| set(event_target_value(&ev))>
+                            {options.into_iter().map(|(v, l)| {
+                                let v2 = v.clone();
+                                view! { <option value=v selected=move || get() == v2>{l}</option> }
+                            }).collect_view()}
+                        </select>
+                    }
+                    .into_any()
+                }
                 FieldKind::Lines | FieldKind::CidrLines | FieldKind::IpLines | FieldKind::TextArea => view! {
                     <textarea id=id.clone() rows="3" aria-describedby=described aria-invalid=invalid required=required
                         prop:value=get
@@ -372,7 +394,12 @@ fn general_errors(
 
 /// A generated settings form (`<SettingsForm<T>>` renders this with `T`'s id).
 #[island]
-pub fn SettingsFormIsland(form: FormId, scope: Option<String>, initial: Value) -> impl IntoView {
+pub fn SettingsFormIsland(
+    form: FormId,
+    scope: Option<String>,
+    initial: Value,
+    choices: Choices,
+) -> impl IntoView {
     mark_hydrated();
     let fields = form.fields();
     let values = RwSignal::new(to_inputs(fields, &initial));
@@ -410,7 +437,7 @@ pub fn SettingsFormIsland(form: FormId, scope: Option<String>, initial: Value) -
     view! {
         <form class="settings-form" id=form_dom.clone() on:submit=submit novalidate>
             {general_errors(errors, fields)}
-            <FormFields fields form_id=form_dom.clone() values errors/>
+            <FormFields fields form_id=form_dom.clone() values errors choices/>
             <div class="form-actions">
                 <button type="submit" class="btn btn-primary" disabled=move || busy.get()>"Save"</button>
                 <p class="status" role="status">{move || status.get()}</p>
@@ -449,6 +476,7 @@ pub fn GridIsland(
     scope: Option<String>,
     initial: GridPage,
     label: String,
+    choices: Choices,
 ) -> impl IntoView {
     mark_hydrated();
     let meta = grid.meta();
@@ -472,6 +500,7 @@ pub fn GridIsland(
     let dialog_ref = NodeRef::<leptos::html::Dialog>::new();
     let dom_id = format!("grid-{grid:?}").to_lowercase();
     let scope = StoredValue::new(scope);
+    let choice_lists = StoredValue::new(choices.clone());
 
     let key_of = move |row: &Value| {
         row.get(key_field)
@@ -504,7 +533,23 @@ pub fn GridIsland(
             Editing::Row(_, v) => v.clone(),
             _ => grid.new_row(),
         };
-        values.set(to_inputs(fields, &base));
+        let mut inputs = to_inputs(fields, &base);
+        // Runtime selects start on the grid's scope (the interface tab) or the first option.
+        for f in fields {
+            if let FieldKind::Choice(set) = f.kind
+                && inputs.get(f.path).is_none_or(String::is_empty)
+            {
+                let first = choice_lists
+                    .with_value(|c| c.get(&set).and_then(|o| o.first()).map(|o| o.0.clone()));
+                let pick = scope
+                    .get_value()
+                    .filter(|s| !s.is_empty())
+                    .or(first)
+                    .unwrap_or_default();
+                inputs.insert(f.path.to_owned(), pick);
+            }
+        }
+        values.set(inputs);
         errors.set(vec![]);
         editing.set(e);
         #[cfg(feature = "hydrate")]
@@ -809,7 +854,7 @@ pub fn GridIsland(
                     </header>
                     <div class="modal-body">
                         {general_errors(errors, fields)}
-                        <FormFields fields form_id=format!("{dom_id}-dlg") values errors/>
+                        <FormFields fields form_id=format!("{dom_id}-dlg") values errors choices=choices.clone()/>
                     </div>
                     <footer class="modal-foot">
                         <button type="button" class="btn" on:click=move |_| close_dialog()>"Cancel"</button>

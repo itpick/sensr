@@ -1,6 +1,7 @@
 //! In-memory [`Backend`] with a realistic small-office config, used by the dev server and the
 //! tests until sensr-api's routes land.
 
+use crate::adapt::REDACTED;
 use crate::api::*;
 use crate::form::{get_path, set_path};
 use futures::future::{BoxFuture, FutureExt};
@@ -124,7 +125,7 @@ impl MockBackend {
         let mut second_doc = doc.clone();
         set_path(
             &mut second_doc,
-            "system.general.timezone",
+            "system.timezone",
             json!("Europe/Amsterdam"),
         );
         let second = Commit {
@@ -132,7 +133,7 @@ impl MockBackend {
                 id: 2,
                 time: t.saturating_sub(3_600 * 5),
                 user: "root".into(),
-                message: "System › Settings › General: timezone".into(),
+                message: "system".into(),
             },
             doc: second_doc.clone(),
         };
@@ -193,10 +194,13 @@ fn diff_lines(a: &Value, b: &Value) -> Vec<DiffLine> {
 impl Backend for MockBackend {
     fn get<'a>(&'a self, path: &'a str) -> BoxFuture<'a, ApiResult<Value>> {
         ready(self.with(|s| {
-            if path.is_empty() {
-                return Ok(s.staged.clone());
-            }
-            Ok(get_path(&s.staged, path).cloned().unwrap_or(Value::Null))
+            let mut v = if path.is_empty() {
+                s.staged.clone()
+            } else {
+                get_path(&s.staged, path).cloned().unwrap_or(Value::Null)
+            };
+            redact(&mut v);
+            Ok(v)
         }))
     }
 
@@ -207,7 +211,14 @@ impl Backend for MockBackend {
                     "refusing to replace the whole document".into(),
                 ));
             }
-            set_path(&mut s.staged, path, value);
+            let mut value = value;
+            if let Some(old) = get_path(&s.staged, path) {
+                unredact(&mut value, old);
+            }
+            let mut candidate = s.staged.clone();
+            set_path(&mut candidate, path, value);
+            validate(&candidate).map_err(ApiError::Validation)?;
+            s.staged = candidate;
             Ok(())
         }))
     }
@@ -345,45 +356,54 @@ fn wave(t: u64, period: u64, phase: u64) -> f64 {
 }
 
 fn simulated_status(doc: &Value, t: u64) -> SystemStatus {
+    let text = |p: &str, d: &str| {
+        get_path(doc, p)
+            .and_then(Value::as_str)
+            .unwrap_or(d)
+            .to_owned()
+    };
     let hostname = format!(
         "{}.{}",
-        get_path(doc, "system.general.hostname")
-            .and_then(Value::as_str)
-            .unwrap_or("sensr"),
-        get_path(doc, "system.general.domain")
-            .and_then(Value::as_str)
-            .unwrap_or("internal"),
+        text("system.hostname", "sensr"),
+        text("system.domain", "internal")
     );
-    let ifaces = doc
+    let ifaces: Vec<(String, Value)> = doc
         .get("interfaces")
-        .and_then(Value::as_array)
-        .cloned()
+        .and_then(Value::as_object)
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
     let interfaces: Vec<InterfaceStatus> = ifaces
         .iter()
         .enumerate()
-        .map(|(i, v)| {
+        .map(|(i, (id, v))| {
             let s = |k: &str| {
-                v.get(k)
+                get_path(v, k)
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned()
             };
             let phase = i as u64 * 17;
-            let scale = if s("id") == "wan" { 180e6 } else { 60e6 };
+            let scale = if id == "wan" { 180e6 } else { 60e6 };
             InterfaceStatus {
-                name: s("description"),
+                name: if s("description").is_empty() {
+                    id.to_uppercase()
+                } else {
+                    s("description")
+                },
                 device: s("device"),
-                up: v.get("enabled").and_then(Value::as_bool).unwrap_or(false),
-                speed_mbps: Some(if s("device") == "wg0" { 0 } else { 1000 }).filter(|n| *n > 0),
-                ipv4: Some(s("ipv4_address"))
-                    .filter(|a| !a.is_empty())
-                    .or_else(|| (s("ipv4_type") == "dhcp").then(|| "203.0.113.24/24".to_owned())),
-                ipv6: Some(s("ipv6_address"))
-                    .filter(|a| !a.is_empty())
-                    .or_else(|| {
-                        (s("ipv6_type") == "dhcp6").then(|| "2001:db8:42::1/64".to_owned())
-                    }),
+                up: v.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+                speed_mbps: (!s("device").starts_with("wg")).then_some(1000),
+                ipv4: match s("ipv4.mode").as_str() {
+                    "static" => Some(s("ipv4.address")),
+                    "dhcp" => Some("203.0.113.24/24".to_owned()),
+                    _ => None,
+                },
+                ipv6: match s("ipv6.mode").as_str() {
+                    "static" => Some(s("ipv6.address")),
+                    "dhcp6" => Some("2001:db8:42::1/64".to_owned()),
+                    "track" => Some("2001:db8:42:1::1/64".to_owned()),
+                    _ => None,
+                },
                 rx_bps: (wave(t, 60, phase) * scale) as u64,
                 tx_bps: (wave(t, 45, phase + 9) * scale * 0.3) as u64,
             }
@@ -442,142 +462,202 @@ fn simulated_status(doc: &Value, t: u64) -> SystemStatus {
     }
 }
 
-/// The seeded document: a two-port router with WireGuard, as an imported OPNsense box looks.
+/// The seeded document (sensr-schema shape): the factory default plus aliases, rules, NAT,
+/// DHCP reservations, host overrides and a WireGuard road-warrior setup.
 pub fn seed() -> Value {
     json!({
+        "schema_version": "0.1.0",
         "system": {
-            "general": {
-                "hostname": "sensr",
-                "domain": "home.arpa",
-                "timezone": "Etc/UTC",
-                "language": "en_US",
-                "dns_servers": ["9.9.9.9", "2620:fe::fe"],
-                "dns_allow_override": true,
-                "dns_local_disabled": false
-            }
+            "hostname": "sensr",
+            "domain": "home.arpa",
+            "dns_servers": ["9.9.9.9", "2620:fe::fe"],
+            "dns_allow_override": true,
+            "timezone": "Etc/UTC",
+            "ipv6_allow": true
         },
-        "interfaces": [
-            {"id": "wan", "device": "eth0", "description": "WAN", "enabled": true,
-             "block_private": true, "block_bogons": true, "ipv4_type": "dhcp", "ipv4_address": "",
-             "ipv4_gateway": "", "ipv6_type": "dhcp6", "ipv6_address": "", "mtu": null},
-            {"id": "lan", "device": "eth1", "description": "LAN", "enabled": true,
-             "block_private": false, "block_bogons": false, "ipv4_type": "static",
-             "ipv4_address": "192.168.1.1/24", "ipv4_gateway": "", "ipv6_type": "track6",
-             "ipv6_address": "", "mtu": null},
-            {"id": "opt1", "device": "wg0", "description": "WireGuard", "enabled": true,
-             "block_private": false, "block_bogons": false, "ipv4_type": "static",
-             "ipv4_address": "10.10.0.1/24", "ipv4_gateway": "", "ipv6_type": "none",
-             "ipv6_address": "", "mtu": 1420}
-        ],
+        "interfaces": {
+            "wan": {"enabled": true, "role": "wan", "description": "WAN", "device": "eth0",
+                    "ipv4": {"mode": "dhcp"}, "ipv6": {"mode": "dhcp6", "prefix_delegation_len": 64},
+                    "block_private": true, "block_bogons": true},
+            "lan": {"enabled": true, "role": "lan", "description": "LAN", "device": "eth1",
+                    "ipv4": {"mode": "static", "address": "192.168.1.1/24"},
+                    "ipv6": {"mode": "track", "interface": "wan"}},
+            "opt1": {"enabled": true, "role": "other", "description": "WireGuard", "device": "wg0", "mtu": 1420,
+                     "ipv4": {"mode": "static", "address": "10.10.0.1/24"}, "ipv6": {"mode": "none"}}
+        },
         "firewall": {
-            "alias": [
-                {"uuid": "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a01", "enabled": true, "name": "rfc1918", "type": "network",
-                 "content": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"], "description": "Private networks"},
-                {"uuid": "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a02", "enabled": true, "name": "web_ports", "type": "port",
-                 "content": ["80", "443", "8080:8090"], "description": "HTTP(S)"},
-                {"uuid": "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a03", "enabled": true, "name": "nas", "type": "host",
-                 "content": ["192.168.1.20"], "description": "File server"},
-                {"uuid": "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a04", "enabled": false, "name": "spamhaus_drop", "type": "urltable",
-                 "content": ["https://www.spamhaus.org/drop/drop.txt"], "description": "Spamhaus DROP"},
-                {"uuid": "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a05", "enabled": true, "name": "admins", "type": "host",
-                 "content": ["192.168.1.10", "192.168.1.11"], "description": "Admin workstations"}
-            ],
-            "filter": [
-                {"uuid": "a1e1c6f0-1d6e-4b1e-8f00-000000000001", "enabled": true, "action": "pass", "quick": true,
-                 "interface": "lan", "direction": "in", "ipprotocol": "inet", "protocol": "any",
-                 "source": "lan net", "source_port": "", "destination": "any", "destination_port": "",
-                 "log": false, "description": "Default allow LAN to any rule"},
-                {"uuid": "a1e1c6f0-1d6e-4b1e-8f00-000000000002", "enabled": true, "action": "pass", "quick": true,
-                 "interface": "lan", "direction": "in", "ipprotocol": "inet6", "protocol": "any",
-                 "source": "lan net", "source_port": "", "destination": "any", "destination_port": "",
-                 "log": false, "description": "Default allow LAN IPv6 to any rule"},
-                {"uuid": "a1e1c6f0-1d6e-4b1e-8f00-000000000003", "enabled": true, "action": "block", "quick": true,
-                 "interface": "lan", "direction": "in", "ipprotocol": "inet", "protocol": "TCP",
-                 "source": "lan net", "source_port": "", "destination": "any", "destination_port": "25",
-                 "log": true, "description": "No direct SMTP"},
-                {"uuid": "a1e1c6f0-1d6e-4b1e-8f00-000000000004", "enabled": true, "action": "pass", "quick": true,
-                 "interface": "wan", "direction": "in", "ipprotocol": "inet", "protocol": "UDP",
-                 "source": "any", "source_port": "", "destination": "wanip", "destination_port": "51820",
-                 "log": false, "description": "WireGuard"},
-                {"uuid": "a1e1c6f0-1d6e-4b1e-8f00-000000000005", "enabled": true, "action": "pass", "quick": true,
-                 "interface": "wan", "direction": "in", "ipprotocol": "inet", "protocol": "TCP",
-                 "source": "any", "source_port": "", "destination": "nas", "destination_port": "web_ports",
-                 "log": false, "description": "NAT: web to NAS"},
-                {"uuid": "a1e1c6f0-1d6e-4b1e-8f00-000000000006", "enabled": true, "action": "pass", "quick": true,
-                 "interface": "wg0", "direction": "in", "ipprotocol": "inet", "protocol": "any",
-                 "source": "10.10.0.0/24", "source_port": "", "destination": "rfc1918", "destination_port": "",
-                 "log": false, "description": "Road warriors to LAN"},
-                {"uuid": "a1e1c6f0-1d6e-4b1e-8f00-000000000007", "enabled": false, "action": "block", "quick": false,
-                 "interface": "floating", "direction": "in", "ipprotocol": "inet46", "protocol": "any",
-                 "source": "spamhaus_drop", "source_port": "", "destination": "any", "destination_port": "",
-                 "log": true, "description": "Drop listed networks"}
-            ]
+            "aliases": {
+                "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a01": {"enabled": true, "name": "rfc1918",
+                    "content": {"type": "network", "entries": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]},
+                    "description": "Private networks"},
+                "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a02": {"enabled": true, "name": "web_ports",
+                    "content": {"type": "port", "entries": ["80", "443", "8080-8090"]}, "description": "HTTP(S)"},
+                "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a03": {"enabled": true, "name": "nas",
+                    "content": {"type": "host", "entries": ["192.168.1.20"]}, "description": "File server"},
+                "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a04": {"enabled": false, "name": "spamhaus_drop",
+                    "content": {"type": "url_table", "url": "https://www.spamhaus.org/drop/drop.txt"},
+                    "description": "Spamhaus DROP"},
+                "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a05": {"enabled": true, "name": "admins",
+                    "content": {"type": "host", "entries": ["192.168.1.10", "192.168.1.11"]},
+                    "description": "Admin workstations"}
+            },
+            "rules": {
+                "00000000-0000-0000-0000-00005e450001": {"sequence": 1, "action": "pass", "interfaces": ["lan"],
+                    "ip_protocol": "inet", "source": {"net": "net:lan"}, "description": "Default allow LAN to any rule"},
+                "00000000-0000-0000-0000-00005e450002": {"sequence": 11, "action": "pass", "interfaces": ["lan"],
+                    "ip_protocol": "inet6", "source": {"net": "net:lan"}, "description": "Default allow LAN IPv6 to any rule"},
+                "a1e1c6f0-1d6e-4b1e-8f00-000000000003": {"sequence": 21, "action": "block", "interfaces": ["lan"],
+                    "protocol": "tcp", "source": {"net": "net:lan"}, "destination": {"net": "any", "port": "25"},
+                    "log": true, "description": "No direct SMTP"},
+                "a1e1c6f0-1d6e-4b1e-8f00-000000000004": {"sequence": 31, "action": "pass", "interfaces": ["wan"],
+                    "protocol": "udp", "destination": {"net": "addr:wan", "port": "51820"}, "description": "WireGuard"},
+                "a1e1c6f0-1d6e-4b1e-8f00-000000000005": {"sequence": 41, "action": "pass", "interfaces": ["wan"],
+                    "protocol": "tcp", "destination": {"net": "alias:nas", "port": "alias:web_ports"},
+                    "description": "NAT: web to NAS"},
+                "a1e1c6f0-1d6e-4b1e-8f00-000000000006": {"sequence": 51, "action": "pass", "interfaces": ["opt1"],
+                    "source": {"net": "10.10.0.0/24"}, "destination": {"net": "alias:rfc1918"},
+                    "description": "Road warriors to LAN"},
+                "a1e1c6f0-1d6e-4b1e-8f00-000000000007": {"enabled": false, "sequence": 61, "action": "block",
+                    "quick": false, "interfaces": [], "ip_protocol": "inet46",
+                    "source": {"net": "alias:spamhaus_drop"}, "log": true, "description": "Drop listed networks"}
+            }
         },
         "nat": {
-            "source": {
-                "settings": {"mode": "hybrid"},
-                "rules": [
-                    {"uuid": "c0ffee00-0000-4000-a000-000000000001", "enabled": true, "nonat": false, "interface": "wan",
-                     "protocol": "any", "source": "10.10.0.0/24", "destination": "any", "target": "wanip",
-                     "description": "WireGuard clients out"}
-                ]
+            "outbound": {
+                "mode": "hybrid",
+                "rules": {
+                    "c0ffee00-0000-4000-a000-000000000001": {"interface": "wan", "source": {"net": "10.10.0.0/24"},
+                        "description": "WireGuard clients out"}
+                }
             },
-            "destination": [
-                {"uuid": "d0d0d0d0-0000-4000-a000-000000000001", "enabled": true, "interface": "wan", "protocol": "TCP",
-                 "destination": "wanip", "destination_port": "443", "target": "192.168.1.20", "target_port": "443",
-                 "description": "NAS HTTPS"},
-                {"uuid": "d0d0d0d0-0000-4000-a000-000000000002", "enabled": false, "interface": "wan", "protocol": "TCP/UDP",
-                 "destination": "wanip", "destination_port": "25565", "target": "192.168.1.30", "target_port": "",
-                 "description": "Game server"}
-            ]
-        },
-        "dhcpd": {
-            "lan": {
-                "settings": {"enabled": true, "range_from": "192.168.1.100", "range_to": "192.168.1.199",
-                             "dns_servers": [], "gateway": "", "domain": "home.arpa", "default_lease": 7200,
-                             "max_lease": 86400, "register_dns": true},
-                "ranges": [
-                    {"uuid": "e0000000-0000-4000-a000-000000000001", "enabled": true, "from": "192.168.1.220",
-                     "to": "192.168.1.239", "description": "Guests"}
-                ],
-                "staticmaps": [
-                    {"uuid": "f0000000-0000-4000-a000-000000000001", "mac": "52:54:00:aa:bb:01", "ipaddr": "192.168.1.20",
-                     "hostname": "nas", "description": "File server"},
-                    {"uuid": "f0000000-0000-4000-a000-000000000002", "mac": "52:54:00:aa:bb:02", "ipaddr": "192.168.1.21",
-                     "hostname": "printer", "description": "Office printer"}
-                ]
+            "port_forwards": {
+                "d0d0d0d0-0000-4000-a000-000000000001": {"interfaces": ["wan"], "protocol": "tcp",
+                    "destination": {"net": "addr:wan", "port": "443"}, "target": "192.168.1.20", "target_port": "443",
+                    "description": "NAS HTTPS"},
+                "d0d0d0d0-0000-4000-a000-000000000002": {"enabled": false, "sequence": 2, "interfaces": ["wan"],
+                    "protocol": "tcp/udp", "destination": {"net": "addr:wan", "port": "25565"},
+                    "target": "192.168.1.30", "description": "Game server"}
             }
         },
-        "unbound": {
-            "general": {"enabled": true, "port": 53, "interfaces": [], "dnssec": true,
-                        "register_dhcp_leases": true, "register_dhcp_static": true,
-                        "local_zone_type": "transparent"},
-            "hosts": [
-                {"uuid": "b0000000-0000-4000-a000-000000000001", "enabled": true, "hostname": "nas", "domain": "home.arpa",
-                 "rr": "A", "server": "192.168.1.20", "mx": "", "mxprio": null, "description": "NAS"},
-                {"uuid": "b0000000-0000-4000-a000-000000000002", "enabled": true, "hostname": "*", "domain": "lab.home.arpa",
-                 "rr": "A", "server": "192.168.1.40", "mx": "", "mxprio": null, "description": "Lab wildcard"}
-            ]
+        "dhcpv4": {
+            "enabled": true,
+            "interfaces": ["lan"],
+            "subnets": {
+                "00000000-0000-0000-0000-00005e450003": {"subnet": "192.168.1.0/24", "interface": "lan",
+                    "pools": ["192.168.1.100-192.168.1.199", "192.168.1.220-192.168.1.239"],
+                    "options": {"domain_name": "home.arpa"}}
+            },
+            "reservations": {
+                "f0000000-0000-4000-a000-000000000001": {"subnet": "00000000-0000-0000-0000-00005e450003",
+                    "client": {"hw_address": "52:54:00:aa:bb:01"}, "ip_address": "192.168.1.20",
+                    "hostname": "nas", "description": "File server"},
+                "f0000000-0000-4000-a000-000000000002": {"subnet": "00000000-0000-0000-0000-00005e450003",
+                    "client": {"hw_address": "52:54:00:aa:bb:02"}, "ip_address": "192.168.1.21",
+                    "hostname": "printer", "description": "Office printer"}
+            }
+        },
+        "dns": {
+            "enabled": true, "port": "53", "dnssec": true, "register_dhcp_leases": true,
+            "register_dhcp_static": true, "local_zone_type": "transparent",
+            "host_overrides": {
+                "b0000000-0000-4000-a000-000000000001": {"hostname": "nas", "domain": "home.arpa",
+                    "record": {"rr": "A", "address": "192.168.1.20"}, "description": "NAS"},
+                "b0000000-0000-4000-a000-000000000002": {"hostname": "*", "domain": "lab.home.arpa",
+                    "record": {"rr": "A", "address": "192.168.1.40"}, "description": "Lab wildcard"}
+            }
         },
         "wireguard": {
-            "server": [
-                {"uuid": "90000000-0000-4000-a000-000000000001", "enabled": true, "name": "wg0",
-                 "pubkey": "XkqVfAIvmIb6m1w8bQzYgX2WmAZgM1pQd1kR6m0Y6Ec=",
-                 "privkey": "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=", "port": 51820, "mtu": 1420,
-                 "tunneladdress": ["10.10.0.1/24"], "dns": [], "disableroutes": false}
-            ],
-            "client": [
-                {"uuid": "91000000-0000-4000-a000-000000000001", "enabled": true, "name": "laptop",
-                 "pubkey": "TrMvSoP4jYQlY6RIzBgbssQqY3vxI2Pi+y71lOWWXX0=", "psk": "",
-                 "tunneladdress": ["10.10.0.2/32"], "serveraddress": "", "serverport": null,
-                 "servers": ["wg0"], "keepalive": 25},
-                {"uuid": "91000000-0000-4000-a000-000000000002", "enabled": true, "name": "phone",
-                 "pubkey": "gN65BkIKy1eCE9pP1wdc8ROUtkHLF2PfAqYdyYBz6EA=", "psk": "",
-                 "tunneladdress": ["10.10.0.3/32"], "serveraddress": "", "serverport": null,
-                 "servers": ["wg0"], "keepalive": 25}
-            ]
+            "enabled": true,
+            "servers": {
+                "90000000-0000-4000-a000-000000000001": {"name": "wg0", "instance": 0,
+                    "public_key": "pf9Z1Xx2TJUy0rzvQFkWsWTfNszIHhUyU0PazG/IQyc=",
+                    "private_key": "RFdSBMFhe6alos1D62jnPf1MOxQSfI4eWjqrjHdkgtI=",
+                    "listen_port": "51820", "mtu": 1420, "tunnel_addresses": ["10.10.0.1/24"],
+                    "peers": ["91000000-0000-4000-a000-000000000001", "91000000-0000-4000-a000-000000000002"]}
+            },
+            "peers": {
+                "91000000-0000-4000-a000-000000000001": {"name": "laptop",
+                    "public_key": "SgF/lLNYzsAh3k/TS8exPiMtwhP8i24yYk9rXVhvOI4=",
+                    "allowed_ips": ["10.10.0.2/32"], "keepalive": 25},
+                "91000000-0000-4000-a000-000000000002": {"name": "phone",
+                    "public_key": "QI/cUp+b5XkhrNjwkflNQD3lZZ1tzY6kr9E3dj+KyDw=",
+                    "allowed_ips": ["10.10.0.3/32"], "keepalive": 25}
+            }
         }
     })
+}
+
+/// Field names whose values are secrets (sensr-schema `Secret<T>`).
+const SECRET_KEYS: &[&str] = &[
+    "private_key",
+    "preshared_key",
+    "password_hash",
+    "secret_hash",
+];
+
+/// Replaces secrets with [`REDACTED`], as the API does in responses.
+fn redact(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m.iter_mut() {
+                if SECRET_KEYS.contains(&k.as_str()) && x.is_string() {
+                    *x = Value::String(REDACTED.into());
+                } else {
+                    redact(x);
+                }
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(redact),
+        _ => {}
+    }
+}
+
+/// Puts stored secrets back where a write sent [`REDACTED`] ("unchanged").
+fn unredact(new: &mut Value, old: &Value) {
+    match new {
+        Value::Object(m) => {
+            for (k, x) in m.iter_mut() {
+                if x.as_str() == Some(REDACTED) {
+                    if let Some(prev) = old.get(k) {
+                        *x = prev.clone();
+                    }
+                } else if let Some(prev) = old.get(k) {
+                    unredact(x, prev);
+                }
+            }
+        }
+        Value::Array(a) => {
+            for (i, x) in a.iter_mut().enumerate() {
+                if let Some(prev) = old.get(i) {
+                    unredact(x, prev);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Validates a whole document the way the agent does: typed parse, then cross-checks.
+pub fn validate(doc: &Value) -> Result<(), Vec<FieldError>> {
+    let typed: sensr_schema::Document = serde_path_to_error::deserialize(doc).map_err(|e| {
+        let path = e.path().to_string();
+        let msg = e.inner().to_string();
+        vec![FieldError::new(
+            if path == "." { String::new() } else { path },
+            msg,
+        )]
+    })?;
+    let v = typed.validate();
+    if v.is_ok() {
+        return Ok(());
+    }
+    Err(v
+        .iter()
+        .flat_map(|(p, errs)| {
+            errs.iter()
+                .map(move |e| FieldError::new(p.to_string(), e.message.clone()))
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -602,15 +682,12 @@ mod tests {
     #[test]
     fn set_stages_and_commit_applies() {
         let (m, _) = mock_with_clock();
-        block(m.set("system.general.hostname", json!("fw"))).unwrap();
+        block(m.set("system.hostname", json!("fw"))).unwrap();
         assert_eq!(block(m.pending()).unwrap().changed, ["system"]);
         let rev = block(m.commit("root", "rename", None)).unwrap();
         assert_eq!(rev.id, 3);
         assert!(!block(m.pending()).unwrap().dirty());
-        assert_eq!(
-            block(m.get("system.general.hostname")).unwrap(),
-            json!("fw")
-        );
+        assert_eq!(block(m.get("system.hostname")).unwrap(), json!("fw"));
         let diff = block(m.diff(2, Some(3))).unwrap();
         assert!(
             diff.iter()
@@ -625,16 +702,13 @@ mod tests {
     #[test]
     fn unconfirmed_commit_rolls_back_after_deadline() {
         let (m, t) = mock_with_clock();
-        block(m.set("system.general.hostname", json!("fw"))).unwrap();
+        block(m.set("system.hostname", json!("fw"))).unwrap();
         block(m.commit("root", "risky", Some(60))).unwrap();
         assert!(block(m.pending()).unwrap().confirm.is_some());
         t.fetch_add(61, Ordering::SeqCst);
         let p = block(m.pending()).unwrap();
         assert!(p.confirm.is_none());
-        assert_eq!(
-            block(m.get("system.general.hostname")).unwrap(),
-            json!("sensr")
-        );
+        assert_eq!(block(m.get("system.hostname")).unwrap(), json!("sensr"));
         assert!(
             block(m.history()).unwrap()[0]
                 .message
@@ -645,14 +719,11 @@ mod tests {
     #[test]
     fn confirmed_commit_stays() {
         let (m, t) = mock_with_clock();
-        block(m.set("system.general.hostname", json!("fw"))).unwrap();
+        block(m.set("system.hostname", json!("fw"))).unwrap();
         block(m.commit("root", "risky", Some(60))).unwrap();
         block(m.confirm()).unwrap();
         t.fetch_add(120, Ordering::SeqCst);
-        assert_eq!(
-            block(m.get("system.general.hostname")).unwrap(),
-            json!("fw")
-        );
+        assert_eq!(block(m.get("system.hostname")).unwrap(), json!("fw"));
         assert_eq!(
             block(m.confirm()),
             Err(ApiError::Conflict("no change awaits confirmation".into()))
@@ -664,11 +735,8 @@ mod tests {
         let (m, _) = mock_with_clock();
         let r = block(m.rollback("root", 1)).unwrap();
         assert_eq!(r.id, 3);
-        assert_eq!(
-            block(m.get("system.general.timezone")).unwrap(),
-            json!("Etc/UTC")
-        );
-        block(m.set("system.general.timezone", json!("Asia/Tokyo"))).unwrap();
+        assert_eq!(block(m.get("system.timezone")).unwrap(), json!("Etc/UTC"));
+        block(m.set("system.timezone", json!("Asia/Tokyo"))).unwrap();
         block(m.discard()).unwrap();
         assert!(!block(m.pending()).unwrap().dirty());
         assert!(matches!(
@@ -688,7 +756,38 @@ mod tests {
     }
 
     #[test]
-    fn seed_rows_parse_as_their_models() {
+    fn seed_is_a_valid_schema_document() {
+        validate(&seed()).unwrap();
+    }
+
+    #[test]
+    fn invalid_writes_are_rejected_with_schema_paths() {
+        let (m, _) = mock_with_clock();
+        let err = block(m.set("system.hostname", json!("not a host"))).unwrap_err();
+        let ApiError::Validation(errs) = err else {
+            panic!("{err:?}")
+        };
+        assert_eq!(errs[0].path, "system.hostname", "{errs:?}");
+        assert!(!block(m.pending()).unwrap().dirty(), "nothing staged");
+    }
+
+    #[test]
+    fn secrets_are_redacted_and_kept() {
+        let (m, _) = mock_with_clock();
+        let servers = block(m.get("wireguard.servers")).unwrap();
+        let (k, srv) = servers.as_object().unwrap().iter().next().unwrap();
+        assert_eq!(srv["private_key"], REDACTED);
+        let mut changed = srv.clone();
+        changed["mtu"] = json!(1400);
+        block(m.set(&format!("wireguard.servers.{k}"), changed)).unwrap();
+        let state = m.state.lock().unwrap();
+        let stored =
+            get_path(&state.staged, &format!("wireguard.servers.{k}.private_key")).unwrap();
+        assert_ne!(stored, REDACTED, "a redacted write keeps the stored secret");
+    }
+
+    #[test]
+    fn seed_rows_round_trip_through_views() {
         use crate::models::*;
         let doc = seed();
         for g in [
@@ -703,28 +802,80 @@ mod tests {
             GridId::WgInstances,
             GridId::WgPeers,
         ] {
-            let loc = g.location(&None);
-            let rows = get_path(&doc, &loc.list)
-                .and_then(Value::as_array)
-                .unwrap_or_else(|| panic!("{g:?}"));
-            for row in rows {
-                let inputs = crate::form::to_inputs(g.meta().fields, row);
-                g.apply(row, &inputs)
-                    .unwrap_or_else(|e| panic!("{g:?} {row}: {e:?}"));
+            let scope = g.scope(&None);
+            let store = crate::adapt::store(g, &scope, &doc);
+            let (crate::adapt::Store::Map(p) | crate::adapt::Store::Array(p)) = &store;
+            let items: Vec<Value> = match get_path(&doc, p).unwrap() {
+                Value::Object(m) => m.values().cloned().collect(),
+                Value::Array(a) => a.clone(),
+                _ => unreachable!(),
+            };
+            assert!(!items.is_empty(), "{g:?}");
+            for item in items
+                .iter()
+                .filter(|i| crate::adapt::in_scope(g, &scope, &doc, i))
+            {
+                let mut view = crate::adapt::to_view(g, &doc, item);
+                view[g.meta().key] = json!("existing");
+                let inputs = crate::form::to_inputs(g.meta().fields, &view);
+                let parsed = g
+                    .apply(&view, &inputs)
+                    .unwrap_or_else(|e| panic!("{g:?} {view}: {e:?}"));
+                let back = crate::adapt::from_view(g, &doc, &scope, Some(item), &parsed);
+                // Unchanged views write back the same item (secrets come back as "keep").
+                let mut expect = item.clone();
+                redact(&mut expect);
+                let mut got = back.clone();
+                redact(&mut got);
+                assert_eq!(strip_defaults(&got), strip_defaults(&expect), "{g:?}");
             }
         }
         for f in [
             FormId::SystemGeneral,
+            FormId::Interface,
             FormId::SourceNatMode,
             FormId::DhcpSettings,
             FormId::UnboundGeneral,
         ] {
-            let Location::Path(p) = f.location(&None) else {
-                unreachable!()
-            };
-            let v = get_path(&doc, &p).unwrap();
-            f.apply(v, &crate::form::to_inputs(f.fields(), v))
+            let scope = f.scope(&None);
+            let view = crate::adapt::form_to_view(f, &doc, &scope).unwrap();
+            let parsed = f
+                .apply(&view, &crate::form::to_inputs(f.fields(), &view))
                 .unwrap_or_else(|e| panic!("{f:?}: {e:?}"));
+            let mut d = doc.clone();
+            crate::adapt::form_from_view(f, &mut d, &scope, &parsed).unwrap();
+            validate(&d).unwrap_or_else(|e| panic!("{f:?}: {e:?}"));
+        }
+    }
+
+    /// Drops keys whose value equals the schema default the view writes explicitly.
+    fn strip_defaults(v: &Value) -> Value {
+        let defaults = [
+            ("enabled", json!(true)),
+            ("not", json!(false)),
+            ("quick", json!(true)),
+            ("log", json!(false)),
+            ("no_nat", json!(false)),
+            ("disable_routes", json!(false)),
+            ("block_private", json!(false)),
+            ("block_bogons", json!(false)),
+            ("tunnel_addresses", json!([])),
+            ("dns", json!([])),
+            ("direction", json!("")),
+            ("ip_protocol", json!("")),
+            ("protocol", json!("")),
+            ("action", json!("")),
+        ];
+        match v {
+            Value::Object(m) => Value::Object(
+                m.iter()
+                    .filter(|(k, x)| !defaults.iter().any(|(dk, dv)| dk == k && dv == *x))
+                    .filter(|(k, x)| !(k.as_str() == "net" && x.as_str() == Some("any")))
+                    .map(|(k, x)| (k.clone(), strip_defaults(x)))
+                    .filter(|(_, x)| x.as_object().is_none_or(|o| !o.is_empty()))
+                    .collect(),
+            ),
+            other => other.clone(),
         }
     }
 
@@ -734,6 +885,7 @@ mod tests {
         let s = block(m.status()).unwrap();
         assert_eq!(s.hostname, "sensr.home.arpa");
         assert_eq!(s.interfaces.len(), 3);
+        assert_eq!(s.interfaces[1].ipv4.as_deref(), Some("192.168.1.1/24"));
         assert_eq!(s.traffic[0].rx.len(), 60);
     }
 }
