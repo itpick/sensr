@@ -2,7 +2,7 @@
 source: crates/sensr-apply/src/appliers/mod.rs
 expression: "p.diff(&Plan::default()).dry_run(&Plan::default())"
 ---
-17 change(s):
+18 change(s):
   [Firewall] load ruleset 634317eaecf0 (0 rules)
   [Sysctl] net.core.default_qdisc = fq_codel (new)
   [Sysctl] net.ipv4.conf.all.rp_filter = 2 (new)
@@ -17,6 +17,7 @@ expression: "p.diff(&Plan::default()).dry_run(&Plan::default())"
   [Files] create /run/sensr/unbound/unbound.conf (3497 bytes)
   [Files] create /run/systemd/network/50-sensr-wg0.netdev (550 bytes)
   [Files] create /run/systemd/network/50-sensr-wg0.network (103 bytes)
+  [Services] restart sensr-dns-watch.service
   [Services] reload sensr-kea-dhcp4.service
   [Services] reload sensr-unbound.service
   [Hooks] run config hooks

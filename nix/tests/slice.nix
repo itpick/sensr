@@ -134,6 +134,23 @@ pkgs.testers.runNixOSTest {
         routes = [ { Gateway = net.internet.upstream; } ];
       };
       systemd.services.http-echo = httpEcho { port = 80; };
+      # A blocklist (HaGeZi's wildcard format) for the router to download.
+      systemd.services.http-list = httpEcho {
+        port = 8080;
+        reply = "*.listed.example";
+      };
+      # An authoritative server for a domain the router forwards to (a
+      # domain override): the slice has no root servers to recurse to.
+      services.unbound = {
+        enable = true;
+        resolveLocalQueries = false;
+        settings.server = {
+          interface = [ net.internet.host ];
+          access-control = [ "0.0.0.0/0 allow" ];
+          local-zone = [ "\"internet.example.\" static" ];
+          local-data = [ "\"www.internet.example. A ${net.internet.host}\"" ];
+        };
+      };
       environment.systemPackages = with pkgs; [
         curl
         wireguard-tools
@@ -308,6 +325,65 @@ pkgs.testers.runNixOSTest {
             # IoT may ask the firewall for DNS (rule seq 200).
             out = iot.succeed("dig +short +time=3 @${net.iot.router} cloud.home.example A")
             assert out.strip() == NAS, out
+
+        if not REFERENCE:
+            with subtest("DNS: split-horizon override, reservations and DHCP leases by name"):
+                out = lan.succeed("dig +short @${net.lan.router} cluster.internal.home.example A")
+                assert out.strip() == "192.168.1.20", out
+                # Kea reservations, in their subnet's domain.
+                out = lan.succeed("dig +short @${net.lan.router} logbox.home.example A")
+                assert out.strip() == "192.168.1.20", out
+                out = lan.succeed("dig +short @${net.lan.router} thermostat.iot.home.example A")
+                assert out.strip() == IOT, out
+                out = lan.succeed(f"dig +short @${net.lan.router} -x {IOT}")
+                assert out.strip() == "thermostat.iot.home.example.", out
+                # The LAN client's own lease, registered under the name it sent.
+                lan_ip = ipv4(lan, "eth1")
+                out = lan.wait_until_succeeds(
+                    "dig +short @${net.lan.router} lan.home.example A | grep .", timeout=60
+                )
+                assert out.strip() == lan_ip, f"lan.home.example is {out!r}, lease {lan_ip}"
+                out = lan.succeed(f"dig +short @${net.lan.router} -x {lan_ip}")
+                assert out.strip() == "lan.home.example.", out
+
+            with subtest("DNS: a domain override forwards (names outside the network resolve)"):
+                router.succeed(
+                    "sensr config set dns.forwarding.servers.6c1d0c3e-0d7b-4c1e-9a51-1f0e4a9b2d77"
+                    """ --json '{"domain": "internet.example", "address": "${net.internet.host}"}'"""
+                    " && sensr config set dns.blocklists.14d4cffe-087b-45c1-b3a5-b06c07bf285e.urls"
+                    """ --json '["http://${net.internet.host}:8080/list.txt"]'"""
+                    " && sensr config commit -m 'slice: domain override and a reachable blocklist'"
+                )
+                out = lan.wait_until_succeeds(
+                    "dig +short @${net.lan.router} www.internet.example A | grep .", timeout=60
+                )
+                assert out.strip() == INTERNET, out
+
+            with subtest("DNSBL: blocked names answer 0.0.0.0, allowed and local names resolve"):
+                # Custom entries of the imported policy, and a name from the
+                # list sensr downloaded and compiled.
+                out = lan.wait_until_succeeds(
+                    "dig +short @${net.lan.router} a.listed.example A | grep -x 0.0.0.0", timeout=180
+                )
+                print(router.succeed("cat /var/lib/sensr-dns/status.json; journalctl -b -u sensr-dnsbl --no-pager | tail -n 20"))
+                for name in ["x.ads.example.net", "ads.example.net", "tracker.example.org"]:
+                    out = lan.succeed(f"dig +short @${net.lan.router} {name} A")
+                    assert out.strip() == "0.0.0.0", f"{name}: {out!r}"
+                out = lan.succeed("dig +short @${net.lan.router} x.ads.example.net AAAA")
+                assert out.strip() == "::", out
+                # The allowlisted name inside the blocked subtree is not blocked.
+                out = lan.succeed("dig +short @${net.lan.router} ok.ads.example.net A")
+                assert out.strip() != "0.0.0.0", out
+                # Exact entries block only the name itself.
+                out = lan.succeed("dig +short @${net.lan.router} sub.tracker.example.org A")
+                assert out.strip() != "0.0.0.0", out
+                # Local and forwarded names are untouched.
+                assert lan.succeed("dig +short @${net.lan.router} nas.home.example A").strip() == NAS
+                assert lan.succeed("dig +short @${net.lan.router} www.internet.example A").strip() == INTERNET
+                # IoT's own policy answers NXDOMAIN for its names; its clients
+                # still get the global policy's.
+                out = iot.succeed("dig +short +time=3 @${net.iot.router} x.ads.example.net A")
+                assert out.strip() == "0.0.0.0", out
 
         with subtest("NAT: LAN reaches the internet as the router's WAN address"):
             seen = lan.wait_until_succeeds(f"curl -sf --max-time 5 http://{INTERNET}/", timeout=60).strip()

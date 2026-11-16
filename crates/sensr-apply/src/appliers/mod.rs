@@ -114,6 +114,19 @@ impl SliceModels {
                         .collect(),
                 },
             );
+            // The lease watcher reads sensr-dns.json once at start; the
+            // blocklist refresh is started by a path unit when it changes.
+            p.units.insert(
+                "sensr-dns-watch.service".into(),
+                UnitSpec {
+                    action: UnitAction::Restart,
+                    inputs: files
+                        .keys()
+                        .filter(|f| f.ends_with("sensr-dns.json"))
+                        .cloned()
+                        .collect(),
+                },
+            );
             p.files.extend(files);
         }
         // networkd is driven by `WireguardModel::commands`, not a unit

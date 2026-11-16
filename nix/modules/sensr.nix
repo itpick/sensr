@@ -745,6 +745,70 @@ in
       };
     };
 
+    # sensr-dns (crates/sensr-dns): blocklists compiled into Unbound local
+    # zones, DHCP leases registered as names, resolver counters for the UI.
+    # It reads ${runtimeDir}/unbound/sensr-dns.json (rendered with
+    # unbound.conf) and writes the include files unbound.conf globs for in
+    # /var/lib/sensr-dns, then updates the running resolver with
+    # unbound-control. Root: it reads Kea's lease file (Kea's private state
+    # directory) and talks to Unbound's control socket.
+    systemd.services.sensr-dnsbl = {
+      description = "sensr DNS blocklist refresh";
+      after = [
+        "network-online.target"
+        "sensr-unbound.service"
+      ];
+      wants = [ "network-online.target" ];
+      unitConfig.ConditionPathExists = "${runtimeDir}/unbound/sensr-dns.json";
+      path = [ pkgs.unbound ];
+      serviceConfig = commonHardening // {
+        Type = "oneshot";
+        ExecStart = "${cfg.package}/bin/sensr-dns blocklist-update";
+        StateDirectory = "sensr-dns";
+        StateDirectoryMode = "0755";
+        UMask = "0022";
+        ProtectSystem = "strict";
+        # Compiling 1.7 M names takes a few hundred MB for a few seconds.
+        MemoryMax = "1G";
+        Nice = 10;
+      };
+    };
+    # The job decides which lists are due (each policy's refresh interval);
+    # the timer only wakes it, and a new configuration starts it at once.
+    systemd.timers.sensr-dnsbl = {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "1min";
+        OnUnitActiveSec = "1h";
+        RandomizedDelaySec = "5min";
+      };
+    };
+    systemd.paths.sensr-dnsbl = {
+      wantedBy = [ "multi-user.target" ];
+      pathConfig.PathChanged = "${runtimeDir}/unbound/sensr-dns.json";
+    };
+    systemd.services.sensr-dns-watch = {
+      description = "sensr DHCP lease registration and resolver statistics";
+      wantedBy = [ "multi-user.target" ];
+      after = [
+        "sensr-unbound.service"
+        "sensr-kea-dhcp4.service"
+      ];
+      unitConfig.ConditionPathExists = "${runtimeDir}/unbound/sensr-dns.json";
+      path = [ pkgs.unbound ];
+      serviceConfig = commonHardening // {
+        ExecStart = "${cfg.package}/bin/sensr-dns watch";
+        Restart = "always";
+        RestartSec = 5;
+        StateDirectory = "sensr-dns";
+        StateDirectoryMode = "0755";
+        RuntimeDirectory = "sensr-dns";
+        RuntimeDirectoryMode = "0755";
+        UMask = "0022";
+        ProtectSystem = "strict";
+      };
+    };
+
     # The seed folder explains itself to whoever mounts the card on a laptop
     # (PLAN §6: every image's FAT partition has sensr/README.txt).
     systemd.services.sensr-seed-readme = {
