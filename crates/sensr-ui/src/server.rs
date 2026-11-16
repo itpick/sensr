@@ -126,6 +126,16 @@ pub fn router(options: LeptosOptions, sessions: SessionsHandle) -> Router {
     let pkg = tower_http::services::ServeDir::new(site.join(options.site_pkg_dir.as_ref()));
     Router::new()
         .route("/healthz", axum::routing::get(|| async { "ok" }))
+        // Leptos names the wasm `<output>_bg.wasm` unless LEPTOS_OUTPUT_NAME was set when the
+        // *server* was compiled (cargo-leptos does that; a plain `cargo build` of sensr-api
+        // does not). Serve both names from the one file cargo-leptos writes.
+        .route_service(
+            &format!("/{}/{}_bg.wasm", options.site_pkg_dir, options.output_name),
+            tower_http::services::ServeFile::new(
+                site.join(options.site_pkg_dir.as_ref())
+                    .join(format!("{}.wasm", options.output_name)),
+            ),
+        )
         .nest_service("/pkg", pkg)
         .route_service(
             "/favicon.svg",
