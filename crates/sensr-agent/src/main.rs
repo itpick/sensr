@@ -7,7 +7,7 @@ use anyhow::Context;
 use clap::Parser;
 use sensr_agent::applier::{Applier, PreviewApplier};
 use sensr_agent::slice_applier::SliceApplier;
-use sensr_agent::store::{ConfigStore, JsonDirStore, MemStore, NewRevision};
+use sensr_agent::store::{ConfigStore, JsonDirStore, MemStore, NewRevision, SqliteStore};
 use sensr_agent::{Agent, Settings};
 
 /// The privileged sensr daemon.
@@ -26,6 +26,11 @@ struct Args {
     /// State directory (revisions, agent state). Omit for an in-memory store.
     #[arg(long, env = "SENSR_STATE_DIR")]
     state_dir: Option<PathBuf>,
+    /// Store backend under --state-dir: `sqlite` (typed sensr-config
+    /// revisions in config.db, head exported to config.json; the default)
+    /// or `json-dir` (untyped stopgap, one JSON file per revision).
+    #[arg(long, value_enum, default_value_t = StoreKind::Sqlite)]
+    store: StoreKind,
     /// Seed document committed as revision 1 when the store is empty.
     #[arg(long)]
     seed: Option<PathBuf>,
@@ -51,6 +56,15 @@ struct Args {
     /// sysctls, qdiscs).
     #[arg(long, value_enum, default_value_t = ApplierKind::Preview, env = "SENSR_APPLIER")]
     applier: ApplierKind,
+}
+
+/// Which config store backend the agent runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum StoreKind {
+    /// sensr-config SQLite (typed documents).
+    Sqlite,
+    /// One JSON file per revision (any document shape).
+    JsonDir,
 }
 
 /// Which apply pipeline the agent runs.
@@ -140,11 +154,15 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
-    match &args.state_dir {
-        Some(dir) => {
+    match (&args.state_dir, args.store) {
+        (Some(dir), StoreKind::Sqlite) => {
+            let store = SqliteStore::open(&dir.join("config.db"), Some(dir.join("config.json")))?;
+            serve(args, store).await
+        }
+        (Some(dir), StoreKind::JsonDir) => {
             let store = JsonDirStore::open(&dir.join("revisions"))?;
             serve(args, store).await
         }
-        None => serve(args, MemStore::new()).await,
+        (None, _) => serve(args, MemStore::new()).await,
     }
 }

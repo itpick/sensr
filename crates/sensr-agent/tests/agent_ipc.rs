@@ -586,3 +586,46 @@ async fn secrets_are_masked_on_read_and_kept_on_write_back() {
     let shown = serde_json::to_string(&p).unwrap();
     assert!(!shown.contains("NEWKEY") && !shown.contains("PRIVATE"));
 }
+
+/// The real store behind the socket: typed documents, schema errors come
+/// back as validation messages and store nothing.
+#[tokio::test]
+async fn sqlite_store_validates_over_ipc() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        trusted_uids: vec![Fx::my_uid(&dir)],
+        ..Settings::default()
+    };
+    let store = sensr_agent::store::SqliteStore::in_memory().unwrap();
+    let agent = Agent::new(store, FakeApplier::default(), settings).unwrap();
+    agent.boot().await.unwrap();
+    let socket = dir.path().join("agent.sock");
+    let running = sensr_agent::start(agent, &socket, 0o600, None).unwrap();
+    let mut c = Client::connect(&socket, Principal::unix("t", 0))
+        .await
+        .unwrap();
+
+    // The factory document is revision 1.
+    assert!(get(&mut c, "interfaces.lan", Source::Head).await.is_some());
+    set(&mut c, "system.hostname", json!("edge")).await;
+    let Response::Committed(out) = commit(&mut c, None).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(out.revision.id, 2);
+
+    set(&mut c, "system.hostname", json!("not valid!")).await;
+    let e = agent_err(commit(&mut c, None).await);
+    assert_eq!(e.kind, ErrorKind::Validation);
+    assert!(!e.validations.is_empty());
+    c.call(Op::ConfigDiscard).await.unwrap();
+    set(&mut c, "system.bogus", json!(1)).await;
+    assert_eq!(
+        agent_err(commit(&mut c, None).await).kind,
+        ErrorKind::Validation
+    );
+    let Response::History(h) = c.call(Op::ConfigHistory { limit: None }).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(h.len(), 2);
+    running.shutdown().await;
+}

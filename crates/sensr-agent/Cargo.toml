@@ -22,6 +22,7 @@ getrandom.workspace = true
 sd-notify.workspace = true
 sensr-apply.workspace = true
 sensr-auth.workspace = true
+sensr-config.workspace = true
 sensr-ipc.workspace = true
 sensr-rules.workspace = true
 sensr-schema.workspace = true

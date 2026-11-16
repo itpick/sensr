@@ -3,11 +3,16 @@
 //! Hashes never leave the agent: `sensr-api` sends the presented credential
 //! over the socket and gets back the identity and effective privileges.
 //!
-//! Document shape (OPNsense `config.xml` as JSON): `system.user[]` with
-//! `name`, `uid`, `password` (argon2id or imported bcrypt), `priv`
-//! (string, CSV or list), `disabled`, `apikeys` (list of `{key, secret}`,
-//! or OPNsense's `{item: …}` wrapper); `system.group[]` with `name`,
-//! `member` (uids), `priv`, `source_networks`.
+//! Two document shapes are understood:
+//! - the typed `sensr-schema` document: `system.users` and `system.groups`
+//!   are UUID-keyed maps; a user has `name`, `uid`, `disabled`,
+//!   `password_hash`, `groups` (group names) and `api_keys`
+//!   (`[{key, secret_hash}]`); a group has `name` and `privileges`;
+//! - OPNsense's `config.xml` array view: `system.user[]` with `name`,
+//!   `uid`, `password`, `priv` (string, CSV or list), `disabled`, `apikeys`
+//!   (`key|secret|created|descr` lines, or `{item: …}` elements);
+//!   `system.group[]` with `name`, `member` (uids), `priv`,
+//!   `source_networks`.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -56,13 +61,28 @@ fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
+/// Items of a list, or the values of a UUID-keyed map.
+fn items<'a>(v: Option<&'a Value>) -> Vec<&'a Value> {
+    match v {
+        Some(Value::Object(m)) => m.values().collect(),
+        other => list(other),
+    }
+}
+
 fn users(doc: &Value) -> Vec<&Value> {
-    list(doc.pointer("/system/user"))
+    let mut all = items(doc.pointer("/system/users"));
+    all.extend(list(doc.pointer("/system/user")));
+    all
+}
+
+fn first<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter().find_map(|k| v.get(*k))
 }
 
 fn acl_of(doc: &Value) -> Acl {
-    let users: Vec<User> = users(doc)
-        .into_iter()
+    let all_users = users(doc);
+    let users: Vec<User> = all_users
+        .iter()
         .filter_map(|u| {
             Some(User {
                 name: text(u.get("name")),
@@ -71,7 +91,7 @@ fn acl_of(doc: &Value) -> Acl {
             })
         })
         .collect();
-    let groups: Vec<Group> = list(doc.pointer("/system/group"))
+    let mut groups: Vec<Group> = list(doc.pointer("/system/group"))
         .into_iter()
         .map(|g| Group {
             name: text(g.get("name")),
@@ -86,11 +106,29 @@ fn acl_of(doc: &Value) -> Acl {
                 .collect(),
         })
         .collect();
+    // Typed groups: membership is listed on the user, by group name.
+    for g in items(doc.pointer("/system/groups")) {
+        let name = text(g.get("name"));
+        let members = all_users
+            .iter()
+            .filter(|u| csv(u.get("groups")).contains(&name))
+            .filter_map(|u| text(u.get("uid")).parse().ok())
+            .collect();
+        groups.push(Group {
+            name,
+            members,
+            privileges: csv(g.get("privileges")),
+            source_networks: csv(g.get("source_networks"))
+                .iter()
+                .filter_map(|n| n.parse().ok())
+                .collect(),
+        });
+    }
     Acl::new(Arc::new(Registry::builtin()), &users, &groups)
 }
 
 fn api_keys(user: &Value) -> Vec<(String, String)> {
-    let raw = user.get("apikeys");
+    let raw = first(user, &["api_keys", "apikeys"]);
     // Current OPNsense stores `key|secret_hash|created|descr`, one key per
     // line; older configs have `<item><key/><secret/></item>` elements.
     if let Some(Value::String(lines)) = raw {
@@ -109,7 +147,12 @@ fn api_keys(user: &Value) -> Vec<(String, String)> {
     };
     items
         .into_iter()
-        .map(|k| (text(k.get("key")), text(k.get("secret"))))
+        .map(|k| {
+            (
+                text(k.get("key")),
+                text(first(k, &["secret_hash", "secret"])),
+            )
+        })
         .filter(|(k, s)| !k.is_empty() && !s.is_empty())
         .collect()
 }
@@ -122,7 +165,7 @@ pub fn authenticate(doc: &Value, cred: &Credential, remote: Option<IpAddr>) -> O
             let u = users(doc)
                 .into_iter()
                 .find(|u| text(u.get("name")) == *user)?;
-            if !password::verify_password(pw, &text(u.get("password"))) {
+            if !password::verify_password(pw, &text(first(u, &["password_hash", "password"]))) {
                 return None;
             }
             u
@@ -216,6 +259,36 @@ mod tests {
             secret: "nope".into(),
         };
         assert!(authenticate(&doc, &bad, None).is_none());
+    }
+
+    #[test]
+    fn typed_document_shape() {
+        let key = apikey::generate().unwrap();
+        let doc = json!({"system": {
+            "users": {
+                "6f0c6f9e-0000-4000-8000-000000000001": {
+                    "name": "root", "uid": 0, "disabled": false, "groups": ["admins"],
+                    "password_hash": password::hash_password("pw").unwrap(),
+                    "api_keys": [{"key": key.key, "secret_hash": key.secret_hash}],
+                },
+                "6f0c6f9e-0000-4000-8000-000000000002": {
+                    "name": "off", "uid": 2001, "disabled": true,
+                    "password_hash": password::hash_password("pw").unwrap(),
+                },
+            },
+            "groups": {"6f0c6f9e-0000-4000-8000-0000000000a1": {"name": "admins", "gid": 1999, "privileges": ["page-all"]}},
+        }});
+        let info = authenticate(&doc, &pw("root", "pw"), None).unwrap();
+        assert_eq!(
+            (info.uid, info.groups.clone(), info.privileges.clone()),
+            (0, vec!["admins".to_owned()], vec!["page-all".to_owned()])
+        );
+        let by_key = Credential::ApiKey {
+            key: key.key.clone(),
+            secret: key.secret.clone(),
+        };
+        assert_eq!(authenticate(&doc, &by_key, None).unwrap().user, "root");
+        assert!(authenticate(&doc, &pw("off", "pw"), None).is_none());
     }
 
     #[test]

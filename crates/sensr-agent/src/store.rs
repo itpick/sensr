@@ -31,6 +31,13 @@ pub enum StoreError {
         /// Parser message.
         message: String,
     },
+    /// The document does not fit the schema or fails validation; nothing
+    /// was stored.
+    #[error("the configuration does not validate")]
+    Invalid(Vec<sensr_ipc::ValidationIssue>),
+    /// Any other failure of the backing store.
+    #[error("config store: {0}")]
+    Backend(String),
 }
 
 /// What a commit stores; the store assigns id, parent, hash and time.
@@ -277,6 +284,136 @@ impl ConfigStore for JsonDirStore {
     }
 }
 
+/// The real store: `sensr-config`'s SQLite revisions over the typed
+/// `sensr-schema` [`Document`](sensr_schema::Document). JSON from the IPC
+/// side is decoded into the typed document on commit, so a candidate that
+/// does not fit the schema, or fails whole-document validation, is
+/// rejected with per-field messages and nothing is stored.
+pub struct SqliteStore {
+    inner: sensr_config::Store,
+}
+
+impl std::fmt::Debug for SqliteStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteStore").finish_non_exhaustive()
+    }
+}
+
+fn backend(e: sensr_config::StoreError) -> StoreError {
+    match e {
+        sensr_config::StoreError::Invalid(v) => StoreError::Invalid(
+            v.iter()
+                .flat_map(|(path, errors)| {
+                    errors.iter().map(move |e| sensr_ipc::ValidationIssue {
+                        path: path.as_str().to_owned(),
+                        message: e.to_string(),
+                    })
+                })
+                .collect(),
+        ),
+        other => StoreError::Backend(other.to_string()),
+    }
+}
+
+fn info_of(m: &sensr_config::RevisionMeta) -> RevisionInfo {
+    RevisionInfo {
+        id: m.id.0.max(0) as RevisionId,
+        parent: m.parent.map(|p| p.0.max(0) as RevisionId),
+        hash: m.hash.clone(),
+        username: m.meta.username.clone(),
+        time_ms: m.time_ms,
+        description: m.meta.description.clone(),
+        impersonated_by: m.meta.impersonated_by.clone(),
+    }
+}
+
+fn stored(r: sensr_config::Revision) -> Result<StoredRevision, StoreError> {
+    let document =
+        serde_json::to_value(&r.document).map_err(|e| StoreError::Backend(e.to_string()))?;
+    Ok(StoredRevision {
+        info: info_of(&r.meta),
+        document,
+    })
+}
+
+impl SqliteStore {
+    /// Opens (creating with the factory document) the database at `db`,
+    /// exporting head to `export` after every commit.
+    pub fn open(db: &Path, export: Option<PathBuf>) -> Result<Self, StoreError> {
+        let options = sensr_config::StoreOptions {
+            export_path: export,
+            ..sensr_config::StoreOptions::default()
+        };
+        let inner = sensr_config::Store::open_with(db, sensr_schema::Document::factory, options)
+            .map_err(backend)?;
+        Ok(Self { inner })
+    }
+
+    /// An in-memory database (tests).
+    pub fn in_memory() -> Result<Self, StoreError> {
+        let inner = sensr_config::Store::open_in_memory(
+            sensr_schema::Document::factory,
+            sensr_config::StoreOptions::default(),
+        )
+        .map_err(backend)?;
+        Ok(Self { inner })
+    }
+}
+
+/// Decodes an IPC document into the typed schema, reporting serde's path.
+pub fn decode_document(doc: &Value) -> Result<sensr_schema::Document, StoreError> {
+    serde_json::from_value(doc.clone()).map_err(|e| {
+        StoreError::Invalid(vec![sensr_ipc::ValidationIssue {
+            path: "/".into(),
+            message: format!("The document does not match the schema: {e}."),
+        }])
+    })
+}
+
+impl ConfigStore for SqliteStore {
+    fn head(&self) -> Result<Option<StoredRevision>, StoreError> {
+        self.inner
+            .head()
+            .map_err(backend)
+            .and_then(stored)
+            .map(Some)
+    }
+
+    fn get(&self, id: RevisionId) -> Result<Option<StoredRevision>, StoreError> {
+        let Ok(id) = i64::try_from(id) else {
+            return Ok(None);
+        };
+        match self.inner.get(sensr_config::RevisionId(id)) {
+            Ok(r) => stored(r).map(Some),
+            Err(sensr_config::StoreError::NotFound(_)) => Ok(None),
+            Err(e) => Err(backend(e)),
+        }
+    }
+
+    fn commit(&mut self, rev: NewRevision) -> Result<RevisionInfo, StoreError> {
+        let doc = decode_document(&rev.document)?;
+        let meta = sensr_config::CommitMeta {
+            username: rev.username,
+            description: rev.description,
+            impersonated_by: rev.impersonated_by,
+            user_apitoken: None,
+        };
+        let id = self.inner.commit(&doc, meta).map_err(backend)?.id();
+        let r = self.inner.get(id).map_err(backend)?;
+        Ok(info_of(&r.meta))
+    }
+
+    fn history(&self, limit: usize) -> Result<Vec<RevisionInfo>, StoreError> {
+        Ok(self
+            .inner
+            .history(limit, None)
+            .map_err(backend)?
+            .iter()
+            .map(info_of)
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +455,51 @@ mod tests {
         let reopened = JsonDirStore::open(dir.path()).unwrap();
         assert_eq!(reopened.head().unwrap().unwrap().info.id, 2);
         assert_eq!(reopened.history(10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn sqlite_store_starts_from_the_factory_document_and_validates() {
+        let mut s = SqliteStore::in_memory().unwrap();
+        let head = s.head().unwrap().unwrap();
+        assert_eq!(head.info.id, 1);
+        assert!(
+            head.document["interfaces"].get("lan").is_some(),
+            "{}",
+            head.document
+        );
+
+        let mut doc = head.document.clone();
+        doc["system"]["hostname"] = json!("edge");
+        let info = s.commit(rev(doc)).unwrap();
+        assert_eq!((info.id, info.parent), (2, Some(1)));
+        assert_eq!(
+            s.head().unwrap().unwrap().document["system"]["hostname"],
+            "edge"
+        );
+        assert_eq!(
+            s.history(10)
+                .unwrap()
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            [2, 1]
+        );
+        assert!(s.get(1).unwrap().is_some());
+        assert!(s.get(99).unwrap().is_none());
+
+        let mut bad = head.document.clone();
+        bad["system"]["hostname"] = json!("not a hostname!");
+        match s.commit(rev(bad)) {
+            Err(StoreError::Invalid(issues)) => assert!(!issues.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        let mut unknown = head.document;
+        unknown["no_such_section"] = json!({});
+        assert!(matches!(
+            s.commit(rev(unknown)),
+            Err(StoreError::Invalid(_))
+        ));
+        assert_eq!(s.head().unwrap().unwrap().info.id, 2, "nothing stored");
     }
 
     #[test]
