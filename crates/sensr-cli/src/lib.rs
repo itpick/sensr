@@ -136,6 +136,10 @@ pub enum ImportCmd {
         /// Print the import report.
         #[arg(long)]
         report: bool,
+        /// Rename a FreeBSD device to its Linux name (repeatable), e.g.
+        /// `--device igc0=enp1s0`.
+        #[arg(long = "device", value_name = "FREEBSD=LINUX")]
+        devices: Vec<String>,
     },
 }
 
@@ -212,12 +216,22 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             }
         }
         Command::Config(cmd) => config(&mut c, cmd, out).await?,
-        Command::Import(ImportCmd::Opnsense { file, report }) => {
+        Command::Import(ImportCmd::Opnsense {
+            file,
+            report,
+            devices,
+        }) => {
             let bytes =
                 std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-            let imported = OpnsenseImporter.import(&bytes)?;
+            let imported = OpnsenseImporter::with_devices(&devices)?.import(&bytes)?;
             if report {
                 write!(out, "{}", imported.report)?;
+            }
+            if !imported.clean {
+                writeln!(
+                    out,
+                    "note: some nodes were not imported (see --report, \"unmapped, unexpected\")"
+                )?;
             }
             let Response::Staged { dirty } = call(
                 &mut c,

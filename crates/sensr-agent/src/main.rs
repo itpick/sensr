@@ -7,7 +7,7 @@ use anyhow::Context;
 use clap::Parser;
 use sensr_agent::applier::{Applier, PreviewApplier};
 use sensr_agent::slice_applier::SliceApplier;
-use sensr_agent::store::{ConfigStore, JsonDirStore, MemStore, NewRevision};
+use sensr_agent::store::{ConfigStore, JsonDirStore, MemStore, NewRevision, SqliteStore};
 use sensr_agent::{Agent, Settings};
 
 /// The privileged sensr daemon.
@@ -26,9 +26,18 @@ struct Args {
     /// State directory (revisions, agent state). Omit for an in-memory store.
     #[arg(long, env = "SENSR_STATE_DIR")]
     state_dir: Option<PathBuf>,
+    /// Store backend under --state-dir: `sqlite` (typed sensr-config
+    /// revisions in config.db, head exported to config.json; the default)
+    /// or `json-dir` (untyped stopgap, one JSON file per revision).
+    #[arg(long, value_enum, default_value_t = StoreKind::Sqlite)]
+    store: StoreKind,
     /// Seed document committed as revision 1 when the store is empty.
     #[arg(long)]
     seed: Option<PathBuf>,
+    /// First-boot seed folder: a `config.xml` here is imported once onto a
+    /// store that holds only the factory revision.
+    #[arg(long, env = "SENSR_SEED_DIR")]
+    seed_dir: Option<PathBuf>,
     /// Peer uid allowed to act for the principals it authenticated (sensr-api).
     #[arg(long = "trust-uid")]
     trust_uids: Vec<u32>,
@@ -51,6 +60,15 @@ struct Args {
     /// sysctls, qdiscs).
     #[arg(long, value_enum, default_value_t = ApplierKind::Preview, env = "SENSR_APPLIER")]
     applier: ApplierKind,
+}
+
+/// Which config store backend the agent runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum StoreKind {
+    /// sensr-config SQLite (typed documents).
+    Sqlite,
+    /// One JSON file per revision (any document shape).
+    JsonDir,
 }
 
 /// Which apply pipeline the agent runs.
@@ -86,6 +104,15 @@ fn seed_store(store: &mut dyn ConfigStore, seed: Option<&PathBuf>) -> anyhow::Re
 
 async fn serve<S: ConfigStore>(args: Args, mut store: S) -> anyhow::Result<()> {
     seed_store(&mut store, args.seed.as_ref())?;
+    if let (Some(seed_dir), Some(state_dir)) = (&args.seed_dir, &args.state_dir) {
+        match sensr_agent::seed::import_seed(&mut store, seed_dir, state_dir) {
+            Ok(outcome) => {
+                tracing::info!(?outcome, seed_dir = %seed_dir.display(), "seed folder checked")
+            }
+            // Keep booting on the factory config; the report says why.
+            Err(e) => tracing::error!(error = %e, "seed import failed"),
+        }
+    }
     let mut trusted_gids = args.trust_gids.clone();
     for name in &args.trust_groups {
         match sensr_agent::agent::group_id(name) {
@@ -140,11 +167,15 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
-    match &args.state_dir {
-        Some(dir) => {
+    match (&args.state_dir, args.store) {
+        (Some(dir), StoreKind::Sqlite) => {
+            let store = SqliteStore::open(&dir.join("config.db"), Some(dir.join("config.json")))?;
+            serve(args, store).await
+        }
+        (Some(dir), StoreKind::JsonDir) => {
             let store = JsonDirStore::open(&dir.join("revisions"))?;
             serve(args, store).await
         }
-        None => serve(args, MemStore::new()).await,
+        (None, _) => serve(args, MemStore::new()).await,
     }
 }

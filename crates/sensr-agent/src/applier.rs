@@ -37,6 +37,10 @@ pub trait Applier: Send + 'static {
 
 /// Sections and the unit that serves them, for the preview plan.
 const SERVICES: &[(&str, &str)] = &[
+    // typed sensr-schema sections
+    ("dhcpv4", "kea-dhcp4-server.service"),
+    ("dns", "unbound.service"),
+    // OPNsense array-view sections
     ("dhcpd", "kea-dhcp4-server.service"),
     ("kea", "kea-dhcp4-server.service"),
     ("unbound", "unbound.service"),
@@ -46,7 +50,7 @@ const SERVICES: &[(&str, &str)] = &[
 /// Renders the firewall-relevant sections as a stand-in ruleset text.
 fn ruleset_text(doc: &Value) -> String {
     let mut out = String::from("table inet sensr {\n");
-    for section in ["filter", "nat"] {
+    for section in ["firewall", "filter", "nat"] {
         if let Some(v) = doc.get(section) {
             out += &format!("  # {section}\n");
             for line in serde_json::to_string_pretty(v).unwrap_or_default().lines() {

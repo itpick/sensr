@@ -85,10 +85,10 @@ pkgs.testers.runNixOSTest {
                 print(machine.execute("systemctl status sensr-agent --no-pager; journalctl -b -u sensr-agent --no-pager | tail -n 40")[1])
             machine.wait_for_file("/run/sensr/agent.sock")
             machine.succeed("stat -c '%a %U %G' /run/sensr/agent.sock | grep -qx '660 root sensr'")
-            # It survives a restart with its state (revisions on disk).
+            # It survives a restart with its state (the revision database).
             machine.succeed("systemctl restart sensr-agent")
             machine.wait_for_unit("sensr-agent.service")
-            machine.succeed("test -d /var/lib/sensr/revisions")
+            machine.succeed("test -s /var/lib/sensr/config.db")
         # Hardening that must not regress, whatever the agent does.
         props = machine.succeed(
             "systemctl show -p User -p ProtectSystem -p NoNewPrivileges -p CapabilityBoundingSet sensr-agent"

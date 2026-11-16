@@ -88,7 +88,14 @@ fn empty() -> Value {
 }
 
 fn internal(e: StoreError) -> IpcError {
-    IpcError::new(ErrorKind::Internal, e.to_string())
+    match e {
+        StoreError::Invalid(validations) => IpcError {
+            kind: ErrorKind::Validation,
+            message: "the configuration was rejected; nothing was changed".into(),
+            validations,
+        },
+        other => IpcError::new(ErrorKind::Internal, other.to_string()),
+    }
 }
 
 fn err(kind: ErrorKind, msg: impl Into<String>) -> IpcError {

@@ -9,26 +9,34 @@ let
   # bcrypt of "opnsense", OPNsense's factory default root password (the hash
   # in upstream's ACL test fixture).
   rootHash = "$2y$10$YRVoF4SgskIsrXOvOQjGieB9XqHPRra9R7d80B3BZdbY/j21TwBfS";
-  users = builtins.toJSON [
-    {
+  # The typed document's shape: UUID-keyed users and groups, membership
+  # listed on the user.
+  users = builtins.toJSON {
+    "7a0c1d2e-0000-4000-8000-000000000001" = {
       name = "root";
-      uid = "0";
-      password = rootHash;
-    }
-    {
+      uid = 0;
+      password_hash = rootHash;
+      groups = [ "admins" ];
+    };
+    "7a0c1d2e-0000-4000-8000-000000000002" = {
       name = "viewer";
-      uid = "2000";
-      password = rootHash;
-      priv = "page-sensr-status";
-    }
-  ];
-  groups = builtins.toJSON [
-    {
+      uid = 2000;
+      password_hash = rootHash;
+      groups = [ "viewers" ];
+    };
+  };
+  groups = builtins.toJSON {
+    "7a0c1d2e-0000-4000-8000-0000000000a1" = {
       name = "admins";
-      member = "0";
-      priv = "page-all";
-    }
-  ];
+      gid = 1999;
+      privileges = [ "page-all" ];
+    };
+    "7a0c1d2e-0000-4000-8000-0000000000a2" = {
+      name = "viewers";
+      gid = 2000;
+      privileges = [ "page-sensr-status" ];
+    };
+  };
 in
 pkgs.testers.runNixOSTest {
   name = "sensr-agent-api";
@@ -71,8 +79,8 @@ pkgs.testers.runNixOSTest {
     with subtest("commit-confirm: confirmed in time"):
         machine.succeed("sensr config set system.hostname kept")
         machine.succeed("sensr config commit --confirm 60 | grep -q provisional")
-        machine.succeed("sensr status | grep -q 'rolls back to 1'")
-        machine.succeed("sensr config confirm | grep -q 'revision 2 confirmed'")
+        machine.succeed("sensr status | grep -q 'rolls back to 2'")
+        machine.succeed("sensr config confirm | grep -q 'revision 3 confirmed'")
         assert applied("system.hostname") == "kept"
 
     with subtest("commit-confirm: timeout rolls back"):
@@ -94,19 +102,27 @@ pkgs.testers.runNixOSTest {
 
     with subtest("history survives the restart (persistent store)"):
         out = json.loads(machine.succeed("sensr config history --json"))
-        assert len(out) >= 6, out
+        # Revision 1 is the factory document.
+        assert len(out) >= 7, out
 
     with subtest("users for the API; the password hash is never returned"):
-        machine.succeed('sensr config set system.user --json "$(cat /etc/sensr-test/users.json)"')
-        machine.succeed('sensr config set system.group --json "$(cat /etc/sensr-test/groups.json)"')
+        machine.succeed('sensr config set system.users --json "$(cat /etc/sensr-test/users.json)"')
+        machine.succeed('sensr config set system.groups --json "$(cat /etc/sensr-test/groups.json)"')
         machine.succeed("sensr config commit -m users")
-        machine.fail("sensr config get system.user | grep -q YRVoF4")
+        machine.fail("sensr config get system.users | grep -q YRVoF4")
+        machine.fail("grep -q YRVoF4 /var/lib/sensr/config.json")
+
+    with subtest("schema violations are rejected and store nothing"):
+        machine.succeed("sensr config set system.hostname 'not a hostname'")
+        out = machine.fail("sensr config commit 2>&1")
+        print(out)
+        machine.succeed("sensr config discard")
 
     api = "http://127.0.0.1:8080"
     with subtest("API authenticates and enforces ACLs"):
         machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' {api}/api/v1/status | grep -qx 401")
         machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' -u root:wrong {api}/api/v1/status | grep -qx 401")
-        machine.succeed(f"curl -sf -u root:opnsense {api}/api/v1/status | jq -e '.applied >= 7'")
+        machine.succeed(f"curl -sf -u root:opnsense {api}/api/v1/status | jq -e '.applied >= 8'")
         machine.succeed(f"curl -sf -u viewer:opnsense {api}/api/v1/status >/dev/null")
         machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' -u viewer:opnsense {api}/api/v1/config/doc | grep -qx 403")
 

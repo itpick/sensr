@@ -176,7 +176,7 @@ async fn import_dry_run_commit() {
     let fx = Fx::start().await;
     let s = fx.socket.as_path();
     let out = ok(s, &["import", "opnsense", HOME_ROUTER, "--report"]).await;
-    assert!(out.contains("top-level sections"), "{out}");
+    assert!(out.starts_with("# sensr import report"), "{out}");
     assert!(out.contains("staged"), "{out}");
 
     let plan = ok(s, &["apply", "--dry-run"]).await;
@@ -187,8 +187,8 @@ async fn import_dry_run_commit() {
 
     ok(s, &["config", "commit", "-m", "import home-router"]).await;
     assert_eq!(
-        ok(s, &["config", "get", "interfaces.lan.ipaddr"]).await,
-        "192.168.1.1\n"
+        ok(s, &["config", "get", "interfaces.lan.ipv4.address"]).await,
+        "192.168.1.1/24\n"
     );
     assert_eq!(fx.applied().len(), 1);
     assert!(
@@ -196,8 +196,15 @@ async fn import_dry_run_commit() {
             .await
             .contains("nothing to apply")
     );
-    let lines = ok(s, &["config", "get", "system.user"]).await;
-    assert!(lines.contains("system.user.0.name = root"), "{lines}");
+    let lines = ok(s, &["config", "get", "system.users"]).await;
+    assert!(
+        lines.contains("system.users.c493ce95-b248-400b-a46d-6c3c647a3b08.name = root"),
+        "{lines}"
+    );
+    assert!(
+        !lines.contains("synthetic.synthetic"),
+        "hash leaked: {lines}"
+    );
 }
 
 /// Round-trip latency of the CLI (process spawn included) and of the raw
