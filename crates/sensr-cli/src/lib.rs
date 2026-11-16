@@ -36,6 +36,11 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run-time state as JSON: `gateways`, `aliases` or `ipv6`.
+    Runtime {
+        /// Which subsystem.
+        section: RuntimeArg,
+    },
     /// Read and change the configuration.
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -54,6 +59,17 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Subsystems for `sensr runtime`.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum RuntimeArg {
+    /// Gateway monitor.
+    Gateways,
+    /// Alias feeds.
+    Aliases,
+    /// IPv6 prefix delegation.
+    Ipv6,
 }
 
 /// `sensr config …`
@@ -214,6 +230,21 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             } else {
                 output::status(out, &st)?;
             }
+        }
+        Command::Runtime { section } => {
+            let section = match section {
+                RuntimeArg::Gateways => sensr_ipc::RuntimeSection::Gateways,
+                RuntimeArg::Aliases => sensr_ipc::RuntimeSection::Aliases,
+                RuntimeArg::Ipv6 => sensr_ipc::RuntimeSection::Ipv6,
+            };
+            let Response::Value(v) = call(&mut c, Op::Runtime { section }).await? else {
+                bail!("unexpected runtime reply")
+            };
+            writeln!(
+                out,
+                "{}",
+                output::json(&v.unwrap_or(serde_json::Value::Null))
+            )?;
         }
         Command::Config(cmd) => config(&mut c, cmd, out).await?,
         Command::Import(ImportCmd::Opnsense {
