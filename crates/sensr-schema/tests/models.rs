@@ -662,7 +662,7 @@ fn message_literals(src: &str) -> Vec<String> {
             "syntax(\"",
             "callback(\"",
             "range(\"",
-            "FieldError::new(",
+            "msg(\"",
             "format!(\"",
         ] {
             if let Some(i) = t.find(pat) {
@@ -671,6 +671,9 @@ fn message_literals(src: &str) -> Vec<String> {
         }
         if let Some(i) = t.find("ValidatorKind::")
             && let Some(j) = t[i..].find(", \"")
+            && t[i + "ValidatorKind::".len()..i + j]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric())
         {
             starts.push(i + j + 3);
         }
@@ -688,9 +691,10 @@ fn message_literals(src: &str) -> Vec<String> {
                 .map(|(i, _)| i);
             if let Some(end) = end {
                 let lit = &rest[..end];
-                // Pure placeholders (`"{p}: {}"`) are formatting, not messages.
-                if lit.contains(' ') && !lit.starts_with('{') {
-                    out.push(lit.to_owned());
+                // Pure placeholders (`"{p}: {}"`) are formatting, and a
+                // trailing placeholder is an embedded message checked on its own.
+                if lit.contains(' ') && !lit.starts_with('{') && !lit.ends_with('}') {
+                    out.push(lit.trim().to_owned());
                 }
             }
         }

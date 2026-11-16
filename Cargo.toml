@@ -40,6 +40,7 @@ nftables = "0.6.3"
 pretty_assertions = "1.4.1"
 proptest = "1.12.0"
 quick-xml = { version = "0.42.0", features = ["serialize"] }
+regex = "1.13.1"
 rtnetlink = "0.24.0"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 schemars = "1.2.3"

@@ -17,6 +17,7 @@ pub mod migrate;
 pub mod models;
 pub mod path;
 pub mod refs;
+pub mod testing;
 pub mod validation;
 
 pub use array::{ArrayField, Relation, Uuid};

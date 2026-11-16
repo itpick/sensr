@@ -1,20 +1,37 @@
-//! Field newtypes: parsed, validated values that cannot hold invalid data.
+//! Field types.
 //!
-//! Every type here implements `FromStr` (never panics; property-tested),
-//! `Display` (the canonical text form, which `FromStr` accepts back) and serde
-//! as that string, so the JSON document stays readable and diffable.
+//! Two layers:
+//!
+//! - **Newtypes** (`Hostname`, `MacAddr`, `Port`, `NetOrAlias`, ...): parsed,
+//!   validated values that cannot hold invalid data. Every one implements
+//!   `FromStr` (never panics; property-tested), `Display` (the canonical text
+//!   form, which `FromStr` accepts back) and serde as that string, so the
+//!   JSON document stays readable and diffable. Models are built from these.
+//! - **Configurable fields** ([`Field<T>`] over `*Field` kinds such as
+//!   [`PortField`], [`TextField`], [`OptionField`]): raw text with OPNsense's
+//!   per-field options and validation semantics, for importer, compat API
+//!   and form validation.
 
+mod countries;
+mod csv_list;
+pub mod field;
 mod hostname;
 mod keys;
 mod mac;
 mod misc;
 mod names;
 mod net;
+mod numbers;
+mod option;
 mod port;
 mod protocol;
 mod secret;
+mod text;
 pub mod well_known;
 
+pub use countries::{COUNTRIES, country_name};
+pub use csv_list::CsvListField;
+pub use field::{ChangeCase, Ctx, Field, FieldType, Mask};
 pub use hostname::{DomainName, Host, HostOverrideName, Hostname};
 pub use keys::{SshPublicKey, WgKey};
 pub use mac::MacAddr;
@@ -23,9 +40,12 @@ pub use names::{
     AliasName, Description, DeviceName, GroupName, InterfaceId, Timezone, Username, WgName,
 };
 pub use net::{AddressRange, IpFamily, NetOrAlias};
-pub use port::{Port, PortRange, PortSpec};
-pub use protocol::Protocol;
+pub use numbers::{AutoNumberField, BooleanField, IntegerField, NumericField};
+pub use option::{CountryField, OptionEntry, OptionField, OptionList};
+pub use port::{Port, PortField, PortRange, PortSpec};
+pub use protocol::{Protocol, ProtocolField};
 pub use secret::{REDACTED, Secret, redacted};
+pub use text::{Base64Field, EmailField, TextField, UpdateOnlyTextField, is_email};
 
 /// Implements `Serialize`/`Deserialize` through `Display`/`FromStr`.
 macro_rules! string_serde {
