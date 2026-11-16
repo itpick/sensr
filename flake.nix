@@ -21,9 +21,16 @@
           craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
         in f { inherit pkgs toolchain craneLib; });
     in {
-      packages = forAll ({ craneLib, ... }: {
+      packages = forAll ({ pkgs, craneLib, ... }: {
         default = craneLib.buildPackage {
-          src = craneLib.cleanCargoSource ./.;
+          # Cargo sources plus test fixtures (cleanCargoSource alone drops *.xml etc.).
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            name = "source";
+            filter = path: type:
+              (craneLib.filterCargoSources path type)
+              || (builtins.match ".*/tests/fixtures(/.*)?" path != null);
+          };
           strictDeps = true;
         };
       });
