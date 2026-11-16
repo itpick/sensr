@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::devices::{Devices, VirtualIps};
 use super::dhcp::{Dhcpv4, Pool4, Subnet4};
+use super::dhcpv6::{Dhcpv6, RouterAdvertisements};
 use super::dns::DnsResolver;
 use super::firewall::{AliasType, Endpoint, FilterRule, Firewall};
 use super::gateways::Gateways;
@@ -112,11 +113,15 @@ pub enum Section {
     Devices,
     /// `virtual_ips`.
     VirtualIps,
+    /// `dhcpv6`.
+    Dhcpv6,
+    /// `router_advertisements`.
+    RouterAdvertisements,
 }
 
 impl Section {
     /// Every section, in document order.
-    pub const ALL: [Section; 12] = [
+    pub const ALL: [Section; 14] = [
         Self::System,
         Self::Interfaces,
         Self::Firewall,
@@ -129,6 +134,8 @@ impl Section {
         Self::Routes,
         Self::Devices,
         Self::VirtualIps,
+        Self::Dhcpv6,
+        Self::RouterAdvertisements,
     ];
 
     /// The section's key in the JSON document.
@@ -146,6 +153,8 @@ impl Section {
             Self::Routes => "routes",
             Self::Devices => "devices",
             Self::VirtualIps => "virtual_ips",
+            Self::Dhcpv6 => "dhcpv6",
+            Self::RouterAdvertisements => "router_advertisements",
         }
     }
 }
@@ -194,6 +203,12 @@ pub struct Document {
     /// Virtual IP addresses (omitted while empty).
     #[serde(default, skip_serializing_if = "VirtualIps::is_empty")]
     pub virtual_ips: VirtualIps,
+    /// DHCPv6 server (omitted while unconfigured).
+    #[serde(default, skip_serializing_if = "Dhcpv6::is_empty")]
+    pub dhcpv6: Dhcpv6,
+    /// Router advertisements (omitted while empty).
+    #[serde(default, skip_serializing_if = "RouterAdvertisements::is_empty")]
+    pub router_advertisements: RouterAdvertisements,
 }
 
 impl Default for Document {
@@ -212,6 +227,8 @@ impl Default for Document {
             routes: Routes::default(),
             devices: Devices::default(),
             virtual_ips: VirtualIps::default(),
+            dhcpv6: Dhcpv6::default(),
+            router_advertisements: RouterAdvertisements::default(),
         }
     }
 }
@@ -314,6 +331,9 @@ impl Document {
         self.devices.validate(self, &root.join("devices"), &mut out);
         self.virtual_ips
             .validate(self, &root.join("virtual_ips"), &mut out);
+        self.dhcpv6.validate(self, &root.join("dhcpv6"), &mut out);
+        self.router_advertisements
+            .validate(self, &root.join("router_advertisements"), &mut out);
         out
     }
 
@@ -340,6 +360,10 @@ impl Document {
                 Section::Routes => self.routes != other.routes,
                 Section::Devices => self.devices != other.devices,
                 Section::VirtualIps => self.virtual_ips != other.virtual_ips,
+                Section::Dhcpv6 => self.dhcpv6 != other.dhcpv6,
+                Section::RouterAdvertisements => {
+                    self.router_advertisements != other.router_advertisements
+                }
             })
             .collect()
     }

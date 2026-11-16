@@ -885,6 +885,141 @@ fn devices_and_virtual_ips() {
 }
 
 #[test]
+fn dhcpv6_and_router_advertisements() {
+    let mut doc = Document::factory();
+    let set =
+        |doc: &mut Document, path: &str, v: serde_json::Value| doc.set_by_path(path, v).unwrap();
+    set(&mut doc, "dhcpv6.enabled", json!(true));
+    set(&mut doc, "dhcpv6.interfaces", json!(["lan"]));
+    let s1 = "00000000-0000-0000-0000-000000006001";
+    let s2 = "00000000-0000-0000-0000-000000006002";
+    set(
+        &mut doc,
+        &format!("dhcpv6.subnets.{s1}"),
+        json!({"interface": "lan", "addressing": {"mode": "static", "subnet": "2001:db8:1::/64", "pools": ["2001:db8:1::1000-2001:db8:1::2000"]}}),
+    );
+    set(
+        &mut doc,
+        &format!("dhcpv6.subnets.{s2}"),
+        json!({"interface": "lan", "addressing": {"mode": "dynamic_prefix"}}),
+    );
+    set(
+        &mut doc,
+        "dhcpv6.reservations.00000000-0000-0000-0000-000000006101",
+        json!({"subnet": s1, "client": {"duid": "00:01:00:01"}, "ip_address": "2001:db8:1::50"}),
+    );
+    set(
+        &mut doc,
+        "router_advertisements.interfaces.00000000-0000-0000-0000-000000006201",
+        json!({"interface": "lan", "mode": "assisted"}),
+    );
+    let v = doc.validate();
+    assert!(v.is_ok(), "{v}");
+
+    set(
+        &mut doc,
+        "dhcpv6.subnets.00000000-0000-0000-0000-000000006003",
+        json!({"interface": "lan", "auto_options": true, "options": {"dns_servers": ["2001:db8::53"]}, "addressing": {"mode": "dynamic_prefix"}}),
+    );
+    set(
+        &mut doc,
+        "dhcpv6.subnets.00000000-0000-0000-0000-000000006004",
+        json!({"interface": "wan", "addressing": {"mode": "static", "subnet": "2001:db8:2::1/64", "pools": ["2001:db8:3::1-2001:db8:3::9"]}}),
+    );
+    set(
+        &mut doc,
+        "dhcpv6.reservations.00000000-0000-0000-0000-000000006102",
+        json!({"subnet": s2, "client": {"hw_address": "00:11:22:33:44:55"}}),
+    );
+    set(
+        &mut doc,
+        "dhcpv6.reservations.00000000-0000-0000-0000-000000006103",
+        json!({"subnet": s1, "client": {"duid": "00:01:00:01"}, "ip_address": "2001:db8:9::1"}),
+    );
+    set(
+        &mut doc,
+        "dhcpv6.pd_pools.00000000-0000-0000-0000-000000006301",
+        json!({"subnet": s1, "prefix": "2001:db8:100::/48", "delegated_len": 40}),
+    );
+    set(
+        &mut doc,
+        "router_advertisements.interfaces.00000000-0000-0000-0000-000000006202",
+        json!({"interface": "lan", "prefix_from": "lan", "min_interval": 500, "nat64_prefix": "64:ff9b::/72", "default_lifetime": 100}),
+    );
+    let v = doc.validate();
+    let sp = |k: &str, f: &str| format!("dhcpv6.subnets.00000000-0000-0000-0000-00000000{k}.{f}");
+    assert_eq!(
+        messages(&v, &sp("6003", "interface")),
+        ["Only one dynamic prefix subnet may be configured per interface."]
+    );
+    assert_eq!(
+        messages(&v, &sp("6003", "options.dns_servers")),
+        ["DNS servers must be empty when option data autocollect is enabled."]
+    );
+    assert_eq!(
+        messages(&v, &sp("6004", "interface")),
+        ["Interface is not selected in the general settings."]
+    );
+    assert_eq!(
+        messages(&v, &sp("6004", "addressing.subnet")),
+        ["The subnet must be a network address."]
+    );
+    assert_eq!(
+        messages(&v, &sp("6004", "addressing.pools")),
+        ["Pool \"2001:db8:3::1-2001:db8:3::9\" not in specified subnet."]
+    );
+    let rp =
+        |k: &str, f: &str| format!("dhcpv6.reservations.00000000-0000-0000-0000-00000000{k}.{f}");
+    assert_eq!(
+        messages(&v, &rp("6102", "subnet")),
+        ["Reservations cannot be assigned to dynamic prefix subnets."]
+    );
+    assert_eq!(
+        messages(&v, &rp("6103", "ip_address")),
+        ["Address not in specified subnet."]
+    );
+    assert_eq!(
+        messages(&v, &rp("6103", "client")),
+        ["Duplicate entry exists."]
+    );
+    assert_eq!(
+        messages(
+            &v,
+            "dhcpv6.pd_pools.00000000-0000-0000-0000-000000006301.delegated_len"
+        ),
+        ["Please specify a value between 48 and 128."]
+    );
+    let ra = |f: &str| {
+        format!("router_advertisements.interfaces.00000000-0000-0000-0000-000000006202.{f}")
+    };
+    assert_eq!(
+        messages(&v, &ra("interface")),
+        ["Router advertisements are already configured for this interface."]
+    );
+    assert_eq!(
+        messages(&v, &ra("prefix_from")),
+        ["Constructor cannot be the same as interface."]
+    );
+    assert_eq!(
+        messages(&v, &ra("nat64_prefix")),
+        ["Prefix size must be one of 32, 40, 48, 56, 64 or 96."]
+    );
+    assert_eq!(
+        messages(&v, &ra("min_interval")),
+        ["Value cannot be greater than 450."]
+    );
+    assert_eq!(
+        messages(&v, &ra("default_lifetime")),
+        ["Value must be between 600 and 9000 seconds."]
+    );
+    let factory = serde_json::to_string(&Document::factory()).unwrap();
+    assert!(
+        !factory.contains("\"dhcpv6\"") && !factory.contains("router_advertisements"),
+        "unconfigured sections are omitted"
+    );
+}
+
+#[test]
 fn system_rules() {
     let mut doc = Document::factory();
     let user = User {
