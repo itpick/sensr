@@ -26,6 +26,28 @@ jobs:
       - run: nft --version
       - run: NFT_WRAP=sudo scripts/nft-check-goldens.sh
 
+  xtask:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show
+      - name: Test parity does not fall (docs/PLAN.md §4)
+        run: cargo xtask parity --check --badge parity.svg
+      - run: cargo xtask lint-fixtures
+      - name: Fetch the pinned OPNsense core and plugins trees (shallow)
+        run: |
+          for r in core plugins; do
+            pin=$(awk -v r=$r '$1==r {print $2}' reference/REFS)
+            git init -q reference/opnsense/$r
+            git -C reference/opnsense/$r fetch -q --depth 1 https://github.com/opnsense/$r.git "$pin"
+            git -C reference/opnsense/$r checkout -q FETCH_HEAD
+          done
+      - name: Source coverage manifest matches the pinned trees (docs/PLAN.md §2.6)
+        run: cargo xtask source-coverage --check --require-tree --report | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Flake inputs and toolchain are fresh (nightly)
+        if: github.event_name == 'schedule'
+        run: cargo xtask freshness --daemons
+
   deps:
     runs-on: ubuntu-24.04
     steps:

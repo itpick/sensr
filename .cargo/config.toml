@@ -1,0 +1,3 @@
+[alias]
+# cargo xtask <task>: repository checks (docs/PLAN.md §4, §2.6)
+xtask = "run --quiet --package xtask --"
