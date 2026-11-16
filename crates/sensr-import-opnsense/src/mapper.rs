@@ -46,6 +46,7 @@ pub struct MapContext<'doc> {
     xpaths: HashMap<usize, String>,
     consumed: HashSet<usize>,
     whole: HashSet<usize>,
+    expected: HashMap<usize, &'static str>,
     warnings: Vec<Warning>,
     _doc: std::marker::PhantomData<&'doc Document>,
 }
@@ -64,6 +65,7 @@ impl<'doc> MapContext<'doc> {
             xpaths,
             consumed: HashSet::new(),
             whole: HashSet::new(),
+            expected: HashMap::new(),
             warnings: Vec::new(),
             _doc: std::marker::PhantomData,
         }
@@ -87,6 +89,13 @@ impl<'doc> MapContext<'doc> {
     pub fn consume_subtree(&mut self, e: &'doc Element) {
         self.consumed.insert(id(e));
         self.whole.insert(id(e));
+    }
+
+    /// Report `e` (when nothing below it is mapped) as expected-unmapped for
+    /// `reason`: for nodes whose irrelevance depends on their content, such as
+    /// a disabled service, which a static pattern cannot express.
+    pub fn expect(&mut self, e: &'doc Element, reason: &'static str) {
+        self.expected.insert(id(e), reason);
     }
 
     /// Undo every consumption in `e`'s subtree, so an item a mapper gave up on is
@@ -187,9 +196,6 @@ impl<'doc> MapContext<'doc> {
     /// (`<numberoptions><item/></numberoptions>`): the form wrote an empty list. A
     /// list with any value stays unconsumed and surfaces in the report.
     pub fn blank(&mut self, parent: &'doc Element, names: &[&str]) {
-        fn is_blank(e: &Element) -> bool {
-            e.text().trim().is_empty() && e.elements().all(is_blank)
-        }
         for name in names {
             for c in parent.elements().filter(|e| e.name == *name) {
                 if is_blank(c) {
@@ -343,6 +349,21 @@ fn find_all<'a>(root: &'a Element, segments: &[&str]) -> Vec<&'a Element> {
     current
 }
 
+/// The reason given for nodes that hold no value at all.
+pub const BLANK: &str = "empty: nothing is configured here";
+
+/// No text anywhere in `e`'s subtree (attributes such as a model `version`
+/// carry no configuration): an empty section, list or field, which OPNsense
+/// writes for features never set up.
+fn is_blank(e: &Element) -> bool {
+    e.text().trim().is_empty() && e.elements().all(is_blank)
+}
+
+fn inner_expectation(e: &Element, ctx: &MapContext<'_>) -> bool {
+    e.elements()
+        .any(|c| ctx.expected.contains_key(&id(c)) || inner_expectation(c, ctx))
+}
+
 fn any_consumed(e: &Element, ctx: &MapContext<'_>) -> bool {
     ctx.consumed.contains(&id(e)) || e.elements().any(|c| any_consumed(c, ctx))
 }
@@ -358,16 +379,24 @@ fn collect_unmapped<'a>(
         return;
     }
     names.push(&e.name);
-    if any_consumed(e, ctx) {
-        // Consumed itself or partly mapped below: account for the children one by one.
+    if any_consumed(e, ctx) || inner_expectation(e, ctx) {
+        // Consumed itself, partly mapped below, or holding a node a mapper
+        // declared expected: account for the children one by one.
         for c in e.elements() {
             collect_unmapped(c, names, ctx, expected, report);
         }
     } else {
-        let reason = expected
-            .iter()
-            .find(|(pattern, _)| pattern_matches(pattern, names))
-            .map(|(_, reason)| *reason);
+        let reason = ctx
+            .expected
+            .get(&id(e))
+            .copied()
+            .or_else(|| {
+                expected
+                    .iter()
+                    .find(|(pattern, _)| pattern_matches(pattern, names))
+                    .map(|(_, reason)| *reason)
+            })
+            .or_else(|| is_blank(e).then_some(BLANK));
         let entry = Unmapped {
             xpath: ctx.xpath(e),
             reason,
@@ -464,7 +493,7 @@ mod tests {
       <port>99999</port>
       <group>admins</group>
     </ssh>
-    <mystery/>
+    <mystery>x</mystery>
   </system>
   <filter>
     <rule uuid="a1"><type>pass</type></rule>
@@ -472,6 +501,7 @@ mod tests {
   </filter>
   <rrd><enable/></rrd>
   <unknown><deep>1</deep></unknown>
+  <unused version="1.0"><list><item/></list></unused>
 </opnsense>
 "#;
 
@@ -509,8 +539,14 @@ mod tests {
             .collect();
         assert_eq!(
             expected,
-            ["/opnsense/system/powerd_ac_mode", "/opnsense/rrd"]
+            [
+                "/opnsense/system/powerd_ac_mode",
+                "/opnsense/rrd",
+                "/opnsense/unused"
+            ]
         );
+        // A section with no value anywhere is expected, whatever its name.
+        assert_eq!(r.unmapped_expected[2].reason, Some(BLANK));
         let unexpected: Vec<&str> = r
             .unmapped_unexpected
             .iter()
