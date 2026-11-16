@@ -1010,6 +1010,52 @@ fn ipv6_allowed_follows_interfaces_settings_over_legacy() {
             assert_eq!(again.document.system.ipv6_allow, allowed);
         }
     }
+
+#[test]
+fn legacy_one_to_one_maps_like_the_mfp1_0_4_migration() {
+    // Pre-MVC configs keep 1:1 rules in `nat/onetoone` with nested
+    // endpoints; the MVC rules come first, the legacy ones follow in file
+    // order. The binat reflection switch still lives in `system`.
+    let xml = format!(
+        "<opnsense><system><enablebinatreflection>yes</enablebinatreflection></system>{IFACES}\
+         <nat>\
+           <onetoone><external>203.0.113.40</external><interface>wan</interface><type>binat</type>\
+             <source><address>192.168.1.40</address></source><destination><any>1</any></destination>\
+             <descr>legacy host</descr><natreflection>disable</natreflection></onetoone>\
+           <onetoone><external>203.0.113.48</external><interface>wan</interface>\
+             <source><address>192.168.1.48/29</address></source><destination><address>198.51.100.0/24</address><not>1</not></destination>\
+             <disabled>1</disabled><log>1</log></onetoone>\
+         </nat>\
+         <OPNsense><Firewall><Filter><onetoone>\
+           <rule uuid=\"00000000-0000-4000-8000-0000000011a1\"><enabled>1</enabled><log>0</log><sequence>5</sequence>\
+             <interface>wan</interface><type>nat</type><source_net>lan</source_net><source_not>0</source_not>\
+             <destination_net>any</destination_net><destination_not>0</destination_not><external>203.0.113.9</external>\
+             <natreflection/><categories/><description>mvc</description></rule>\
+         </onetoone></Filter></Firewall></OPNsense></opnsense>"
+    );
+    let i = import_str(&xml);
+    assert!(i.report.unmapped_unexpected.is_empty(), "{}", i.report);
+    let doc = &i.document;
+    assert!(doc.nat.reflection.one_to_one);
+    let rules: Vec<_> = doc.nat.one_to_one.values().collect();
+    assert_eq!(rules.len(), 3);
+    assert_eq!(rules[0].description.as_ref().unwrap().as_str(), "mvc");
+    assert_eq!(rules[0].kind, sensr_schema::models::nat::OneToOneKind::Nat);
+    assert_eq!(rules[0].source.net, "net:lan".parse().unwrap());
+    assert_eq!(rules[1].external, "203.0.113.40/32".parse().unwrap());
+    assert_eq!(rules[1].source.net, "192.168.1.40".parse().unwrap());
+    assert_eq!(
+        rules[1].reflection,
+        Some(sensr_schema::models::nat::OneToOneReflection::Disable)
+    );
+    assert!(!rules[2].enabled && rules[2].log);
+    assert!(rules[2].destination.not);
+    assert_eq!(
+        rules.iter().map(|r| r.sequence).collect::<Vec<_>>(),
+        [10, 20, 30]
+    );
+    // a host external with a /29 source is fine (it takes the prefix)
+    assert!(doc.validate().is_empty(), "{}", doc.validate());
 }
 
 #[test]

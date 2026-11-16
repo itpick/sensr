@@ -567,9 +567,9 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/library/OPNsense/Core/Singleton.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/Core/Syslog.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/Core/Type.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/library/OPNsense/Firewall/DNatRule.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/library/OPNsense/Firewall/DNatRule.php" = { status = "done", crate = "sensr-rules", module = "nat::static_rules, render::pf::static_rule, render::nft::lower_static", note = "1:1 binat/nat, reflection rdr and helper nat; tests/nat.rs" }
 "core/src/opnsense/mvc/app/library/OPNsense/Firewall/FilterRule.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/library/OPNsense/Firewall/ForwardRule.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/library/OPNsense/Firewall/ForwardRule.php" = { status = "in-progress", crate = "sensr-rules", module = "nat::rdr_rules", note = "rdr, reflection and helper done (tests/nat.rs); open: tag/tagged, poolopts, shifted ranges over 64 ports in nft" }
 "core/src/opnsense/mvc/app/library/OPNsense/Firewall/NptRule.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/Firewall/Plugin.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/Firewall/Rule.php" = { status = "todo" }
@@ -797,7 +797,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/PortMappedField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/SNatModeField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/ScheduleField.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/SourceNatRuleField.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/SourceNatRuleField.php" = { status = "in-progress", crate = "sensr-rules", module = "document::one_to_one_conf, document::snat_conf", note = "serialize for onetoone and snatrules; getPriority split (400000/600000) not modelled: sensr registers MVC snatrules with the legacy ones at 100, upstream at 50" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/FieldTypes/TosField.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Filter.php" = { status = "in-progress", crate = "sensr-schema", module = "models::firewall", note = "routing-slice subset" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Filter.xml" = { status = "in-progress", crate = "sensr-schema", module = "models::firewall", note = "routing-slice subset" }
@@ -808,7 +808,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Migrations/M1_0_0.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Migrations/MFP1_0_0.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Migrations/MFP1_0_3.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Firewall/Migrations/MFP1_0_4.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Firewall/Migrations/MFP1_0_4.php" = { status = "done", crate = "sensr-import-opnsense", module = "opnsense::nat::one_to_one", note = "legacy nat/onetoone imported like the migration" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Migrations/MFP1_0_8.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Migrations/MFP1_0_9.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Firewall/Migrations/MFP1_1_0.php" = { status = "todo" }

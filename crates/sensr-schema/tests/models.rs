@@ -8,7 +8,7 @@ use sensr_schema::models::dhcp::{ClientMatch, Pool4, Reservation4, Subnet4};
 use sensr_schema::models::dns::{DnsRecord, HostOverride};
 use sensr_schema::models::firewall::{Alias, FilterRule};
 use sensr_schema::models::interfaces::{Ipv4Config, Ipv6Config};
-use sensr_schema::models::nat::{ForwardFilter, PortForward};
+use sensr_schema::models::nat::{ForwardFilter, OneToOneRule, PortForward};
 use sensr_schema::models::system::{Group, User};
 use sensr_schema::models::wireguard::{WgPeer, WgServer};
 use sensr_schema::{Document, PathAccess, Relation, Section, Uuid, Validations};
@@ -533,6 +533,86 @@ fn nat_rules() {
         doc.get_by_path("nat.outbound.mode").unwrap(),
         json!("automatic")
     );
+}
+
+#[test]
+fn nat_one_to_one_rules() {
+    let mut doc = Document::factory();
+    let rule = |v: serde_json::Value| -> OneToOneRule { serde_json::from_value(v).unwrap() };
+    let ok = doc.nat.one_to_one.push(rule(json!({
+        "interface": "wan",
+        "external": "203.0.113.0/28",
+        "source": {"net": "192.168.1.16/28"},
+    })));
+    // a host external address takes the internal prefix
+    let host = doc.nat.one_to_one.push(rule(json!({
+        "interface": "wan",
+        "external": "203.0.113.5",
+        "source": {"net": "192.168.1.0/28"},
+        "reflection": "enable",
+    })));
+    let size = doc.nat.one_to_one.push(rule(json!({
+        "interface": "wan",
+        "external": "203.0.113.0/29",
+        "source": {"net": "192.168.1.0/28"},
+    })));
+    let alias = doc.nat.one_to_one.push(rule(json!({
+        "interface": "nope",
+        "external": "2001:db8::1",
+        "source": {"net": "net:lan", "not": true},
+        "destination": {"net": "198.51.100.0/24"},
+    })));
+    // type nat accepts interface networks and unequal sizes
+    let nat = doc.nat.one_to_one.push(rule(json!({
+        "interface": "wan",
+        "type": "nat",
+        "external": "203.0.113.9",
+        "source": {"net": "net:lan"},
+        "destination": {"net": "any", "not": true},
+    })));
+    let v = doc.validate();
+    let p = |id: &Uuid, f: &str| format!("nat.one_to_one.{id}.{f}");
+    for id in [&ok, &host] {
+        assert!(
+            !v.iter()
+                .any(|(path, _)| path.as_str().starts_with(&format!("nat.one_to_one.{id}"))),
+            "{v}"
+        );
+    }
+    assert_eq!(
+        messages(&v, &p(&size, "external")),
+        ["The external and internal networks must be the same size."]
+    );
+    assert_eq!(
+        messages(&v, &p(&alias, "interface")),
+        ["The interface does not exist."]
+    );
+    assert_eq!(
+        messages(&v, &p(&alias, "source.net")),
+        [
+            "A BINAT source must be an address or network; use type NAT for aliases and interface networks."
+        ]
+    );
+    assert_eq!(
+        messages(&v, &p(&alias, "source.not")),
+        ["A BINAT source cannot be inverted."]
+    );
+    assert_eq!(
+        messages(&v, &p(&alias, "destination.net")),
+        ["The address family must match the external address."]
+    );
+    assert_eq!(
+        messages(&v, &p(&nat, "destination.not")),
+        ["Inverting \"any\" would match nothing; clear the inversion or choose an address."]
+    );
+    assert!(v.get(&p(&nat, "source.net")).is_none());
+    let back = serde_json::to_value(doc.nat.one_to_one.get(&host).unwrap()).unwrap();
+    assert_eq!(back["type"], json!("binat"));
+    assert_eq!(back["destination"], json!({"net": "any", "not": false}));
+    assert_eq!(back["reflection"], json!("enable"));
+    assert_eq!(back["external"], json!("203.0.113.5"));
+    let net = serde_json::to_value(doc.nat.one_to_one.get(&ok).unwrap()).unwrap();
+    assert_eq!(net["external"], json!("203.0.113.0/28"));
 }
 
 #[test]

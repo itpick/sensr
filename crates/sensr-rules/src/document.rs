@@ -15,13 +15,15 @@ use sensr_schema::Document;
 use sensr_schema::fields::{IpFamily as SchemaFamily, NetOrAlias, PortSpec, Protocol};
 use sensr_schema::models::firewall::{self as fw, Direction, RuleAction, StateType};
 use sensr_schema::models::interfaces::{InterfaceRole, Ipv4Config, Ipv6Config};
-use sensr_schema::models::nat::{self as sn, ForwardFilter, OutboundNatMode, ReflectionMode};
+use sensr_schema::models::nat::{
+    self as sn, ForwardFilter, OneToOneKind, OneToOneReflection, OutboundNatMode, ReflectionMode,
+};
 
 use crate::alias::{self, AliasDef, Resolution, Sources};
 use crate::conf;
 use crate::conf::{Conf, Value};
 use crate::ir::{FilterRule, IfAddr, Interface, InterfaceMap, IpFamily, V4Mode, V6Mode};
-use crate::nat::{self, NatRules, OutboundMode, ReflectionDefaults};
+use crate::nat::{self, NatRules, OutboundMode, ReflectionDefaults, StaticDefaults};
 use crate::normalize::Context;
 use crate::render::{nft, pf};
 use crate::routing::{PolicyRouting, TargetKind};
@@ -437,6 +439,46 @@ pub fn forward_conf(f: &sn::PortForward, global: &sn::Reflection) -> (Conf, Refl
     (c, defaults)
 }
 
+/// A typed 1:1 rule as `SourceNatRuleContainerField::serialize` gives it
+/// for the `onetoone` model, and the defaults that apply to it.
+pub fn one_to_one_conf(r: &sn::OneToOneRule, global: &sn::Reflection) -> (Conf, StaticDefaults) {
+    let side = |m: &sn::AddressMatch| {
+        let mut c = conf! { "network" => net_token(&m.net) };
+        if m.not {
+            c.set("not", true);
+        }
+        c
+    };
+    let external = if r.external.prefix_len() == r.external.max_prefix_len() {
+        r.external.addr().to_string()
+    } else {
+        r.external.to_string()
+    };
+    let mut c = conf! {
+        "log" => r.log,
+        "sequence" => r.sequence.to_string(),
+        "interface" => r.interface.as_str(),
+        "type" => match r.kind { OneToOneKind::Binat => "binat", OneToOneKind::Nat => "nat" },
+        "external" => external,
+    };
+    match r.reflection {
+        Some(OneToOneReflection::Enable) => c.set("natreflection", "enable"),
+        Some(OneToOneReflection::Disable) => c.set("natreflection", "disable"),
+        None => {}
+    }
+    if let Some(d) = &r.description {
+        c.set("descr", d.as_str());
+    }
+    c.set("disabled", !r.enabled);
+    c.set("source", side(&r.source));
+    c.set("destination", side(&r.destination));
+    let defaults = StaticDefaults {
+        reflection: global.one_to_one,
+        helper: global.source_nat,
+    };
+    (c, defaults)
+}
+
 /// A typed outbound rule as the legacy `nat/outbound/rule` array.
 pub fn snat_conf(r: &sn::SourceNatRule) -> Conf {
     let mut c = conf! {
@@ -575,6 +617,16 @@ pub fn compile(doc: &Document, rt: &Runtime<'_>) -> Compiled {
         }
     }
     nat::automatic_outbound(mode, false, &ctx, &mut nat_rules.snat);
+    // pf.inc registers 1:1 rules at 500, after the anti-lockout `no rdr`
+    // (300) and before port forwards (600)
+    let mut statics: Vec<_> = doc.nat.one_to_one.values().collect();
+    statics.sort_by_key(|r| r.sequence);
+    for r in statics {
+        let (c, defaults) = one_to_one_conf(r, &doc.nat.reflection);
+        nat_rules
+            .static_nat
+            .extend(nat::static_rules(&c, 500, defaults, &ctx));
+    }
     let lockout = system_rules::anti_lockout(&settings, &ctx);
     nat_rules
         .rdr

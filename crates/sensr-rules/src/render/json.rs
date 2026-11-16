@@ -218,7 +218,7 @@ impl Serialize for Target<'_> {
 }
 
 /// NAT statement arguments.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Nat<'a> {
     /// `ip` / `ip6` when the table is `inet`
     pub family: Option<&'static str>,
@@ -228,6 +228,9 @@ pub struct Nat<'a> {
     pub port: Option<Expr<'a>>,
     /// nat flags (`persistent`, `random`, …)
     pub flags: Vec<&'static str>,
+    /// prefix mapping (`snat ip prefix to 203.0.113.0/24`): host bits are
+    /// kept, as pf's `binat` / `bitmask` pools do
+    pub prefix: bool,
 }
 
 impl Serialize for Nat<'_> {
@@ -242,8 +245,15 @@ impl Serialize for Nat<'_> {
         if let Some(p) = &self.port {
             m.serialize_entry("port", p)?;
         }
-        if !self.flags.is_empty() {
-            m.serialize_entry("flags", &self.flags)?;
+        let mut flags = self.flags.clone();
+        if self.prefix && !flags.contains(&"netmap") {
+            flags.push("netmap");
+        }
+        if !flags.is_empty() {
+            m.serialize_entry("flags", &flags)?;
+        }
+        if self.prefix {
+            m.serialize_entry("type_flags", &["prefix"])?;
         }
         m.end()
     }

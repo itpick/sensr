@@ -1,6 +1,7 @@
 //! NAT: outbound mode and rules (legacy `nat/outbound/rule` and MVC
-//! `OPNsense/Firewall/Filter/snatrules`) and port forwards (`nat/rule`, the
-//! legacy-mapped `Firewall/DNat` model).
+//! `OPNsense/Firewall/Filter/snatrules`), port forwards (`nat/rule`, the
+//! legacy-mapped `Firewall/DNat` model) and 1:1 rules (MVC
+//! `OPNsense/Firewall/Filter/onetoone`, legacy `nat/onetoone`).
 
 use std::cell::RefCell;
 
@@ -8,7 +9,8 @@ use sensr_schema::array::Relation;
 use sensr_schema::fields::{NetOrAlias, PortRange};
 use sensr_schema::models::firewall::Endpoint;
 use sensr_schema::models::nat::{
-    ForwardFilter, OutboundNatMode, PortForward, ReflectionMode, SourceNatRule,
+    AddressMatch, ForwardFilter, OneToOneKind, OneToOneReflection, OneToOneRule, OutboundNatMode,
+    PortForward, ReflectionMode, SourceNatRule,
 };
 use sensr_schema::{Document, Uuid};
 
@@ -24,6 +26,9 @@ use crate::tree::{Document as XmlDocument, Element};
 pub struct NatMapper {
     /// Outbound rules: (origin 0 = MVC / 1 = legacy, order key, id, rule).
     staged: RefCell<Vec<(u8, u64, Uuid, SourceNatRule)>>,
+    /// 1:1 rules, same staging (the legacy ones only exist before the
+    /// MFP1_0_4 migration, which numbers them after nothing else).
+    staged_static: RefCell<Vec<(u8, u64, Uuid, OneToOneRule)>>,
 }
 
 impl Mapper<Document> for NatMapper {
@@ -36,12 +41,28 @@ impl Mapper<Document> for NatMapper {
             "nat/outbound",
             "nat/rule",
             "OPNsense/Firewall/Filter/snatrules/rule",
+            "OPNsense/Firewall/Filter/onetoone/rule",
+            "nat/onetoone",
         ]
     }
 
     fn map<'doc>(&self, s: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Document) {
         match s.name.as_str() {
             "outbound" => self.outbound(s, ctx, out),
+            "onetoone" => {
+                let index = self.staged_static.borrow().len() as u64;
+                match one_to_one(s, ctx, out, false) {
+                    Some((id, rule)) => self.staged_static.borrow_mut().push((1, index, id, rule)),
+                    None => ctx.release(s),
+                }
+            }
+            "rule" if s.child("external").is_some() => {
+                let key = ctx.parse::<u64>(s, "sequence").unwrap_or(0);
+                match one_to_one(s, ctx, out, true) {
+                    Some((id, rule)) => self.staged_static.borrow_mut().push((0, key, id, rule)),
+                    None => ctx.release(s),
+                }
+            }
             "rule" if s.child("source_net").is_some() || s.child("nonat").is_some() => {
                 let key = ctx.parse::<u64>(s, "sequence").unwrap_or(0);
                 match snat_rule(s, ctx, out, true) {
@@ -66,6 +87,12 @@ impl Mapper<Document> for NatMapper {
             seq = seq.saturating_add(SEQUENCE_STEP);
             rule.sequence = seq;
             out.nat.outbound.rules.insert(id, rule);
+        }
+        let mut staged = std::mem::take(&mut *self.staged_static.borrow_mut());
+        staged.sort_by_key(|(origin, key, _, _)| (*origin, *key));
+        for (n, (_, _, id, mut rule)) in staged.into_iter().enumerate() {
+            rule.sequence = (n as u32 + 1).saturating_mul(SEQUENCE_STEP);
+            out.nat.one_to_one.insert(id, rule);
         }
     }
 }
@@ -412,4 +439,115 @@ fn port_forward<'doc>(
         ],
     );
     Some((id, pf))
+}
+
+/// A 1:1 rule: MVC (`source_net`, `enabled`, `description`) or legacy
+/// (nested `source`, `disabled`, `descr`).
+fn one_to_one<'doc>(
+    r: &'doc Element,
+    ctx: &mut MapContext<'doc>,
+    out: &Document,
+    mvc: bool,
+) -> Option<(Uuid, OneToOneRule)> {
+    let id = item_uuid(ctx, r);
+    let if_el = r.child("interface")?;
+    let Some(interface) = interface_id(out, if_el.text().trim()) else {
+        ctx.warn(
+            if_el,
+            Severity::Invalid,
+            format!(
+                "1:1 rule not imported: interface {:?} is not assigned",
+                if_el.text()
+            ),
+        );
+        return None;
+    };
+    ctx.consume(if_el);
+    let kind = match r.child("type") {
+        Some(t) => {
+            let k = match t.text().trim() {
+                "" | "binat" => OneToOneKind::Binat,
+                "nat" => OneToOneKind::Nat,
+                other => {
+                    ctx.warn(t, Severity::Invalid, format!("unknown 1:1 type {other:?}"));
+                    return None;
+                }
+            };
+            ctx.consume(t);
+            k
+        }
+        None => OneToOneKind::Binat,
+    };
+    let ext_el = r.child("external")?;
+    let external = translate(ctx, ext_el, &ext_el.text(), |t| {
+        let t = t.trim();
+        t.parse::<sensr_schema::ipnet::IpNet>()
+            .or_else(|_| {
+                t.parse::<std::net::IpAddr>()
+                    .map(sensr_schema::ipnet::IpNet::from)
+            })
+            .map_err(|_| format!("{t:?} is not an address or network"))
+    })?;
+    ctx.consume(ext_el);
+    let side = |ctx: &mut MapContext<'doc>, name: &str| -> Option<AddressMatch> {
+        let ep = if mvc {
+            mvc_endpoint(ctx, r, name, out)?
+        } else {
+            nested_endpoint(ctx, r.child(name), out)?
+        };
+        Some(AddressMatch {
+            net: ep.net,
+            not: ep.not,
+        })
+    };
+    let source = side(ctx, "source")?;
+    let destination = side(ctx, "destination")?;
+    let reflection = match r.child("natreflection") {
+        Some(n) => {
+            let v = match n.text().trim() {
+                "" => None,
+                "enable" => Some(OneToOneReflection::Enable),
+                "disable" => Some(OneToOneReflection::Disable),
+                other => {
+                    ctx.warn(
+                        n,
+                        Severity::Invalid,
+                        format!("unknown NAT reflection mode {other:?}"),
+                    );
+                    return None;
+                }
+            };
+            ctx.consume(n);
+            v
+        }
+        None => None,
+    };
+    let enabled = if mvc {
+        ctx.flag(r, "enabled")
+    } else {
+        !ctx.flag(r, "disabled")
+    };
+    let descr = ctx.text(r, if mvc { "description" } else { "descr" });
+    let rule = OneToOneRule {
+        enabled,
+        sequence: 0,
+        interface,
+        kind,
+        external,
+        source,
+        destination,
+        log: ctx.flag(r, "log"),
+        reflection,
+        description: description(ctx, r, descr),
+    };
+    ctx.defaults(
+        r,
+        &[
+            ("categories", ""),
+            ("category", ""),
+            ("sequence", ""),
+            ("nosync", "0"),
+        ],
+    );
+    Some((id, rule))
 }

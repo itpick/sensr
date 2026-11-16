@@ -15,7 +15,9 @@ use sensr_schema::models::firewall::{
     AliasContent, AliasValue, Direction, Endpoint, RuleAction, StateType,
 };
 use sensr_schema::models::interfaces::{DhcpOptionValue, Ipv4Config, Ipv6Config, VlanProtocol};
-use sensr_schema::models::nat::{ForwardFilter, OutboundNatMode, ReflectionMode};
+use sensr_schema::models::nat::{
+    ForwardFilter, OneToOneKind, OneToOneReflection, OutboundNatMode, ReflectionMode,
+};
 use sensr_schema::models::ntp::NtpServerOptions;
 
 use super::common::stable_uuid;
@@ -229,6 +231,9 @@ fn system(doc: &Document) -> Element {
     }
     if !r.port_forwards {
         e.put(leaf("disablenatreflection", "yes"));
+    }
+    if r.one_to_one {
+        e.put(leaf("enablebinatreflection", "yes"));
     }
     e
 }
@@ -669,8 +674,43 @@ fn filter(doc: &Document) -> Element {
         .put_opt("description", r.description.as_ref());
         snat.put(re);
     }
+    let mut one = Element::new("onetoone");
+    for (id, r) in doc.nat.one_to_one.iter() {
+        let mut re = Element::new("rule").attr("uuid", id.to_string());
+        let external = if r.external.prefix_len() == r.external.max_prefix_len() {
+            r.external.addr().to_string()
+        } else {
+            r.external.to_string()
+        };
+        re.put(leaf("enabled", flag01(r.enabled)))
+            .put(leaf("log", flag01(r.log)))
+            .put(leaf("sequence", r.sequence))
+            .put(leaf("interface", &r.interface))
+            .put(leaf(
+                "type",
+                match r.kind {
+                    OneToOneKind::Binat => "binat",
+                    OneToOneKind::Nat => "nat",
+                },
+            ))
+            .put(leaf("source_net", operand(&r.source.net)))
+            .put(leaf("source_not", flag01(r.source.not)))
+            .put(leaf("destination_net", operand(&r.destination.net)))
+            .put(leaf("destination_not", flag01(r.destination.not)))
+            .put(leaf("external", external))
+            .put(leaf(
+                "natreflection",
+                match r.reflection {
+                    None => "",
+                    Some(OneToOneReflection::Enable) => "enable",
+                    Some(OneToOneReflection::Disable) => "disable",
+                },
+            ))
+            .put_opt("description", r.description.as_ref());
+        one.put(re);
+    }
     let mut e = Element::new("Filter");
-    e.put(rules).put(snat);
+    e.put(rules).put(snat).put(one);
     e
 }
 

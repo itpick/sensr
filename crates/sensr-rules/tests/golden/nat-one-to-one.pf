@@ -1,0 +1,151 @@
+# [prio: 100]
+nat on igc0 inet from 10.10.10.0/24 to any -> (igc0:0) port 1024:65535 # Road warrior tunnel out via WAN
+# [prio: 200]
+nat on igc0 inet from (igc1:network) to any port 500 -> (igc0:0) static-port # Automatic outbound rule
+nat on igc0 inet from (vlan01:network) to any port 500 -> (igc0:0) static-port # Automatic outbound rule
+nat on igc0 inet from (vlan02:network) to any port 500 -> (igc0:0) static-port # Automatic outbound rule
+nat on igc0 inet from (wg0:network) to any port 500 -> (igc0:0) static-port # Automatic outbound rule
+nat on igc0 inet from 127.0.0.0/8 to any port 500 -> (igc0:0) static-port # Automatic outbound rule
+nat on igc0 inet from (igc1:network) to any -> (igc0:0) port 1024:65535 # Automatic outbound rule
+nat on igc0 inet from (vlan01:network) to any -> (igc0:0) port 1024:65535 # Automatic outbound rule
+nat on igc0 inet from (vlan02:network) to any -> (igc0:0) port 1024:65535 # Automatic outbound rule
+nat on igc0 inet from (wg0:network) to any -> (igc0:0) port 1024:65535 # Automatic outbound rule
+nat on igc0 inet from 127.0.0.0/8 to any -> (igc0:0) port 1024:65535 # Automatic outbound rule
+# [prio: 300]
+no rdr on igc1 proto tcp from {any} to {(igc1)} port {22} # Anti-lockout; prevent redirects for protected ports to this interface address
+no rdr on igc1 proto tcp from {any} to {(igc1)} port {80} # Anti-lockout; prevent redirects for protected ports to this interface address
+no rdr on igc1 proto tcp from {any} to {(igc1)} port {443} # Anti-lockout; prevent redirects for protected ports to this interface address
+# [prio: 500]
+binat on igc0 from 192.168.1.32/28 to any -> 203.0.113.16/28 # Lab /28
+rdr on igc1 from {any} to {203.0.113.16/28} -> {192.168.1.32/28} bitmask # Lab /28
+rdr on vlan01 from {any} to {203.0.113.16/28} -> {192.168.1.32/28} bitmask # Lab /28
+rdr on vlan02 from {any} to {203.0.113.16/28} -> {192.168.1.32/28} bitmask # Lab /28
+rdr on wg0 from {any} to {203.0.113.16/28} -> {192.168.1.32/28} bitmask # Lab /28
+nat on igc1 inet from (igc1:network) to {192.168.1.32/28} -> (igc1) port 1024:65535 # Lab /28
+nat on vlan01 inet from (vlan01:network) to {192.168.1.32/28} -> (vlan01) port 1024:65535 # Lab /28
+nat on vlan02 inet from (vlan02:network) to {192.168.1.32/28} -> (vlan02) port 1024:65535 # Lab /28
+nat on wg0 inet from (wg0:network) to {192.168.1.32/28} -> (wg0) port 1024:65535 # Lab /28
+nat on igc0 inet from (igc0:network) to {192.168.1.32/28} -> (igc0) port 1024:65535 # Lab /28
+binat on igc0 from 192.168.1.20 to any -> 203.0.113.20 # Game server
+nat on igc1 inet from (igc1:network) to {192.168.1.20} -> (igc1) port 1024:65535 # Game server
+nat on vlan01 inet from (vlan01:network) to {192.168.1.20} -> (vlan01) port 1024:65535 # Game server
+nat on vlan02 inet from (vlan02:network) to {192.168.1.20} -> (vlan02) port 1024:65535 # Game server
+nat on wg0 inet from (wg0:network) to {192.168.1.20} -> (wg0) port 1024:65535 # Game server
+nat on igc0 inet from (igc0:network) to {192.168.1.20} -> (igc0) port 1024:65535 # Game server
+nat log on igc0 from (vlan01:network) to 198.51.100.0/24 -> 203.0.113.30 # IoT to vendor cloud
+nat on igc1 inet from (igc1:network) to {(vlan01:network)} -> (igc1) port 1024:65535 # IoT to vendor cloud
+nat on vlan01 inet from (vlan01:network) to {(vlan01:network)} -> (vlan01) port 1024:65535 # IoT to vendor cloud
+nat on vlan02 inet from (vlan02:network) to {(vlan01:network)} -> (vlan02) port 1024:65535 # IoT to vendor cloud
+nat on wg0 inet from (wg0:network) to {(vlan01:network)} -> (wg0) port 1024:65535 # IoT to vendor cloud
+nat on igc0 inet from (igc0:network) to {(vlan01:network)} -> (igc0) port 1024:65535 # IoT to vendor cloud
+# [prio: 600]
+rdr pass on igc0 inet proto tcp from {any} to {(igc0)} port {443} -> $NAS_HOST port 443 # HTTPS to NAS reverse proxy
+nat on igc0 inet proto tcp from (igc0:network) to $NAS_HOST port {443} -> (igc0) port 1024:65535 # HTTPS to NAS reverse proxy
+rdr pass on igc1 inet proto tcp from {any} to {(igc0)} port {443} -> $NAS_HOST port 443 # HTTPS to NAS reverse proxy
+nat on igc1 inet proto tcp from (igc1:network) to $NAS_HOST port {443} -> (igc1) port 1024:65535 # HTTPS to NAS reverse proxy
+rdr pass on vlan01 inet proto tcp from {any} to {(igc0)} port {443} -> $NAS_HOST port 443 # HTTPS to NAS reverse proxy
+nat on vlan01 inet proto tcp from (vlan01:network) to $NAS_HOST port {443} -> (vlan01) port 1024:65535 # HTTPS to NAS reverse proxy
+rdr pass on vlan02 inet proto tcp from {any} to {(igc0)} port {443} -> $NAS_HOST port 443 # HTTPS to NAS reverse proxy
+nat on vlan02 inet proto tcp from (vlan02:network) to $NAS_HOST port {443} -> (vlan02) port 1024:65535 # HTTPS to NAS reverse proxy
+rdr pass on wg0 inet proto tcp from {any} to {(igc0)} port {443} -> $NAS_HOST port 443 # HTTPS to NAS reverse proxy
+nat on wg0 inet proto tcp from (wg0:network) to $NAS_HOST port {443} -> (wg0) port 1024:65535 # HTTPS to NAS reverse proxy
+# [prio: 1]
+# block in log quick inet6 from {any} to {any} label "92c36e7dd6e900eff9263c0c36eaa001" # Block all IPv6
+block in log inet from {any} to {any} label "02f4bab031b57d1e30553ce08e0ec131" # Default deny / state violation rule
+block in log inet6 from {any} to {any} label "02f4bab031b57d1e30553ce08e0ec131" # Default deny / state violation rule
+pass in log quick inet6 proto ipv6-icmp from {any} to {any} icmp6-type {1,2,3,4,135,136} keep state label "e7c9d7283a8a1dd5793f4eb8a0b61539" # IPv6 RFC4890 requirements (ICMP)
+pass out log quick inet6 proto ipv6-icmp from {(self)} to {fe80::/10} icmp6-type {128,129,133,134,135,136} keep state label "ad320c74571489f02bc7e13ed3b0faf1" # IPv6 RFC4890 requirements (ICMP)
+pass out log quick inet6 proto ipv6-icmp from {(self)} to {ff02::/16} icmp6-type {128,129,133,134,135,136} keep state label "ad320c74571489f02bc7e13ed3b0faf1" # IPv6 RFC4890 requirements (ICMP)
+pass in log quick inet6 proto ipv6-icmp from {fe80::/10} to {fe80::/10} icmp6-type {128,133,134,135,136} keep state label "2af1bbc2f5b570474a3e51da98cfea0d" # IPv6 RFC4890 requirements (ICMP)
+pass in log quick inet6 proto ipv6-icmp from {fe80::/10} to {ff02::/16} icmp6-type {128,133,134,135,136} keep state label "2af1bbc2f5b570474a3e51da98cfea0d" # IPv6 RFC4890 requirements (ICMP)
+pass in log quick inet6 proto ipv6-icmp from {ff02::/16} to {fe80::/10} icmp6-type {128,133,134,135,136} keep state label "51e2f531ca4ef477abcdc7c1ddc2e892" # IPv6 RFC4890 requirements (ICMP)
+pass in log quick inet6 proto ipv6-icmp from {::} to {ff02::/16} icmp6-type {128,133,134,135,136} keep state label "640d734bf8867e36603953157d6945a5" # IPv6 RFC4890 requirements (ICMP)
+block in log quick inet proto {tcp udp} from {any} port {0} to {any} label "aec9f3b63c93939f82538646dafef5b8" # block all targeting port 0
+block in log quick inet6 proto {tcp udp} from {any} port {0} to {any} label "aec9f3b63c93939f82538646dafef5b8" # block all targeting port 0
+block in log quick inet proto {tcp udp} from {any} to {any} port {0} label "6bf37cddd4ab4919991fd6799f2d087d" # block all targeting port 0
+block in log quick inet6 proto {tcp udp} from {any} to {any} port {0} label "6bf37cddd4ab4919991fd6799f2d087d" # block all targeting port 0
+block in log quick proto tcp from {<sshlockout>} to {(self)} port {22} label "f449ad33d3ffa3d5cb47f60ed9d2e27a" # sshlockout
+block in log quick proto tcp from {<sshlockout>} to {(self)} port {443} label "8bb995882b5c4cca530badeff674944c" # sshlockout
+block in log quick from {<virusprot>} to {any} label "10750fe8ac153c0b36d8a70f277ffe00" # virusprot overload table
+pass in log quick on igc0 proto udp from {any} to {fe80::/10} port {546} label "c6e8fd0e915a27c129dc70c00a278a98" # allow dhcpv6 client in WAN
+pass out log quick on igc0 proto udp from {fe80::/10} port {546} to {fe80::/10} port {547} label "2f2c37025cd02b5cd29fd330f8e48954" # allow dhcpv6 client out WAN
+pass out log quick on igc0 proto udp from {fe80::/10} port {546} to {ff02::/16} port {547} label "2f2c37025cd02b5cd29fd330f8e48954" # allow dhcpv6 client out WAN
+pass in log quick on igc0 proto udp from {any} port {67} to {any} port {68} label "f994f615e00b8be0042263f86c79913f" # allow DHCP client on WAN
+pass out log quick on igc0 proto udp from {any} port {68} to {any} port {67} label "5cf7ab808da1fcbca1ddb9ba9b46b669" # allow DHCP client on WAN
+pass in log quick on igc1 proto udp from {any} port {68} to {255.255.255.255} port {67} label "9a5ae4c7391ae65c139da21bf152637e" # allow access to DHCP server
+pass in log quick on igc1 proto udp from {any} port {68} to {(self)} port {67} label "9a0443d67aca73b9884f8270d9e40e59" # allow access to DHCP server
+pass in log quick on vlan01 proto udp from {any} port {68} to {255.255.255.255} port {67} label "bdf519a45c13dd301ee43fbdd34331e0" # allow access to DHCP server
+pass in log quick on vlan01 proto udp from {any} port {68} to {(self)} port {67} label "4ecb8e0f11213ceb799b7280fbcc6449" # allow access to DHCP server
+pass in log quick on vlan02 proto udp from {any} port {68} to {255.255.255.255} port {67} label "3eed85023b0beb011d68a62cd0921c0e" # allow access to DHCP server
+pass in log quick on vlan02 proto udp from {any} port {68} to {(self)} port {67} label "9edbb7af52fe76c33802ee2794b463b9" # allow access to DHCP server
+# [prio: 5]
+block in quick on igc0 inet from {<bogons>} to {any} label "3c2cd03c70091e3732710e44c3b97506" # Block bogon IPv4 networks from WAN
+block in quick on igc0 inet6 from {<bogonsv6>} to {any} label "57401c13616c94401fc89cafa777581e" # Block bogon IPv6 networks from WAN
+block in quick on igc0 inet from {10.0.0.0/8} to {any} label "aff80939d9e2f87bb12757208f4a6a4e" # Block private networks from WAN
+block in quick on igc0 inet from {172.16.0.0/12} to {any} label "aff80939d9e2f87bb12757208f4a6a4e" # Block private networks from WAN
+block in quick on igc0 inet from {192.168.0.0/16} to {any} label "aff80939d9e2f87bb12757208f4a6a4e" # Block private networks from WAN
+block in quick on igc0 inet from {100.64.0.0/10} to {any} label "aff80939d9e2f87bb12757208f4a6a4e" # Block private networks from WAN
+block in quick on igc0 inet from {169.254.0.0/16} to {any} label "aff80939d9e2f87bb12757208f4a6a4e" # Block private networks from WAN
+block in quick on igc0 inet6 from {fd00::/8} to {any} label "e77bdfb60a5b9367391f7468293b5e91" # Block private networks from WAN
+block in quick on igc0 inet6 from {fe80::/10} to {any} label "e77bdfb60a5b9367391f7468293b5e91" # Block private networks from WAN
+# block in quick on igc1 inet from {<bogons>} to {any} label "905d384826ec270b160b1b1b666dd136" # Block bogon IPv4 networks from LAN
+# block in quick on igc1 inet6 from {<bogonsv6>} to {any} label "cc61e8783155f24fe67bf264aa30c78e" # Block bogon IPv6 networks from LAN
+# block in quick on igc1 inet from {10.0.0.0/8} to {any} label "7de7c6abba709c5d463a0e5666d5b0f3" # Block private networks from LAN
+# block in quick on igc1 inet from {172.16.0.0/12} to {any} label "7de7c6abba709c5d463a0e5666d5b0f3" # Block private networks from LAN
+# block in quick on igc1 inet from {192.168.0.0/16} to {any} label "7de7c6abba709c5d463a0e5666d5b0f3" # Block private networks from LAN
+# block in quick on igc1 inet from {100.64.0.0/10} to {any} label "7de7c6abba709c5d463a0e5666d5b0f3" # Block private networks from LAN
+# block in quick on igc1 inet from {169.254.0.0/16} to {any} label "7de7c6abba709c5d463a0e5666d5b0f3" # Block private networks from LAN
+# block in quick on igc1 inet6 from {fd00::/8} to {any} label "d7b5a533d9983a207c675ed18dfbd6cb" # Block private networks from LAN
+# block in quick on igc1 inet6 from {fe80::/10} to {any} label "d7b5a533d9983a207c675ed18dfbd6cb" # Block private networks from LAN
+# block in quick on vlan01 inet from {<bogons>} to {any} label "d89a12d05e90d514aa7aa1465e89a0f0" # Block bogon IPv4 networks from IOT
+# block in quick on vlan01 inet6 from {<bogonsv6>} to {any} label "2a385e45f089e960616a35e07c0e578e" # Block bogon IPv6 networks from IOT
+# block in quick on vlan01 inet from {10.0.0.0/8} to {any} label "ff8de62ab851bdcd18007c570abe8d2d" # Block private networks from IOT
+# block in quick on vlan01 inet from {172.16.0.0/12} to {any} label "ff8de62ab851bdcd18007c570abe8d2d" # Block private networks from IOT
+# block in quick on vlan01 inet from {192.168.0.0/16} to {any} label "ff8de62ab851bdcd18007c570abe8d2d" # Block private networks from IOT
+# block in quick on vlan01 inet from {100.64.0.0/10} to {any} label "ff8de62ab851bdcd18007c570abe8d2d" # Block private networks from IOT
+# block in quick on vlan01 inet from {169.254.0.0/16} to {any} label "ff8de62ab851bdcd18007c570abe8d2d" # Block private networks from IOT
+# block in quick on vlan01 inet6 from {fd00::/8} to {any} label "853d3cd8cd2db0b91a2855504bda31c3" # Block private networks from IOT
+# block in quick on vlan01 inet6 from {fe80::/10} to {any} label "853d3cd8cd2db0b91a2855504bda31c3" # Block private networks from IOT
+# block in quick on vlan02 inet from {<bogons>} to {any} label "decbac75d1831265a24051ceee0fad23" # Block bogon IPv4 networks from GUEST
+# block in quick on vlan02 inet6 from {<bogonsv6>} to {any} label "fc198f6c7703b06136d3e01404b54f0e" # Block bogon IPv6 networks from GUEST
+# block in quick on vlan02 inet from {10.0.0.0/8} to {any} label "ec049301bfa37a1a390a1eddf8dc8a62" # Block private networks from GUEST
+# block in quick on vlan02 inet from {172.16.0.0/12} to {any} label "ec049301bfa37a1a390a1eddf8dc8a62" # Block private networks from GUEST
+# block in quick on vlan02 inet from {192.168.0.0/16} to {any} label "ec049301bfa37a1a390a1eddf8dc8a62" # Block private networks from GUEST
+# block in quick on vlan02 inet from {100.64.0.0/10} to {any} label "ec049301bfa37a1a390a1eddf8dc8a62" # Block private networks from GUEST
+# block in quick on vlan02 inet from {169.254.0.0/16} to {any} label "ec049301bfa37a1a390a1eddf8dc8a62" # Block private networks from GUEST
+# block in quick on vlan02 inet6 from {fd00::/8} to {any} label "d7f88369674218772b6bf4b61c749431" # Block private networks from GUEST
+# block in quick on vlan02 inet6 from {fe80::/10} to {any} label "d7f88369674218772b6bf4b61c749431" # Block private networks from GUEST
+# block in quick on wg0 inet from {<bogons>} to {any} label "44909a00b02f01bbebeec3c61b3f40d7" # Block bogon IPv4 networks from WG_ROADWARRIOR
+# block in quick on wg0 inet6 from {<bogonsv6>} to {any} label "444dd5c9d41a572d3692984b9e7d8b67" # Block bogon IPv6 networks from WG_ROADWARRIOR
+# block in quick on wg0 inet from {10.0.0.0/8} to {any} label "b7eb3e0b702063950c9599d0cf991f01" # Block private networks from WG_ROADWARRIOR
+# block in quick on wg0 inet from {172.16.0.0/12} to {any} label "b7eb3e0b702063950c9599d0cf991f01" # Block private networks from WG_ROADWARRIOR
+# block in quick on wg0 inet from {192.168.0.0/16} to {any} label "b7eb3e0b702063950c9599d0cf991f01" # Block private networks from WG_ROADWARRIOR
+# block in quick on wg0 inet from {100.64.0.0/10} to {any} label "b7eb3e0b702063950c9599d0cf991f01" # Block private networks from WG_ROADWARRIOR
+# block in quick on wg0 inet from {169.254.0.0/16} to {any} label "b7eb3e0b702063950c9599d0cf991f01" # Block private networks from WG_ROADWARRIOR
+# block in quick on wg0 inet6 from {fd00::/8} to {any} label "5a0bd78ef14579047a46cdfb01119864" # Block private networks from WG_ROADWARRIOR
+# block in quick on wg0 inet6 from {fe80::/10} to {any} label "5a0bd78ef14579047a46cdfb01119864" # Block private networks from WG_ROADWARRIOR
+pass out log from {any} to {any} keep state allow-opts label "fae559338f65e11c53669fc3642c93c2" # let out anything from firewall host itself
+pass in log quick on igc1 proto tcp from {any} to {(self)} port {22} keep state label "125db1a425b9fffa681fbacb8023720f" # anti-lockout rule
+pass in log quick on igc1 proto tcp from {any} to {(self)} port {80} keep state label "58d2221c91b735e99192dc8437637bd5" # anti-lockout rule
+pass in log quick on igc1 proto tcp from {any} to {(self)} port {443} keep state label "9a848dfc8ff33b16d39603d170c32486" # anti-lockout rule
+# [prio: 200000]
+block in log quick on igc1 inet from {any} to $BLOCKLIST label "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a01" # Block outbound to BLOCKLIST (multi-interface: evaluated before the LAN allow)
+block in log quick on vlan01 inet from {any} to $BLOCKLIST label "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a01" # Block outbound to BLOCKLIST (multi-interface: evaluated before the LAN allow)
+block in quick on igc1 inet from {any} to $PAUSED_FEED label "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a02" # Block outbound to PAUSED_FEED (its alias is disabled: matches nothing)
+block in quick on vlan01 inet from {any} to $PAUSED_FEED label "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a02" # Block outbound to PAUSED_FEED (its alias is disabled: matches nothing)
+# [prio: 400000]
+# block in quick on vlan02 inet from $PRINTERS to {any} label "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a03" # Block printers from the internet (not any)
+block in log quick on igc0 inet from $GEO_BLOCK to {any} label "8c3dc3ee-b23e-4170-af5a-5f23b2321d58" # Block inbound from GEO_BLOCK
+pass in quick on igc0 inet proto udp from {any} to {(igc0)} port {51820} keep state label "2064ba71-29e9-4ca4-a655-3069cd2fb19e" # Allow WireGuard
+pass in quick on igc0 inet proto tcp from {any} to {192.168.1.40} port {25565} keep state label "5a7e0c21-3f4b-4d1e-9c2a-6b8d0e1f4a40" # Game server via 1:1 NAT
+pass in quick on igc1 inet from {(igc1:network)} to {any} keep state label "1aac7ca4-2950-47cf-af32-f24f076f55a2" # Default allow LAN to any rule
+pass in quick on igc1 inet6 from {(igc1:network),fe80::/10} to {any} keep state label "7fea0ed1-647a-4a21-ad39-b58e286fffa4" # Default allow LAN IPv6 to any rule
+pass in quick on vlan01 inet proto {tcp udp} from {(vlan01:network)} to {(vlan01)} port {53} keep state label "bf449e1e-69ca-44ef-a21f-104e3a575460" # IoT: allow DNS to firewall
+block in log quick on vlan01 inet from {(vlan01:network)} to {(igc1:network)} label "6b5af314-ed14-4fe2-bc30-d6da7a0d48ac" # IoT: block access to LAN
+block in quick on vlan01 inet from {(vlan01:network)} to $DROP_FEED label "78acdbe1-999a-4cee-a55d-30c5cec58707" # IoT: block DROP_FEED destinations
+pass in quick on vlan01 inet from {(vlan01:network)} to {any} keep state label "e3d0f852-1cea-4e20-9ad7-cbe26eee9ad7" # IoT: allow internet
+pass in quick on wg0 inet from {(wg0:network)} to {(igc1:network)} keep state label "ebd5ccfb-e396-4732-bc44-0f87bb45f5f7" # Road warriors to LAN
+pass in quick on wg0 inet proto tcp from {(wg0:network)} to $NAS_HOST port $WEB_PORTS keep state label "cf87b7c6-ccf9-4131-ac97-f2497b1370c2" # Road warriors to NAS web ports
+block in quick on vlan02 inet from {(vlan02:network)} to $RFC1918_NETS label "ab1bbef5-9d70-4722-894c-4e0ef251e651" # Guest isolation: block access to private networks
+pass in quick on vlan02 inet proto {tcp udp} from {(vlan02:network)} to {(vlan02)} port {53} keep state label "7fdf1e38-9c02-4739-9175-2108029af84a" # Guest: allow DNS to firewall
+pass in quick on vlan02 inet from {(vlan02:network)} to {any} keep state label "3f71ffc8-0a4b-4596-b1ff-22382acc4598" # Guest: allow internet

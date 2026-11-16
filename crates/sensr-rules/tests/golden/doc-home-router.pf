@@ -15,6 +15,18 @@ nat on igc0 inet from 127.0.0.0/8 to any -> (igc0:0) port 1024:65535 # Automatic
 no rdr on igc1 proto tcp from {any} to {(igc1)} port {22} # Anti-lockout; prevent redirects for protected ports to this interface address
 no rdr on igc1 proto tcp from {any} to {(igc1)} port {80} # Anti-lockout; prevent redirects for protected ports to this interface address
 no rdr on igc1 proto tcp from {any} to {(igc1)} port {443} # Anti-lockout; prevent redirects for protected ports to this interface address
+# [prio: 500]
+binat on igc0 from 192.168.1.40 to any -> 203.0.113.40 # Game server on its own public address
+rdr on igc1 from {any} to {203.0.113.40} -> {192.168.1.40} bitmask # Game server on its own public address
+rdr on vlan01 from {any} to {203.0.113.40} -> {192.168.1.40} bitmask # Game server on its own public address
+rdr on vlan02 from {any} to {203.0.113.40} -> {192.168.1.40} bitmask # Game server on its own public address
+rdr on wg0 from {any} to {203.0.113.40} -> {192.168.1.40} bitmask # Game server on its own public address
+nat on igc1 inet from (igc1:network) to {192.168.1.40} -> (igc1) port 1024:65535 # Game server on its own public address
+nat on vlan01 inet from (vlan01:network) to {192.168.1.40} -> (vlan01) port 1024:65535 # Game server on its own public address
+nat on vlan02 inet from (vlan02:network) to {192.168.1.40} -> (vlan02) port 1024:65535 # Game server on its own public address
+nat on wg0 inet from (wg0:network) to {192.168.1.40} -> (wg0) port 1024:65535 # Game server on its own public address
+nat on igc0 inet from (igc0:network) to {192.168.1.40} -> (igc0) port 1024:65535 # Game server on its own public address
+# nat log on igc0 from (vlan01:network) to 198.51.100.0/24 -> 203.0.113.50 # IoT to the vendor cloud from a fixed address (paused)
 # [prio: 600]
 rdr pass on igc0 inet proto tcp from {any} to {(igc0)} port {443} -> $NAS_HOST port 443 # HTTPS to NAS reverse proxy
 nat on igc0 inet proto tcp from (igc0:network) to $NAS_HOST port {443} -> (igc0) port 1024:65535 # HTTPS to NAS reverse proxy
@@ -114,6 +126,7 @@ block in quick on vlan01 inet from {any} to $PAUSED_FEED label "4b0d1c55-9e1a-4f
 # block in quick on vlan02 inet from $PRINTERS to {any} label "4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a03" # Block printers from the internet (not any)
 block in log quick on igc0 inet from $GEO_BLOCK to {any} label "8c3dc3ee-b23e-4170-af5a-5f23b2321d58" # Block inbound from GEO_BLOCK
 pass in quick on igc0 inet proto udp from {any} to {(igc0)} port {51820} keep state label "2064ba71-29e9-4ca4-a655-3069cd2fb19e" # Allow WireGuard
+pass in quick on igc0 inet proto tcp from {any} to {192.168.1.40} port {25565} keep state label "5a7e0c21-3f4b-4d1e-9c2a-6b8d0e1f4a40" # Game server via 1:1 NAT
 pass in quick on igc1 inet from {(igc1:network)} to {any} keep state label "1aac7ca4-2950-47cf-af32-f24f076f55a2" # Default allow LAN to any rule
 pass in quick on igc1 inet6 from {(igc1:network),fe80::/10} to {any} keep state label "7fea0ed1-647a-4a21-ad39-b58e286fffa4" # Default allow LAN IPv6 to any rule
 pass in quick on vlan01 inet proto {tcp udp} from {(vlan01:network)} to {(vlan01)} port {53} keep state label "bf449e1e-69ca-44ef-a21f-104e3a575460" # IoT: allow DNS to firewall

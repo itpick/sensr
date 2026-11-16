@@ -127,6 +127,9 @@ impl Mapper<Document> for SystemMapper {
         if let Some(v) = ctx.text(s, "disablenatreflection") {
             out.nat.reflection.port_forwards = v.trim() != "yes";
         }
+        if let Some(v) = ctx.text(s, "enablebinatreflection") {
+            out.nat.reflection.one_to_one = v.trim() == "yes";
+        }
     }
 
     fn expected_unmapped(&self) -> &'static [(&'static str, &'static str)] {
