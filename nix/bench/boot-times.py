@@ -149,6 +149,8 @@ def one_boot(a, work, n):
             shutil.copy(a.pi5, disk)
             if a.seed:
                 fat(disk, "mcopy", "-o", a.seed, "::sensr/config.xml")
+            if a.seed_keys:
+                fat(disk, "mcopy", "-o", a.seed_keys, "::sensr/authorized_keys")
             ser = f"{work}/router.sock"
             t0 = time.monotonic()
             procs.append(qemu_pi5(disk, work, rnics, ser))
@@ -185,6 +187,7 @@ def main():
     ap.add_argument("--router")
     ap.add_argument("--pi5")
     ap.add_argument("--seed")
+    ap.add_argument("--seed-keys", help="authorized_keys to put in the image's seed folder (--pi5)")
     ap.add_argument("--endpoint", required=True)
     ap.add_argument("--key", required=True)
     ap.add_argument("--boots", type=int, default=5)
