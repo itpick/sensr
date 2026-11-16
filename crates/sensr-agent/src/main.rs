@@ -34,6 +34,10 @@ struct Args {
     /// Seed document committed as revision 1 when the store is empty.
     #[arg(long)]
     seed: Option<PathBuf>,
+    /// First-boot seed folder: a `config.xml` here is imported once onto a
+    /// store that holds only the factory revision.
+    #[arg(long, env = "SENSR_SEED_DIR")]
+    seed_dir: Option<PathBuf>,
     /// Peer uid allowed to act for the principals it authenticated (sensr-api).
     #[arg(long = "trust-uid")]
     trust_uids: Vec<u32>,
@@ -100,6 +104,15 @@ fn seed_store(store: &mut dyn ConfigStore, seed: Option<&PathBuf>) -> anyhow::Re
 
 async fn serve<S: ConfigStore>(args: Args, mut store: S) -> anyhow::Result<()> {
     seed_store(&mut store, args.seed.as_ref())?;
+    if let (Some(seed_dir), Some(state_dir)) = (&args.seed_dir, &args.state_dir) {
+        match sensr_agent::seed::import_seed(&mut store, seed_dir, state_dir) {
+            Ok(outcome) => {
+                tracing::info!(?outcome, seed_dir = %seed_dir.display(), "seed folder checked")
+            }
+            // Keep booting on the factory config; the report says why.
+            Err(e) => tracing::error!(error = %e, "seed import failed"),
+        }
+    }
     let mut trusted_gids = args.trust_gids.clone();
     for name in &args.trust_groups {
         match sensr_agent::agent::group_id(name) {
