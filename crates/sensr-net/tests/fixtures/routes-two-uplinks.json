@@ -1,0 +1,5 @@
+[
+  {"type":"unreachable","dst":"2001:db8:a::/56","dev":"lo","protocol":"dhcp","metric":1024,"flags":[],"expires":86000,"pref":"medium"},
+  {"type":"unreachable","dst":"2001:db8:b::/60","dev":"lo","protocol":"dhcp","metric":1024,"flags":[],"expires":1200,"pref":"medium"},
+  {"dst":"default","gateway":"fe80::1","dev":"wan0","protocol":"ra","metric":1024,"flags":[],"expires":1795,"pref":"medium"}
+]

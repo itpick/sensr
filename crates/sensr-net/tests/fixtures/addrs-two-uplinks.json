@@ -1,0 +1,6 @@
+[
+  {"ifindex":3,"ifname":"lan0","addr_info":[
+    {"family":"inet6","local":"2001:db8:a::1","prefixlen":64,"scope":"global","dynamic":true,"valid_life_time":86000,"preferred_life_time":40000}]},
+  {"ifindex":9,"ifname":"lan9","addr_info":[
+    {"family":"inet6","local":"2001:db8:b:3::1","prefixlen":64,"scope":"global","dynamic":true,"valid_life_time":1200,"preferred_life_time":600}]}
+]

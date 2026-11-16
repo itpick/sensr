@@ -2912,6 +2912,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sensr-net"
+version = "0.0.0"
+dependencies = [
+ "ipnet",
+ "pretty_assertions",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "sensr-rules"
 version = "0.0.0"
 dependencies = [

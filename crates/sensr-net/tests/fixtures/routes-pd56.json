@@ -1,0 +1,13 @@
+[
+  {"type":"unreachable","dst":"2001:db8:1234:ab00::/56","dev":"lo","protocol":"dhcp","metric":1024,"flags":[],"expires":3539,"pref":"medium"},
+  {"dst":"2001:db8:ffff:1::/64","dev":"wan0","protocol":"ra","metric":1024,"flags":[],"expires":1795,"pref":"medium"},
+  {"dst":"2001:db8:1234:ab00::/64","dev":"lan0","protocol":"dhcp","metric":1024,"flags":[],"expires":3539,"pref":"medium"},
+  {"dst":"2001:db8:1234:ab10::/64","dev":"lan1","protocol":"dhcp","metric":1024,"flags":[],"expires":3539,"pref":"medium"},
+  {"dst":"fd00:db8::/64","dev":"lan0","protocol":"kernel","metric":256,"flags":[],"pref":"medium"},
+  {"dst":"fe80::/64","dev":"wan0","protocol":"kernel","metric":256,"flags":[],"pref":"medium"},
+  {"dst":"fe80::/64","dev":"lan0","protocol":"kernel","metric":256,"flags":[],"pref":"medium"},
+  {"dst":"default","gateway":"fe80::1","dev":"wan0","protocol":"ra","metric":1024,"flags":[],"expires":1795,"pref":"medium"},
+  {"type":"unreachable","dst":"2001:db8:dead::/48","dev":"lo","protocol":"static","metric":1024,"flags":[],"pref":"medium"},
+  {"type":"local","dst":"2001:db8:1234:ab00::1","table":"local","dev":"lan0","protocol":"kernel","metric":0,"flags":[],"pref":"medium"},
+  {"type":"multicast","dst":"ff00::/8","table":"local","dev":"lan0","protocol":"kernel","metric":256,"flags":[],"pref":"medium"}
+]
