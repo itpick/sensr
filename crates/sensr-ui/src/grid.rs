@@ -18,6 +18,10 @@ pub enum ColumnKind {
     Bool,
     /// Array shown comma-separated.
     List,
+    /// Address selector (`any`, `net:lan`, `alias:x`, `!…`) shown the OPNsense way.
+    Endpoint,
+    /// Port or port alias; empty means any.
+    Port,
 }
 
 /// One grid column.
@@ -54,6 +58,22 @@ impl Column {
             path,
             label,
             kind: ColumnKind::List,
+        }
+    }
+    /// An address-selector column.
+    pub const fn endpoint(path: &'static str, label: &'static str) -> Self {
+        Self {
+            path,
+            label,
+            kind: ColumnKind::Endpoint,
+        }
+    }
+    /// A port column.
+    pub const fn port(path: &'static str, label: &'static str) -> Self {
+        Self {
+            path,
+            label,
+            kind: ColumnKind::Port,
         }
     }
 }
@@ -131,8 +151,33 @@ impl GridPage {
     }
 }
 
+/// `net:lan` → `LAN net`, `addr:wan` → `WAN address`, `alias:x` → `x`, `any` → `*`.
+pub fn pretty_endpoint(raw: &str) -> String {
+    let (not, rest) = match raw.strip_prefix('!') {
+        Some(r) => ("! ", r),
+        None => ("", raw),
+    };
+    let body = match rest {
+        "" | "any" => "*".to_owned(),
+        "self" | "(self)" => "This Firewall".to_owned(),
+        _ => match rest.split_once(':') {
+            Some(("net", i)) => format!("{} net", i.to_uppercase()),
+            Some(("addr", i)) => format!("{} address", i.to_uppercase()),
+            Some(("alias", a)) => a.to_owned(),
+            _ => rest.to_owned(),
+        },
+    };
+    format!("{not}{body}")
+}
+
 /// Text of a cell as displayed and searched.
 pub fn cell_text(row: &Value, col: &Column) -> String {
+    if matches!(col.kind, ColumnKind::Endpoint | ColumnKind::Port) {
+        let raw = get_path(row, col.path)
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        return pretty_endpoint(raw);
+    }
     match get_path(row, col.path) {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(s)) => s.clone(),
@@ -288,6 +333,15 @@ mod tests {
         (0..30)
             .map(|i| json!({"uuid": format!("u{i}"), "name": format!("host{:02}", 29 - i), "n": i, "enabled": i % 2 == 0, "if": if i < 15 {"lan"} else {"wan"}}))
             .collect()
+    }
+
+    #[test]
+    fn endpoints_read_like_opnsense() {
+        assert_eq!(pretty_endpoint("net:lan"), "LAN net");
+        assert_eq!(pretty_endpoint("!addr:wan"), "! WAN address");
+        assert_eq!(pretty_endpoint("alias:web_ports"), "web_ports");
+        assert_eq!(pretty_endpoint(""), "*");
+        assert_eq!(pretty_endpoint("10.0.0.0/8"), "10.0.0.0/8");
     }
 
     #[test]

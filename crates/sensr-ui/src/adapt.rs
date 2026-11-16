@@ -29,6 +29,11 @@ fn s(v: &Value, path: &str) -> String {
     }
 }
 
+/// Schema fields left at their default are omitted from the document; show the default.
+fn or_default(v: String, default: &str) -> String {
+    if v.is_empty() { default.to_owned() } else { v }
+}
+
 fn b(v: &Value, path: &str, default: bool) -> bool {
     get_path(v, path)
         .and_then(Value::as_bool)
@@ -257,12 +262,12 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
             json!({
                 "enabled": b(item, "enabled", true),
                 "sequence": get_path(item, "sequence").cloned().unwrap_or(json!(1)),
-                "action": s(item, "action"),
+                "action": or_default(s(item, "action"), "pass"),
                 "quick": b(item, "quick", true),
                 "interface": rule_scope(item, "interfaces"),
-                "direction": s(item, "direction"),
-                "ipprotocol": s(item, "ip_protocol"),
-                "protocol": s(item, "protocol"),
+                "direction": or_default(s(item, "direction"), "in"),
+                "ipprotocol": or_default(s(item, "ip_protocol"), "inet"),
+                "protocol": or_default(s(item, "protocol"), "any"),
                 "source": src, "source_port": sport,
                 "destination": dst, "destination_port": dport,
                 "log": b(item, "log", false),
@@ -277,7 +282,7 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
                 "sequence": get_path(item, "sequence").cloned().unwrap_or(json!(1)),
                 "nonat": b(item, "no_nat", false),
                 "interface": s(item, "interface"),
-                "protocol": s(item, "protocol"),
+                "protocol": or_default(s(item, "protocol"), "any"),
                 "source": src,
                 "destination": dst,
                 "target": s(item, "target"),
