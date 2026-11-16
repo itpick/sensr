@@ -215,6 +215,10 @@ pkgs.testers.runNixOSTest {
     IOT = "${net.iot.ip}"
     INTERNET = "${net.internet.host}"
 
+    def hostname_in(source):
+        out = router.succeed(f"sensr config get system.hostname --json --source {source}")
+        return json.loads(out)
+
     def pending(what):
         print(f"PENDING: {what} (nix/pending.nix)")
 
@@ -240,21 +244,19 @@ pkgs.testers.runNixOSTest {
             if PENDING["importApply"]:
                 pending("import + apply of home-router.xml; the network assertions below are skipped")
             else:
-                router.succeed("cp /etc/sensr-slice/home-router.xml /boot/sensr/config.xml")
-                router.succeed("systemctl restart sensr-agent")
-                router.wait_until_succeeds("test -e /boot/sensr/config.xml.applied", timeout=120)
-                print(router.succeed("cat /boot/sensr/import-report.txt"))
+                # The seed-folder path (config.xml read once at first boot)
+                # and the CLI path stage the same import.
+                print(router.succeed("sensr import opnsense /etc/sensr-slice/home-router.xml --report"))
                 # The fixture's peer keys are placeholders; give "phone"
                 # the test key pair's public half (nix/tests/slice/net.nix).
-                router.succeed(
-                    "sensr config set wireguard.peers.phone.pubkey ${net.wg.phonePublic}"
-                    " && sensr apply"
-                )
+                # TODO(importApply): the document path of peer "phone".
+                router.succeed("sensr config set wireguard.peers.phone.pubkey ${net.wg.phonePublic}")
+                router.succeed("sensr config commit -m 'import home-router.xml'")
         if PENDING["configGet"]:
             pending("sensr config get")
         else:
-            doc = json.loads(router.succeed("sensr config get / --json"))
-            assert isinstance(doc, dict)
+            doc = json.loads(router.succeed("sensr config get --json"))
+            assert isinstance(doc, dict), doc
 
     if REFERENCE or not PENDING["importApply"]:
         router.wait_for_unit("multi-user.target")
@@ -336,12 +338,35 @@ pkgs.testers.runNixOSTest {
         if PENDING["commitConfirm"]:
             pending("commit-confirm" + (" (sensr only)" if REFERENCE else ""))
         else:
-            before = router.succeed("sensr config get /system/hostname").strip()
+            if PENDING["importApply"]:
+                # Nothing imported: commit a known revision to come back to.
+                router.succeed("sensr config set system.hostname gw-home")
+                router.succeed("sensr config commit -m 'slice: baseline'")
+            before = hostname_in("head")
             router.succeed("sensr config set system.hostname slice-unconfirmed")
-            router.succeed("sensr apply --confirm-within 20s")
-            router.wait_until_succeeds("hostname | grep -qx slice-unconfirmed", timeout=30)
-            # No confirm: the agent re-applies the previous revision.
-            router.wait_until_succeeds(f"hostname | grep -qx {before}", timeout=90)
-            assert router.succeed("sensr config get /system/hostname").strip() == before
+            router.succeed("sensr config commit --confirm 15 -m 'slice: unconfirmed'")
+            assert hostname_in("head") == "slice-unconfirmed"
+            print(router.succeed("sensr status"))
+            if not PENDING["importApply"]:
+                router.wait_until_succeeds("hostname | grep -qx slice-unconfirmed", timeout=30)
+            # No `sensr config confirm`: the agent goes back to the previous
+            # revision on its own (as a new revision).
+            router.wait_until_succeeds(
+                f"sensr config get system.hostname --json --source head | grep -qx '\"{before}\"'",
+                timeout=90,
+            )
+            print(router.succeed("sensr config history"))
+            if not PENDING["importApply"]:
+                router.wait_until_succeeds(f"hostname | grep -qx {before}", timeout=30)
+
+    with subtest("commit-confirm: a confirmed commit stays"):
+        if PENDING["commitConfirm"]:
+            pending("commit-confirm" + (" (sensr only)" if REFERENCE else ""))
+        else:
+            router.succeed("sensr config set system.hostname slice-confirmed")
+            router.succeed("sensr config commit --confirm 15 -m 'slice: confirmed'")
+            router.succeed("sensr config confirm")
+            router.sleep(25)
+            assert hostname_in("head") == "slice-confirmed"
   '';
 }
