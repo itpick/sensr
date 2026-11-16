@@ -372,25 +372,18 @@ pub fn forward_conf(f: &sn::PortForward, global: &sn::Reflection) -> (Conf, Refl
     if let Some(p) = &f.target_port {
         c.set("local-port", port_token(p));
     }
-    let defaults = match f.reflection {
-        // the schema's per-rule choice decides the helper too
-        Some(ReflectionMode::Enable) => {
-            c.set("natreflection", "enable");
-            c.set("enablenatreflectionhelper", true);
-            ReflectionDefaults::default()
-        }
-        Some(ReflectionMode::Purenat) => {
-            c.set("natreflection", "purenat");
-            ReflectionDefaults::default()
-        }
-        Some(ReflectionMode::Disable) => {
-            c.set("natreflection", "disable");
-            ReflectionDefaults::default()
-        }
-        None => ReflectionDefaults {
-            port_forwards: global.port_forwards,
-            source_nat: global.source_nat,
-        },
+    // Upstream (registerDestinationNatRule): the per-rule choice only sets
+    // `natreflection`; the hairpin helper always follows the global
+    // `reflection_snat`, also for "purenat" rules.
+    match f.reflection {
+        Some(ReflectionMode::Enable) => c.set("natreflection", "enable"),
+        Some(ReflectionMode::Purenat) => c.set("natreflection", "purenat"),
+        Some(ReflectionMode::Disable) => c.set("natreflection", "disable"),
+        None => {}
+    }
+    let defaults = ReflectionDefaults {
+        port_forwards: global.port_forwards,
+        source_nat: global.source_nat,
     };
     (c, defaults)
 }

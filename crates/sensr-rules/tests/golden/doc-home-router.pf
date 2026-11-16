@@ -17,10 +17,15 @@ no rdr on igc1 proto tcp from {any} to {(igc1)} port {80} # Anti-lockout; preven
 no rdr on igc1 proto tcp from {any} to {(igc1)} port {443} # Anti-lockout; prevent redirects for protected ports to this interface address
 # [prio: 600]
 rdr pass on igc0 inet proto tcp from {any} to {(igc0)} port {443} -> $NAS_HOST port 443 # HTTPS to NAS reverse proxy
+nat on igc0 inet proto tcp from (igc0:network) to $NAS_HOST port {443} -> (igc0) port 1024:65535 # HTTPS to NAS reverse proxy
 rdr pass on igc1 inet proto tcp from {any} to {(igc0)} port {443} -> $NAS_HOST port 443 # HTTPS to NAS reverse proxy
+nat on igc1 inet proto tcp from (igc1:network) to $NAS_HOST port {443} -> (igc1) port 1024:65535 # HTTPS to NAS reverse proxy
 rdr pass on vlan01 inet proto tcp from {any} to {(igc0)} port {443} -> $NAS_HOST port 443 # HTTPS to NAS reverse proxy
+nat on vlan01 inet proto tcp from (vlan01:network) to $NAS_HOST port {443} -> (vlan01) port 1024:65535 # HTTPS to NAS reverse proxy
 rdr pass on vlan02 inet proto tcp from {any} to {(igc0)} port {443} -> $NAS_HOST port 443 # HTTPS to NAS reverse proxy
+nat on vlan02 inet proto tcp from (vlan02:network) to $NAS_HOST port {443} -> (vlan02) port 1024:65535 # HTTPS to NAS reverse proxy
 rdr pass on wg0 inet proto tcp from {any} to {(igc0)} port {443} -> $NAS_HOST port 443 # HTTPS to NAS reverse proxy
+nat on wg0 inet proto tcp from (wg0:network) to $NAS_HOST port {443} -> (wg0) port 1024:65535 # HTTPS to NAS reverse proxy
 # [prio: 1]
 # block in log quick inet6 from {any} to {any} label "92c36e7dd6e900eff9263c0c36eaa001" # Block all IPv6
 block in log inet from {any} to {any} label "02f4bab031b57d1e30553ce08e0ec131" # Default deny / state violation rule
