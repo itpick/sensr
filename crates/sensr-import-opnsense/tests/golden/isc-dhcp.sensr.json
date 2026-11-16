@@ -1,0 +1,196 @@
+{
+  "schema_version": "0.1.0",
+  "system": {
+    "hostname": "gw-lab",
+    "domain": "lab.home.example",
+    "dns_servers": [],
+    "dns_allow_override": false,
+    "timezone": "Etc/UTC",
+    "time_servers": [],
+    "ipv6_allow": false,
+    "users": {},
+    "groups": {},
+    "ssh": {
+      "enabled": false,
+      "port": "22",
+      "interfaces": [],
+      "permit_root_login": false,
+      "password_auth": false
+    }
+  },
+  "interfaces": {
+    "wan": {
+      "enabled": true,
+      "role": "wan",
+      "description": "WAN",
+      "device": "igc0",
+      "ipv4": {
+        "mode": "dhcp",
+        "use_gateway": true
+      },
+      "ipv6": {
+        "mode": "none"
+      },
+      "block_private": true,
+      "block_bogons": true,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    },
+    "lan": {
+      "enabled": true,
+      "role": "lan",
+      "description": "LAN",
+      "device": "igc1",
+      "ipv4": {
+        "mode": "static",
+        "address": "192.168.1.1/24"
+      },
+      "ipv6": {
+        "mode": "none"
+      },
+      "block_private": false,
+      "block_bogons": false,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    },
+    "opt1": {
+      "enabled": true,
+      "role": "lan",
+      "description": "LAB",
+      "device": "igc2",
+      "ipv4": {
+        "mode": "static",
+        "address": "192.168.40.1/24"
+      },
+      "ipv6": {
+        "mode": "none"
+      },
+      "block_private": false,
+      "block_bogons": false,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    }
+  },
+  "firewall": {
+    "aliases": {},
+    "rules": {},
+    "settings": {
+      "anti_lockout": true,
+      "log_default_block": true,
+      "log_default_pass": true,
+      "flow_offload": false
+    }
+  },
+  "nat": {
+    "outbound": {
+      "mode": "automatic",
+      "rules": {}
+    },
+    "port_forwards": {},
+    "reflection": {
+      "port_forwards": true,
+      "source_nat": false
+    }
+  },
+  "dhcpv4": {
+    "enabled": true,
+    "interfaces": [
+      "lan",
+      "opt1"
+    ],
+    "valid_lifetime": 4000,
+    "firewall_rules": true,
+    "subnets": {
+      "28697669-3206-807f-bdbc-f252ebb938d2": {
+        "subnet": "192.168.1.0/24",
+        "description": "LAN clients",
+        "interface": "lan",
+        "pools": [
+          "192.168.1.100-192.168.1.199"
+        ],
+        "valid_lifetime": 7200,
+        "auto_options": true,
+        "options": {
+          "dns_servers": [
+            "192.168.1.1"
+          ],
+          "domain_name": "home.example"
+        },
+        "match_client_id": true
+      },
+      "ebaf97d8-15c0-8eec-91eb-70cdda3b5567": {
+        "subnet": "192.168.40.0/24",
+        "interface": "opt1",
+        "pools": [
+          "192.168.40.50-192.168.40.99"
+        ],
+        "valid_lifetime": 7200,
+        "auto_options": true,
+        "options": {
+          "domain_name": "lab.home.example"
+        },
+        "match_client_id": true
+      }
+    },
+    "reservations": {
+      "77af61ff-8ccb-8227-ad75-1da9d65bae18": {
+        "subnet": "28697669-3206-807f-bdbc-f252ebb938d2",
+        "client": {
+          "hw_address": "02:00:5e:10:00:01"
+        },
+        "ip_address": "192.168.1.10",
+        "hostname": "nas",
+        "description": "Storage box"
+      },
+      "77b961ff-8cd3-86ac-ad6b-5da9d653c653": {
+        "subnet": "28697669-3206-807f-bdbc-f252ebb938d2",
+        "client": {
+          "hw_address": "02:00:5e:10:00:02"
+        },
+        "ip_address": "192.168.1.11",
+        "hostname": "printer"
+      },
+      "53eaf237-1e75-812f-8da0-c953ee4eeda8": {
+        "subnet": "ebaf97d8-15c0-8eec-91eb-70cdda3b5567",
+        "client": {
+          "hw_address": "02:00:5e:10:00:40"
+        },
+        "ip_address": "192.168.40.5",
+        "hostname": "bench",
+        "description": "Test bench"
+      }
+    }
+  },
+  "dns": {
+    "enabled": false,
+    "port": "53",
+    "listen_interfaces": [],
+    "outgoing_interfaces": [],
+    "dnssec": false,
+    "dns64": false,
+    "register_dhcp_leases": false,
+    "register_dhcp_static": false,
+    "local_zone_type": "transparent",
+    "forwarding": {
+      "use_system_servers": false,
+      "servers": {}
+    },
+    "host_overrides": {}
+  },
+  "wireguard": {
+    "enabled": false,
+    "servers": {},
+    "peers": {}
+  },
+  "gateways": {
+    "gateways": {},
+    "groups": {}
+  },
+  "trust": {
+    "authorities": {},
+    "certificates": {}
+  }
+}

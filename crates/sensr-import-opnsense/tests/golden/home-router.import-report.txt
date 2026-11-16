@@ -30,7 +30,7 @@
 /opnsense/nat/outbound  <- nat
 /opnsense/nat/rule[@uuid='fc2c1c65-ad69-489b-967c-8ff95e8f2f80']  <- nat
 /opnsense/OPNsense/Firewall/Filter/snatrules/rule[@uuid='7d2b8cc7-2217-4d32-b029-3ba292c7751e']  <- nat
-/opnsense/OPNsense/Kea/dhcp4  <- kea-dhcp4
+/opnsense/OPNsense/Kea/dhcp4  <- kea
 /opnsense/OPNsense/unboundplus  <- unbound
 /opnsense/OPNsense/wireguard  <- wireguard
 /opnsense/ca[@uuid='9a7d8f90-ce35-4ce7-ae7f-952ebd95d44d']  <- trust

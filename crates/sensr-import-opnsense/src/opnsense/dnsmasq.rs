@@ -12,11 +12,51 @@ use sensr_schema::models::interfaces::Ipv4Config;
 use sensr_schema::{Document, Uuid};
 
 use super::common::{description, interface_id, item_uuid, parse_or_warn, stable_uuid};
+use super::dhcp_servers::{Ledger, Server, SharedLedger};
 use crate::mapper::{MapContext, Mapper};
 use crate::report::Severity;
 use crate::tree::Element;
 
-pub struct DnsmasqMapper;
+/// The global settings of the Dnsmasq model (`Dnsmasq.xml`). With dnsmasq disabled
+/// they are leftover form state; enabled, sensr does not model them yet, so they
+/// stay reported.
+const GLOBAL_SETTINGS: &[&str] = &[
+    "regdhcp",
+    "regdhcpstatic",
+    "dhcpfirst",
+    "strict_order",
+    "domain_needed",
+    "no_private_reverse",
+    "no_resolv",
+    "log_queries",
+    "no_hosts",
+    "expand_hosts",
+    "strictbind",
+    "dnssec",
+    "regdhcpdomain",
+    "dns_port",
+    "dns_forward_max",
+    "cache_size",
+    "local_ttl",
+    "add_mac",
+    "add_subnet",
+    "strip_subnet",
+    "no_ident",
+];
+
+pub struct DnsmasqMapper {
+    ledger: SharedLedger,
+}
+
+impl DnsmasqMapper {
+    pub fn new(ledger: SharedLedger) -> Self {
+        Self { ledger }
+    }
+}
+
+fn subnet_id(id: &sensr_schema::fields::InterfaceId) -> Uuid {
+    stable_uuid(&format!("dnsmasq-subnet:{id}"))
+}
 
 impl Mapper<Document> for DnsmasqMapper {
     fn name(&self) -> &'static str {
@@ -31,7 +71,7 @@ impl Mapper<Document> for DnsmasqMapper {
         let enabled = ctx.flag(s, "enable");
         if let Some(p) = s.child("port") {
             ctx.consume(p);
-            if p.text().trim() != "0" {
+            if enabled && p.text().trim() != "0" {
                 ctx.warn(
                     p,
                     Severity::Info,
@@ -53,7 +93,7 @@ impl Mapper<Document> for DnsmasqMapper {
                 continue; // DHCPv6 / RA: reported.
             }
             ctx.consume(r);
-            if let Some(id) = range(r, ctx, out) {
+            if let Some(id) = range(r, ctx, out, &mut self.ledger.borrow_mut()) {
                 served.push(id);
             } else {
                 ctx.release(r);
@@ -61,11 +101,12 @@ impl Mapper<Document> for DnsmasqMapper {
         }
         for h in s.children_named("hosts") {
             ctx.consume(h);
-            if !host(h, ctx, out) {
+            if !host(h, ctx, out, &mut self.ledger.borrow_mut()) {
                 ctx.release(h);
             }
         }
         if enabled && !served.is_empty() {
+            self.ledger.borrow_mut().activate(Server::Dnsmasq);
             out.dhcpv4.enabled = true;
             for id in served {
                 if !out.dhcpv4.interfaces.contains(&id) {
@@ -73,8 +114,18 @@ impl Mapper<Document> for DnsmasqMapper {
                 }
             }
         }
+        if !enabled {
+            for name in GLOBAL_SETTINGS {
+                for c in s.children_named(name) {
+                    ctx.consume_subtree(c);
+                }
+            }
+        }
         if let Some(d) = s.child("dhcp") {
             ctx.consume(d);
+            if !enabled {
+                ctx.consume_subtree(d);
+            }
             ctx.defaults(
                 d,
                 &[
@@ -100,6 +151,7 @@ fn range<'doc>(
     r: &'doc Element,
     ctx: &mut MapContext<'doc>,
     out: &mut Document,
+    ledger: &mut Ledger,
 ) -> Option<sensr_schema::fields::InterfaceId> {
     let if_el = ctx.child(r, "interface")?;
     let id = interface_id(out, if_el.text().trim())?;
@@ -138,7 +190,7 @@ fn range<'doc>(
         ],
     );
     // One subnet per interface; further ranges add pools to it.
-    let subnet_id = stable_uuid(&format!("dnsmasq-subnet:{id}"));
+    let subnet_id = subnet_id(&id);
     match out.dhcpv4.subnets.get_mut(&subnet_id) {
         Some(s) => s.pools.push(pool),
         None => {
@@ -148,12 +200,18 @@ fn range<'doc>(
             s.valid_lifetime = lease;
             s.description = descr;
             out.dhcpv4.subnets.insert(subnet_id, s);
+            ledger.subnet(Server::Dnsmasq, subnet_id, ctx.xpath(r));
         }
     }
     Some(id)
 }
 
-fn host<'doc>(h: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Document) -> bool {
+fn host<'doc>(
+    h: &'doc Element,
+    ctx: &mut MapContext<'doc>,
+    out: &mut Document,
+    ledger: &mut Ledger,
+) -> bool {
     let id = item_uuid(ctx, h);
     let Some(mac) = ctx.non_empty(h, "hwaddr") else {
         return false;
@@ -165,7 +223,11 @@ fn host<'doc>(h: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Document) 
     let Some(IpAddr::V4(ip)) = ip else {
         return false;
     };
-    let Some((subnet, _)) = out.dhcpv4.subnet_for(ip) else {
+    // dnsmasq's own range subnet first: another server may define the same network.
+    let own = out.dhcpv4.subnets.iter().find(|(sid, s)| {
+        s.subnet.contains(&ip) && s.interface.as_ref().is_some_and(|i| **sid == subnet_id(i))
+    });
+    let Some((subnet, _)) = own.or_else(|| out.dhcpv4.subnet_for(ip)) else {
         ctx.warn(
             h,
             Severity::Invalid,
@@ -194,6 +256,7 @@ fn host<'doc>(h: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Document) 
             ("aliases", ""),
         ],
     );
+    ledger.reservation(Server::Dnsmasq, id, ctx.xpath(h));
     out.dhcpv4.reservations.insert(
         id,
         Reservation4 {
