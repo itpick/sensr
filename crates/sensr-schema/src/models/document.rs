@@ -14,6 +14,7 @@ use super::firewall::{AliasType, Endpoint, FilterRule, Firewall};
 use super::gateways::Gateways;
 use super::interfaces::{Interface, InterfaceRole, Interfaces, Ipv4Config, Ipv6Config};
 use super::nat::Nat;
+use super::ntp::Ntp;
 use super::routes::Routes;
 use super::system::System;
 use super::trust::Trust;
@@ -117,11 +118,13 @@ pub enum Section {
     Dhcpv6,
     /// `router_advertisements`.
     RouterAdvertisements,
+    /// `ntp`.
+    Ntp,
 }
 
 impl Section {
     /// Every section, in document order.
-    pub const ALL: [Section; 14] = [
+    pub const ALL: [Section; 15] = [
         Self::System,
         Self::Interfaces,
         Self::Firewall,
@@ -136,6 +139,7 @@ impl Section {
         Self::VirtualIps,
         Self::Dhcpv6,
         Self::RouterAdvertisements,
+        Self::Ntp,
     ];
 
     /// The section's key in the JSON document.
@@ -155,6 +159,7 @@ impl Section {
             Self::VirtualIps => "virtual_ips",
             Self::Dhcpv6 => "dhcpv6",
             Self::RouterAdvertisements => "router_advertisements",
+            Self::Ntp => "ntp",
         }
     }
 }
@@ -209,6 +214,9 @@ pub struct Document {
     /// Router advertisements (omitted while empty).
     #[serde(default, skip_serializing_if = "RouterAdvertisements::is_empty")]
     pub router_advertisements: RouterAdvertisements,
+    /// NTP service (omitted while at defaults).
+    #[serde(default, skip_serializing_if = "Ntp::is_empty")]
+    pub ntp: Ntp,
 }
 
 impl Default for Document {
@@ -229,6 +237,7 @@ impl Default for Document {
             virtual_ips: VirtualIps::default(),
             dhcpv6: Dhcpv6::default(),
             router_advertisements: RouterAdvertisements::default(),
+            ntp: Ntp::default(),
         }
     }
 }
@@ -334,6 +343,8 @@ impl Document {
         self.dhcpv6.validate(self, &root.join("dhcpv6"), &mut out);
         self.router_advertisements
             .validate(self, &root.join("router_advertisements"), &mut out);
+        self.ntp
+            .validate_with(&self.system.time_servers, self, &root.join("ntp"), &mut out);
         out
     }
 
@@ -364,6 +375,7 @@ impl Document {
                 Section::RouterAdvertisements => {
                     self.router_advertisements != other.router_advertisements
                 }
+                Section::Ntp => self.ntp != other.ntp,
             })
             .collect()
     }

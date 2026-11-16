@@ -25,6 +25,7 @@ else bumps `SCHEMA_VERSION` and ships a migration.
 | `virtual_ips` | `devices::VirtualIps` (IP alias, proxy ARP, CARP/VRRP; omitted while empty) | `Interfaces/Vip.xml` |
 | `dhcpv6` | `dhcpv6::Dhcpv6` (static or dynamic-prefix subnets, pools, DUID/MAC reservations, PD pools; omitted while unconfigured) | `Kea/KeaDhcpv6.xml` |
 | `router_advertisements` | `dhcpv6::RouterAdvertisements` (per-interface RA mode, RDNSS/DNSSL, intervals, NAT64 prefix) | `Radvd/Radvd.xml` |
+| `ntp` | `ntp::Ntp` (serve, listen interfaces, per-server prefer/noselect/iburst/pool/NTS flags, orphan stratum; servers themselves are `system.time_servers`) | `ntpd` section |
 | `routes` | `routes::Routes` (static routes to gateways by name; omitted while empty) | `Routes/Route.xml` (`staticroutes`) |
 
 ## Text grammars

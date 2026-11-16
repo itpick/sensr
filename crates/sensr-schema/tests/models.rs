@@ -1020,6 +1020,64 @@ fn dhcpv6_and_router_advertisements() {
 }
 
 #[test]
+fn ntp_settings() {
+    let mut doc = Document::factory();
+    doc.set_by_path(
+        "system.time_servers",
+        json!(["0.pool.ntp.org", "time.cloudflare.com"]),
+    )
+    .unwrap();
+    doc.set_by_path(
+        "ntp",
+        json!({"serve": true, "listen_interfaces": ["lan"], "servers": [
+        {"host": "0.pool.ntp.org", "pool": true, "iburst": true},
+        {"host": "time.cloudflare.com", "nts": true, "prefer": true}
+    ], "orphan_stratum": 10}),
+    )
+    .unwrap();
+    let v = doc.validate();
+    assert!(v.is_ok(), "{v}");
+    assert!(
+        doc.ntp
+            .options(&"time.cloudflare.com".parse().unwrap())
+            .unwrap()
+            .nts
+    );
+    doc.set_by_path(
+        "ntp.servers",
+        json!([
+            {"host": "ntp.example.org"},
+            {"host": "0.pool.ntp.org", "prefer": true, "no_select": true},
+            {"host": "0.pool.ntp.org"}
+        ]),
+    )
+    .unwrap();
+    doc.set_by_path("ntp.orphan_stratum", json!(16)).unwrap();
+    let v = doc.validate();
+    assert_eq!(
+        messages(&v, "ntp.servers.0.host"),
+        ["ntp.example.org is not one of the configured time servers."]
+    );
+    assert_eq!(
+        messages(&v, "ntp.servers.1"),
+        ["A server cannot be both preferred and never selected."]
+    );
+    assert_eq!(
+        messages(&v, "ntp.servers.2.host"),
+        ["Duplicate entry exists."]
+    );
+    assert_eq!(
+        messages(&v, "ntp.orphan_stratum"),
+        ["Please specify a value between 1 and 15."]
+    );
+    assert!(
+        !serde_json::to_string(&Document::factory())
+            .unwrap()
+            .contains("\"ntp\"")
+    );
+}
+
+#[test]
 fn system_rules() {
     let mut doc = Document::factory();
     let user = User {
