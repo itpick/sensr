@@ -1,0 +1,5 @@
+error: no field `nope` in this model
+ --> tests/ui/unknown_constraint_field.rs:4:25
+  |
+4 |     #[sensr(depend(with(nope)))]
+  |                         ^^^^

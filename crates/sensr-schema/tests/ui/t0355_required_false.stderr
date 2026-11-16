@@ -1,0 +1,5 @@
+error: lint-model rule 8: required = false is the default; leave it out
+ --> tests/ui/t0355_required_false.rs:4:24
+  |
+4 |     #[sensr(required = false)]
+  |                        ^^^^^

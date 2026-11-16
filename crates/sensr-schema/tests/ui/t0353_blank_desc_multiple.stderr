@@ -1,0 +1,5 @@
+error: lint-model rule 6: blank_desc does not apply to a multiple field
+ --> tests/ui/t0353_blank_desc_multiple.rs:4:36
+  |
+4 |     #[sensr(multiple, blank_desc = "Pick some")]
+  |                                    ^^^^^^^^^^^
