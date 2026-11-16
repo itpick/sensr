@@ -280,6 +280,9 @@ in
     networking.useNetworkd = true;
     networking.useDHCP = false;
     systemd.network.enable = true;
+    # Unbound (rendered by the agent) is the resolver and listens on :53 on
+    # every interface; resolved's stub listener would hold the port.
+    services.resolved.settings.Resolve.DNSStubListener = "no";
     # Routing is the product; the agent still owns per-interface sysctls.
     boot.kernel.sysctl = {
       "net.ipv4.ip_forward" = mkDefault 1;
@@ -475,8 +478,11 @@ in
         ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
         Restart = "on-failure";
         DynamicUser = true;
+        # Kea refuses a control-socket directory looser than 0750
         StateDirectory = "kea";
+        StateDirectoryMode = "0750";
         RuntimeDirectory = "kea";
+        RuntimeDirectoryMode = "0750";
         AmbientCapabilities = [
           "CAP_NET_BIND_SERVICE"
           "CAP_NET_RAW"
@@ -496,7 +502,13 @@ in
       partOf = [ "sensr-agent.service" ];
       unitConfig.ConditionPathExists = "${runtimeDir}/unbound/unbound.conf";
       serviceConfig = commonHardening // {
-        ExecStartPre = "${pkgs.unbound}/bin/unbound-checkconf ${runtimeDir}/unbound/unbound.conf";
+        ExecStartPre = [
+          # the DNSSEC root anchor lives in the state directory; seed it from
+          # unbound's built-in anchor (no network needed), "-": exit 1 means
+          # "used the built-in anchor"
+          "-${pkgs.unbound}/bin/unbound-anchor -a /var/lib/unbound/root.key"
+          "${pkgs.unbound}/bin/unbound-checkconf ${runtimeDir}/unbound/unbound.conf"
+        ];
         ExecStart = "${pkgs.unbound}/bin/unbound -d -p -c ${runtimeDir}/unbound/unbound.conf";
         ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
         Restart = "on-failure";

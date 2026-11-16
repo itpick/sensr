@@ -52,8 +52,8 @@ server:
   domain-insecure: "corp.example"
   private-domain: "corp.example"
 
-  # Registered DHCP leases
-  include: "/var/lib/unbound/dhcp-leases.conf"
+  # Registered DHCP leases (sensr keeps the file next to this one)
+  include: "/run/sensr/unbound/dhcp-leases.conf"
   tls-cert-bundle: "/etc/ssl/certs/ca-certificates.crt"
 
 forward-zone:

@@ -301,7 +301,10 @@ pkgs.testers.runNixOSTest {
             out = lan.wait_until_succeeds("dig +short @${net.lan.router} nas.home.example A", timeout=30)
             assert out.strip() == NAS, out
             out = lan.succeed("dig +short @${net.lan.router} gw-home.home.example A")
-            assert out.strip() == "${net.lan.router}", out
+            # OPNsense also registers the firewall's own name for every
+            # interface address (unbound.inc unbound_add_host_entries), so
+            # the LAN address is one of several answers.
+            assert "${net.lan.router}" in out.split(), out
             # IoT may ask the firewall for DNS (rule seq 200).
             out = iot.succeed("dig +short +time=3 @${net.iot.router} cloud.home.example A")
             assert out.strip() == NAS, out

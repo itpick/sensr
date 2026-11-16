@@ -36,6 +36,8 @@ IPv6SendRA=yes
 [DHCPv4]
 UseGateway={{ item.dhcp4.use_gateway }}
 UseRoutes={{ item.dhcp4.use_gateway }}
+# below networkd's default 1024: a WAN's lease wins over any other DHCP link
+RouteMetric=100
 UseDNS=no
 {% if item.dhcp4.hostname %}
 Hostname={{ item.dhcp4.hostname }}

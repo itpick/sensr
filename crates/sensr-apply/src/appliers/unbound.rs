@@ -318,10 +318,16 @@ pub enum RenderError {
 pub const MODULE: Module = Module {
     name: "unbound",
     dir: "run/sensr/unbound",
-    templates: &[(
-        "unbound.conf",
-        include_str!("../../templates/unbound/unbound.conf"),
-    )],
+    templates: &[
+        (
+            "unbound.conf",
+            include_str!("../../templates/unbound/unbound.conf"),
+        ),
+        (
+            "dhcp-leases.conf",
+            include_str!("../../templates/unbound/dhcp-leases.conf"),
+        ),
+    ],
     targets: include_str!("../../templates/unbound/TARGETS"),
 };
 
@@ -357,8 +363,12 @@ pub(crate) mod tests {
         let mut t = Templates::empty();
         t.register(MODULE).unwrap();
         let out = m.render(&t).unwrap();
-        assert_eq!(out.len(), 1);
-        out[0].contents.clone()
+        assert_eq!(out.len(), 2, "unbound.conf + the lease include");
+        out.iter()
+            .find(|r| r.dest.ends_with("unbound.conf"))
+            .unwrap()
+            .contents
+            .clone()
     }
 
     fn dot(mut m: UnboundModel) -> UnboundModel {
@@ -424,12 +434,16 @@ pub(crate) mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("dhcp-leases.conf"), "").unwrap();
+        let include = dir.path().join("dhcp-leases.conf");
         for (label, mut m) in [("recursive", model()), ("dot", dot(model()))] {
             m.directory = dir.path().to_owned();
             m.control_socket = dir.path().join("ctl");
             // Unprivileged: no user switch, no fixed listen addresses.
             m.listen.clear();
-            let conf = render(&m);
+            let conf = render(&m).replace(
+                "/run/sensr/unbound/dhcp-leases.conf",
+                &include.display().to_string(),
+            );
             let f = dir.path().join("unbound.conf");
             std::fs::write(&f, conf).unwrap();
             let msg = check(&SystemRunner, &f).unwrap().unwrap();

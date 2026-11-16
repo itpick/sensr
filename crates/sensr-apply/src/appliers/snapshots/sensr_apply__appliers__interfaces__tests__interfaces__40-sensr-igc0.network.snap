@@ -17,6 +17,8 @@ LinkLocalAddressing=ipv6
 [DHCPv4]
 UseGateway=yes
 UseRoutes=yes
+# below networkd's default 1024: a WAN's lease wins over any other DHCP link
+RouteMetric=100
 UseDNS=no
 
 [DHCPv6]
