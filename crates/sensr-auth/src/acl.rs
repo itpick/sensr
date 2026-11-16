@@ -192,7 +192,12 @@ impl Registry {
         r.insert(
             "page-sensr-status",
             "sensr: Status (native API)",
-            &["api/v1/status"],
+            &["api/v1/status", "api/v1/status/*"],
+        );
+        r.insert(
+            "page-status-gateways",
+            "Status: Gateways",
+            &["ui/routing/gateways/status", "api/routes/gateway/status"],
         );
         r
     }

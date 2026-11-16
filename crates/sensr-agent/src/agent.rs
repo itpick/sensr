@@ -956,6 +956,7 @@ impl<A: Applier> Agent<A> {
                 }
                 self.stage(inner, &base, doc)
             }
+            Op::Runtime { section } => Ok(Response::Value(inner.applier.runtime(section))),
         }
     }
 
@@ -1133,6 +1134,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::WebListener => "web_listener",
         Op::Nics => "nics",
         Op::InterfacesAssign { .. } => "interfaces.assign",
+        Op::Runtime { .. } => "runtime",
     }
 }
 

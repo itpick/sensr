@@ -24,6 +24,48 @@ pub struct Gateways {
     /// Failover / load-balancing groups of gateways.
     #[serde(default)]
     pub groups: ArrayField<GatewayGroup>,
+    /// Move the default route to the next candidate when the default
+    /// gateway goes down (OPNsense `system/gw_switch_default`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub switch_default: bool,
+}
+
+/// Probe timing and alarm thresholds (OPNsense dpinger settings); `None`
+/// keeps OPNsense's default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MonitorThresholds {
+    /// Latency (ms) above which the gateway is "delay" (default 200).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_low: Option<u32>,
+    /// Latency (ms) above which the gateway is down (default 500).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_high: Option<u32>,
+    /// Loss (%) above which the gateway is "loss" (default 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss_low: Option<u32>,
+    /// Loss (%) above which the gateway is down (default 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss_high: Option<u32>,
+    /// Seconds between probes (default 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<u32>,
+    /// Seconds after which an unanswered probe is lost (default 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss_interval: Option<u32>,
+    /// Seconds of history averaged (default 60).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_period: Option<u32>,
+    /// Probe payload bytes (default 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_length: Option<u32>,
+}
+
+impl MonitorThresholds {
+    /// True when every value is the default.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 impl Gateways {
@@ -77,6 +119,12 @@ pub struct Gateway {
     /// Share of traffic in a load-balancing group, 1 to 10.
     #[serde(default = "one")]
     pub weight: u8,
+    /// Treat the gateway as down regardless of probes (`force_down`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force_down: bool,
+    /// Probe timing and thresholds.
+    #[serde(default, skip_serializing_if = "MonitorThresholds::is_default")]
+    pub thresholds: MonitorThresholds,
 }
 
 fn default_priority() -> u8 {
@@ -182,6 +230,31 @@ impl Validate for Gateways {
                 );
             }
             check::range(g.weight, 1..=10, &p.join("weight"), out);
+            let t = &g.thresholds;
+            let pair = |lo: Option<u32>, hi: Option<u32>, dlo: u32, dhi: u32| {
+                lo.unwrap_or(dlo) < hi.unwrap_or(dhi)
+            };
+            if !pair(t.latency_low, t.latency_high, 200, 500) {
+                out.add(
+                    &p.join("thresholds"),
+                    ValidatorKind::Callback,
+                    "The low latency threshold must be below the high one.",
+                );
+            }
+            if !pair(t.loss_low, t.loss_high, 10, 20) || t.loss_high.is_some_and(|h| h > 100) {
+                out.add(
+                    &p.join("thresholds"),
+                    ValidatorKind::Callback,
+                    "Loss thresholds must be percentages with the low one below the high one.",
+                );
+            }
+            if t.interval == Some(0) || t.time_period == Some(0) || t.loss_interval == Some(0) {
+                out.add(
+                    &p.join("thresholds"),
+                    ValidatorKind::Callback,
+                    "Probe intervals and the time period must be at least one second.",
+                );
+            }
         }
         for (id, grp) in &self.groups {
             let p = groups.join(id);

@@ -43,7 +43,7 @@ fn parse_path(p: &str) -> Result<ConfigPath, ApiError> {
         .map_err(|e| bad(format!("bad config path {p:?}: {e}")))
 }
 
-async fn call(state: &AppState, caller: &Caller, op: Op) -> Result<Response, ApiError> {
+pub(crate) async fn call(state: &AppState, caller: &Caller, op: Op) -> Result<Response, ApiError> {
     Ok(state.agent.call(caller.principal(), op).await?)
 }
 
@@ -274,6 +274,25 @@ pub async fn assign(
 ) -> ApiResult {
     match call(&state, &caller, Op::InterfacesAssign { assignments }).await? {
         Response::Staged { dirty } => Ok(to_json(&serde_json::json!({ "dirty": dirty }))),
+/// `GET /api/v1/status/{gateways|aliases|ipv6}`: run-time state.
+pub async fn runtime(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    axum::extract::Path(section): axum::extract::Path<String>,
+) -> ApiResult {
+    let section = match section.as_str() {
+        "gateways" => sensr_ipc::RuntimeSection::Gateways,
+        "aliases" => sensr_ipc::RuntimeSection::Aliases,
+        "ipv6" => sensr_ipc::RuntimeSection::Ipv6,
+        other => {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                format!("no run-time section {other:?}"),
+            ));
+        }
+    };
+    match call(&state, &caller, Op::Runtime { section }).await? {
+        Response::Value(v) => Ok(Json(v.unwrap_or(serde_json::Value::Null))),
         other => Err(unexpected(other)),
     }
 }

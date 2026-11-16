@@ -70,8 +70,7 @@
 /opnsense/OPNsense/Syslog  (remote syslog is not modelled yet)
 /opnsense/OPNsense/trust  (trust store settings are not modelled yet)
 
-## unmapped, unexpected (3)
-/opnsense/system/gw_switch_default
+## unmapped, unexpected (2)
 /opnsense/system/dns1gw
 /opnsense/system/dns2gw
 
