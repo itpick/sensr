@@ -258,58 +258,6 @@ pub async fn alias_search(
     Ok(Json(recordset(rows, &q.merge(body.map(|Json(b)| b)))))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn rows(n: usize) -> Vec<Value> {
-        (0..n)
-            .map(|i| json!({"name": format!("alias{i}"), "type": "host"}))
-            .collect()
-    }
-
-    #[test]
-    fn gateway_widget_shape() {
-        let view = json!({"gateways": [
-            {"name": "WAN_DHCP", "next_hop": "192.0.2.1", "status_text": "none", "latency_ms": 4.25, "stddev_ms": 0.5, "loss_pct": 0.0, "active_default": true},
-            {"name": "WAN_DHCP6", "next_hop": null, "status_text": "down"}
-        ]});
-        let v = gateway_items(&view);
-        assert_eq!(v["items"][0]["status_translated"], "Online");
-        assert_eq!(v["items"][0]["delay"], "4.2 ms");
-        assert_eq!(v["items"][1]["status_translated"], "Offline");
-        assert_eq!(v["items"][1]["loss"], "~");
-    }
-
-    #[test]
-    fn paging_and_search() {
-        let all = recordset(rows(25), &SearchParams::default());
-        assert_eq!(
-            (all["total"].as_i64(), all["rowCount"].as_i64()),
-            (Some(25), Some(25))
-        );
-        let p = SearchParams {
-            current: Some(3),
-            row_count: Some(10),
-            search_phrase: None,
-        };
-        let page = recordset(rows(25), &p);
-        assert_eq!(page["rowCount"], 5);
-        assert_eq!(page["rows"][0]["name"], "alias20");
-        let p = SearchParams {
-            search_phrase: Some("ALIAS1 host".into()),
-            ..SearchParams::default()
-        };
-        // alias1, alias10..alias19
-        assert_eq!(recordset(rows(25), &p)["total"], 11);
-        let p = SearchParams {
-            row_count: Some(-1),
-            ..SearchParams::default()
-        };
-        assert_eq!(recordset(rows(3), &p)["rowCount"], 3);
-    }
-}
-
 /// `GET /api/routes/gateway/status` (dashboard Gateways widget): OPNsense's
 /// shape, `{"items": [{name, address, status, status_translated, loss,
 /// delay, stddev, monitor}], "status": "ok"}`.
@@ -364,4 +312,56 @@ pub fn gateway_items(view: &Value) -> Value {
         })
         .unwrap_or_default();
     json!({"items": items, "status": "ok"})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(n: usize) -> Vec<Value> {
+        (0..n)
+            .map(|i| json!({"name": format!("alias{i}"), "type": "host"}))
+            .collect()
+    }
+
+    #[test]
+    fn gateway_widget_shape() {
+        let view = json!({"gateways": [
+            {"name": "WAN_DHCP", "next_hop": "192.0.2.1", "status_text": "none", "latency_ms": 4.25, "stddev_ms": 0.5, "loss_pct": 0.0, "active_default": true},
+            {"name": "WAN_DHCP6", "next_hop": null, "status_text": "down"}
+        ]});
+        let v = gateway_items(&view);
+        assert_eq!(v["items"][0]["status_translated"], "Online");
+        assert_eq!(v["items"][0]["delay"], "4.2 ms");
+        assert_eq!(v["items"][1]["status_translated"], "Offline");
+        assert_eq!(v["items"][1]["loss"], "~");
+    }
+
+    #[test]
+    fn paging_and_search() {
+        let all = recordset(rows(25), &SearchParams::default());
+        assert_eq!(
+            (all["total"].as_i64(), all["rowCount"].as_i64()),
+            (Some(25), Some(25))
+        );
+        let p = SearchParams {
+            current: Some(3),
+            row_count: Some(10),
+            search_phrase: None,
+        };
+        let page = recordset(rows(25), &p);
+        assert_eq!(page["rowCount"], 5);
+        assert_eq!(page["rows"][0]["name"], "alias20");
+        let p = SearchParams {
+            search_phrase: Some("ALIAS1 host".into()),
+            ..SearchParams::default()
+        };
+        // alias1, alias10..alias19
+        assert_eq!(recordset(rows(25), &p)["total"], 11);
+        let p = SearchParams {
+            row_count: Some(-1),
+            ..SearchParams::default()
+        };
+        assert_eq!(recordset(rows(3), &p)["rowCount"], 3);
+    }
 }
