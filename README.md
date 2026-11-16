@@ -4,9 +4,16 @@ A firewall and router OS written in Rust on NixOS. The goal is feature parity wi
 [OPNsense](https://opnsense.org/), including its Business Edition features, plus
 atomic upgrades, rollback and a typed, tested configuration model.
 
-**Status: planning.** Nothing is runnable yet. Start with the plan in [`docs/PLAN.md`](docs/PLAN.md).
+**Status: in development.** No images have been released yet. Start with the plan in [`docs/PLAN.md`](docs/PLAN.md).
+If you need a router today, use [opnsense-pi](https://github.com/itpick/opnsense-pi) or [vyos-pi](https://github.com/itpick/vyos-pi).
 
 **Install page:** https://itpick.github.io/sensr/ (images are listed there once released)
+
+**Related projects:**
+- [opnsense-pi](https://github.com/itpick/opnsense-pi) ([download page](https://itpick.github.io/opnsense-pi/)): OPNsense images for Raspberry Pi 4/5
+- [vyos-pi](https://github.com/itpick/vyos-pi) ([download page](https://itpick.github.io/vyos-pi/)): VyOS images for Raspberry Pi 4/5
+- [OPNsense vs VyOS on the Pi 5](https://github.com/itpick/vyos-pi/blob/main/docs/comparison/pi5-iperf-vyos-vs-opnsense.md): side-by-side speed and boot-time results
+- [Performance evaluation](docs/research/07-performance-evaluation.md): OPNsense, VyOS and a NixOS + Rust prototype compared on forwarding, boot and config apply
 
 ## Why
 
