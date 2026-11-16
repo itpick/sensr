@@ -1,0 +1,186 @@
+{
+  "schema_version": "0.1.0",
+  "system": {
+    "hostname": "gw",
+    "domain": "home.example",
+    "dns_servers": [
+      "2001:db8:53::53"
+    ],
+    "dns_allow_override": false,
+    "timezone": "America/Chicago",
+    "time_servers": [],
+    "ipv6_allow": true,
+    "users": {},
+    "groups": {},
+    "ssh": {
+      "enabled": false,
+      "port": "22",
+      "interfaces": [],
+      "permit_root_login": false,
+      "password_auth": false
+    }
+  },
+  "interfaces": {
+    "wan": {
+      "enabled": true,
+      "role": "wan",
+      "description": "FIBRE",
+      "device": "igc0",
+      "spoof_mac": "02:00:5e:10:20:30",
+      "ipv4": {
+        "mode": "dhcp",
+        "reject_from": [
+          "192.168.1.254"
+        ],
+        "use_gateway": true,
+        "vendor_class": "sensr-test",
+        "send_options": [
+          {
+            "code": 125,
+            "value": {
+              "hex": "00:00:0d:e9:04:01:02:03:04"
+            }
+          }
+        ],
+        "request_options": [
+          1,
+          3,
+          6,
+          121
+        ]
+      },
+      "ipv6": {
+        "mode": "dhcp6",
+        "prefix_delegation_len": 60,
+        "send_prefix_hint": true,
+        "prefix_only": false,
+        "rapid_commit": true,
+        "duid": "00:03:00:01:02:00:5e:10:20:30",
+        "send_release": false
+      },
+      "block_private": true,
+      "block_bogons": true,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    },
+    "lan": {
+      "enabled": true,
+      "role": "lan",
+      "description": "LAN",
+      "device": "igc1",
+      "ipv4": {
+        "mode": "static",
+        "address": "192.168.1.1/24"
+      },
+      "ipv6": {
+        "mode": "track",
+        "interface": "wan",
+        "prefix_id": 0
+      },
+      "block_private": false,
+      "block_bogons": false,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    },
+    "opt1": {
+      "enabled": true,
+      "role": "lan",
+      "description": "KIDS",
+      "device": "igc2",
+      "ipv4": {
+        "mode": "static",
+        "address": "192.168.2.1/24"
+      },
+      "ipv6": {
+        "mode": "track",
+        "interface": "wan",
+        "prefix_id": 1
+      },
+      "block_private": false,
+      "block_bogons": false,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    },
+    "opt2": {
+      "enabled": true,
+      "role": "lan",
+      "description": "LAB",
+      "device": "igc3",
+      "ipv4": {
+        "mode": "static",
+        "address": "192.168.3.1/24"
+      },
+      "ipv6": {
+        "mode": "track",
+        "interface": "wan",
+        "prefix_id": 10
+      },
+      "block_private": false,
+      "block_bogons": false,
+      "qdisc": {
+        "type": "fq_codel"
+      }
+    }
+  },
+  "firewall": {
+    "aliases": {},
+    "rules": {},
+    "settings": {
+      "anti_lockout": true,
+      "log_default_block": true,
+      "log_default_pass": true,
+      "flow_offload": false
+    }
+  },
+  "nat": {
+    "outbound": {
+      "mode": "automatic",
+      "rules": {}
+    },
+    "port_forwards": {},
+    "reflection": {
+      "port_forwards": true,
+      "source_nat": false
+    }
+  },
+  "dhcpv4": {
+    "enabled": false,
+    "interfaces": [],
+    "valid_lifetime": 4000,
+    "firewall_rules": true,
+    "subnets": {},
+    "reservations": {}
+  },
+  "dns": {
+    "enabled": true,
+    "port": "53",
+    "listen_interfaces": [],
+    "outgoing_interfaces": [],
+    "dnssec": false,
+    "dns64": false,
+    "register_dhcp_leases": false,
+    "register_dhcp_static": false,
+    "local_zone_type": "transparent",
+    "forwarding": {
+      "use_system_servers": false,
+      "servers": {}
+    },
+    "host_overrides": {}
+  },
+  "wireguard": {
+    "enabled": false,
+    "servers": {},
+    "peers": {}
+  },
+  "gateways": {
+    "gateways": {},
+    "groups": {}
+  },
+  "trust": {
+    "authorities": {},
+    "certificates": {}
+  }
+}

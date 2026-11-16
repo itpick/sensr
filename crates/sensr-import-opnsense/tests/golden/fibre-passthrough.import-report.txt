@@ -1,0 +1,23 @@
+# sensr import report
+
+## mapped (4)
+/opnsense/system  <- system
+/opnsense/OPNsense/Interfaces/settings  <- interfaces
+/opnsense/interfaces  <- interfaces
+/opnsense/OPNsense/unboundplus  <- unbound
+
+## unmapped, expected (4)
+/opnsense/OPNsense/Interfaces/settings/disablechecksumoffloading  (FreeBSD NIC offload tuning; Linux keeps the driver's offloads)
+/opnsense/OPNsense/Interfaces/settings/disablesegmentationoffloading  (FreeBSD NIC offload tuning; Linux keeps the driver's offloads)
+/opnsense/OPNsense/Interfaces/settings/disablelargereceiveoffloading  (FreeBSD NIC offload tuning; Linux keeps the driver's offloads)
+/opnsense/OPNsense/Interfaces/settings/disablevlanhwfilter  (FreeBSD VLAN hardware filter tuning; Linux keeps the driver's setting)
+
+## unmapped, unexpected (0)
+
+## warnings (6)
+[info] /opnsense/interfaces/wan/if: device igc0 keeps its OPNsense name; assign the Linux device during installation
+[info] /opnsense/interfaces/wan/adv_dhcp_request_options: DHCP request options: dhclient asks for exactly these, networkd adds them to its own list (subnet mask, router, DNS, domain, routes, ...)
+[degraded] /opnsense/interfaces/wan: DHCP protocol timing reboot 5: networkd's client has fixed timings (retries from 1 s doubling to 64 s); not imported
+[info] /opnsense/interfaces/lan/if: device igc1 keeps its OPNsense name; assign the Linux device during installation
+[info] /opnsense/interfaces/opt1/if: device igc2 keeps its OPNsense name; assign the Linux device during installation
+[info] /opnsense/interfaces/opt2/if: device igc3 keeps its OPNsense name; assign the Linux device during installation

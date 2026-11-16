@@ -13,7 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{check, yes};
-use crate::fields::{Description, DeviceName, Hostname, InterfaceId, MacAddr};
+use crate::fields::{Description, DeviceName, HexBytes, Hostname, InterfaceId, MacAddr};
 use crate::refs::{RefContext, Validate};
 use crate::validation::{FieldPath, Validations, ValidatorKind};
 
@@ -198,6 +198,31 @@ pub enum Ipv4Config {
         /// Install the default route learned from DHCP.
         #[serde(default = "yes")]
         use_gateway: bool,
+        /// What the client identifier (option 61) is built from.
+        #[serde(default, skip_serializing_if = "is_default")]
+        client_id: DhcpClientId,
+        /// Vendor class identifier, option 60.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vendor_class: Option<String>,
+        /// User classes, option 77.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        user_class: Vec<String>,
+        /// Further options sent in every request (OPNsense
+        /// `adv_dhcp_send_options`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        send_options: Vec<DhcpSendOption>,
+        /// Option codes to ask for in addition to the client's defaults
+        /// (option 55, OPNsense `adv_dhcp_request_options`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        request_options: Vec<u8>,
+        /// 802.1p priority of the client's frames on a VLAN interface, 0 to 7
+        /// (OPNsense `dhcpvlanprio`; some ISPs drop requests without it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vlan_priority: Option<u8>,
+        /// Apply the MTU the server offers (option 26). Off by default, as in
+        /// OPNsense: ISPs get it wrong often enough (`dhcphonourmtu`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        use_mtu: bool,
     },
     /// Static address with prefix length (host bits are the address).
     Static {
@@ -217,6 +242,13 @@ impl Ipv4Config {
             hostname: None,
             reject_from: Vec::new(),
             use_gateway: true,
+            client_id: DhcpClientId::default(),
+            vendor_class: None,
+            user_class: Vec::new(),
+            send_options: Vec::new(),
+            request_options: Vec::new(),
+            vlan_priority: None,
+            use_mtu: false,
         }
     }
 
@@ -248,6 +280,24 @@ pub enum Ipv6Config {
         /// Request only a prefix, no address (`dhcp6prefixonly`).
         #[serde(default)]
         prefix_only: bool,
+        /// Ask for the two-message exchange (`dhcp6_rapid_commit`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        rapid_commit: bool,
+        /// Which /64 of the delegation this interface addresses itself from
+        /// (OPNsense `dhcp6-prefix-id`); `None` takes no address from it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix_id: Option<u16>,
+        /// The DHCP unique identifier to present, type included (OPNsense
+        /// `Interfaces/settings/dhcp6_duid`). `None` derives a DUID-LL from
+        /// the interface's MAC, the spoofed one when set, so the delegation
+        /// survives reinstalls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duid: Option<HexBytes>,
+        /// Release the lease when the client stops (inverse of OPNsense
+        /// `dhcp6_norelease`). Turning it off keeps the ISP's delegation
+        /// across restarts with ISPs that hand out a new prefix otherwise.
+        #[serde(default = "yes", skip_serializing_if = "is_true")]
+        send_release: bool,
     },
     /// Stateless autoconfiguration from router advertisements.
     Slaac,
@@ -271,6 +321,90 @@ pub enum Ipv6Config {
     },
 }
 
+impl Ipv6Config {
+    /// A DHCPv6 client asking for a `/len` delegation (`None`: no
+    /// delegation), everything else at its default.
+    pub fn dhcp6(prefix_delegation_len: Option<u8>) -> Self {
+        Self::Dhcp6 {
+            prefix_delegation_len,
+            send_prefix_hint: false,
+            prefix_only: false,
+            rapid_commit: false,
+            prefix_id: None,
+            duid: None,
+            send_release: true,
+        }
+    }
+}
+
+/// What a DHCPv4 client identifier (option 61) is built from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DhcpClientId {
+    /// Hardware type 1 and the interface's MAC, the spoofed one when
+    /// `spoof_mac` is set: what dhclient (and so OPNsense) sends, and what a
+    /// residential gateway in passthrough mode recognises its client by.
+    #[default]
+    Mac,
+    /// RFC 4361: IAID plus the DHCP unique identifier.
+    Duid,
+}
+
+/// The value of a DHCPv4 option the client sends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DhcpOptionValue {
+    /// Text.
+    String(String),
+    /// Raw bytes (`01:02:f3`).
+    Hex(HexBytes),
+    /// An IPv4 address.
+    Ipv4(Ipv4Addr),
+    /// An 8-bit number.
+    Uint8(u8),
+    /// A 16-bit number.
+    Uint16(u16),
+    /// A 32-bit number.
+    Uint32(u32),
+}
+
+/// A DHCPv4 option the client adds to its requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DhcpSendOption {
+    /// Option code, 1 to 254.
+    pub code: u8,
+    /// Its value.
+    pub value: DhcpOptionValue,
+}
+
+/// Options the client builds itself, with the field that sets them.
+const CLIENT_OWNED_OPTIONS: &[(u8, &str)] = &[
+    (12, "Set the host name with hostname."),
+    (50, "The client manages the requested address itself."),
+    (51, "The client manages the lease time itself."),
+    (53, "The client manages the message type itself."),
+    (54, "The client manages the server identifier itself."),
+    (55, "Set the parameter request list with request_options."),
+    (57, "The client manages the maximum message size itself."),
+    (60, "Set the vendor class with vendor_class."),
+    (61, "Set the client identifier with client_id."),
+    (77, "Set the user class with user_class."),
+];
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+/// Text a networkd setting can carry on one line.
+fn plain_text(s: &str) -> bool {
+    !s.is_empty() && !s.chars().any(char::is_control)
+}
+
 impl Default for Interface {
     fn default() -> Self {
         Self::new("eth0".parse().expect("valid literal"), InterfaceRole::Other)
@@ -282,6 +416,32 @@ impl Validate for Interfaces {
         let mut devices: HashMap<&DeviceName, &InterfaceId> = HashMap::new();
         let mut macs: HashMap<MacAddr, &InterfaceId> = HashMap::new();
         let mut vlans: HashMap<(&DeviceName, u16), &InterfaceId> = HashMap::new();
+        // Each /64 of a delegation can go to one interface only.
+        let mut subnets: HashMap<(&InterfaceId, u16), &InterfaceId> = HashMap::new();
+        for (id, iface) in &self.0 {
+            if let Ipv6Config::Dhcp6 {
+                prefix_id: Some(n), ..
+            } = &iface.ipv6
+            {
+                subnets.insert((id, *n), id);
+            }
+        }
+        for (id, iface) in &self.0 {
+            if let Ipv6Config::Track {
+                interface,
+                prefix_id,
+            } = &iface.ipv6
+                && iface.enabled
+                && let Some(other) = subnets.insert((interface, *prefix_id), id)
+                && other != id
+            {
+                out.add(
+                    &at.join(id).join("ipv6").join("prefix_id"),
+                    ValidatorKind::Constraint,
+                    format!("Prefix ID 0x{prefix_id:x} of {interface} is already used by {other}."),
+                );
+            }
+        }
         for (id, iface) in &self.0 {
             let p = at.join(id);
             if let Some(other) = devices.insert(&iface.device, id) {
@@ -340,7 +500,77 @@ impl Validate for Interfaces {
     }
 }
 
+fn validate_dhcp4(cfg: &Ipv4Config, at: &FieldPath, out: &mut Validations) {
+    let Ipv4Config::Dhcp {
+        vendor_class,
+        user_class,
+        send_options,
+        request_options,
+        vlan_priority,
+        ..
+    } = cfg
+    else {
+        return;
+    };
+    if vendor_class.as_deref().is_some_and(|v| !plain_text(v)) {
+        out.add(
+            &at.join("vendor_class"),
+            ValidatorKind::Callback,
+            "The vendor class must be non-empty text without control characters.",
+        );
+    }
+    if user_class
+        .iter()
+        .any(|u| !plain_text(u) || u.contains(char::is_whitespace))
+    {
+        out.add(
+            &at.join("user_class"),
+            ValidatorKind::Callback,
+            "A user class must be non-empty text without spaces or control characters.",
+        );
+    }
+    let sp = at.join("send_options");
+    for o in send_options {
+        if o.code == 0 || o.code == 255 {
+            out.add(
+                &sp,
+                ValidatorKind::MinMax,
+                "An option code must be between 1 and 254.",
+            );
+        } else if let Some((_, why)) = CLIENT_OWNED_OPTIONS.iter().find(|(c, _)| *c == o.code) {
+            out.add(
+                &sp,
+                ValidatorKind::Callback,
+                format!("Option {} cannot be sent this way. {why}", o.code),
+            );
+        }
+        if let DhcpOptionValue::String(t) = &o.value
+            && !plain_text(t)
+        {
+            out.add(
+                &sp,
+                ValidatorKind::Callback,
+                format!(
+                    "Option {}: text must be non-empty, without control characters.",
+                    o.code
+                ),
+            );
+        }
+    }
+    if request_options.iter().any(|c| *c == 0 || *c == 255) {
+        out.add(
+            &at.join("request_options"),
+            ValidatorKind::MinMax,
+            "An option code must be between 1 and 254.",
+        );
+    }
+    if let Some(p) = vlan_priority {
+        check::range(*p, 0..=7, &at.join("vlan_priority"), out);
+    }
+}
+
 fn validate_v4(cfg: &Ipv4Config, at: &FieldPath, out: &mut Validations) {
+    validate_dhcp4(cfg, at, out);
     if let Ipv4Config::Static { address, gateway } = cfg {
         let addr = address.addr();
         let p = at.join("address");
@@ -387,6 +617,45 @@ impl Interfaces {
         at: &FieldPath,
         out: &mut Validations,
     ) {
+        if let Ipv6Config::Dhcp6 {
+            prefix_delegation_len,
+            prefix_id,
+            duid,
+            ..
+        } = cfg
+        {
+            // A DUID is a 2-byte type plus 1 to 128 bytes (RFC 8415 §11.1).
+            if duid
+                .as_ref()
+                .is_some_and(|d| !(3..=130).contains(&d.as_bytes().len()))
+            {
+                out.add(
+                    &at.join("duid"),
+                    ValidatorKind::Callback,
+                    "A valid DUID must be specified.",
+                );
+            }
+            if let Some(id) = prefix_id {
+                match prefix_delegation_len {
+                    None => out.add(
+                        &at.join("prefix_id"),
+                        ValidatorKind::Callback,
+                        "A prefix ID needs a prefix delegation size.",
+                    ),
+                    Some(len) if (32..=64).contains(len) => {
+                        let slots = 1u64 << (64 - u64::from(*len));
+                        if u64::from(*id) >= slots {
+                            out.add(
+                                &at.join("prefix_id"),
+                                ValidatorKind::MinMax,
+                                format!("The prefix ID must be smaller than {slots} for a /{len} delegation."),
+                            );
+                        }
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
         match cfg {
             Ipv6Config::Dhcp6 {
                 prefix_delegation_len: Some(len),

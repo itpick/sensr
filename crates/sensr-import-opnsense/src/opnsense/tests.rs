@@ -55,6 +55,7 @@ fn corpus_reports_and_documents_match_golden() {
         ("corpus/home-router.xml", "home-router"),
         ("corpus/multiwan.xml", "multiwan"),
         ("corpus/isc-dhcp.xml", "isc-dhcp"),
+        ("corpus/fibre-passthrough.xml", "fibre-passthrough"),
         ("opnsense/Sample/config.xml", "sample"),
     ] {
         let i = import(fixture);
@@ -310,6 +311,7 @@ fn export_then_import_is_identical() {
         "corpus/home-router.xml",
         "corpus/multiwan.xml",
         "corpus/isc-dhcp.xml",
+        "corpus/fibre-passthrough.xml",
         "opnsense/Sample/config.xml",
     ] {
         let first = import(f);
@@ -707,4 +709,281 @@ fn kea_ddns_and_control_agent_are_accepted_at_defaults_only() {
             "/opnsense/OPNsense/Kea/ddns/general/enabled",
         ]
     );
+}
+
+fn wan_xml(wan: &str, extra: &str) -> String {
+    format!(
+        "<opnsense><interfaces><wan><if>em0</if><enable>1</enable>{wan}</wan>\
+         <lan><if>em1</if><enable>1</enable><ipaddr>192.168.1.1</ipaddr><subnet>24</subnet>\
+         <ipaddrv6>track6</ipaddrv6><track6-interface>wan</track6-interface><track6-prefix-id>0</track6-prefix-id></lan>\
+         </interfaces>{extra}</opnsense>"
+    )
+}
+
+fn wan(i: &Imported<SensrDocument>) -> &sensr_schema::models::interfaces::Interface {
+    i.document.interfaces.get(&"wan".parse().unwrap()).unwrap()
+}
+
+fn degraded(i: &Imported<SensrDocument>, needle: &str) -> bool {
+    i.report
+        .warnings
+        .iter()
+        .any(|w| w.severity == crate::Severity::Degraded && w.message.contains(needle))
+}
+
+#[test]
+fn spoofed_mac_round_trips_and_names_the_client_identifier() {
+    use sensr_schema::models::interfaces::{DhcpClientId, Ipv4Config};
+    let i = import_str(&wan_xml(
+        "<spoofmac>02:00:5e:10:20:30</spoofmac><ipaddr>dhcp</ipaddr>\
+         <adv_dhcp_config_advanced>1</adv_dhcp_config_advanced>\
+         <adv_dhcp_send_options>dhcp-client-identifier 01:02:00:5e:10:20:30</adv_dhcp_send_options>",
+        "",
+    ));
+    assert_eq!(wan(&i).spoof_mac.unwrap().to_string(), "02:00:5e:10:20:30");
+    let Ipv4Config::Dhcp {
+        client_id,
+        send_options,
+        ..
+    } = &wan(&i).ipv4
+    else {
+        panic!("dhcp")
+    };
+    // the identifier dhclient would build from the spoofed MAC: nothing lost
+    assert_eq!(*client_id, DhcpClientId::Mac);
+    assert!(send_options.is_empty());
+    assert!(
+        i.report
+            .warnings
+            .iter()
+            .all(|w| w.severity != crate::Severity::Degraded),
+        "{}",
+        i.report
+    );
+    let again = import_str(&export_config(&i.document));
+    assert_eq!(wan(&again), wan(&i));
+}
+
+#[test]
+fn dhcp4_advanced_options_map_or_are_reported() {
+    use sensr_schema::models::interfaces::{DhcpOptionValue, Ipv4Config};
+    let i = import_str(&wan_xml(
+        "<ipaddr>dhcp</ipaddr><dhcphostname>gw</dhcphostname><dhcphonourmtu>1</dhcphonourmtu>\
+         <adv_dhcp_config_advanced>1</adv_dhcp_config_advanced>\
+         <adv_dhcp_pt_timeout>30</adv_dhcp_pt_timeout>\
+         <adv_dhcp_send_options>vendor-class-identifier \"acme\", user-class \"tv\", option-125 00:00:0d:e9, \
+           dhcp-client-identifier \"text-id\", host-name \"{hostname}\", option-200 {mac_addr_asciiU:}</adv_dhcp_send_options>\
+         <adv_dhcp_request_options>routers, domain-search, bogus-name</adv_dhcp_request_options>\
+         <adv_dhcp_required_options>subnet-mask</adv_dhcp_required_options>\
+         <adv_dhcp_option_modifiers>supersede domain-name \"x\"</adv_dhcp_option_modifiers>",
+        "",
+    ));
+    let Ipv4Config::Dhcp {
+        hostname,
+        vendor_class,
+        user_class,
+        send_options,
+        request_options,
+        use_mtu,
+        ..
+    } = &wan(&i).ipv4
+    else {
+        panic!("dhcp")
+    };
+    assert_eq!(hostname.as_ref().unwrap().to_string(), "gw");
+    assert_eq!(vendor_class.as_deref(), Some("acme"));
+    assert_eq!(user_class, &["tv"]);
+    assert_eq!(send_options.len(), 1);
+    assert_eq!(send_options[0].code, 125);
+    assert!(matches!(send_options[0].value, DhcpOptionValue::Hex(_)));
+    assert_eq!(request_options, &[3, 119]);
+    assert!(*use_mtu);
+    for needle in [
+        "protocol timing timeout 30",
+        "client identifier",
+        "{mac_addr_asciiU:}",
+        "bogus-name",
+        "required options",
+        "option modifiers",
+    ] {
+        assert!(degraded(&i, needle), "{needle}: {}", i.report);
+    }
+    assert!(i.report.unmapped_unexpected.is_empty(), "{}", i.report);
+    // advanced mode does not send the host name as client identifier
+    assert!(!degraded(&i, "also sends it as the client identifier"));
+    let again = import_str(&export_config(&i.document));
+    assert_eq!(wan(&again).ipv4, wan(&i).ipv4);
+}
+
+#[test]
+fn dhcp4_basic_mode_ignores_advanced_fields_and_notes_the_hostname_identifier() {
+    let i = import_str(&wan_xml(
+        "<ipaddr>dhcp</ipaddr><dhcphostname>gw</dhcphostname>\
+         <adv_dhcp_pt_timeout>30</adv_dhcp_pt_timeout><adv_dhcp_send_options>user-class \"tv\"</adv_dhcp_send_options>",
+        "",
+    ));
+    assert!(degraded(&i, "also sends it as the client identifier"));
+    assert!(!degraded(&i, "protocol timing"));
+    assert!(i.report.unmapped_unexpected.is_empty(), "{}", i.report);
+}
+
+#[test]
+fn dhcp_vlan_priority_needs_a_vlan() {
+    use sensr_schema::models::interfaces::Ipv4Config;
+    let plain = import_str(&wan_xml(
+        "<ipaddr>dhcp</ipaddr><dhcpvlanprio>3</dhcpvlanprio>",
+        "",
+    ));
+    assert!(matches!(
+        &wan(&plain).ipv4,
+        Ipv4Config::Dhcp {
+            vlan_priority: None,
+            ..
+        }
+    ));
+    assert!(degraded(&plain, "not a VLAN"));
+    let xml = "<opnsense><vlans><vlan uuid=\"00000000-0000-4000-8000-0000000000aa\"><if>em0</if><tag>201</tag><vlanif>vlan0.201</vlanif></vlan></vlans>\
+        <interfaces><wan><if>vlan0.201</if><enable>1</enable><ipaddr>dhcp</ipaddr><dhcpvlanprio>3</dhcpvlanprio></wan></interfaces></opnsense>";
+    let tagged = import_str(xml);
+    assert!(matches!(
+        &wan(&tagged).ipv4,
+        Ipv4Config::Dhcp {
+            vlan_priority: Some(3),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn dhcp6_delegation_sizes_follow_the_form() {
+    use sensr_schema::models::interfaces::Ipv6Config;
+    // interfaces.php: the stored value is the bits below /64
+    for (bits, len) in [
+        ("0", Some(64)),
+        ("4", Some(60)),
+        ("8", Some(56)),
+        ("16", Some(48)),
+        ("none", None),
+    ] {
+        let i = import_str(&wan_xml(
+            &format!(
+                "<ipaddr>dhcp</ipaddr><ipaddrv6>dhcp6</ipaddrv6><dhcp6-ia-pd-len>{bits}</dhcp6-ia-pd-len>"
+            ),
+            "",
+        ));
+        let Ipv6Config::Dhcp6 {
+            prefix_delegation_len,
+            ..
+        } = &wan(&i).ipv6
+        else {
+            panic!("dhcp6")
+        };
+        assert_eq!(*prefix_delegation_len, len, "{bits}");
+        let again = import_str(&export_config(&i.document));
+        assert_eq!(wan(&again).ipv6, wan(&i).ipv6, "{bits}");
+    }
+}
+
+#[test]
+fn dhcp6_globals_and_client_flags_map() {
+    use sensr_schema::models::interfaces::Ipv6Config;
+    let i = import_str(&wan_xml(
+        "<ipaddr>dhcp</ipaddr><ipaddrv6>dhcp6</ipaddrv6><dhcp6-ia-pd-len>4</dhcp6-ia-pd-len>\
+         <dhcp6-ia-pd-send-hint>1</dhcp6-ia-pd-send-hint><dhcp6prefixonly>1</dhcp6prefixonly>\
+         <dhcp6_rapid_commit>1</dhcp6_rapid_commit><dhcp6-prefix-id>15</dhcp6-prefix-id><dhcp6vlanprio>2</dhcp6vlanprio>",
+        "<OPNsense><Interfaces><settings><dhcp6_norelease>1</dhcp6_norelease>\
+         <dhcp6_duid>0:3:0:1:02:00:5e:10:20:30</dhcp6_duid></settings></Interfaces></OPNsense>",
+    ));
+    let Ipv6Config::Dhcp6 {
+        prefix_delegation_len,
+        send_prefix_hint,
+        prefix_only,
+        rapid_commit,
+        prefix_id,
+        duid,
+        send_release,
+    } = &wan(&i).ipv6
+    else {
+        panic!("dhcp6")
+    };
+    assert_eq!(*prefix_delegation_len, Some(60));
+    assert!(*send_prefix_hint && *prefix_only && *rapid_commit);
+    assert_eq!(*prefix_id, Some(15));
+    assert_eq!(
+        duid.as_ref().unwrap().to_string(),
+        "00:03:00:01:02:00:5e:10:20:30"
+    );
+    assert!(!*send_release);
+    assert!(degraded(&i, "DHCPv6 VLAN priority 2"));
+    assert!(i.report.unmapped_unexpected.is_empty(), "{}", i.report);
+    let again = import_str(&export_config(&i.document));
+    assert_eq!(wan(&again).ipv6, wan(&i).ipv6);
+}
+
+#[test]
+fn legacy_system_duid_is_used() {
+    use sensr_schema::models::interfaces::Ipv6Config;
+    let i = import_str(&wan_xml(
+        "<ipaddr>dhcp</ipaddr><ipaddrv6>dhcp6</ipaddrv6><dhcp6-ia-pd-len>8</dhcp6-ia-pd-len>",
+        "",
+    ).replace("<opnsense>", "<opnsense><system><ipv6duid>00:01:00:01:2a:2b:2c:2d:02:00:5e:00:00:01</ipv6duid></system>"));
+    let Ipv6Config::Dhcp6 { duid, .. } = &wan(&i).ipv6 else {
+        panic!("dhcp6")
+    };
+    assert_eq!(duid.as_ref().unwrap().as_bytes().len(), 14);
+}
+
+#[test]
+fn several_lans_track_one_wan_with_their_prefix_ids() {
+    let i = import("corpus/fibre-passthrough.xml");
+    let ids: Vec<u16> = i
+        .document
+        .interfaces
+        .iter()
+        .filter_map(|(_, x)| match &x.ipv6 {
+            sensr_schema::models::interfaces::Ipv6Config::Track { prefix_id, .. } => {
+                Some(*prefix_id)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids, [0, 1, 10]);
+    assert!(
+        i.document.validate().is_empty(),
+        "{:?}",
+        i.document.validate()
+    );
+}
+
+#[test]
+fn ipv6_allowed_follows_interfaces_settings_over_legacy() {
+    let legacy_off = "<system><hostname>gw</hostname><domain>home.example</domain></system>";
+    let legacy_on = "<system><hostname>gw</hostname><domain>home.example</domain><ipv6allow>1</ipv6allow></system>";
+    let doc = |system: &str, extra: &str| {
+        import_str(
+            &wan_xml("<ipaddr>dhcp</ipaddr>", extra)
+                .replace("<opnsense>", &format!("<opnsense>{system}")),
+        )
+    };
+    // no settings section: the legacy flag decides
+    assert!(!doc(legacy_off, "").document.system.ipv6_allow);
+    assert!(doc(legacy_on, "").document.system.ipv6_allow);
+    // the section decides when present, whatever the legacy flag says
+    for (settings, allowed) in [
+        ("<disableipv6>0</disableipv6>", true),
+        ("<disableipv6/>", true),
+        ("", true),
+        ("<disableipv6>1</disableipv6>", false),
+    ] {
+        let extra = format!(
+            "<OPNsense><Interfaces><settings>{settings}</settings></Interfaces></OPNsense>"
+        );
+        for system in [legacy_off, legacy_on] {
+            let i = doc(system, &extra);
+            assert_eq!(i.document.system.ipv6_allow, allowed, "{settings} {system}");
+            assert!(i.report.unmapped_unexpected.is_empty(), "{}", i.report);
+            let again = import_str(&export_config(&i.document));
+            assert_eq!(again.document.system.ipv6_allow, allowed);
+        }
+    }
 }

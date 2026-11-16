@@ -23,7 +23,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/etc/inc/console.inc" = { status = "todo" }
 "core/src/etc/inc/filter.inc" = { status = "todo" }
 "core/src/etc/inc/filter.lib.inc" = { status = "todo" }
-"core/src/etc/inc/interfaces.inc" = { status = "todo" }
+"core/src/etc/inc/interfaces.inc" = { status = "in-progress", crate = "sensr-apply", module = "appliers::interfaces", note = "interface_dhcp_configure, DHCP6_Config_File_Basic, track6 prefix ids via networkd; PPP/6rd/GIF/GRE and dhcp6c advanced mode open" }
 "core/src/etc/inc/interfaces.lib.inc" = { status = "todo" }
 "core/src/etc/inc/legacy_bindings.inc" = { status = "todo" }
 "core/src/etc/inc/plugins.inc" = { status = "todo" }
@@ -48,7 +48,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/etc/inc/plugins.inc.d/openvpn/ovpn-linkup" = { status = "todo" }
 "core/src/etc/inc/plugins.inc.d/openvpn/tunnel_endpoint.php" = { status = "todo" }
 "core/src/etc/inc/plugins.inc.d/pf.inc" = { status = "todo" }
-"core/src/etc/inc/plugins.inc.d/radvd.inc" = { status = "todo" }
+"core/src/etc/inc/plugins.inc.d/radvd.inc" = { status = "in-progress", crate = "sensr-apply", module = "appliers::interfaces", note = "automatic track6 RA (RDNSS self, DNSSL domain) and per-interface entries as networkd [IPv6SendRA]; intervals, MTU, constructors open" }
 "core/src/etc/inc/plugins.inc.d/suricata.inc" = { status = "todo" }
 "core/src/etc/inc/plugins.inc.d/tap.inc" = { status = "todo" }
 "core/src/etc/inc/plugins.inc.d/unbound.inc" = { status = "todo" }
@@ -893,7 +893,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/models/OPNsense/Interfaces/NetworkInterface.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Interfaces/NetworkInterface.xml" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Interfaces/Settings.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/models/OPNsense/Interfaces/Settings.xml" = { status = "todo" }
+"core/src/opnsense/mvc/app/models/OPNsense/Interfaces/Settings.xml" = { status = "in-progress", crate = "sensr-import-opnsense", module = "opnsense::interfaces", note = "dhcp6_duid, dhcp6_norelease, dhcp6_ratimeout/debug noted; offload tuning n-a on Linux" }
 "core/src/opnsense/mvc/app/models/OPNsense/Interfaces/Tap.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Interfaces/Tap.xml" = { status = "todo" }
 "core/src/opnsense/mvc/app/models/OPNsense/Interfaces/Vip.php" = { status = "todo" }
@@ -1727,7 +1727,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/www/guiconfig.inc" = { status = "todo" }
 "core/src/www/head.inc" = { status = "todo" }
 "core/src/www/index.php" = { status = "todo" }
-"core/src/www/interfaces.php" = { status = "todo" }
+"core/src/www/interfaces.php" = { status = "in-progress", crate = "sensr-import-opnsense", module = "opnsense::interfaces", note = "field semantics of the DHCPv4/DHCPv6/track6 sections (pd-len bits, hex prefix ids, flags)" }
 "core/src/www/interfaces_ppps.php" = { status = "todo" }
 "core/src/www/interfaces_ppps_edit.php" = { status = "todo" }
 "core/src/www/javascript/opnsense_legacy.js" = { status = "todo" }

@@ -24,3 +24,11 @@ IPv6SendRA=yes
 UplinkInterface=igc0
 SubnetId=0x0
 Announce=yes
+
+[IPv6SendRA]
+Managed=no
+OtherInformation=no
+EmitDNS=yes
+DNS=_link_local
+EmitDomains=yes
+Domains=home.example

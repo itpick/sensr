@@ -194,7 +194,9 @@ pub fn unbound(doc: &Document) -> Result<Option<UnboundModel>, ConvertError> {
         let before = listen.len();
         listen.extend(static_v4(i).map(|a| IpAddr::V4(a.addr())));
         listen.extend(static_v6(i).map(|a| IpAddr::V6(a.addr())));
-        dynamic |= listen.len() == before;
+        // Router advertisements name the router's link-local address as
+        // the resolver there; only the wildcard bind answers on it.
+        dynamic |= listen.len() == before || super::interfaces::advertises_link_local_dns(doc, id);
     }
     if dynamic {
         listen.clear();
