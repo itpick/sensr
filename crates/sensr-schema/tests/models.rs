@@ -196,6 +196,43 @@ fn interface_rules() {
     ));
 }
 
+#[test]
+fn vlan_rules() {
+    let mut doc = Document::factory();
+    for (id, tag) in [("opt1", 20), ("opt2", 20)] {
+        doc.set_by_path(
+            &format!("interfaces.{id}"),
+            json!({"device": format!("vlan.{id}"), "vlan": {"parent": "eth1", "tag": tag}}),
+        )
+        .unwrap();
+    }
+    doc.set_by_path(
+        "interfaces.opt3",
+        json!({"device": "eth1.0", "vlan": {"parent": "eth1.0", "tag": 0, "pcp": 9, "protocol": "802.1ad"}}),
+    )
+    .unwrap();
+    let v = doc.validate();
+    assert_eq!(
+        messages(&v, "interfaces.opt2.vlan.tag"),
+        ["Tag for this device must be unique (already used by opt1)."]
+    );
+    assert_eq!(
+        messages(&v, "interfaces.opt3.vlan.tag"),
+        ["Please specify a value between 1 and 4094."]
+    );
+    assert_eq!(
+        messages(&v, "interfaces.opt3.vlan.pcp"),
+        ["Please specify a value between 0 and 7."]
+    );
+    assert_eq!(
+        messages(&v, "interfaces.opt3.vlan.parent"),
+        ["A VLAN cannot be its own parent device."]
+    );
+    assert!(v.get("interfaces.opt1.vlan.tag").is_none());
+    let back: Document = serde_json::from_value(serde_json::to_value(&doc).unwrap()).unwrap();
+    assert_eq!(back, doc);
+}
+
 fn alias(name: &str, content: serde_json::Value) -> Alias {
     serde_json::from_value(json!({"name": name, "content": content})).unwrap()
 }

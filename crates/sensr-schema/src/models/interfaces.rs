@@ -124,6 +124,38 @@ pub struct Interface {
     /// Egress queueing.
     #[serde(default)]
     pub qdisc: Qdisc,
+    /// When set, `device` is a VLAN sub-interface sensr creates on a parent
+    /// device (OPNsense `vlans`, Interfaces › Devices › VLAN).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vlan: Option<Vlan>,
+}
+
+/// 802.1Q / 802.1ad tagging of a VLAN device.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VlanProtocol {
+    /// Customer tag (`802.1q`).
+    #[default]
+    #[serde(rename = "802.1q")]
+    Dot1Q,
+    /// Service tag, for QinQ (`802.1ad`).
+    #[serde(rename = "802.1ad")]
+    Dot1Ad,
+}
+
+/// A VLAN sub-interface: frames on `parent` tagged `tag`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Vlan {
+    /// The device carrying the tagged frames.
+    pub parent: DeviceName,
+    /// VLAN id, 1 to 4094.
+    pub tag: u16,
+    /// 802.1p priority code point of egress frames, 0 to 7.
+    #[serde(default)]
+    pub pcp: u8,
+    /// Tag protocol.
+    #[serde(default)]
+    pub protocol: VlanProtocol,
 }
 
 impl Interface {
@@ -142,6 +174,7 @@ impl Interface {
             block_private: false,
             block_bogons: false,
             qdisc: Qdisc::default(),
+            vlan: None,
         }
     }
 }
@@ -245,6 +278,7 @@ impl Validate for Interfaces {
     fn validate(&self, ctx: &dyn RefContext, at: &FieldPath, out: &mut Validations) {
         let mut devices: HashMap<&DeviceName, &InterfaceId> = HashMap::new();
         let mut macs: HashMap<MacAddr, &InterfaceId> = HashMap::new();
+        let mut vlans: HashMap<(&DeviceName, u16), &InterfaceId> = HashMap::new();
         for (id, iface) in &self.0 {
             let p = at.join(id);
             if let Some(other) = devices.insert(&iface.device, id) {
@@ -272,6 +306,25 @@ impl Validate for Interfaces {
                         &p.join(field),
                         ValidatorKind::Callback,
                         "A multicast MAC address cannot be assigned to an interface.",
+                    );
+                }
+            }
+            if let Some(vlan) = &iface.vlan {
+                let vp = p.join("vlan");
+                check::range(vlan.tag, 1..=4094, &vp.join("tag"), out);
+                check::range(vlan.pcp, 0..=7, &vp.join("pcp"), out);
+                if vlan.parent == iface.device {
+                    out.add(
+                        &vp.join("parent"),
+                        ValidatorKind::Callback,
+                        "A VLAN cannot be its own parent device.",
+                    );
+                }
+                if let Some(other) = vlans.insert((&vlan.parent, vlan.tag), id) {
+                    out.add(
+                        &vp.join("tag"),
+                        ValidatorKind::Constraint,
+                        format!("Tag for this device must be unique (already used by {other})."),
                     );
                 }
             }
