@@ -73,7 +73,17 @@ let
   routerSensr = {
     imports = sensrModules ++ [ ../images/common.nix ];
     services.sensr.seedDir = "/boot/sensr";
-    systemd.tmpfiles.rules = [ "d /boot 0755 root root -" ];
+    # Until import + apply work end to end, the agent only plans, so the
+    # commit-confirm assertions still run against the store.
+    services.sensr.applier = if pending.importApply then "preview" else "slice";
+    # The seed folder as a fresh image has it after someone copied their
+    # OPNsense backup onto the FAT partition (the agent imports it once,
+    # before its boot apply).
+    systemd.tmpfiles.rules = [
+      "d /boot 0755 root root -"
+      "d /boot/sensr 0755 root root -"
+    ]
+    ++ lib.optional (!pending.importApply) "C /boot/sensr/config.xml - - - - ${fixture}";
     users.users.root.hashedPassword = lib.mkForce null;
   };
 in
@@ -244,14 +254,20 @@ pkgs.testers.runNixOSTest {
             if PENDING["importApply"]:
                 pending("import + apply of home-router.xml; the network assertions below are skipped")
             else:
-                # The seed-folder path (config.xml read once at first boot)
-                # and the CLI path stage the same import.
-                print(router.succeed("sensr import opnsense /etc/sensr-slice/home-router.xml --report"))
+                # The agent imported /boot/sensr/config.xml at boot, onto
+                # the factory revision, and applied it.
+                router.wait_for_unit("sensr-agent.service")
+                print(router.succeed("sensr config history"))
+                print(router.succeed("cat /var/lib/sensr/import-report.txt"))
+                # What the boot apply made of it (validation issues, the plan).
+                print(router.execute("sensr apply --dry-run --source head 2>&1; sensr status 2>&1; journalctl -b -u sensr-agent --no-pager 2>&1 | tail -n 40")[1])
+                assert json.loads(router.succeed("sensr config get system.hostname --json --source head")) == "gw-home"
                 # The fixture's peer keys are placeholders; give "phone"
                 # the test key pair's public half (nix/tests/slice/net.nix).
-                # TODO(importApply): the document path of peer "phone".
-                router.succeed("sensr config set wireguard.peers.phone.pubkey ${net.wg.phonePublic}")
-                router.succeed("sensr config commit -m 'import home-router.xml'")
+                router.succeed(
+                    "sensr config set wireguard.peers.${net.wg.phoneUuid}.public_key ${net.wg.phonePublic}"
+                    " && sensr config commit -m 'slice: test key for peer phone'"
+                )
         if PENDING["configGet"]:
             pending("sensr config get")
         else:

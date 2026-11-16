@@ -205,6 +205,19 @@ in
       '';
     };
 
+    applier = mkOption {
+      type = types.enum [
+        "preview"
+        "slice"
+      ];
+      default = "preview";
+      description = ''
+        What the agent does on apply ($SENSR_APPLIER): `preview` only plans
+        (nothing on the box changes); `slice` drives the sensr-apply
+        appliers (networkd, nftables, sysctl, Kea, Unbound, WireGuard).
+      '';
+    };
+
     seedDir = mkOption {
       type = types.str;
       default = "/boot/sensr";
@@ -327,6 +340,7 @@ in
         SENSR_STATE_DIR = stateDir;
         SENSR_SEED_DIR = cfg.seedDir;
         SENSR_NETWORKD_DIR = "/run/systemd/network";
+        SENSR_APPLIER = cfg.applier;
         RUST_LOG = "info";
       }
       // lib.optionalAttrs (cfg.configFile != null) { SENSR_CONFIG_FILE = "${cfg.configFile}"; };

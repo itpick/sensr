@@ -21,6 +21,11 @@
   # (sensr-import-opnsense) and applies it (sensr-apply, sensr-net,
   # sensr-rules, sensr-services). Gates every slice assertion that needs the
   # router to be configured by sensr.
+  #
+  # Open (found by checks.slice with importApply = false): the boot apply
+  # of the imported home-router.xml is rejected because the Kea check
+  # (`kea-dhcp4 -t` in /run/sensr/.check) runs before the VLAN devices it
+  # names (vlan01, vlan02) exist; they are created by the same apply.
   importApply = true;
 
   # `sensr config set` + `sensr config commit --confirm SECS`: an
