@@ -462,10 +462,10 @@ in
     systemd.services.sensr-api = mkIf cfg.api.enable {
       description = "sensr API and web UI";
       wantedBy = [ "multi-user.target" ];
-      after = [
-        "sensr-agent.service"
-        "sensr-net.target"
-      ];
+      # Not ordered after the agent: the API connects to the agent socket
+      # per request, so the management UI answers while the agent is still
+      # running its boot apply (and reports the agent as unavailable for
+      # the second or so before its socket exists).
       wants = [ "sensr-agent.service" ];
       environment = {
         SENSR_AGENT_SOCKET = socket;
@@ -541,10 +541,16 @@ in
       unitConfig.ConditionPathExists = "${runtimeDir}/unbound/unbound.conf";
       serviceConfig = commonHardening // {
         ExecStartPre = [
-          # the DNSSEC root anchor lives in the state directory; seed it from
-          # unbound's built-in anchor (no network needed), "-": exit 1 means
-          # "used the built-in anchor"
-          "-${pkgs.unbound}/bin/unbound-anchor -a /var/lib/unbound/root.key"
+          # The DNSSEC root anchor lives in the state directory. Seed it from
+          # the closure's copy (dns-root-data) when missing; Unbound keeps it
+          # current itself (RFC 5011). Not unbound-anchor: without a route
+          # to the internet it waits for its fetch to time out, about 5 s
+          # of every first boot, and the agent's boot apply waits with it.
+          "${pkgs.writeShellScript "sensr-unbound-anchor" ''
+            if [ ! -s /var/lib/unbound/root.key ]; then
+              ${pkgs.coreutils}/bin/install -m 0644 ${pkgs.dns-root-data}/root.key /var/lib/unbound/root.key
+            fi
+          ''}"
           "${pkgs.unbound}/bin/unbound-checkconf ${runtimeDir}/unbound/unbound.conf"
         ];
         ExecStart = "${pkgs.unbound}/bin/unbound -d -p -c ${runtimeDir}/unbound/unbound.conf";

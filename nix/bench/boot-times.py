@@ -7,6 +7,8 @@ docs/research/07 (and the vyos-pi pages):
           the router (NAT), probe every 50 ms
   ssh     SSH to the router's LAN address accepts the key
   api     sensr-api answers HTTP on the LAN address
+  dns     the router's Unbound answers nas.home.example with 192.168.1.10
+          (an override only home-router.xml has; --milestones picks which)
 
 All measured from the moment the router's QEMU starts, on a fresh qcow2
 overlay each boot, with the endpoints already up. Milestones are
@@ -17,11 +19,17 @@ timestamped on arrival at the host (serial consoles over Unix sockets).
 
 x86_64 with KVM. Networks are QEMU socket multicast segments on loopback,
 so no root is needed.
+
+  --pi5 IMG.img [--seed config.xml]: the router is images.pi5 booted the way
+  nix/tests/pi5-qemu.sh does (kernel, initrd, cmdline.txt from its FAT
+  partition) on QEMU's aarch64 virt machine under TCG: emulated, so the
+  numbers are relative only. --seed copies an OPNsense config.xml into the
+  image's seed folder before each boot.
 """
 import argparse, json, os, random, re, selectors, shutil, socket, statistics, subprocess, sys, tempfile, time
 
 OVMF = os.environ.get("OVMF_FD", "")
-MILESTONES = ["kernel", "fwd", "ssh", "api"]
+MILESTONES = ["kernel", "fwd", "ssh", "api"]  # --milestones overrides
 
 
 def qemu(name, disk, nics, serial, extra, firmware=False, mem=1024, cpus=2):
@@ -39,6 +47,29 @@ def qemu(name, disk, nics, serial, extra, firmware=False, mem=1024, cpus=2):
         cmd += ["-netdev", f"socket,id=n{i},mcast=230.0.0.1:{port},localaddr=127.0.0.1",
                 "-device", f"virtio-net-pci,netdev=n{i},mac={mac}"]
     return subprocess.Popen(cmd + extra, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
+def fat(disk, *args):
+    off = json.loads(subprocess.run(["sfdisk", "-J", disk], capture_output=True, check=True, text=True).stdout)
+    off = off["partitiontable"]["partitions"][0]["start"] * 512
+    return subprocess.run([args[0], "-i", f"{disk}@@{off}", *args[1:]], capture_output=True, check=True)
+
+
+def qemu_pi5(disk, work, nics, serial):
+    for f in ("Image", "initrd"):
+        fat(disk, "mcopy", "-o", "-n", f"::current/{f}", f"{work}/{f}")
+    cmdline = fat(disk, "mtype", "::current/cmdline.txt").stdout.decode().strip()
+    # Pi-only consoles do not exist on virt (see nix/tests/pi5-qemu.sh).
+    cmdline = re.sub(r"earlycon=\S+", "earlycon", cmdline)
+    cmdline = re.sub(r"console=ttyAMA10\S*", "", cmdline) + " console=ttyAMA0,115200 loglevel=6"
+    cmd = ["qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a76", "-smp", "4", "-m", "2048",
+           "-accel", "tcg,thread=multi", "-kernel", f"{work}/Image", "-initrd", f"{work}/initrd",
+           "-append", cmdline, "-drive", f"file={disk},if=virtio,format=raw", "-display", "none",
+           "-chardev", f"socket,id=ser,path={serial},server=on,wait=on", "-serial", "chardev:ser"]
+    for i, (mac, port) in enumerate(nics):
+        cmd += ["-netdev", f"socket,id=n{i},mcast=230.0.0.1:{port},localaddr=127.0.0.1",
+                "-device", f"virtio-net-pci,netdev=n{i},mac={mac}"]
+    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
 def connect(path, deadline=10):
@@ -104,19 +135,37 @@ def one_boot(a, work, n):
     try:
         start("wanhost", a.endpoint, [("52:54:00:5e:00:20", wan)], False)
         start("client", a.endpoint, [("52:54:00:5e:00:10", lan)], False,
-              ["-fw_cfg", f"name=opt/sensrbench/key,file={a.key}"])
+              ["-fw_cfg", f"name=opt/sensrbench/key,file={a.key}"]
+              + (["-fw_cfg", f"name=opt/sensrbench/profile,string=1"] if a.profile else []))
         end = time.monotonic() + 120
         while "client:ready" not in seen and time.monotonic() < end:
             pump(0.05)
         if "client:ready" not in seen:
             raise RuntimeError("endpoints did not come up")
         time.sleep(2)  # wanhost's networkd and DHCP server settle
-        t0 = time.monotonic()
-        start("router", a.router, [("52:54:00:5e:00:01", wan), ("52:54:00:5e:00:02", lan)], True)
+        rnics = [("52:54:00:5e:00:01", wan), ("52:54:00:5e:00:02", lan)]
+        if a.pi5:
+            disk = f"{work}/router.img"
+            shutil.copy(a.pi5, disk)
+            if a.seed:
+                fat(disk, "mcopy", "-o", a.seed, "::sensr/config.xml")
+            ser = f"{work}/router.sock"
+            t0 = time.monotonic()
+            procs.append(qemu_pi5(disk, work, rnics, ser))
+            s = connect(ser)
+            logs["router"] = open(f"{work}/boot{n}-router.log", "wb")
+            sel.register(s, selectors.EVENT_READ, "router")
+        else:
+            t0 = time.monotonic()
+            start("router", a.router, rnics, True)
         end = t0 + a.timeout
         while time.monotonic() < end and not all(
                 (m == "kernel" and "kernel" in seen) or f"client:{m}" in seen for m in MILESTONES):
             pump(0.05)
+        if a.profile:
+            end = time.monotonic() + 90
+            while "client:profiled" not in seen and time.monotonic() < end:
+                pump(0.05)
         res = {}
         for m in MILESTONES:
             k = "kernel" if m == "kernel" else f"client:{m}"
@@ -133,7 +182,9 @@ def one_boot(a, work, n):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--router", required=True)
+    ap.add_argument("--router")
+    ap.add_argument("--pi5")
+    ap.add_argument("--seed")
     ap.add_argument("--endpoint", required=True)
     ap.add_argument("--key", required=True)
     ap.add_argument("--boots", type=int, default=5)
@@ -141,7 +192,10 @@ def main():
     ap.add_argument("--label", default="sensr")
     ap.add_argument("--json")
     ap.add_argument("--work", default=tempfile.mkdtemp(prefix="sensrbench-"))
+    ap.add_argument("--milestones", default="kernel,fwd,ssh,api")
+    ap.add_argument("--profile", action="store_true", help="dump systemd-analyze from the router (client serial log)")
     a = ap.parse_args()
+    MILESTONES[:] = a.milestones.split(",")
     os.makedirs(a.work, exist_ok=True)
     runs = []
     for n in range(1, a.boots + 1):

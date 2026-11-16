@@ -124,10 +124,12 @@ pkgs.testers.runNixOSTest {
     with subtest("the packages the appliers drive are in the closure"):
         for tool in ["nft --version", "kea-dhcp4 -V", "unbound -V", "wg --version"]:
             machine.succeed(tool)
-        # Daemon units exist but stay down until the agent renders a config.
-        for unit in ["sensr-kea-dhcp4", "sensr-unbound"]:
+        # The daemon units start only once the agent has rendered their
+        # config: the factory document enables DHCP and DNS on the LAN, so
+        # the slice applier has rendered both by now.
+        for unit, conf in [("sensr-kea-dhcp4", "kea/kea-dhcp4.conf"), ("sensr-unbound", "unbound/unbound.conf")]:
             machine.succeed(f"systemctl cat {unit}.service")
-            machine.fail(f"systemctl is-active {unit}.service")
+            machine.wait_until_succeeds(f"test -s /run/sensr/{conf} && systemctl is-active {unit}.service", timeout=60)
 
     with subtest("nothing failed"):
         machine.succeed("test -z \"$(systemctl list-units --failed --no-legend)\" || (systemctl list-units --failed; false)")

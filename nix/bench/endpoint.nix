@@ -16,8 +16,18 @@ let
     say ready
     (until ${pkgs.iputils}/bin/ping -n -c1 -W1 11.0.0.1 >/dev/null 2>&1; do sleep 0.05; done; say fwd) &
     (until ${pkgs.openssh}/bin/ssh -i $key -o BatchMode=yes -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=1 root@192.168.1.1 true 2>/dev/null; do sleep 0.2; done; say ssh) &
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=1 root@192.168.1.1 true 2>/dev/null; do sleep 0.2; done; say ssh
+     # --profile: once everything is up, dump the router's boot profile.
+     if [ -e /sys/firmware/qemu_fw_cfg/by_name/opt/sensrbench/profile/raw ]; then
+       sleep 20
+       ${pkgs.openssh}/bin/ssh -i $key -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.1.1 \
+         'systemd-analyze; systemd-analyze critical-chain sshd.service sensr-api.service sensr-agent.service; systemd-analyze blame | head -n 40; journalctl -b -o short-monotonic --no-pager _PID=1 + SYSLOG_IDENTIFIER=systemd-networkd | grep -v -e Starting -e Mounting | head -n 200' > /dev/ttyS0 2>&1
+       say profiled
+     fi) &
     (until [ "$(${pkgs.curl}/bin/curl -s -o /dev/null -w '%{http_code}' --max-time 1 http://192.168.1.1:443/api/v1/session)" != 000 ]; do sleep 0.1; done; say api) &
+    # Only the imported home-router.xml has this host override, so this
+    # milestone also proves which config the router is running.
+    (until [ "$(${pkgs.dig}/bin/dig +short +time=1 +tries=1 @192.168.1.1 nas.home.example A 2>/dev/null)" = 192.168.1.10 ]; do sleep 0.2; done; say dns) &
     wait
   '';
 in
