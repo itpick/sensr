@@ -8,12 +8,15 @@ use serde::{Deserialize, Serialize};
 use super::dhcp::{Dhcpv4, Pool4, Subnet4};
 use super::dns::DnsResolver;
 use super::firewall::{AliasType, Endpoint, FilterRule, Firewall};
+use super::gateways::Gateways;
 use super::interfaces::{Interface, InterfaceRole, Interfaces, Ipv4Config, Ipv6Config};
 use super::nat::Nat;
 use super::system::System;
 use super::wireguard::WireGuard;
 use crate::array::Uuid;
-use crate::fields::{AliasName, GroupName, InterfaceId, IpFamily, NetOrAlias, string_serde};
+use crate::fields::{
+    AliasName, GatewayName, GroupName, InterfaceId, IpFamily, NetOrAlias, string_serde,
+};
 use crate::refs::{ItemKind, RefContext, Validate};
 
 use crate::validation::{FieldError, FieldPath, Validations};
@@ -93,11 +96,13 @@ pub enum Section {
     Dns,
     /// `wireguard`.
     Wireguard,
+    /// `gateways`.
+    Gateways,
 }
 
 impl Section {
     /// Every section, in document order.
-    pub const ALL: [Section; 7] = [
+    pub const ALL: [Section; 8] = [
         Self::System,
         Self::Interfaces,
         Self::Firewall,
@@ -105,6 +110,7 @@ impl Section {
         Self::Dhcpv4,
         Self::Dns,
         Self::Wireguard,
+        Self::Gateways,
     ];
 
     /// The section's key in the JSON document.
@@ -117,6 +123,7 @@ impl Section {
             Self::Dhcpv4 => "dhcpv4",
             Self::Dns => "dns",
             Self::Wireguard => "wireguard",
+            Self::Gateways => "gateways",
         }
     }
 }
@@ -149,6 +156,9 @@ pub struct Document {
     /// WireGuard.
     #[serde(default)]
     pub wireguard: WireGuard,
+    /// Gateways and gateway groups.
+    #[serde(default)]
+    pub gateways: Gateways,
 }
 
 impl Default for Document {
@@ -162,6 +172,7 @@ impl Default for Document {
             dhcpv4: Dhcpv4::default(),
             dns: DnsResolver::default(),
             wireguard: WireGuard::default(),
+            gateways: Gateways::default(),
         }
     }
 }
@@ -257,6 +268,8 @@ impl Document {
         self.dns.validate(self, &root.join("dns"), &mut out);
         self.wireguard
             .validate(self, &root.join("wireguard"), &mut out);
+        self.gateways
+            .validate(self, &root.join("gateways"), &mut out);
         out
     }
 
@@ -272,6 +285,7 @@ impl Document {
                 Section::Dhcpv4 => self.dhcpv4 != other.dhcpv4,
                 Section::Dns => self.dns != other.dns,
                 Section::Wireguard => self.wireguard != other.wireguard,
+                Section::Gateways => self.gateways != other.gateways,
             })
             .collect()
     }
@@ -293,6 +307,10 @@ impl RefContext for Document {
             ItemKind::WgServer => self.wireguard.servers.contains(id),
             ItemKind::FilterRule => self.firewall.rules.contains(id),
         }
+    }
+
+    fn has_gateway(&self, name: &GatewayName) -> bool {
+        self.gateways.has(name)
     }
 
     fn has_group(&self, name: &GroupName) -> bool {

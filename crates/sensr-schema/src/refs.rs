@@ -31,6 +31,10 @@ pub trait RefContext {
     fn has_item(&self, kind: ItemKind, id: &Uuid) -> bool;
     /// True if a local group with this name exists.
     fn has_group(&self, name: &GroupName) -> bool;
+    /// True if a gateway or gateway group with this name exists.
+    fn has_gateway(&self, _name: &crate::fields::GatewayName) -> bool {
+        false
+    }
 }
 
 /// Validation of a model (or part of one) against the document.

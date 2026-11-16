@@ -197,5 +197,9 @@
     "enabled": false,
     "servers": {},
     "peers": {}
+  },
+  "gateways": {
+    "gateways": {},
+    "groups": {}
   }
 }
