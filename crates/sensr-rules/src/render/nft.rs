@@ -28,6 +28,7 @@ use crate::compile::{
 use crate::ir::{Addr, FilterRule, InterfaceMap, IpFamily, PortMatch};
 use crate::nat::{NatRules, RdrRule, SnatTarget};
 use crate::render::json::{Expr, Hook, Nat, Object, SetType, Stmt, Verdict, Writer};
+use crate::routing::{PolicyRouting, REPLY_MASK, ROUTE_MASK};
 
 /// Contents of one alias after resolution (nested aliases flattened).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -76,6 +77,8 @@ pub struct Policy<'a> {
     pub aliases: &'a BTreeMap<String, ResolvedAlias>,
     /// NAT rules; `None` renders no NAT chains
     pub nat: Option<&'a NatRules>,
+    /// policy-routing targets; `None` (or empty) renders no route marking
+    pub routing: Option<&'a PolicyRouting>,
 }
 
 /// Counts that make the compilation visible (and benchmarkable).
@@ -201,6 +204,43 @@ pub fn render<W: io::Write>(
             })?;
         }
     }
+    let route = route_plan(policy, &eval);
+    if route.is_none() {
+        for r in eval.iter().filter(|r| routes(r)) {
+            report.warnings.push(Warning {
+                label: r.label.clone(),
+                message: "no policy-routing targets; rule passes without route-to".into(),
+            });
+        }
+    }
+    if let Some(r) = &route {
+        w.add(Object::Chain {
+            name: "route_pre".into(),
+            hook: Some(Hook {
+                kind: "filter",
+                hook: "prerouting",
+                prio: -150,
+                policy: "accept",
+            }),
+        })?;
+        // the firewall's own replies (to connections that came in on a WAN)
+        // are routed in output; a `route` chain re-routes on a mark change
+        w.add(Object::Chain {
+            name: "route_out".into(),
+            hook: Some(Hook {
+                kind: "route",
+                hook: "output",
+                prio: -150,
+                policy: "accept",
+            }),
+        })?;
+        for k in &r.chains {
+            w.add(Object::Chain {
+                name: route_chain(*k).into(),
+                hook: None,
+            })?;
+        }
+    }
     for dir in ["in", "out"] {
         w.add(Object::Chain {
             name: format!("{dir}_dispatch").into(),
@@ -229,6 +269,9 @@ pub fn render<W: io::Write>(
     }
     dispatch(&mut w, "in", "iifname", policy.interfaces)?;
     dispatch(&mut w, "out", "oifname", policy.interfaces)?;
+    if let Some(r) = &route {
+        emit_route(&mut w, policy, r, &eval, &lows, opts, &mut report.warnings)?;
+    }
 
     for (dir, wants) in [
         (
@@ -622,8 +665,7 @@ fn concat(mut v: Vec<Expr<'static>>) -> Expr<'static> {
     }
 }
 
-/// conntrack mark bit set by `rdr pass` redirects.
-pub const RDR_PASS_MARK: u32 = 0x0001_0000;
+pub use crate::routing::RDR_PASS_MARK;
 
 type RuleStmts = (Vec<Stmt<'static>>, Option<std::borrow::Cow<'static, str>>);
 
@@ -1095,4 +1137,207 @@ pub fn alias_set_updates(name: &str, a: &ResolvedAlias) -> Vec<(String, SetConte
         SetContents::Ports(a.ports.clone()),
     ));
     v
+}
+
+/// What the route-marking chains need.
+struct RoutePlan<'p> {
+    routing: &'p PolicyRouting,
+    /// interface chains (by logical name; `None` = catch-all) with rules
+    /// that pick a gateway
+    chains: Vec<Option<&'p str>>,
+}
+
+fn route_chain(k: Option<&str>) -> String {
+    match k {
+        Some(i) => format!("pr_{i}"),
+        None => "pr__any".into(),
+    }
+}
+
+fn routes(r: &FilterRule) -> bool {
+    r.enabled
+        && r.action == crate::ir::Action::Pass
+        && r.gateway.is_some()
+        && r.direction.matches_in()
+}
+
+fn route_plan<'p>(policy: &Policy<'p>, eval: &[&'p FilterRule]) -> Option<RoutePlan<'p>> {
+    let routing = policy.routing.filter(|r| !r.is_empty())?;
+    let keys: Vec<Option<&'p str>> = policy
+        .interfaces
+        .keys()
+        .map(|k| Some(k.as_str()))
+        .chain([None])
+        .collect();
+    let chains: Vec<Option<&'p str>> = keys
+        .into_iter()
+        .filter(|k| eval.iter().any(|r| routes(r) && applies_to(r, *k)))
+        .collect();
+    (!chains.is_empty() || !routing.reply.is_empty()).then_some(RoutePlan { routing, chains })
+}
+
+fn mark_and(mask: u32) -> Expr<'static> {
+    Expr::And(Box::new(Expr::Ct("mark")), Box::new(Expr::Num(mask)))
+}
+
+fn emit_route<W: io::Write>(
+    w: &mut Writer<'_, W>,
+    policy: &Policy<'_>,
+    plan: &RoutePlan<'_>,
+    eval: &[&FilterRule],
+    lows: &[Vec<Low<'_>>],
+    opts: &Options,
+    warnings: &mut Vec<Warning>,
+) -> io::Result<()> {
+    let established = || Stmt::Match {
+        op: "==",
+        left: Expr::Ct("state"),
+        right: Expr::Set(vec![Expr::s("established"), Expr::s("related")]),
+    };
+    let direction = |d: &'static str| Stmt::Match {
+        op: "==",
+        left: Expr::Ct("direction"),
+        right: Expr::s(d),
+    };
+    let ret = || Stmt::Verdict(Verdict::Return);
+    // later packets: restore the connection's choice
+    add_rule(
+        w,
+        "route_pre",
+        vec![
+            established(),
+            direction("original"),
+            Stmt::MetaMarkSet(mark_and(ROUTE_MASK)),
+            ret(),
+        ],
+    )?;
+    add_rule(
+        w,
+        "route_pre",
+        vec![
+            established(),
+            direction("reply"),
+            Stmt::MetaMarkSet(Expr::And(
+                Box::new(Expr::Shr(
+                    Box::new(Expr::Ct("mark")),
+                    Box::new(Expr::Num(8)),
+                )),
+                Box::new(Expr::Num(ROUTE_MASK)),
+            )),
+            ret(),
+        ],
+    )?;
+    add_rule(
+        w,
+        "route_out",
+        vec![
+            established(),
+            direction("reply"),
+            Stmt::MetaMarkSet(Expr::And(
+                Box::new(Expr::Shr(
+                    Box::new(Expr::Ct("mark")),
+                    Box::new(Expr::Num(8)),
+                )),
+                Box::new(Expr::Num(ROUTE_MASK)),
+            )),
+        ],
+    )?;
+    // new connections arriving on a WAN reply through it
+    for (iface, gw) in &plan.routing.reply {
+        let (Some(i), Some(mark)) = (policy.interfaces.get(iface), plan.routing.mark(gw)) else {
+            continue;
+        };
+        add_rule(
+            w,
+            "route_pre",
+            vec![
+                Stmt::Match {
+                    op: "==",
+                    left: Expr::Meta("iifname"),
+                    right: Expr::Str(i.device.clone().into()),
+                },
+                Stmt::CtMarkSet(Expr::Or(
+                    Box::new(mark_and(!REPLY_MASK)),
+                    Box::new(Expr::Num(mark << 8)),
+                )),
+            ],
+        )?;
+    }
+    // new connections from inside: the first matching inbound rule decides
+    let mut by_dev = Vec::new();
+    for k in plan.chains.iter().flatten() {
+        if let Some(i) = policy.interfaces.get(*k) {
+            by_dev.push((
+                Expr::Str(i.device.clone().into()),
+                Verdict::Goto(route_chain(Some(k)).into()),
+            ));
+        }
+    }
+    if !by_dev.is_empty() {
+        add_rule(
+            w,
+            "route_pre",
+            vec![Stmt::Vmap {
+                key: Expr::Meta("iifname"),
+                data: by_dev,
+            }],
+        )?;
+    }
+    if plan.chains.contains(&None) {
+        add_rule(
+            w,
+            "route_pre",
+            vec![Stmt::Verdict(Verdict::Goto(route_chain(None).into()))],
+        )?;
+    }
+    for k in &plan.chains {
+        let chain = route_chain(*k);
+        let members: Vec<(&FilterRule, &Vec<Low<'_>>)> = eval
+            .iter()
+            .copied()
+            .zip(lows)
+            .filter(|(r, _)| r.direction.matches_in() && applies_to(r, *k))
+            .collect();
+        // rules after the last gateway rule cannot pick a gateway
+        let Some(last) = members.iter().rposition(|(r, _)| routes(r)) else {
+            continue;
+        };
+        for (r, ls) in &members[..=last] {
+            let mark = if routes(r) {
+                let gw = r.gateway.as_deref().unwrap_or_default();
+                match plan.routing.mark(gw) {
+                    Some(m) => Some(m),
+                    None => {
+                        warnings.push(Warning {
+                            label: r.label.clone(),
+                            message: format!("unknown gateway {gw}; not policy-routed"),
+                        });
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            for l in ls.iter() {
+                let mut expr: Vec<Stmt<'_>> = l.matches.iter().map(match_stmt).collect();
+                if let Some(m) = mark {
+                    if opts.counters {
+                        expr.push(Stmt::Counter);
+                    }
+                    expr.push(Stmt::MetaMarkSet(Expr::Num(m)));
+                    expr.push(Stmt::CtMarkSet(Expr::Or(
+                        Box::new(mark_and(!ROUTE_MASK)),
+                        Box::new(Expr::Num(m)),
+                    )));
+                }
+                expr.push(ret());
+                w.add(Object::Rule {
+                    chain: chain.clone().into(),
+                    expr,
+                    comment: comment(l.label),
+                })?;
+            }
+        }
+    }
+    Ok(())
 }

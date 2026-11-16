@@ -247,6 +247,7 @@ fn main() {
             interfaces: &ifs,
             aliases: &resolved,
             nat: Some(&nat_rules),
+            routing: None,
         };
         let mut buf = Vec::with_capacity(256 * 1024);
         let report = nft::render(&policy, &Options::default(), &mut buf).expect("render");

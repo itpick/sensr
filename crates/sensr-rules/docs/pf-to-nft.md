@@ -84,11 +84,23 @@ golden with real packets in network namespaces.
 | a port forward with filter association "rule" | its filter rule at priority 500000 (destination = target, port = local port) |
 | port given without protocol | `meta l4proto { 6, 17 }` — a pf port test only ever matches TCP/UDP |
 
+## Policy routing
+
+pf routes at filter time; Linux routes before the filter, from the packet
+mark. See `src/routing.rs` for the mark layout; golden `doc-multiwan`,
+packet test `scripts/netns-multiwan-test.sh`.
+
+| pf (OPNsense) | nftables |
+|---|---|
+| `pass in … route-to (igc2 198.51.100.1)` (rule gateway / group) | chain `route_pre` (prerouting, prio −150): new connections re-walk the inbound rules up to the last gateway rule in `pr_<iface>`; the deciding rule sets `meta mark` and stores it in the ct mark (`0x0000ff00`) |
+| later packets of the connection | `ct state established,related ct direction original meta mark set ct mark & 0xff00` |
+| automatic `reply-to` on multi-WAN | new connections arriving on a WAN store that WAN's gateway in ct mark bits `0x00ff0000`; reply packets (forwarded: `route_pre`, the firewall's own: `route_out`, a `route` chain) get `meta mark set (ct mark >> 8) & 0xff00` |
+| gateways and gateway groups | `Compiled::routing`: one mark and routing table per target, for the routing layer's `ip rule fwmark <mark>/0xff00 lookup <table>` |
+
 ## Degraded on import (warning, rule still loads)
 
 | pf | Status |
 |---|---|
-| `route-to` / `reply-to` (gateways) | not rendered yet (policy routing via fwmark tables is `sensr-net` work) |
 | `tag` / `tagged` | not rendered yet |
 | `set prio` | not rendered yet |
 | `modulate state` | no nftables equivalent |
