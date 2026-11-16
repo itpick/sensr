@@ -259,3 +259,42 @@ fn every_fixture_imports_and_round_trips() {
         }
     }
 }
+
+proptest::proptest! {
+    // The importer never panics on structurally valid XML with OPNsense-shaped
+    // names and arbitrary text, and its document always exports.
+    #[test]
+    fn prop_import_never_panics(
+        sections in proptest::collection::vec(
+            (
+                proptest::sample::select(vec![
+                    "system", "interfaces", "filter", "nat", "dhcpd", "dnsmasq", "unbound", "vlans", "gateways", "ca", "cert",
+                ]),
+                proptest::collection::vec(
+                    (
+                        proptest::sample::select(vec![
+                            "wan", "lan", "opt1", "rule", "user", "group", "vlan", "staticmap", "outbound", "if", "ipaddr",
+                            "subnet", "ipaddrv6", "track6-interface", "enable", "hostname", "dnsserver", "gateway_item",
+                        ]),
+                        "[ -~]{0,12}",
+                    ),
+                    0..6,
+                ),
+            ),
+            0..6,
+        )
+    ) {
+        let mut xml = String::from("<opnsense>");
+        for (section, children) in &sections {
+            xml.push_str(&format!("<{section}>"));
+            for (name, text) in children {
+                let text = text.replace('&', "&amp;").replace('<', "&lt;");
+                xml.push_str(&format!("<{name}>{text}</{name}>"));
+            }
+            xml.push_str(&format!("</{section}>"));
+        }
+        xml.push_str("</opnsense>");
+        let imported = import_config(&xml, &ImportOptions::default()).unwrap();
+        let _ = export_config(&imported.document);
+    }
+}
