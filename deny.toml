@@ -1,8 +1,19 @@
 [advisories]
 yanked = "deny"
+ignore = [
+  # Unmaintained, no vulnerability; a proc-macro dependency of leptos 0.8 (either_of, tachys).
+  # Drop once leptos moves off it (tracked for the leptos 0.9 migration, docs/PLAN.md).
+  { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained, compile-time only, via leptos" },
+]
 
 [licenses]
 allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MPL-2.0", "Zlib", "Unicode-3.0", "CDLA-Permissive-2.0"]
+
+# Permissive licenses accepted for single crates in the Leptos tree.
+exceptions = [
+  { allow = ["CC0-1.0"], crate = "base16" },
+  { allow = ["BSL-1.0"], crate = "xxhash-rust" },
+]
 
 [bans]
 multiple-versions = "warn"

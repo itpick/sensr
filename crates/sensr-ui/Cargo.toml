@@ -7,7 +7,84 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+# cdylib is the wasm island bundle (hydrate); rlib is what sensr-api and the dev server link (ssr).
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+# Standalone UI server on the mock backend, for development and the browser tests.
+name = "sensr-ui-dev"
+path = "src/bin/dev.rs"
+required-features = ["ssr"]
+
+[features]
+default = ["ssr"]
+ssr = [
+  "dep:anyhow",
+  "dep:axum",
+  "dep:leptos_axum",
+  "dep:similar",
+  "dep:tokio",
+  "dep:tower",
+  "dep:tower-http",
+  "dep:tracing",
+  "dep:tracing-subscriber",
+  "leptos/ssr",
+  "leptos_meta/ssr",
+  "leptos_router/ssr",
+]
+hydrate = [
+  "dep:console_error_panic_hook",
+  "dep:wasm-bindgen",
+  "dep:web-sys",
+  "leptos/hydrate",
+]
+
 [dependencies]
+futures.workspace = true
+leptos = { workspace = true, features = ["islands"] }
+leptos_meta.workspace = true
+leptos_router.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+# ssr
+anyhow = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+leptos_axum = { workspace = true, optional = true }
+similar = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+# hydrate
+console_error_panic_hook = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true, features = ["Document", "DragEvent", "DataTransfer", "Element", "HtmlElement", "HtmlDocument", "Window", "Storage", "HtmlDialogElement", "DomTokenList", "Location"] }
+
+[dev-dependencies]
+scraper.workspace = true
+tokio = { workspace = true }
 
 [lints]
 workspace = true
+
+[package.metadata.leptos]
+output-name = "sensr-ui"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/main.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+bin-target = "sensr-ui-dev"
+bin-exe-name = "sensr-ui-dev"
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
+lib-profile-release = "wasm-release"
+env = "DEV"

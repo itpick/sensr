@@ -30,13 +30,18 @@ bcrypt = "0.19.3"
 blake3 = "1.8.7"
 ciborium = "0.2.2"
 clap = { version = "4.6.7", features = ["derive"] }
+console_error_panic_hook = "0.1.7"
 fancy-regex = "0.20.2"
+futures = "0.3.34"
 getrandom = "0.4.3"
 indexmap = { version = "2.14.2", features = ["serde"] }
 insta = "1.49.0"
 inventory = "0.3.25"
 ipnet = { version = "2.12.2", features = ["serde"] }
 leptos = "0.8.23"
+leptos_axum = "0.8.10"
+leptos_meta = "0.8.7"
+leptos_router = "0.8.17"
 md-5 = "0.11.0"
 minijinja = "3.1.0"
 nftables = "0.6.3"
@@ -47,6 +52,7 @@ regex = "1.13.1"
 rtnetlink = "0.24.0"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 schemars = "1.2.3"
+scraper = "0.29.0"
 sd-notify = "0.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -56,9 +62,13 @@ tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
 toml = "1.2.1"
+tower = "0.5.3"
+tower-http = { version = "0.7.1", features = ["compression-br", "compression-gzip", "fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.29.2", features = ["v4", "serde"] }
+wasm-bindgen = "0.2.130"
+web-sys = "0.3.107"
 
 [workspace.lints.cargo]
 # The table above pins the whole planned stack at its latest versions before the
@@ -75,3 +85,11 @@ all = { level = "warn", priority = -1 }
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# The wasm island bundle: size over speed (docs/PLAN.md §4 bundle budget).
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
