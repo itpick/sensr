@@ -16,6 +16,7 @@ pub mod dns_runtime;
 pub mod interfaces;
 pub mod kea;
 pub mod nft;
+pub mod ntp;
 pub mod qdisc;
 pub mod suricata;
 pub mod sysctl;
@@ -27,6 +28,9 @@ use crate::templates::{Staging, TemplateError, Templates};
 
 /// Where the Kea config is rendered (the NixOS unit points `-c` here).
 pub const KEA_CONF: &str = "run/sensr/kea/kea-dhcp4.conf";
+
+/// Where the ntpd-rs config is rendered (the NixOS unit points `--config` here).
+pub const NTP_CONF: &str = "run/sensr/ntp/ntp.toml";
 
 /// The slice's typed inputs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -41,6 +45,8 @@ pub struct SliceModels {
     pub unbound: Option<unbound::UnboundModel>,
     /// Tunnels.
     pub wireguard: wireguard::WireguardModel,
+    /// Time service (`None`: no time servers configured).
+    pub ntp: Option<ntp::NtpModel>,
 }
 
 /// Failure to build the slice plan.
@@ -61,6 +67,9 @@ pub enum SliceError {
     /// Unbound model/rendering.
     #[error(transparent)]
     Unbound(#[from] unbound::RenderError),
+    /// NTP model/rendering.
+    #[error(transparent)]
+    Ntp(#[from] ntp::NtpError),
     /// The nft ruleset writer.
     #[error("rendering the ruleset: {0}")]
     Nft(#[from] std::io::Error),
@@ -128,6 +137,24 @@ impl SliceModels {
                 },
             );
             p.files.extend(files);
+        }
+        if let Some(n) = &self.ntp {
+            let path = staging.live_dir(NTP_CONF);
+            p.files.insert(
+                path.clone(),
+                FileSpec {
+                    contents: n.render()?.into_bytes(),
+                    mode: 0o644,
+                },
+            );
+            // ntpd-rs re-reads its config only on start.
+            p.units.insert(
+                "sensr-ntpd.service".into(),
+                UnitSpec {
+                    action: UnitAction::Restart,
+                    inputs: [path].into(),
+                },
+            );
         }
         // networkd is driven by `WireguardModel::commands`, not a unit
         // reload, but its files still take part in the diff.

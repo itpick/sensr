@@ -2,8 +2,8 @@
 # home-router.xml and routes for a small network.
 #
 #   upstream  WAN DHCP server and the internet's router
-#   internet  an "internet" HTTP host (echoes the client address) and the
-#             WireGuard road-warrior peer "phone"
+#   internet  an "internet" HTTP host (echoes the client address), a
+#             stratum-1 NTP server, and the WireGuard road-warrior peer "phone"
 #   router    sensr (mode = "sensr") or the hand-written oracle of the same
 #             config (mode = "reference", ./slice/reference-router.nix)
 #   lan       DHCP client in the LAN pool
@@ -12,7 +12,9 @@
 #
 # Assertions: DHCP leases (pool and static reservation), DNS through the
 # router, NAT to the internet, the imported filter rules (block and allow),
-# the port forward, a WireGuard peer, and commit-confirm rolling back an
+# the port forward, a WireGuard peer, a LAN client setting its clock from the
+# router's NTP server (which syncs from the "internet"), and commit-confirm
+# rolling back an
 # unconfirmed change. In sensr mode each part waits on its flag in
 # nix/pending.nix; the reference mode always runs everything except
 # commit-confirm, which is sensr's alone.
@@ -151,6 +153,15 @@ pkgs.testers.runNixOSTest {
           local-data = [ "\"www.internet.example. A ${net.internet.host}\"" ];
         };
       };
+      # The internet's time: a stratum-1 server with no sources of its own.
+      services.ntpd-rs = {
+        enable = true;
+        useNetworkingTimeServers = false;
+        settings = {
+          server = [ { listen = "[::]:123"; } ];
+          synchronization.local-stratum = 1;
+        };
+      };
       environment.systemPackages = with pkgs; [
         curl
         wireguard-tools
@@ -182,6 +193,9 @@ pkgs.testers.runNixOSTest {
 
     lan = client {
       virtualisation.interfaces.eth1.vlan = net.lan.vlan;
+      # The router is the LAN's time server (timesyncd, NixOS's default).
+      networking.timeServers = [ net.lan.router ];
+      services.timesyncd.fallbackServers = [ ];
       systemd.network.networks."10-eth1" = {
         matchConfig.Name = "eth1";
         networkConfig.DHCP = "ipv4";
@@ -284,6 +298,13 @@ pkgs.testers.runNixOSTest {
                 router.succeed(
                     "sensr config set wireguard.peers.${net.wg.phoneUuid}.public_key ${net.wg.phonePublic}"
                     " && sensr config commit -m 'slice: test key for peer phone'"
+                )
+                # The fixture's time servers do not exist in a sealed test;
+                # the "internet" has one.
+                router.succeed(
+                    "sensr config set system.time_servers '[\"${net.internet.host}\"]' --json"
+                    " && sensr config set ntp.servers '[]' --json"
+                    " && sensr config commit -m 'slice: the internet time server'"
                 )
         if PENDING["configGet"]:
             pending("sensr config get")
@@ -429,6 +450,18 @@ pkgs.testers.runNixOSTest {
             # The tunnel is not a way onto the firewall itself: no rule
             # passes wg0 -> the firewall's own addresses.
             internet.fail("ping -c1 -W2 ${net.wg.serverAddress}")
+
+    if REFERENCE or not PENDING["importApply"]:
+        with subtest("NTP: a LAN client sets its clock from the router"):
+            internet.wait_for_unit("ntpd-rs.service")
+            # The router answers only once it is synchronised itself
+            # (stratum 16 before), so the client's sync proves the chain.
+            lan.wait_until_succeeds(
+                "timedatectl show-timesync --property=ServerAddress --value | grep -qx ${net.lan.router}"
+                " && timedatectl show --property=NTPSynchronized --value | grep -qx yes",
+                timeout=300,
+            )
+            print(lan.succeed("timedatectl timesync-status"))
 
     with subtest("commit-confirm: an unconfirmed apply rolls back"):
         if PENDING["commitConfirm"]:

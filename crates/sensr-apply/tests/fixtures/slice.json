@@ -6,7 +6,11 @@
     "dns_servers": [],
     "dns_allow_override": true,
     "timezone": "Etc/UTC",
-    "time_servers": [],
+    "time_servers": [
+      "0.pool.ntp.org",
+      "time.example.net",
+      "192.0.2.123"
+    ],
     "ipv6_allow": true,
     "users": {},
     "groups": {},
@@ -344,6 +348,23 @@
         ]
       }
     }
+  },
+  "ntp": {
+    "serve": true,
+    "listen_interfaces": [
+      "lan"
+    ],
+    "servers": [
+      {
+        "host": "time.example.net",
+        "no_select": true
+      },
+      {
+        "host": "192.0.2.123",
+        "prefer": true,
+        "iburst": true
+      }
+    ]
   },
   "wireguard": {
     "enabled": true,

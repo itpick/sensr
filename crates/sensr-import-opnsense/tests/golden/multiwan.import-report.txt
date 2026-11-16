@@ -1,6 +1,6 @@
 # sensr import report
 
-## mapped (24)
+## mapped (25)
 /opnsense/system  <- system
 /opnsense/vlans  <- interfaces
 /opnsense/interfaces  <- interfaces
@@ -17,6 +17,7 @@
 /opnsense/nat/outbound  <- nat
 /opnsense/OPNsense/Kea/dhcp4  <- kea
 /opnsense/OPNsense/unboundplus  <- unbound
+/opnsense/ntpd  <- ntpd
 /opnsense/ca[@uuid='7959b528-c70f-44b4-93e4-259c92e55107']  <- trust
 /opnsense/cert[@uuid='d5dccda9-c84a-487a-be74-309f12a4025c']  <- trust
 /opnsense/OPNsense/Gateways  <- gateways
@@ -26,7 +27,7 @@
 /opnsense/gateways/gateway_group[@uuid='2b2d395e-cfcf-4324-be48-7f65ebbc5323']  <- gateways
 /opnsense/gateways/gateway_group[@uuid='60d77f02-8d93-4fec-b523-cf0d0af7f5dc']  <- gateways
 
-## unmapped, expected (35)
+## unmapped, expected (34)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -51,7 +52,6 @@
 /opnsense/system/language  (web GUI language)
 /opnsense/system/firmware  (FreeBSD package mirror and plugin selection; sensr updates through NixOS generations)
 /opnsense/rrd  (RRD graphs are replaced by sensr-monitor)
-/opnsense/ntpd  (NTP server preferences are not modelled yet (system.time_servers is imported))
 /opnsense/revision  (OPNsense revision metadata; sensr keeps its own revision history)
 /opnsense/OPNsense/Firewall/Alias/geoip  (GeoIP database source is not modelled yet)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='2a511d4c-7829-427a-af2e-305619a096d2']/audit  (OPNsense change metadata; sensr keeps its own audit log)

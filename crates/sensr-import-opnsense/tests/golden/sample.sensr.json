@@ -212,5 +212,43 @@
   "trust": {
     "authorities": {},
     "certificates": {}
+  },
+  "ntp": {
+    "serve": true,
+    "servers": [
+      {
+        "host": "0.opnsense.pool.ntp.org",
+        "prefer": true,
+        "no_select": false,
+        "iburst": false,
+        "pool": true,
+        "nts": false
+      },
+      {
+        "host": "1.opnsense.pool.ntp.org",
+        "prefer": false,
+        "no_select": false,
+        "iburst": false,
+        "pool": true,
+        "nts": false
+      },
+      {
+        "host": "2.opnsense.pool.ntp.org",
+        "prefer": false,
+        "no_select": false,
+        "iburst": false,
+        "pool": true,
+        "nts": false
+      },
+      {
+        "host": "3.opnsense.pool.ntp.org",
+        "prefer": false,
+        "no_select": false,
+        "iburst": false,
+        "pool": true,
+        "nts": false
+      }
+    ],
+    "allow_query": false
   }
 }

@@ -10,7 +10,7 @@
 # Kea subnets and reservations, Unbound host overrides, WireGuard.
 # Not modelled: IPv6 / prefix delegation, the URL-table and GeoIP alias
 # contents (both are empty sets here: no feed in a sealed test), the DoT and
-# domain-forward upstreams, syslog, NTP.
+# domain-forward upstreams, syslog.
 { lib, pkgs, ... }:
 let
   net = import ./net.nix;
@@ -176,6 +176,28 @@ in
         }
       }
     '';
+  };
+
+  # ntpd: the "internet" time server (the fixture's are replaced in the
+  # test), served on lan,opt1,opt2's addresses and loopback.
+  services.ntpd-rs = {
+    enable = true;
+    useNetworkingTimeServers = false;
+    settings = {
+      source = [
+        {
+          mode = "server";
+          address = net.internet.host;
+        }
+      ];
+      server = map (a: { listen = "${a}:123"; }) [
+        "127.0.0.1"
+        net.lan.router
+        net.iot.router
+        "192.168.30.1"
+      ];
+      synchronization.minimum-agreeing-sources = 1;
+    };
   };
 
   services.kea.dhcp4 = {

@@ -25,7 +25,7 @@ use sensr_schema::Document;
 use crate::appliers::convert::{self, ConvertError, SecretsDir};
 use crate::appliers::interfaces::InterfacesModel;
 use crate::appliers::sysctl::{Sysctl, SysctlApplyError};
-use crate::appliers::{SliceError, SliceModels, kea, nft, suricata, unbound};
+use crate::appliers::{SliceError, SliceModels, kea, nft, ntp, suricata, unbound};
 use crate::cmd::{Cmd, CmdError, Runner};
 use crate::hooks::{HookLevel, Hooks};
 use crate::plan::{FileSpec, Plan, UnitAction, UnitSpec};
@@ -344,7 +344,7 @@ impl Engine {
                 other => EngineError::Nft(other),
             })?;
         }
-        self.check_files(p, &["unbound.conf"])
+        self.check_files(p, &["unbound.conf", "ntp.toml"])
     }
 
     /// Stages the named files, runs their checkers, throws the copies away.
@@ -360,6 +360,7 @@ impl Engine {
             let checker: Option<(&'static str, Checker)> = match name.as_deref() {
                 Some("kea-dhcp4.conf") => Some(("kea-dhcp4", kea::check)),
                 Some("unbound.conf") => Some(("unbound-checkconf", unbound::check)),
+                Some("ntp.toml") => Some(("ntp-ctl", ntp::check)),
                 _ => None,
             };
             if let Some((backend, f)) = checker {

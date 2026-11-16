@@ -1,6 +1,6 @@
 # sensr import report
 
-## mapped (12)
+## mapped (13)
 /opnsense/system  <- system
 /opnsense/interfaces  <- interfaces
 /opnsense/OPNsense/Firewall/Filter/rules/rule[1]  <- filter
@@ -13,8 +13,9 @@
 /opnsense/nat/outbound  <- nat
 /opnsense/dnsmasq  <- dnsmasq-dhcp
 /opnsense/unbound  <- unbound
+/opnsense/ntpd  <- ntpd
 
-## unmapped, expected (15)
+## unmapped, expected (14)
 /opnsense/trigger_initial_wizard  (OPNsense setup wizard marker)
 /opnsense/theme  (web GUI theme)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -29,7 +30,6 @@
 /opnsense/system/pf_share_forward  (pf-specific forwarding option)
 /opnsense/system/lb_use_sticky  (pf load-balancing stickiness)
 /opnsense/rrd  (RRD graphs are replaced by sensr-monitor)
-/opnsense/ntpd  (NTP server preferences are not modelled yet (system.time_servers is imported))
 
 ## unmapped, unexpected (2)
 /opnsense/dnsmasq/dhcp/enable_ra

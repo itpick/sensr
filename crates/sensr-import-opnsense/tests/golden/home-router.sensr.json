@@ -1123,5 +1123,32 @@
         "issuer": "9a7d8f90-ce35-4ce7-ae7f-952ebd95d44d"
       }
     }
+  },
+  "ntp": {
+    "serve": true,
+    "listen_interfaces": [
+      "lan",
+      "opt1",
+      "opt2"
+    ],
+    "servers": [
+      {
+        "host": "ntp1.example.net",
+        "prefer": true,
+        "no_select": false,
+        "iburst": true,
+        "pool": false,
+        "nts": false
+      },
+      {
+        "host": "ntp2.example.net",
+        "prefer": false,
+        "no_select": false,
+        "iburst": true,
+        "pool": false,
+        "nts": false
+      }
+    ],
+    "allow_query": false
   }
 }

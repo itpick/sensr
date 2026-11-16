@@ -76,6 +76,7 @@ let
     nftables
     kea
     unbound
+    cfg.ntp.package
     wireguard-tools
     iproute2
     conntrack-tools
@@ -314,6 +315,15 @@ in
         Force a reboot when stage 1 has not reached
         initrd.target this many seconds after boot (a hung root mount, a hung
         unit). On a Pi trial boot the reboot returns to the previous OS.
+      '';
+    };
+
+    ntp.package = lib.mkPackageOption pkgs "ntpd-rs" { } // {
+      description = ''
+        The NTP daemon sensr renders `ntp.toml` for (ntpd-rs: memory safe,
+        NTS-capable). It keeps the clock from `system.time_servers` and serves
+        clients per the `ntp` section, so systemd-timesyncd is off, as
+        OPNsense runs ntpd whenever time servers are set.
       '';
     };
 
@@ -807,6 +817,62 @@ in
             ${pkgs.coreutils}/bin/install -m 0644 ${cfg.seedDir}/authorized_keys "$d/root"
           fi
         '';
+    # Time: ntpd-rs owns the clock (OPNsense runs ntpd whenever time servers
+    # are set); a second NTP client would fight it.
+    services.timesyncd.enable = false;
+    systemd.services.systemd-timedated.environment.SYSTEMD_TIMEDATED_NTP_SERVICES =
+      "sensr-ntpd.service";
+    systemd.services.sensr-ntpd = {
+      description = "ntpd-rs NTP client and server (config rendered by sensr)";
+      after = [ "sensr-net.target" ];
+      partOf = [ "sensr-agent.service" ];
+      unitConfig.ConditionPathExists = "${runtimeDir}/ntp/ntp.toml";
+      serviceConfig = {
+        ExecStartPre = "${cfg.ntp.package}/bin/ntp-ctl validate -c ${runtimeDir}/ntp/ntp.toml";
+        ExecStart = "${cfg.ntp.package}/bin/ntp-daemon --config ${runtimeDir}/ntp/ntp.toml";
+        Restart = "on-failure";
+        RestartSec = "10s";
+        DynamicUser = true;
+        RuntimeDirectory = "ntpd-rs";
+        # The clock is the point (no ProtectClock); port 123 for clients.
+        AmbientCapabilities = [
+          "CAP_SYS_TIME"
+          "CAP_NET_BIND_SERVICE"
+        ];
+        CapabilityBoundingSet = [
+          "CAP_SYS_TIME"
+          "CAP_NET_BIND_SERVICE"
+        ];
+        NoNewPrivileges = true;
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        PrivateTmp = true;
+        ProcSubset = "pid";
+        ProtectControlGroups = true;
+        ProtectHome = true;
+        ProtectHostname = true;
+        ProtectKernelLogs = true;
+        ProtectKernelModules = true;
+        ProtectKernelTunables = true;
+        ProtectProc = "invisible";
+        ProtectSystem = "strict";
+        RestrictAddressFamilies = [
+          "AF_INET"
+          "AF_INET6"
+          "AF_UNIX"
+          "AF_NETLINK"
+        ];
+        RestrictNamespaces = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        SystemCallArchitectures = "native";
+        SystemCallFilter = [
+          "@system-service"
+          "@resources"
+          "@network-io"
+          "@clock"
+        ];
+        UMask = "0022";
       };
     };
 
