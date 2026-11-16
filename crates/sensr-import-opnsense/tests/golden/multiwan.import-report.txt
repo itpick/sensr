@@ -15,7 +15,7 @@
 /opnsense/OPNsense/Firewall/Filter/rules  <- filter
 /opnsense/OPNsense/Firewall/Filter/snatrules  <- filter
 /opnsense/nat/outbound  <- nat
-/opnsense/OPNsense/Kea/dhcp4  <- kea-dhcp4
+/opnsense/OPNsense/Kea/dhcp4  <- kea
 /opnsense/OPNsense/unboundplus  <- unbound
 /opnsense/ca[@uuid='7959b528-c70f-44b4-93e4-259c92e55107']  <- trust
 /opnsense/cert[@uuid='d5dccda9-c84a-487a-be74-309f12a4025c']  <- trust

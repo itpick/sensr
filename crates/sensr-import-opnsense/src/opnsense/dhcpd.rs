@@ -11,11 +11,23 @@ use sensr_schema::models::dhcp::{ClientMatch, Pool4, Reservation4, Subnet4};
 use sensr_schema::models::interfaces::Ipv4Config;
 
 use super::common::{description, interface_id, item_uuid, list, parse_or_warn};
+use super::dhcp_servers::{Server, SharedLedger};
 use crate::mapper::{MapContext, Mapper};
 use crate::report::Severity;
 use crate::tree::Element;
 
-pub struct DhcpdMapper;
+/// dhcpd's own `default-lease-time` when an interface sets none (`dhcpd.inc`).
+const DEFAULT_LEASE: u32 = 7200;
+
+pub struct DhcpdMapper {
+    ledger: SharedLedger,
+}
+
+impl DhcpdMapper {
+    pub fn new(ledger: SharedLedger) -> Self {
+        Self { ledger }
+    }
+}
 
 impl Mapper<Document> for DhcpdMapper {
     fn name(&self) -> &'static str {
@@ -53,6 +65,7 @@ impl Mapper<Document> for DhcpdMapper {
                 continue;
             };
             if enabled {
+                self.ledger.borrow_mut().activate(Server::Isc);
                 out.dhcpv4.enabled = true;
                 if !out.dhcpv4.interfaces.contains(&id) {
                     out.dhcpv4.interfaces.push(id.clone());
@@ -109,7 +122,12 @@ impl Mapper<Document> for DhcpdMapper {
                     .filter_map(|x| parse_or_warn(ctx, block, x, "search domain"))
                     .collect();
             }
-            subnet.valid_lifetime = ctx.parse(block, "defaultleasetime");
+            subnet.valid_lifetime = Some(
+                ctx.parse(block, "defaultleasetime")
+                    .unwrap_or(DEFAULT_LEASE),
+            );
+            let descr = ctx.text(block, "descr");
+            subnet.description = description(ctx, block, descr);
             // Without explicit options ISC hands out the interface address.
             subnet.auto_options = true;
             let subnet_id = item_uuid(ctx, block);
@@ -119,9 +137,13 @@ impl Mapper<Document> for DhcpdMapper {
                 .filter_map(|m| static_map(m, ctx, subnet_id))
                 .collect();
             out.dhcpv4.subnets.insert(subnet_id, subnet);
-            for (rid, r) in reservations {
+            let mut ledger = self.ledger.borrow_mut();
+            ledger.subnet(Server::Isc, subnet_id, ctx.xpath(block));
+            for (rid, xpath, r) in reservations {
+                ledger.reservation(Server::Isc, rid, xpath);
                 out.dhcpv4.reservations.insert(rid, r);
             }
+            drop(ledger);
             ctx.defaults(
                 block,
                 &[
@@ -138,12 +160,33 @@ impl Mapper<Document> for DhcpdMapper {
                     ("nextserver", ""),
                     ("filename", ""),
                     ("rootpath", ""),
-                    ("numberoptions", ""),
                     ("failover_peerip", ""),
+                    ("failover_split", ""),
                     ("denyunknown", ""),
                     ("ignoreuids", ""),
+                    ("staticarp", ""),
+                    // The key algorithm select always posts a value.
+                    ("ddnsdomainalgorithm", "hmac-md5"),
+                    ("ddnsdomainprimary", ""),
+                    ("ddnsdomainkeyname", ""),
+                    ("ddnsdomainkey", ""),
+                    ("filename32", ""),
+                    ("filename64", ""),
+                    ("filename32arm", ""),
+                    ("filename64arm", ""),
+                    ("filenameipxe", ""),
+                    ("netmask", ""),
+                    ("interface_mtu", ""),
+                    ("wpad", ""),
+                    ("omapi", ""),
+                    ("omapiport", ""),
+                    ("omapialgorithm", ""),
+                    ("omapikey", ""),
+                    ("minsecs", ""),
                 ],
             );
+            // Additional options: the form saves an empty row as `<item/>`.
+            ctx.blank(block, &["numberoptions"]);
         }
     }
 }
@@ -152,7 +195,7 @@ fn static_map<'doc>(
     m: &'doc Element,
     ctx: &mut MapContext<'doc>,
     subnet: sensr_schema::Uuid,
-) -> Option<(sensr_schema::Uuid, Reservation4)> {
+) -> Option<(sensr_schema::Uuid, String, Reservation4)> {
     let id = item_uuid(ctx, m);
     let client = if let Some(mac) = ctx.non_empty(m, "mac") {
         ClientMatch::HwAddress(parse_or_warn::<MacAddr>(ctx, m, &mac, "MAC address")?)
@@ -173,6 +216,9 @@ fn static_map<'doc>(
         None => None,
     };
     let descr = ctx.text(m, "descr");
+    // Per-host options (`services_dhcp_edit.php`) are not modelled on a
+    // reservation: empty ones (the form always writes the server lists) are unset,
+    // set ones stay reported.
     ctx.defaults(
         m,
         &[
@@ -181,10 +227,21 @@ fn static_map<'doc>(
             ("rootpath", ""),
             ("defaultleasetime", ""),
             ("maxleasetime", ""),
+            ("arp_table_static_entry", ""),
+            ("gateway", ""),
+            ("domain", ""),
+            ("domainsearchlist", ""),
+            ("ddnsdomain", ""),
+            ("tftp", ""),
+            ("bootfilename", ""),
+            ("winsserver", ""),
+            ("dnsserver", ""),
+            ("ntpserver", ""),
         ],
     );
     Some((
         id,
+        ctx.xpath(m),
         Reservation4 {
             subnet: Relation::new(subnet),
             client,
