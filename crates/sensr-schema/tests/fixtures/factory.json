@@ -16,6 +16,10 @@
       "interfaces": [],
       "permit_root_login": false,
       "password_auth": false
+    },
+    "webgui": {
+      "protocol": "https",
+      "http_redirect": true
     }
   },
   "interfaces": {

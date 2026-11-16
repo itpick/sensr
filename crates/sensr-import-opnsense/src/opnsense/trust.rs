@@ -55,6 +55,46 @@ impl Mapper<Document> for TrustMapper {
                 None => ctx.release(c),
             }
         }
+        webgui_certificate(doc, ctx, out);
+    }
+}
+
+/// `system/webgui/ssl-certref`: the web GUI's certificate, by refid. A
+/// certificate without its key cannot serve TLS; the listener then uses
+/// sensr's own self-signed certificate.
+fn webgui_certificate<'doc>(doc: &'doc XmlDocument, ctx: &mut MapContext<'doc>, out: &mut Document) {
+    let Some(el) = doc
+        .root
+        .child("system")
+        .and_then(|s| s.child("webgui"))
+        .and_then(|w| w.child("ssl-certref"))
+    else {
+        return;
+    };
+    ctx.consume(el);
+    let refid = el.text();
+    let refid = refid.trim();
+    if refid.is_empty() {
+        return;
+    }
+    let found = out
+        .trust
+        .certificates
+        .iter()
+        .find(|(_, c)| c.refid == refid)
+        .map(|(id, c)| (*id, c.certificate.is_some() && c.private_key.is_some()));
+    match found {
+        Some((id, true)) => out.system.webgui.certificate = Some(Relation::new(id)),
+        Some((_, false)) => ctx.warn(
+            el,
+            Severity::Invalid,
+            format!("web GUI certificate {refid} has no certificate or key; sensr's self-signed certificate is used"),
+        ),
+        None => ctx.warn(
+            el,
+            Severity::Invalid,
+            format!("web GUI certificate {refid} is not in the trust store; sensr's self-signed certificate is used"),
+        ),
     }
 }
 

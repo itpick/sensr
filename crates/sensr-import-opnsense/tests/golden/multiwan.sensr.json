@@ -44,6 +44,12 @@
       "permit_root_login": false,
       "password_auth": false,
       "group": "admins"
+    },
+    "webgui": {
+      "protocol": "https",
+      "port": "8443",
+      "http_redirect": true,
+      "certificate": "d5dccda9-c84a-487a-be74-309f12a4025c"
     }
   },
   "interfaces": {

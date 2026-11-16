@@ -68,6 +68,11 @@
       "permit_root_login": false,
       "password_auth": false,
       "group": "admins"
+    },
+    "webgui": {
+      "protocol": "https",
+      "http_redirect": true,
+      "certificate": "93927b01-1517-45dd-8864-cb9cd2f776c6"
     }
   },
   "interfaces": {
