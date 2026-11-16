@@ -46,7 +46,9 @@ impl fmt::Display for HttpUrl {
 string_serde!(HttpUrl);
 
 /// An ISO 3166-1 alpha-2 country code, upper-case (`NL`, `DE`). Parsing
-/// accepts any case.
+/// accepts any case and checks syntax only, so imported configurations
+/// keep codes the GeoIP database may know; [`CountryCode::is_assigned`]
+/// and [`super::CountryField`] check the code list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CountryCode([u8; 2]);
 
@@ -55,6 +57,14 @@ impl CountryCode {
     pub fn as_str(&self) -> &str {
         // Only ASCII upper-case letters are ever stored.
         std::str::from_utf8(&self.0).unwrap_or("??")
+    }
+}
+
+impl CountryCode {
+    /// True for a code in the ISO 3166 table (plus `XK`, Kosovo, which
+    /// OPNsense adds because the IANA list lacks it).
+    pub fn is_assigned(&self) -> bool {
+        super::countries::is_country(self.as_str())
     }
 }
 
@@ -152,6 +162,8 @@ mod tests {
         assert_eq!("nl".parse::<CountryCode>().unwrap().to_string(), "NL");
         assert!("NLD".parse::<CountryCode>().is_err());
         assert!("N1".parse::<CountryCode>().is_err());
+        assert!(!"XX".parse::<CountryCode>().unwrap().is_assigned());
+        assert!("XK".parse::<CountryCode>().unwrap().is_assigned());
         assert_eq!(
             "01:02:F3".parse::<HexBytes>().unwrap().to_string(),
             "01:02:f3"
