@@ -458,12 +458,16 @@ pkgs.testers.runNixOSTest {
             internet.wait_for_unit("ntpd-rs.service")
             # The router answers only once it is synchronised itself
             # (stratum 16 before), so the client's sync proves the chain.
-            lan.wait_until_succeeds(
-                "timedatectl show-timesync --property=ServerAddress --value | grep -qx ${net.lan.router}"
-                " && timedatectl show --property=NTPSynchronized --value | grep -qx yes",
-                timeout=300,
-            )
-            print(lan.succeed("timedatectl timesync-status"))
+            try:
+                lan.wait_until_succeeds(
+                    "timedatectl show-timesync --property=ServerAddress --value | grep -qx ${net.lan.router}"
+                    " && timedatectl show --property=NTPSynchronized --value | grep -qx yes",
+                    timeout=300,
+                )
+            finally:
+                print(lan.execute("timedatectl timesync-status; journalctl -b -u systemd-timesyncd --no-pager | tail -n 20")[1])
+                print(router.execute("for c in /run/sensr/ntp/ntp.toml /etc/ntpd-rs/ntp.toml; do [ -e $c ] && cat $c && ntp-ctl -c $c status; done; journalctl -b -u sensr-ntpd -u ntpd-rs --no-pager | tail -n 30")[1])
+                print(internet.execute("ntp-ctl status; journalctl -b -u ntpd-rs --no-pager | tail -n 20")[1])
 
     with subtest("commit-confirm: an unconfirmed apply rolls back"):
         if PENDING["commitConfirm"]:
