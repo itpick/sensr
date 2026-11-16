@@ -59,6 +59,8 @@
   .related a { color: var(--accent); }
   .fine { color: var(--muted); font-size: .85rem; }
   td.num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .startup td.num { white-space: normal; }
+  tr.grp td { background: var(--code); font-weight: 600; font-size: .8rem; padding: 5px 10px; }
   footer { margin-top: 40px; color: var(--muted); font-size: .85rem; }
   footer a, p a, li a, td a { color: var(--accent); }
 </style>
@@ -75,7 +77,7 @@
       <li><a href="https://itpick.github.io/vyos-pi/">vyos-pi</a>: VyOS images for Raspberry Pi 4/5</li>
       <li><a href="https://github.com/itpick/vyos-pi/blob/main/docs/comparison/pi5-iperf-vyos-vs-opnsense.md">OPNsense vs VyOS on the Pi 5</a>: side-by-side speed and boot-time results</li>
     </ul>
-    <p>Benchmark: the <a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md">performance evaluation</a> measured OPNsense, VyOS and a NixOS + Rust prototype in x86 VMs. Over virtio with 8 TCP streams, Linux forwarded 25&ndash;26&nbsp;Gbit/s and OPNsense 3.1. With 50 rules loaded, the prototype applied a one-rule change in 16&nbsp;ms, OPNsense in 0.36&nbsp;s and VyOS in 2.2&nbsp;s. See also the <a href="https://itpick.github.io/vyos-pi/#startup">startup comparison</a>: the time until traffic flows, on an x86 VM and on a real Pi 5.</p>
+    <p>Benchmark: the <a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md">performance evaluation</a> measured OPNsense, VyOS and a NixOS + Rust prototype in x86 VMs. Over virtio with 8 TCP streams, Linux forwarded 25&ndash;26&nbsp;Gbit/s and OPNsense 3.1. With 50 rules loaded, the prototype applied a one-rule change in 16&nbsp;ms, OPNsense in 0.36&nbsp;s and VyOS in 2.2&nbsp;s. See also the <a href="#startup">startup comparison</a> below: the time until traffic flows, on an x86 VM and on a real Pi 5.</p>
   </aside>
 
   <div class="boards">
@@ -125,6 +127,18 @@
     </div>
   </div>
 
+
+  <h3 id="startup">Startup: time until traffic flows and until you can manage it</h3>
+  <div class="scroll"><table class="startup">
+    <tr><th></th><th>OPNsense</th><th>VyOS</th><th><a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md">sensr</a> <span class="fine">(in development)</span></th></tr>
+    <tr class="grp"><td colspan="4">x86 VM, from VM start</td></tr>
+    <tr><td><strong>Traffic flowing</strong></td><td class="num">14.5 s<br><span class="fine">17.7 s with 1k rules</span></td><td class="num">30.7 s<br><span class="fine">120.6 s with 1k rules</span></td><td class="num"><strong>10.7 s</strong><br><span class="fine">config imported at first boot; 9.6 s with the factory config</span></td></tr>
+    <tr><td>UI/API ready</td><td class="num">15.4 s<br><span class="fine">19.4 s with 1k rules</span></td><td class="num">39.4 s<br><span class="fine">&gt;10 min with 1k rules</span></td><td class="num">18.3 s<br><span class="fine">SSH/API; being optimised (boot ordering)</span></td></tr>
+    <tr class="grp"><td colspan="4">Pi 5 (real board), from the reboot command</td></tr>
+    <tr><td><strong>Traffic flowing</strong></td><td class="num">64&ndash;67 s</td><td class="num">48 s</td><td class="num">not yet on real hardware</td></tr>
+    <tr><td>UI ready</td><td class="num">65&ndash;68 s<br><span class="fine">web GUI</span></td><td class="num">47&ndash;48 s<br><span class="fine">SSH; config loaded 48&ndash;49 s</span></td><td class="num">not yet on real hardware</td></tr>
+  </table></div>
+  <p class="fine">x86: OPNsense and VyOS from the <a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md">sensr benchmark</a>, median of 5 boots from <code>virsh start</code>, virtio, boot loader delays as shipped; "1k rules" is 1,000 rules plus a 10k-entry table. sensr from its own boot benchmark (<a href="https://github.com/itpick/sensr/pull/53">nix/bench/boot-times.py</a>) on the same host, same definitions: x86 qcow2 under KVM, median of 5 (5 of 5 succeeded), timed from QEMU start including OVMF and systemd-boot's 1&nbsp;s timeout; "traffic flowing" is a LAN client pinging the WAN host through NAT every 50&nbsp;ms. A fix to sensr's SSH/API start-up order is in progress. Pi 5: 16&nbsp;GB boards, timed from the reboot command; details on the <a href="https://itpick.github.io/vyos-pi/#startup">vyos-pi page</a>.</p>
 
   <h3 id="image-size">Image size</h3>
   <div class="scroll"><table>
