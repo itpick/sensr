@@ -1,11 +1,10 @@
 //! `sensr-api` over real TCP in front of a real `sensr-agent` (in-memory
-//! store, fake applier) on a temp socket.
+//! `sensr-config` store, fake applier) on a temp socket.
 
 use std::os::unix::fs::MetadataExt;
 use std::time::{Duration, Instant};
 
 use sensr_agent::applier::FakeApplier;
-use sensr_agent::store::MemStore;
 use sensr_agent::{Agent, Running, Settings};
 use sensr_auth::apikey::{self, basic_header};
 use sensr_auth::password::hash_password;
@@ -28,37 +27,71 @@ async fn start() -> Fx {
         trusted_uids: vec![me],
         ..Settings::default()
     };
-    let agent = Agent::new(MemStore::new(), FakeApplier::default(), settings).unwrap();
+    let agent = Agent::new(
+        sensr_agent::store::in_memory(),
+        FakeApplier::default(),
+        settings,
+    )
+    .unwrap();
+    agent.boot().await.unwrap();
     let socket = dir.path().join("agent.sock");
     let running = sensr_agent::start(agent, &socket, 0o600, None).unwrap();
 
     let key = apikey::generate().unwrap();
-    let doc = json!({
-        "system": {
-            "hostname": "fw",
-            "user": [
-                {"name": "admin", "uid": "0", "password": hash_password("adminpw").unwrap(),
-                 "apikeys": format!("{}|{}||script", key.key, key.secret_hash)},
-                {"name": "auditor", "uid": "2000", "password": hash_password("pw").unwrap(),
-                 "priv": ["user-config-readonly", "page-sensr-config", "page-sensr-status"]},
-                {"name": "watcher", "uid": "2001", "password": hash_password("pw").unwrap(),
-                 "priv": "page-sensr-status"},
-            ],
-            "group": [{"name": "admins", "member": "0", "priv": "page-all"}],
-        },
-        "interfaces": {
-            "wan": {"if": "vtnet0", "enable": "1", "ipaddr": "dhcp"},
-            "lan": {"if": "vtnet1", "enable": "1", "ipaddr": "192.168.1.1", "subnet": "24", "descr": "LAN"},
-        },
-        "OPNsense": {"Firewall": {"Alias": {"aliases": {"alias": [
-            {"@attributes": {"uuid": "u-1"}, "enabled": "1", "name": "nas", "type": "host", "content": "192.168.1.10", "description": "NAS"},
-            {"@attributes": {"uuid": "u-2"}, "enabled": "1", "name": "web_ports", "type": "port", "content": "80\n443", "description": ""},
-        ]}}}},
-    });
     let mut c = Client::connect(&socket, Principal::unix("seed", 0))
         .await
         .unwrap();
-    c.call(Op::ConfigLoad { document: doc }).await.unwrap();
+    let uuid = |n: u32| format!("6f0c6f9e-0000-4000-8000-{n:012}");
+    let mut edits = vec![
+        ("system.hostname".to_owned(), json!("fw")),
+        ("interfaces.lan.description".to_owned(), json!("LAN")),
+    ];
+    for (n, name, privileges) in [
+        (1, "admins", json!(["page-all"])),
+        (
+            2,
+            "auditors",
+            json!([
+                "user-config-readonly",
+                "page-sensr-config",
+                "page-sensr-status"
+            ]),
+        ),
+        (3, "watchers", json!(["page-sensr-status"])),
+    ] {
+        edits.push((
+            format!("system.groups.{}", uuid(100 + n)),
+            json!({"name": name, "gid": 2000 + n, "privileges": privileges}),
+        ));
+    }
+    for (n, name, password, group) in [
+        (1, "admin", "adminpw", "admins"),
+        (2, "auditor", "pw", "auditors"),
+        (3, "watcher", "pw", "watchers"),
+    ] {
+        let mut user = json!({"name": name, "uid": if n == 1 { 0 } else { 2000 + n },
+            "password_hash": hash_password(password).unwrap(), "groups": [group]});
+        if n == 1 {
+            user["api_keys"] = json!([{"key": key.key, "secret_hash": key.secret_hash}]);
+        }
+        edits.push((format!("system.users.{}", uuid(n)), user));
+    }
+    edits.push((
+        "firewall.aliases.0b5e0000-0000-4000-8000-000000000001".into(),
+        json!({"name": "nas", "description": "NAS", "content": {"type": "host", "entries": ["192.168.1.10"]}}),
+    ));
+    edits.push((
+        "firewall.aliases.0b5e0000-0000-4000-8000-000000000002".into(),
+        json!({"name": "web_ports", "content": {"type": "port", "entries": ["80", "443"]}}),
+    ));
+    for (path, value) in edits {
+        c.call(Op::ConfigSet {
+            path: path.parse().unwrap(),
+            value,
+        })
+        .await
+        .unwrap();
+    }
     c.call(Op::ConfigCommit {
         description: Some("seed".into()),
         confirm_secs: None,
@@ -183,9 +216,9 @@ async fn set_commit_confirm_over_http() {
     )
     .await;
     assert_eq!(st, 200, "{out}");
-    assert_eq!(out["revision"]["id"], 2);
+    assert_eq!(out["revision"]["id"], 3);
     assert_eq!(out["revision"]["username"], "admin@ui");
-    assert_eq!(out["pending_confirm"]["rollback_to"], 1);
+    assert_eq!(out["pending_confirm"]["rollback_to"], 2);
     let (st, _) = http(&fx, "POST", "/api/v1/config/confirm", Some(&admin), None).await;
     assert_eq!(st, 200);
     let (st, _) = http(&fx, "POST", "/api/v1/config/confirm", Some(&admin), None).await;
@@ -201,7 +234,7 @@ async fn set_commit_confirm_over_http() {
     .await;
     assert_eq!((st, h.as_array().unwrap().len()), (200, 1));
     let (st, out) = http(&fx, "POST", "/api/v1/config/rollback", Some(&admin), None).await;
-    assert_eq!((st, out["revision"]["id"].clone()), (200, json!(3)));
+    assert_eq!((st, out["revision"]["id"].clone()), (200, json!(4)));
     let (_, v) = http(
         &fx,
         "GET",
@@ -230,7 +263,7 @@ async fn api_key_and_sessions() {
     let fx = start().await;
     let (st, s) = http(&fx, "GET", "/api/v1/status", Some(&fx.admin_key), None).await;
     assert_eq!(st, 200);
-    assert_eq!(s["head"]["id"], 1);
+    assert_eq!(s["head"]["id"], 2);
 
     let (st, login) = http(
         &fx,
@@ -363,7 +396,11 @@ async fn compat_read_endpoints() {
     .await;
     assert_eq!(st, 200);
     assert_eq!(aliases["total"], 1);
-    assert_eq!(aliases["rows"][0]["uuid"], "u-2");
+    assert_eq!(
+        aliases["rows"][0]["uuid"],
+        "0b5e0000-0000-4000-8000-000000000002"
+    );
+    assert_eq!(aliases["rows"][0]["type"], "port");
     assert_eq!(aliases["rows"][0]["content"], "80,443");
     let (_, all) = http(
         &fx,
@@ -423,4 +460,30 @@ async fn api_read_latency() {
         "latency: api config read {per:?}, compat interfaces_info {compat:?} (new TCP connection per request)"
     );
     assert!(per < Duration::from_millis(10), "{per:?}");
+}
+
+/// The real stack validates every write against the schema: a second alias
+/// with an existing name is refused with a field message, before anything
+/// is staged.
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_alias_name_is_rejected() {
+    let fx = start().await;
+    let admin = pw("admin", "adminpw");
+    let (st, body) = http(
+        &fx,
+        "PUT",
+        "/api/v1/config/doc/firewall/aliases/0b5e0000-0000-4000-8000-000000000003",
+        Some(&admin),
+        Some(json!({"name": "nas", "content": {"type": "host", "entries": ["192.168.1.11"]}})),
+    )
+    .await;
+    assert_eq!(st, 422, "{body}");
+    assert_eq!(body["status"], "failed");
+    let fields = body["validations"].as_object().unwrap();
+    assert!(
+        fields.keys().any(|k| k.contains("firewall.aliases")),
+        "{body}"
+    );
+    let (_, status) = http(&fx, "GET", "/api/v1/status", Some(&admin), None).await;
+    assert_eq!(status["candidate_dirty"], false, "nothing staged");
 }

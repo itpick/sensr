@@ -167,35 +167,66 @@ pub async fn interfaces_info(
     let ifaces = section(&state, &caller, "interfaces", Source::Applied).await?;
     let rows = ifaces
         .as_object()
-        .map(|m| {
-            m.iter()
-                .filter(|(k, _)| !k.contains('@'))
-                .map(|(id, i)| {
-                    let addr = s(i.get("ipaddr"));
-                    let subnet = s(i.get("subnet"));
-                    let static4 = addr.parse::<std::net::Ipv4Addr>().is_ok();
-                    let descr = s(i.get("descr"));
-                    json!({
-                        "identifier": id,
-                        "device": s(i.get("if")),
-                        "description": if descr.is_empty() { id.to_uppercase() } else { descr },
-                        "enabled": s(i.get("enable")) == "1",
-                        "status": if s(i.get("enable")) == "1" { "up" } else { "down" },
-                        "link_type": if static4 { "static".to_owned() } else { addr.clone() },
-                        "ipv4": if static4 {
-                            json!([{"ipaddr": format!("{addr}/{subnet}")}])
-                        } else {
-                            json!([])
-                        },
-                        "ipv6": [],
-                        "gateways": [],
-                        "routes": [],
-                    })
-                })
-                .collect()
-        })
+        .map(|m| m.iter().map(|(id, i)| interface_row(id, i)).collect())
         .unwrap_or_default();
     Ok(Json(recordset(rows, &q.merge(body.map(|Json(b)| b)))))
+}
+
+/// One `interfaces_info` row from a typed interface.
+fn interface_row(id: &str, i: &Value) -> Value {
+    let enabled = i.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    let descr = s(i.get("description"));
+    let v4 = i.get("ipv4");
+    let v6 = i.get("ipv6");
+    let mode = |v: Option<&Value>| s(v.and_then(|v| v.get("mode")));
+    let static_addr = |v: Option<&Value>| {
+        (mode(v) == "static")
+            .then(|| s(v.and_then(|v| v.get("address"))))
+            .filter(|a| !a.is_empty())
+    };
+    let addrs = |v: Option<&Value>| match static_addr(v) {
+        Some(a) => json!([{"ipaddr": a}]),
+        None => json!([]),
+    };
+    json!({
+        "identifier": id,
+        "device": s(i.get("device")),
+        "description": if descr.is_empty() { id.to_uppercase() } else { descr },
+        "enabled": enabled,
+        "status": if enabled { "up" } else { "down" },
+        "link_type": match mode(v4).as_str() {
+            "" => "none".to_owned(),
+            m => m.to_owned(),
+        },
+        "macaddr": s(i.get("spoof_mac").or_else(|| i.get("match_mac"))),
+        "ipv4": addrs(v4),
+        "ipv6": addrs(v6),
+        "gateways": [],
+        "routes": [],
+    })
+}
+
+/// OPNsense's alias type names for the schema's content tags.
+fn opnsense_alias_type(tag: &str) -> &str {
+    match tag {
+        "url_table" => "urltable",
+        "geo_ip" => "geoip",
+        "network_group" => "networkgroup",
+        other => other,
+    }
+}
+
+/// The content entries of a typed alias, as OPNsense lists them.
+fn alias_content(c: Option<&Value>) -> Vec<String> {
+    let Some(c) = c else { return Vec::new() };
+    let field = ["entries", "urls", "countries", "members", "addresses"]
+        .iter()
+        .find_map(|k| c.get(*k));
+    match (field, c.get("url")) {
+        (Some(v), _) => list(Some(v)).iter().map(|e| s(Some(e))).collect(),
+        (None, Some(u)) => vec![s(Some(u))],
+        (None, None) => Vec::new(),
+    }
 }
 
 /// `GET|POST /api/firewall/alias/search_item`.
@@ -205,26 +236,22 @@ pub async fn alias_search(
     Query(q): Query<SearchParams>,
     body: Option<Json<SearchParams>>,
 ) -> Result<Json<Value>, ApiError> {
-    let aliases = section(
-        &state,
-        &caller,
-        "OPNsense.Firewall.Alias.aliases",
-        Source::Head,
-    )
-    .await?;
-    let rows = list(aliases.get("alias"))
-        .iter()
-        .map(|a| {
+    let aliases = section(&state, &caller, "firewall.aliases", Source::Head).await?;
+    let rows = aliases
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(uuid, a)| {
+            let content = a.get("content");
             json!({
-                "uuid": s(a.pointer("/@attributes/uuid")),
-                "enabled": s(a.get("enabled")),
+                "uuid": uuid,
+                "enabled": if a.get("enabled").and_then(Value::as_bool).unwrap_or(true) { "1" } else { "0" },
                 "name": s(a.get("name")),
-                "type": s(a.get("type")),
+                "type": opnsense_alias_type(&s(content.and_then(|c| c.get("type")))),
                 "description": s(a.get("description")),
-                // OPNsense stores multi-value content newline-separated and
-                // shows it comma-separated in the grid.
-                "content": s(a.get("content")).lines().collect::<Vec<_>>().join(","),
-                "categories": s(a.get("categories")),
+                // OPNsense shows multi-value content comma-separated in the grid.
+                "content": alias_content(content).join(","),
+                "categories": "",
             })
         })
         .collect();

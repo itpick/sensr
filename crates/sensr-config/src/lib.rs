@@ -10,9 +10,11 @@
 //! with secrets redacted, record an audit row and broadcast
 //! [`RevisionCommitted`] so the apply engine re-renders only the sections that
 //! changed. Commit-confirm state survives restarts, so an unconfirmed change
-//! is rolled back even across a reboot.
+//! is rolled back even across a reboot. With a [`SecretsKey`], secret values
+//! are also encrypted at rest.
 
 mod canonical;
+mod crypt;
 mod diff;
 mod export;
 mod schema;
@@ -20,6 +22,7 @@ mod secrets;
 mod store;
 
 pub use canonical::{ContentHash, canonical_json};
+pub use crypt::SecretsKey;
 pub use diff::{PatchOp, RevisionDiff, json_diff};
 pub use sensr_schema::Document;
 pub use store::{

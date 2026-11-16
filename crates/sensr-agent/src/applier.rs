@@ -1,14 +1,15 @@
 //! The apply-pipeline boundary.
 //!
-//! The real pipeline (`sensr-apply` plans + `sensr-rules` nft renderer +
-//! service templates) plugs in behind [`Applier`]. Until it lands the agent
-//! runs [`PreviewApplier`], which computes the same kind of plan from the
+//! The real pipeline ([`crate::slice_applier::SliceApplier`]: `sensr-apply`
+//! plans, the `sensr-rules` nft renderer, service templates) plugs in behind
+//! [`Applier`]. [`PreviewApplier`] computes a plan of the same shape from the
 //! document but changes nothing on the host.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use sensr_ipc::{FileDiff, PlanView, ServiceAction, ServiceChange, ValidationIssue};
+use sensr_schema::Document;
 use serde_json::Value;
 
 use crate::diff::unified_text;
@@ -29,21 +30,16 @@ pub enum ApplyError {
 pub trait Applier: Send + 'static {
     /// Plans moving the system from `running` (`None` at first boot) to
     /// `next`, running every backend checker, without changing anything.
-    fn plan(&self, running: Option<&Value>, next: &Value) -> Result<PlanView, ApplyError>;
+    fn plan(&self, running: Option<&Document>, next: &Document) -> Result<PlanView, ApplyError>;
 
     /// Makes the system match `next`. Must be idempotent.
-    fn apply(&mut self, running: Option<&Value>, next: &Value) -> Result<(), ApplyError>;
+    fn apply(&mut self, running: Option<&Document>, next: &Document) -> Result<(), ApplyError>;
 }
 
 /// Sections and the unit that serves them, for the preview plan.
 const SERVICES: &[(&str, &str)] = &[
-    // typed sensr-schema sections
     ("dhcpv4", "kea-dhcp4-server.service"),
     ("dns", "unbound.service"),
-    // OPNsense array-view sections
-    ("dhcpd", "kea-dhcp4-server.service"),
-    ("kea", "kea-dhcp4-server.service"),
-    ("unbound", "unbound.service"),
     ("wireguard", "wireguard.service"),
 ];
 
@@ -64,12 +60,13 @@ fn ruleset_text(doc: &Value) -> String {
 
 /// The plan both fakes compute: ruleset diff, interface steps and per-unit
 /// service changes derived from which sections changed.
-pub fn preview_plan(running: Option<&Value>, next: &Value) -> PlanView {
+pub fn preview_plan(running: Option<&Document>, next: &Document) -> PlanView {
     // The preview shows section contents verbatim, so it works on masked
     // copies: a plan must never print a private key.
-    let running = crate::redact::redacted(running.unwrap_or(&Value::Object(Default::default())));
-    let next = &crate::redact::redacted(next);
-    let running = &running;
+    let running = &running
+        .map(crate::redact::masked)
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    let next = &crate::redact::masked(next);
     let nft = unified_text(
         &ruleset_text(running),
         &ruleset_text(next),
@@ -130,11 +127,11 @@ pub fn preview_plan(running: Option<&Value>, next: &Value) -> PlanView {
 pub struct PreviewApplier;
 
 impl Applier for PreviewApplier {
-    fn plan(&self, running: Option<&Value>, next: &Value) -> Result<PlanView, ApplyError> {
+    fn plan(&self, running: Option<&Document>, next: &Document) -> Result<PlanView, ApplyError> {
         Ok(preview_plan(running, next))
     }
 
-    fn apply(&mut self, running: Option<&Value>, next: &Value) -> Result<(), ApplyError> {
+    fn apply(&mut self, running: Option<&Document>, next: &Document) -> Result<(), ApplyError> {
         let plan = preview_plan(running, next);
         tracing::info!(
             nft_changed = !plan.nft.is_empty(),
@@ -150,7 +147,7 @@ impl Applier for PreviewApplier {
 #[derive(Debug, Default)]
 pub struct FakeState {
     /// Every document successfully applied, in order.
-    pub applied: Vec<Value>,
+    pub applied: Vec<Document>,
     /// When set, the next `apply` fails with this message (then clears).
     pub fail_next_apply: Option<String>,
     /// Paths whose presence in a document makes `plan` reject it.
@@ -171,12 +168,13 @@ impl FakeApplier {
 }
 
 impl Applier for FakeApplier {
-    fn plan(&self, running: Option<&Value>, next: &Value) -> Result<PlanView, ApplyError> {
+    fn plan(&self, running: Option<&Document>, next: &Document) -> Result<PlanView, ApplyError> {
+        let json = serde_json::to_value(next).unwrap_or(Value::Null);
         let issues: Vec<ValidationIssue> = self
             .lock()
             .reject_paths
             .iter()
-            .filter(|p| p.lookup(next).is_some())
+            .filter(|p| p.lookup(&json).is_some())
             .map(|p| ValidationIssue {
                 path: p.to_string(),
                 message: "Rejected by the test applier.".into(),
@@ -188,7 +186,7 @@ impl Applier for FakeApplier {
         Ok(preview_plan(running, next))
     }
 
-    fn apply(&mut self, _running: Option<&Value>, next: &Value) -> Result<(), ApplyError> {
+    fn apply(&mut self, _running: Option<&Document>, next: &Document) -> Result<(), ApplyError> {
         let mut st = self.lock();
         if let Some(msg) = st.fail_next_apply.take() {
             return Err(ApplyError::Failed(msg));
@@ -201,49 +199,37 @@ impl Applier for FakeApplier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sensr_schema::PathAccess;
     use serde_json::json;
 
     #[test]
     fn preview_plan_reports_nft_net_and_services() {
-        let old =
-            json!({"interfaces": {"lan": {"ipaddr": "192.168.1.1"}}, "unbound": {"enable": "1"}});
-        let new = json!({
-            "interfaces": {"lan": {"ipaddr": "192.168.2.1"}, "wan": {"ipaddr": "dhcp"}},
-            "filter": {"rule": [{"type": "pass"}]},
-            "dhcpd": {"lan": {}},
-        });
+        let old = Document::factory();
+        let mut new = old.clone();
+        new.set_by_path("interfaces.lan.mtu", json!(1400)).unwrap();
+        new.set_by_path("interfaces.opt1", json!({"device": "eth2"}))
+            .unwrap();
+        new.set_by_path("wireguard.enabled", json!(true)).unwrap();
         let p = preview_plan(Some(&old), &new);
-        assert!(p.nft.contains("+  # filter"));
-        assert_eq!(p.net, ["reconfigure interface lan", "add interface wan"]);
+        assert_eq!(p.net, ["reconfigure interface lan", "add interface opt1"]);
         let svc: Vec<_> = p
             .services
             .iter()
             .map(|s| (s.unit.as_str(), s.action))
             .collect();
-        assert_eq!(
-            svc,
-            [
-                ("kea-dhcp4-server.service", ServiceAction::Start),
-                ("unbound.service", ServiceAction::Stop),
-            ]
-        );
+        assert_eq!(svc, [("wireguard.service", ServiceAction::Reload)]);
         assert!(preview_plan(Some(&new), &new).is_empty());
     }
 
     #[test]
     fn fake_applier_fails_once_and_rejects_paths() {
+        let doc = Document::factory();
         let mut f = FakeApplier::default();
         f.state.lock().unwrap().fail_next_apply = Some("boom".into());
-        assert_eq!(
-            f.apply(None, &json!({})),
-            Err(ApplyError::Failed("boom".into()))
-        );
-        assert_eq!(f.apply(None, &json!({"a": 1})), Ok(()));
-        assert_eq!(f.state.lock().unwrap().applied, vec![json!({"a": 1})]);
-        f.state.lock().unwrap().reject_paths = vec!["bad".parse().unwrap()];
-        assert!(matches!(
-            f.plan(None, &json!({"bad": 1})),
-            Err(ApplyError::Invalid(_))
-        ));
+        assert_eq!(f.apply(None, &doc), Err(ApplyError::Failed("boom".into())));
+        assert_eq!(f.apply(None, &doc), Ok(()));
+        assert_eq!(f.state.lock().unwrap().applied, vec![doc.clone()]);
+        f.state.lock().unwrap().reject_paths = vec!["system.hostname".parse().unwrap()];
+        assert!(matches!(f.plan(None, &doc), Err(ApplyError::Invalid(_))));
     }
 }

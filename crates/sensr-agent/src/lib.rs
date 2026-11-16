@@ -2,10 +2,10 @@
 //! store, runs the apply pipeline and commit-confirm, and serves
 //! `sensr-ipc` on `/run/sensr/agent.sock`.
 //!
-//! The store and the apply pipeline sit behind the [`store::ConfigStore`]
-//! and [`applier::Applier`] traits so the daemon, its IPC surface and the
-//! CLI/API on top can be tested end to end with in-memory fakes while
-//! `sensr-config` and `sensr-apply` land.
+//! The config store is `sensr-config`'s [`Store`](sensr_config::Store) over
+//! the typed `sensr-schema` document (in memory for tests). The apply
+//! pipeline sits behind the [`applier::Applier`] trait so the daemon, its
+//! IPC surface and the CLI/API on top can be tested end to end with a fake.
 
 pub mod agent;
 pub mod applier;
@@ -25,7 +25,6 @@ use tokio::task::JoinHandle;
 
 pub use agent::{Agent, Settings};
 use applier::Applier;
-use store::ConfigStore;
 
 /// A running agent: IPC server, confirm timer and watchdog tasks.
 pub struct Running {
@@ -47,8 +46,8 @@ impl Running {
 
 /// Binds `socket` (mode `mode`, optionally group-owned by `gid`) and starts
 /// serving `agent`.
-pub fn start<S: ConfigStore, A: Applier>(
-    agent: Arc<Agent<S, A>>,
+pub fn start<A: Applier>(
+    agent: Arc<Agent<A>>,
     socket: &Path,
     mode: u32,
     gid: Option<u32>,
@@ -85,8 +84,8 @@ pub fn start<S: ConfigStore, A: Applier>(
 
 /// Runs until `SIGTERM`/`SIGINT`; `SIGHUP` re-applies head (graceful
 /// reload: the socket stays open and in-flight requests are unaffected).
-pub async fn run_until_signal<S: ConfigStore, A: Applier>(
-    agent: Arc<Agent<S, A>>,
+pub async fn run_until_signal<A: Applier>(
+    agent: Arc<Agent<A>>,
     running: Running,
 ) -> anyhow::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
