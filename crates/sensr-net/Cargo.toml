@@ -1,0 +1,22 @@
+[package]
+name = "sensr-net"
+description = "Network model and state: IPv6 prefix delegation maths and the persisted PD state machine (OPNsense counterpart: Interface/Idassoc, interfaces.inc track6, rc.newwanipv6)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ipnet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

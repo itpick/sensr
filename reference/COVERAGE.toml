@@ -24,6 +24,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/etc/inc/filter.inc" = { status = "todo" }
 "core/src/etc/inc/filter.lib.inc" = { status = "todo" }
 "core/src/etc/inc/interfaces.inc" = { status = "in-progress", crate = "sensr-apply", module = "appliers::interfaces", note = "interface_dhcp_configure, DHCP6_Config_File_Basic, track6 prefix ids via networkd; PPP/6rd/GIF/GRE and dhcp6c advanced mode open" }
+"core/src/etc/inc/interfaces.inc" = { status = "in-progress", crate = "sensr-net", module = "ipv6::pd", note = "track6/dhcp6c prefix paths only (sla-id carving, PD lifetimes); the rest of the file is open" }
 "core/src/etc/inc/interfaces.lib.inc" = { status = "todo" }
 "core/src/etc/inc/legacy_bindings.inc" = { status = "todo" }
 "core/src/etc/inc/plugins.inc" = { status = "todo" }
@@ -122,7 +123,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/etc/rc.loader.d/20-modules" = { status = "todo" }
 "core/src/etc/rc.loader.d/20-zfs" = { status = "todo" }
 "core/src/etc/rc.newwanip" = { status = "todo" }
-"core/src/etc/rc.newwanipv6" = { status = "todo" }
+"core/src/etc/rc.newwanipv6" = { status = "in-progress", crate = "sensr-net", module = "ipv6::pd", note = "PdState events (acquired/renewed/changed/lost/expired) exist; the reconciler reacting to them lives in sensr-apply/agent" }
 "core/src/etc/rc.reboot" = { status = "todo" }
 "core/src/etc/rc.reload_all" = { status = "todo" }
 "core/src/etc/rc.restart_webgui" = { status = "todo" }
@@ -576,7 +577,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/app/library/OPNsense/Firewall/SNatRule.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/Firewall/Util.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/Interface/Autoconf.php" = { status = "todo" }
-"core/src/opnsense/mvc/app/library/OPNsense/Interface/Idassoc.php" = { status = "todo" }
+"core/src/opnsense/mvc/app/library/OPNsense/Interface/Idassoc.php" = { status = "done", crate = "sensr-net", module = "ipv6::pd", tests = ["T-0009", "T-0010", "T-0011"], note = "calculatePrefix/calculateUsablePrefixLength; the temporary dead:beef prefix is replaced by advertising nothing until a prefix exists" }
 "core/src/opnsense/mvc/app/library/OPNsense/Mvc/Controller.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/Mvc/Dispatcher.php" = { status = "todo" }
 "core/src/opnsense/mvc/app/library/OPNsense/Mvc/Exceptions/ClassNotFoundException.php" = { status = "todo" }
@@ -1129,7 +1130,7 @@ plugins = "af4166a2fe9f25fed16bd9d375375a6c61424935"
 "core/src/opnsense/mvc/tests/app/library/OPNsense/Firewall/FilterRuleTest/testDirection.conf" = { status = "todo" }
 "core/src/opnsense/mvc/tests/app/library/OPNsense/Firewall/FilterRuleTest/testIcmp.conf" = { status = "todo" }
 "core/src/opnsense/mvc/tests/app/library/OPNsense/Firewall/FilterRuleTest/testProtocol.conf" = { status = "todo" }
-"core/src/opnsense/mvc/tests/app/library/OPNsense/Interface/IdassocTest.php" = { status = "todo" }
+"core/src/opnsense/mvc/tests/app/library/OPNsense/Interface/IdassocTest.php" = { status = "done", crate = "sensr-net", module = "ipv6::pd::tests", tests = ["T-0009", "T-0010", "T-0011"] }
 "core/src/opnsense/mvc/tests/app/models/OPNsense/ACL/AclConfig/config.xml" = { status = "todo" }
 "core/src/opnsense/mvc/tests/app/models/OPNsense/ACL/AclTest.php" = { status = "todo" }
 "core/src/opnsense/mvc/tests/app/models/OPNsense/Base/BaseModel/Migrations/M0_0_1.php" = { status = "done", crate = "sensr-schema", module = "migrate::tests", tests = ["T-0024"] }

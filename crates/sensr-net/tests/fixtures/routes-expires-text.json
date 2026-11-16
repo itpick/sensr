@@ -1,0 +1,4 @@
+[
+  {"type":"unreachable","dst":"2001:db8:77:7700::/56","dev":"lo","protocol":"dhcp","metric":1024,"flags":[],"expires":"3539sec","pref":"medium"},
+  {"type":"unreachable","dst":"2001:db8:78::/48","dev":"lo","protocol":"dhcp","metric":1024,"flags":[],"pref":"medium"}
+]
