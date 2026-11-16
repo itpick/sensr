@@ -114,6 +114,10 @@
             sensrModules = testModules;
             mode = "reference";
           };
+          agent-api = import ./nix/tests/agent-api.nix {
+            inherit pkgs;
+            sensrModules = testModules;
+          };
           qcow-boot = import ./nix/tests/qcow-boot.nix {
             inherit pkgs;
             image = self.images.qcow;

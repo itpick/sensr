@@ -35,6 +35,14 @@ struct Args {
     /// Peer gid allowed to act for the principals it authenticated.
     #[arg(long = "trust-gid")]
     trust_gids: Vec<u32>,
+    /// Group names whose members (primary or supplementary group) may act
+    /// for the principals they authenticated.
+    #[arg(
+        long = "trust-group",
+        env = "SENSR_TRUST_GROUPS",
+        value_delimiter = ','
+    )]
+    trust_groups: Vec<String>,
     /// Longest commit-confirm window accepted, in seconds.
     #[arg(long, default_value_t = 86_400)]
     max_confirm_secs: u64,
@@ -78,9 +86,16 @@ fn seed_store(store: &mut dyn ConfigStore, seed: Option<&PathBuf>) -> anyhow::Re
 
 async fn serve<S: ConfigStore>(args: Args, mut store: S) -> anyhow::Result<()> {
     seed_store(&mut store, args.seed.as_ref())?;
+    let mut trusted_gids = args.trust_gids.clone();
+    for name in &args.trust_groups {
+        match sensr_agent::agent::group_id(name) {
+            Some(gid) => trusted_gids.push(gid),
+            None => tracing::warn!(group = %name, "trusted group does not exist"),
+        }
+    }
     let settings = Settings {
         trusted_uids: args.trust_uids.clone(),
-        trusted_gids: args.trust_gids.clone(),
+        trusted_gids,
         state_file: args.state_dir.as_ref().map(|d| d.join("agent-state.json")),
         max_confirm: Duration::from_secs(args.max_confirm_secs),
         ..Settings::default()
