@@ -12,6 +12,7 @@ mod dhcpd;
 mod dnsmasq;
 mod export;
 mod filter;
+mod gateways;
 mod interfaces;
 mod kea;
 mod nat;
@@ -76,7 +77,9 @@ pub fn importer(options: &ImportOptions) -> Importer<SensrDocument> {
         .with_mapper(dnsmasq::DnsmasqMapper)
         .with_mapper(kea::KeaMapper)
         .with_mapper(unbound::UnboundMapper)
-        .with_mapper(wireguard::WireGuardMapper);
+        .with_mapper(wireguard::WireGuardMapper)
+        // Last: its fix-ups need the interfaces and the rules the others built.
+        .with_mapper(gateways::GatewayMapper);
     for (pattern, reason) in EXPECTED_UNMAPPED {
         importer = importer.expect_unmapped(pattern, reason);
     }
