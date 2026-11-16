@@ -1003,3 +1003,96 @@ fn hairpin(
     }));
     Some(v)
 }
+
+/// New contents for one named set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetContents {
+    /// addresses / networks (one family, matching the set)
+    Nets(Vec<IpNet>),
+    /// inclusive port ranges
+    Ports(Vec<(u16, u16)>),
+}
+
+/// Replaces the contents of named sets in one transaction (`flush set` +
+/// `add element` per set): how DHCP address changes and alias refreshes reach
+/// the kernel without re-rendering the ruleset (07: 10k entries in 0.05 s).
+pub fn render_set_updates<W: io::Write>(
+    table: &str,
+    updates: &[(String, SetContents)],
+    out: &mut W,
+) -> io::Result<()> {
+    let mut w = Writer::new(out, FAMILY, table)?;
+    for (name, contents) in updates {
+        w.cmd(&crate::render::json::Command::Flush(Object::SetName(
+            name.clone().into(),
+        )))?;
+        let elem: Vec<Expr<'_>> = match contents {
+            SetContents::Nets(nets) => nets.iter().map(net_elem).collect(),
+            SetContents::Ports(ports) => ports
+                .iter()
+                .map(|&(lo, hi)| {
+                    if lo == hi {
+                        Expr::Num(u32::from(lo))
+                    } else {
+                        Expr::Range(
+                            Box::new(Expr::Num(u32::from(lo))),
+                            Box::new(Expr::Num(u32::from(hi))),
+                        )
+                    }
+                })
+                .collect(),
+        };
+        if !elem.is_empty() {
+            w.add(Object::Element {
+                name: name.clone().into(),
+                elem,
+            })?;
+        }
+    }
+    w.finish()
+}
+
+/// The four sets of a logical interface with its current addresses.
+pub fn interface_set_updates(
+    name: &str,
+    iface: &crate::ir::Interface,
+) -> Vec<(String, SetContents)> {
+    let mut v = Vec::new();
+    for fam in IpFamily::BOTH {
+        let nets: BTreeSet<IpNet> = iface.addrs_of(fam).filter_map(|a| a.network()).collect();
+        v.push((
+            compile::iface_net_set(name, fam),
+            SetContents::Nets(nets.into_iter().collect()),
+        ));
+        let addrs: BTreeSet<IpNet> = iface.addrs_of(fam).map(|a| IpNet::from(a.addr)).collect();
+        v.push((
+            compile::iface_addr_set(name, fam),
+            SetContents::Nets(addrs.into_iter().collect()),
+        ));
+    }
+    v
+}
+
+/// The sets of one alias with resolved contents.
+pub fn alias_set_updates(name: &str, a: &ResolvedAlias) -> Vec<(String, SetContents)> {
+    let mut v: Vec<(String, SetContents)> = IpFamily::BOTH
+        .into_iter()
+        .map(|fam| {
+            (
+                compile::alias_set(name, fam),
+                SetContents::Nets(
+                    a.nets
+                        .iter()
+                        .filter(|n| IpFamily::of(&n.addr()) == fam)
+                        .copied()
+                        .collect(),
+                ),
+            )
+        })
+        .collect();
+    v.push((
+        compile::port_alias_set(name),
+        SetContents::Ports(a.ports.clone()),
+    ));
+    v
+}

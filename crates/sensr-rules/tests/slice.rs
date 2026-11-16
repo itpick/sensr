@@ -169,3 +169,39 @@ fn anti_lockout_picks_lan_and_sorts_ports() {
         Some(("lan".into(), vec!["80".into(), "443".into(), "2222".into()]))
     );
 }
+
+/// DHCP gives the WAN an address: only the interface sets change. The golden
+/// is the ruleset followed by the update in one transaction, so `nft -c`
+/// checks the update against the sets it targets.
+#[test]
+fn wan_address_update_is_a_set_update() {
+    let s = build();
+    let aliases = BTreeMap::new();
+    let policy = nft::Policy {
+        rules: &s.filter.rules,
+        interfaces: &s.ifs,
+        aliases: &aliases,
+        nat: Some(&s.nat),
+    };
+    let mut base = Vec::new();
+    nft::render(&policy, &nft::Options::default(), &mut base).unwrap();
+    let mut wan = s.ifs["wan"].clone();
+    wan.addrs.push(IfAddr {
+        addr: "203.0.113.2".parse().unwrap(),
+        prefix_len: 24,
+    });
+    let mut upd = Vec::new();
+    nft::render_set_updates("sensr", &nft::interface_set_updates("wan", &wan), &mut upd).unwrap();
+    let text = String::from_utf8(upd.clone()).unwrap();
+    assert!(
+        text.contains(r#"{"flush":{"set":{"family":"inet","table":"sensr","name":"if_wan_a4"}}}"#)
+    );
+    assert!(text.contains(r#""elem":["203.0.113.2"]"#), "{text}");
+    // splice: base commands, then the update's (minus its metainfo)
+    let base_s = String::from_utf8(base).unwrap();
+    let upd_cmds = text
+        .trim_start_matches(r#"{"nftables":[{"metainfo":{"json_schema_version":1}},"#)
+        .trim_end_matches("]}");
+    let combined = format!("{},{}]}}", base_s.trim_end_matches("]}"), upd_cmds);
+    common::golden_json("slice-wan-update", combined.as_bytes());
+}

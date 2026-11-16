@@ -461,6 +461,15 @@ pub enum Object<'a> {
         /// initial elements
         elem: Vec<Expr<'a>>,
     },
+    /// a named set by name only (for `flush`)
+    SetName(Cow<'a, str>),
+    /// elements of a named set
+    Element {
+        /// set name
+        name: Cow<'a, str>,
+        /// elements
+        elem: Vec<Expr<'a>>,
+    },
     /// a flowtable on ingress
     Flowtable {
         /// flowtable name
@@ -521,7 +530,8 @@ impl Serialize for ObjBody<'_, '_> {
             Object::Table => "table",
             Object::Chain { .. } => "chain",
             Object::Rule { .. } => "rule",
-            Object::Set { .. } => "set",
+            Object::Set { .. } | Object::SetName(_) => "set",
+            Object::Element { .. } => "element",
             Object::Flowtable { .. } => "flowtable",
         };
         let mut m = s.serialize_map(Some(1))?;
@@ -576,6 +586,15 @@ impl Serialize for ObjInner<'_, '_, '_> {
                 if !elem.is_empty() {
                     m.serialize_entry("elem", elem)?;
                 }
+            }
+            Object::SetName(name) => {
+                m.serialize_entry("table", b.table)?;
+                m.serialize_entry("name", name)?;
+            }
+            Object::Element { name, elem } => {
+                m.serialize_entry("table", b.table)?;
+                m.serialize_entry("name", name)?;
+                m.serialize_entry("elem", elem)?;
             }
             Object::Flowtable { name, devices } => {
                 m.serialize_entry("table", b.table)?;

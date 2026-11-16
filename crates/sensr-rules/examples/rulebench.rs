@@ -222,6 +222,8 @@ fn main() {
     let block: usize = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(200);
     let reps: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(5);
     let out_path = args.get(4).cloned();
+    // optional: an alias refresh document replacing the blocklist set
+    let update_path = args.get(5).cloned();
 
     let ifs = interfaces();
     let (info, resolved) = alias_defs(block);
@@ -253,6 +255,23 @@ fn main() {
             && let Some(p) = &out_path
         {
             std::fs::write(p, &buf).expect("write output");
+        }
+        if rep == 0
+            && let Some(p) = &update_path
+        {
+            let t = Instant::now();
+            let mut upd = Vec::new();
+            nft::render_set_updates(
+                "sensr",
+                &nft::alias_set_updates("blocklist_v4", &resolved["blocklist_v4"]),
+                &mut upd,
+            )
+            .expect("render update");
+            eprintln!(
+                "{}",
+                serde_json::json!({"set_update_entries": block, "render_ms": t.elapsed().as_secs_f64() * 1e3, "json_bytes": upd.len()})
+            );
+            std::fs::write(p, &upd).expect("write update");
         }
         println!(
             "{}",

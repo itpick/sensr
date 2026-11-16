@@ -317,6 +317,9 @@ pub fn filter_conf(uuid: &str, r: &fw::FilterRule, doc: &Document) -> (u32, Conf
             RuleAction::Reject => "reject",
         },
     );
+    if let Some(gw) = &r.gateway {
+        c.set("gateway", gw.as_str());
+    }
     let floating = r.interfaces.len() != 1 || r.interface_not;
     if floating {
         c.set("floating", true);
