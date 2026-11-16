@@ -1,8 +1,9 @@
 //! Template modules: sensr's `service/templates/OPNsense/<Module>/` + `+TARGETS`.
 //!
 //! A [`Module`] is a set of minijinja templates and a `Targets` table mapping
-//! each template to a file in the daemon's directory under `/run/sensr/<daemon>/`.
-//! Rendering goes to `/run/sensr/<daemon>/.next/` first so the daemon's own
+//! each template to a file in the module's live directory (normally
+//! `/run/sensr/<daemon>/`, or e.g. `/run/systemd/network/` for networkd).
+//! Rendering goes to `<live dir>/.next/` first so the daemon's own
 //! checker can validate the complete new set; [`Staged::commit`] then renames
 //! every file into place (each rename is atomic, the directory is the same
 //! filesystem).
@@ -11,6 +12,11 @@
 //! raw `config.xml` tree, and undefined variables are errors, not empty
 //! strings, so a template typo fails the apply instead of writing a broken
 //! file.
+//!
+//! A target may produce one file per list item, like upstream's
+//! `wg[OPNsense.wireguard.server.servers.server.%.instance].conf`:
+//! `netdev:50-[wireguard.interfaces.%.name].netdev` renders the template once
+//! per element of `wireguard.interfaces`, with that element bound to `item`.
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -27,8 +33,8 @@ use crate::plan::FileSpec;
 pub struct Module {
     /// Module name (`"sample"`, `"unbound"`).
     pub name: &'static str,
-    /// Daemon directory under `/run/sensr/`.
-    pub daemon: &'static str,
+    /// Live directory, relative to the root (`"run/sensr/unbound"`).
+    pub dir: &'static str,
     /// Template name → source.
     pub templates: &'static [(&'static str, &'static str)],
     /// `+TARGETS`-style table: `template:relative/destination` per line.
@@ -40,8 +46,24 @@ pub struct Module {
 pub struct Target {
     /// Template name within the module.
     pub template: String,
-    /// Destination relative to the daemon directory.
+    /// Destination relative to the live directory (for a per-item target,
+    /// the text around the placeholder).
     pub dest: PathBuf,
+    /// Per-item expansion, if the destination has a `[list.%.field]` part.
+    pub each: Option<Each>,
+}
+
+/// Per-item expansion of a target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Each {
+    /// Dotted path of the list in the context.
+    pub list: Vec<String>,
+    /// Field of each item that names the file.
+    pub field: String,
+    /// File name text before the placeholder.
+    pub prefix: String,
+    /// File name text after the placeholder.
+    pub suffix: String,
 }
 
 /// Template errors.
@@ -73,6 +95,16 @@ pub enum TemplateError {
         /// Underlying error (with line information).
         source: minijinja::Error,
     },
+    /// A per-item target's list or name field is missing or unusable.
+    #[error("module {module} template {template}: {why}")]
+    BadItem {
+        /// Module.
+        module: &'static str,
+        /// Template.
+        template: String,
+        /// Explanation.
+        why: String,
+    },
     /// Filesystem error while staging or committing.
     #[error("{path}: {source}")]
     Io {
@@ -100,16 +132,47 @@ pub fn parse_targets(module: &'static str, text: &str) -> Result<Vec<Target>, Te
         let (tpl, dest) = line
             .split_once(':')
             .ok_or_else(|| bad("expected template:dest"))?;
-        let dest = PathBuf::from(dest.trim());
-        if dest.as_os_str().is_empty() || tpl.trim().is_empty() {
+        let dest = dest.trim();
+        if dest.is_empty() || tpl.trim().is_empty() {
             return Err(bad("empty template or destination"));
         }
-        if !dest.components().all(|c| matches!(c, Component::Normal(_))) {
+        let (dest, each) = match (dest.find('['), dest.find(']')) {
+            (None, None) => (PathBuf::from(dest), None),
+            (Some(a), Some(b)) if a < b => {
+                let spec = &dest[a + 1..b];
+                let (list, field) = spec
+                    .split_once(".%.")
+                    .ok_or_else(|| bad("placeholder must be [list.path.%.field]"))?;
+                let (dir, prefix) = match dest[..a].rsplit_once('/') {
+                    Some((d, p)) => (format!("{d}/"), p.to_owned()),
+                    None => (String::new(), dest[..a].to_owned()),
+                };
+                let suffix = dest[b + 1..].to_owned();
+                if suffix.contains('/') || list.is_empty() || field.is_empty() {
+                    return Err(bad("placeholder must be in the file name"));
+                }
+                (
+                    PathBuf::from(if dir.is_empty() { ".".to_owned() } else { dir }),
+                    Some(Each {
+                        list: list.split('.').map(str::to_owned).collect(),
+                        field: field.to_owned(),
+                        prefix,
+                        suffix,
+                    }),
+                )
+            }
+            _ => return Err(bad("unbalanced [ ] in destination")),
+        };
+        if !dest
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+        {
             return Err(bad("destination must be relative without .."));
         }
         out.push(Target {
             template: tpl.trim().to_owned(),
             dest,
+            each,
         });
     }
     Ok(out)
@@ -118,9 +181,9 @@ pub fn parse_targets(module: &'static str, text: &str) -> Result<Vec<Target>, Te
 /// A rendered file, not yet written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rendered {
-    /// Daemon directory name.
-    pub daemon: &'static str,
-    /// Destination relative to the daemon directory.
+    /// Live directory relative to the root.
+    pub dir: &'static str,
+    /// Destination relative to the live directory.
     pub dest: PathBuf,
     /// Contents.
     pub contents: String,
@@ -222,26 +285,71 @@ impl Templates {
             .modules
             .get(module)
             .ok_or_else(|| TemplateError::UnknownModule(module.to_owned()))?;
-        let value = Value::from(Serde(ctx));
-        targets
-            .iter()
-            .map(|t| {
-                let err = |source| TemplateError::Render {
-                    module: m.name,
-                    template: t.template.clone(),
-                    source,
-                };
-                let tpl = self
-                    .env
-                    .get_template(&format!("{}/{}", m.name, t.template))
-                    .map_err(err)?;
-                Ok(Rendered {
-                    daemon: m.daemon,
+        let doc = serde_json::to_value(ctx).map_err(|e| TemplateError::BadItem {
+            module: m.name,
+            template: String::new(),
+            why: format!("context does not serialise: {e}"),
+        })?;
+        let value = Value::from(Serde(&doc));
+        let mut out = Vec::new();
+        for t in targets {
+            let err = |source| TemplateError::Render {
+                module: m.name,
+                template: t.template.clone(),
+                source,
+            };
+            let tpl = self
+                .env
+                .get_template(&format!("{}/{}", m.name, t.template))
+                .map_err(err)?;
+            let Some(each) = &t.each else {
+                out.push(Rendered {
+                    dir: m.dir,
                     dest: t.dest.clone(),
                     contents: tpl.render(value.clone()).map_err(err)?,
-                })
-            })
-            .collect()
+                });
+                continue;
+            };
+            let bad = |why: String| TemplateError::BadItem {
+                module: m.name,
+                template: t.template.clone(),
+                why,
+            };
+            // A missing list means "no items" (the feature is off), as upstream.
+            let items = each
+                .list
+                .iter()
+                .try_fold(&doc, |v, k| v.get(k))
+                .and_then(|v| v.as_array())
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            for item in items {
+                let name = match item.get(&each.field) {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(serde_json::Value::Number(n)) => n.to_string(),
+                    _ => return Err(bad(format!("item without {}", each.field))),
+                };
+                let file = format!("{}{name}{}", each.prefix, each.suffix);
+                if file.is_empty()
+                    || file == "."
+                    || file == ".."
+                    || file.contains('/')
+                    || file.chars().any(char::is_control)
+                {
+                    return Err(bad(format!("unusable file name {file:?}")));
+                }
+                let mut scoped = doc.clone();
+                if let Some(obj) = scoped.as_object_mut() {
+                    obj.insert("item".to_owned(), item.clone());
+                }
+                out.push(Rendered {
+                    dir: m.dir,
+                    dest: t.dest.join(file),
+                    contents: tpl.render(Value::from(Serde(&scoped))).map_err(err)?,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Render every module (upstream `generate('*')`).
@@ -274,19 +382,19 @@ impl Staging {
         Staging { root: root.into() }
     }
 
-    /// `/run/sensr/<daemon>`.
-    pub fn live_dir(&self, daemon: &str) -> PathBuf {
-        self.root.join("run/sensr").join(daemon)
+    /// A module's live directory (`<root>/<dir>`).
+    pub fn live_dir(&self, dir: &str) -> PathBuf {
+        self.root.join(dir)
     }
 
-    /// `/run/sensr/<daemon>/.next`.
-    pub fn next_dir(&self, daemon: &str) -> PathBuf {
-        self.live_dir(daemon).join(".next")
+    /// Its staging directory (`<root>/<dir>/.next`).
+    pub fn next_dir(&self, dir: &str) -> PathBuf {
+        self.live_dir(dir).join(".next")
     }
 
     /// The live path of a rendered file.
     pub fn live_path(&self, r: &Rendered) -> PathBuf {
-        self.live_dir(r.daemon).join(&r.dest)
+        normalize(&self.live_dir(r.dir).join(&r.dest))
     }
 
     /// Plan entries for rendered files (live paths), for diffing.
@@ -309,7 +417,7 @@ impl Staging {
     pub fn stage(&self, rendered: &[Rendered]) -> Result<Staged, TemplateError> {
         let mut files = Vec::new();
         for r in rendered {
-            let next = self.next_dir(r.daemon).join(&r.dest);
+            let next = normalize(&self.next_dir(r.dir).join(&r.dest));
             write_atomic(&next, r.contents.as_bytes(), 0o644)?;
             files.push((next, self.live_path(r)));
         }
@@ -343,6 +451,13 @@ impl Staged {
             let _ = std::fs::remove_file(next);
         }
     }
+}
+
+/// Drop `.` components so plan keys are canonical.
+fn normalize(p: &Path) -> PathBuf {
+    p.components()
+        .filter(|c| !matches!(c, Component::CurDir))
+        .collect()
 }
 
 /// Write `contents` to `path` atomically: temp file in the same directory,
@@ -383,7 +498,7 @@ fn set_mode(_p: &Path, _mode: u32) -> std::io::Result<()> {
 /// no longer ships; sensr keeps one so the template machinery stays tested).
 pub const SAMPLE: Module = Module {
     name: "sample",
-    daemon: "sample",
+    dir: "run/sensr/sample",
     templates: &[
         (
             "sample.conf",
@@ -401,15 +516,35 @@ pub const SAMPLE: Module = Module {
 
 /// Every module sensr ships.
 pub fn builtin_modules() -> Vec<Module> {
-    vec![SAMPLE]
+    vec![
+        SAMPLE,
+        crate::appliers::unbound::MODULE,
+        crate::appliers::wireguard::MODULE,
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The shared fixture document plus the typed slice models' contexts,
+    /// so every module renders from one document as upstream's
+    /// `generate('*')` does.
     fn fixture() -> serde_json::Value {
-        serde_json::from_str(include_str!("../tests/fixtures/full.json")).unwrap()
+        let mut doc: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/full.json")).unwrap();
+        let obj = doc.as_object_mut().unwrap();
+        let unbound =
+            serde_json::to_value(crate::appliers::unbound::tests::model().context().unwrap())
+                .unwrap();
+        let wg = crate::appliers::wireguard::tests::model();
+        let wg = serde_json::to_value(wg.context().unwrap()).unwrap();
+        for part in [unbound, wg] {
+            for (k, v) in part.as_object().unwrap() {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        doc
     }
 
     #[test]
@@ -433,9 +568,36 @@ mod tests {
         for name in t.module_names().collect::<Vec<_>>() {
             let module = t.modules[name].0.clone();
             for target in t.targets(name).unwrap() {
-                let p = staging.live_dir(module.daemon).join(&target.dest);
-                assert!(live.contains(&p), "{name}: {} not rendered", p.display());
-                assert!(p.is_file());
+                let expected: Vec<PathBuf> = match &target.each {
+                    None => vec![staging.live_dir(module.dir).join(&target.dest)],
+                    Some(each) => {
+                        let doc = fixture();
+                        let items = each
+                            .list
+                            .iter()
+                            .try_fold(&doc, |v, k| v.get(k))
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        assert!(!items.is_empty(), "{name}: fixture has no {:?}", each.list);
+                        items
+                            .iter()
+                            .map(|i| {
+                                let n = i[&each.field].as_str().unwrap();
+                                normalize(
+                                    &staging
+                                        .live_dir(module.dir)
+                                        .join(&target.dest)
+                                        .join(format!("{}{n}{}", each.prefix, each.suffix)),
+                                )
+                            })
+                            .collect()
+                    }
+                };
+                for p in expected {
+                    assert!(live.contains(&p), "{name}: {} not rendered", p.display());
+                    assert!(p.is_file());
+                }
             }
         }
     }
@@ -447,12 +609,22 @@ mod tests {
         let staging = Staging::new(root.path());
         let r = t.render("sample", &fixture()).unwrap();
         let staged = staging.stage(&r).unwrap();
-        let live = staging.live_dir("sample").join("sample.conf");
+        let live = staging.live_dir("run/sensr/sample").join("sample.conf");
         assert!(!live.exists(), "not live before commit");
-        assert!(staging.next_dir("sample").join("sample.conf").is_file());
+        assert!(
+            staging
+                .next_dir("run/sensr/sample")
+                .join("sample.conf")
+                .is_file()
+        );
         staged.commit().unwrap();
         assert!(live.is_file());
-        assert!(!staging.next_dir("sample").join("sample.conf").exists());
+        assert!(
+            !staging
+                .next_dir("run/sensr/sample")
+                .join("sample.conf")
+                .exists()
+        );
     }
 
     #[test]
@@ -460,7 +632,7 @@ mod tests {
         let mut t = Templates::empty();
         t.register(Module {
             name: "typo",
-            daemon: "typo",
+            dir: "run/sensr/typo",
             templates: &[("a", "{{ system.hostnme }}")],
             targets: "a:a.conf",
         })
@@ -478,6 +650,20 @@ mod tests {
         }
         let ok = parse_targets("m", "# comment\n\na: sub/dir/file.conf\n").unwrap();
         assert_eq!(ok[0].dest, PathBuf::from("sub/dir/file.conf"));
+        let each = parse_targets("m", "a:sub/50-[w.ifs.%.name].netdev").unwrap();
+        assert_eq!(each[0].dest, PathBuf::from("sub/"));
+        assert_eq!(
+            each[0].each,
+            Some(Each {
+                list: vec!["w".into(), "ifs".into()],
+                field: "name".into(),
+                prefix: "50-".into(),
+                suffix: ".netdev".into(),
+            })
+        );
+        for bad in ["a:x[w.%.n]/y", "a:x[w.n]", "a:x]w.%.n[", "a:[.%.n]"] {
+            assert!(parse_targets("m", bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -490,7 +676,7 @@ mod tests {
         let mut t = Templates::empty();
         let r = t.register(Module {
             name: "m",
-            daemon: "m",
+            dir: "run/sensr/m",
             templates: &[],
             targets: "missing:x",
         });
@@ -503,5 +689,44 @@ mod tests {
         let s = Staging::new("/");
         let files = s.plan_files(&t.render("sample", &fixture()).unwrap());
         assert!(files.contains_key(Path::new("/run/sensr/sample/sample.conf")));
+    }
+}
+
+#[cfg(test)]
+mod each_tests {
+    use super::*;
+
+    #[test]
+    fn per_item_targets_render_one_file_per_item_and_reject_bad_names() {
+        let mut t = Templates::empty();
+        t.register(Module {
+            name: "m",
+            dir: "run/sensr/m",
+            templates: &[("x", "{{ item.name }}={{ top }}\n")],
+            targets: "x:[things.%.name].conf",
+        })
+        .unwrap();
+        let ctx = serde_json::json!({"top": 1, "things": [{"name": "a"}, {"name": "b"}]});
+        let out = t.render("m", &ctx).unwrap();
+        let s = Staging::new("/");
+        let paths: Vec<_> = out.iter().map(|r| s.live_path(r)).collect();
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/run/sensr/m/a.conf"),
+                PathBuf::from("/run/sensr/m/b.conf")
+            ]
+        );
+        assert_eq!(out[1].contents, "b=1\n");
+        assert!(
+            t.render("m", &serde_json::json!({"top": 1}))
+                .unwrap()
+                .is_empty()
+        );
+        let evil = serde_json::json!({"top": 1, "things": [{"name": "../../etc/x"}]});
+        assert!(matches!(
+            t.render("m", &evil),
+            Err(TemplateError::BadItem { .. })
+        ));
     }
 }

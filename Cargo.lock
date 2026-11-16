@@ -1061,8 +1061,10 @@ name = "sensr-apply"
 version = "0.0.0"
 dependencies = [
  "insta",
+ "ipnet",
  "minijinja",
  "proptest",
+ "sensr-schema",
  "serde",
  "serde_json",
  "tempfile",

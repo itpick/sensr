@@ -1,0 +1,3 @@
+# One .netdev and one .network per tunnel, in /run/systemd/network/.
+wireguard.netdev:50-sensr-[wireguard.interfaces.%.name].netdev
+wireguard.network:50-sensr-[wireguard.interfaces.%.name].network

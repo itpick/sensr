@@ -10,8 +10,11 @@
 //! - [`hooks`]: operator drop-ins per hook level.
 //! - [`confirm`]: the commit-confirm timer.
 //! - [`clock`]: injectable time.
+//! - [`appliers`]: nftables, sysctl, qdisc, Kea, Unbound and WireGuard for the
+//!   routing slice.
 
 pub mod actions;
+pub mod appliers;
 pub mod clock;
 pub mod cmd;
 pub mod confirm;
