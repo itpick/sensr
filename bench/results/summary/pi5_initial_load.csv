@@ -1,0 +1,2 @@
+router,size,alias reconfigure s_max,alias reconfigure s_median,alias reconfigure s_min,filter apply s_max,filter apply s_median,filter apply s_min,n,per-rule add ms_max,per-rule add ms_median,per-rule add ms_min
+pi-opn,small,9.181190013885498,9.181190013885498,9.181190013885498,5.7341554164886475,5.7341554164886475,5.7341554164886475,1,518.9175510406494,518.9175510406494,518.9175510406494

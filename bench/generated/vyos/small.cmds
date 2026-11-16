@@ -1,0 +1,555 @@
+set firewall group address-group iot_devices address 192.168.1.20
+set firewall group address-group iot_devices address 192.168.1.21
+set firewall group address-group iot_devices address 192.168.1.22
+set firewall group address-group iot_devices address 192.168.1.23
+set firewall group address-group iot_devices address 192.168.1.24
+set firewall group address-group iot_devices address 192.168.1.25
+set firewall group address-group iot_devices address 192.168.1.26
+set firewall group address-group iot_devices address 192.168.1.27
+set firewall group address-group kids_devices address 192.168.1.40
+set firewall group address-group kids_devices address 192.168.1.41
+set firewall group address-group kids_devices address 192.168.1.42
+set firewall group address-group kids_devices address 192.168.1.43
+set firewall group address-group admin_hosts address 192.168.1.10
+set firewall group address-group admin_hosts address 192.168.1.11
+set firewall group network-group work_vpn_nets network 203.0.113.0/24
+set firewall group network-group work_vpn_nets network 198.51.100.0/24
+set firewall group network-group blocklist_v4 network 83.77.202.19/32
+set firewall group network-group blocklist_v4 network 211.48.187.233/32
+set firewall group network-group blocklist_v4 network 130.109.19.0/24
+set firewall group network-group blocklist_v4 network 108.35.123.0/24
+set firewall group network-group blocklist_v4 network 109.30.63.162/32
+set firewall group network-group blocklist_v4 network 161.31.203.0/24
+set firewall group network-group blocklist_v4 network 57.23.68.0/24
+set firewall group network-group blocklist_v4 network 37.60.157.175/32
+set firewall group network-group blocklist_v4 network 47.52.96.141/32
+set firewall group network-group blocklist_v4 network 183.32.30.128/32
+set firewall group network-group blocklist_v4 network 175.218.160.237/32
+set firewall group network-group blocklist_v4 network 117.185.153.0/24
+set firewall group network-group blocklist_v4 network 47.124.41.135/32
+set firewall group network-group blocklist_v4 network 88.229.147.19/32
+set firewall group network-group blocklist_v4 network 31.214.84.39/32
+set firewall group network-group blocklist_v4 network 126.215.20.20/32
+set firewall group network-group blocklist_v4 network 196.160.174.153/32
+set firewall group network-group blocklist_v4 network 128.233.35.242/32
+set firewall group network-group blocklist_v4 network 70.242.33.0/24
+set firewall group network-group blocklist_v4 network 180.158.228.0/24
+set firewall group network-group blocklist_v4 network 99.177.11.91/32
+set firewall group network-group blocklist_v4 network 44.59.252.0/24
+set firewall group network-group blocklist_v4 network 197.147.66.102/32
+set firewall group network-group blocklist_v4 network 101.254.41.0/24
+set firewall group network-group blocklist_v4 network 103.142.70.222/32
+set firewall group network-group blocklist_v4 network 141.142.212.175/32
+set firewall group network-group blocklist_v4 network 98.118.77.0/24
+set firewall group network-group blocklist_v4 network 39.118.119.0/24
+set firewall group network-group blocklist_v4 network 213.93.134.0/24
+set firewall group network-group blocklist_v4 network 38.214.189.82/32
+set firewall group network-group blocklist_v4 network 33.27.233.200/32
+set firewall group network-group blocklist_v4 network 175.200.203.27/32
+set firewall group network-group blocklist_v4 network 124.205.31.0/24
+set firewall group network-group blocklist_v4 network 54.225.83.0/24
+set firewall group network-group blocklist_v4 network 154.26.52.0/24
+set firewall group network-group blocklist_v4 network 39.51.186.19/32
+set firewall group network-group blocklist_v4 network 54.192.76.245/32
+set firewall group network-group blocklist_v4 network 89.186.242.0/24
+set firewall group network-group blocklist_v4 network 218.249.238.80/32
+set firewall group network-group blocklist_v4 network 22.73.52.190/32
+set firewall group network-group blocklist_v4 network 68.245.82.53/32
+set firewall group network-group blocklist_v4 network 136.185.75.235/32
+set firewall group network-group blocklist_v4 network 7.152.46.67/32
+set firewall group network-group blocklist_v4 network 133.187.85.58/32
+set firewall group network-group blocklist_v4 network 137.168.114.202/32
+set firewall group network-group blocklist_v4 network 195.99.122.190/32
+set firewall group network-group blocklist_v4 network 206.116.102.92/32
+set firewall group network-group blocklist_v4 network 188.14.14.121/32
+set firewall group network-group blocklist_v4 network 67.99.176.240/32
+set firewall group network-group blocklist_v4 network 186.178.186.0/24
+set firewall group network-group blocklist_v4 network 27.116.240.0/24
+set firewall group network-group blocklist_v4 network 53.247.0.168/32
+set firewall group network-group blocklist_v4 network 89.43.61.201/32
+set firewall group network-group blocklist_v4 network 183.102.244.112/32
+set firewall group network-group blocklist_v4 network 163.170.44.249/32
+set firewall group network-group blocklist_v4 network 185.202.237.243/32
+set firewall group network-group blocklist_v4 network 22.81.87.8/32
+set firewall group network-group blocklist_v4 network 39.238.74.153/32
+set firewall group network-group blocklist_v4 network 122.179.79.34/32
+set firewall group network-group blocklist_v4 network 6.7.52.240/32
+set firewall group network-group blocklist_v4 network 36.222.99.55/32
+set firewall group network-group blocklist_v4 network 8.128.108.0/24
+set firewall group network-group blocklist_v4 network 62.166.132.214/32
+set firewall group network-group blocklist_v4 network 34.31.181.170/32
+set firewall group network-group blocklist_v4 network 150.215.66.135/32
+set firewall group network-group blocklist_v4 network 131.9.225.156/32
+set firewall group network-group blocklist_v4 network 2.76.88.0/24
+set firewall group network-group blocklist_v4 network 159.61.31.133/32
+set firewall group network-group blocklist_v4 network 136.247.54.15/32
+set firewall group network-group blocklist_v4 network 64.97.141.0/24
+set firewall group network-group blocklist_v4 network 26.231.14.234/32
+set firewall group network-group blocklist_v4 network 17.226.166.130/32
+set firewall group network-group blocklist_v4 network 156.102.141.137/32
+set firewall group network-group blocklist_v4 network 207.244.126.225/32
+set firewall group network-group blocklist_v4 network 67.103.229.0/24
+set firewall group network-group blocklist_v4 network 32.200.226.172/32
+set firewall group network-group blocklist_v4 network 62.219.37.0/24
+set firewall group network-group blocklist_v4 network 78.62.79.165/32
+set firewall group network-group blocklist_v4 network 170.187.73.0/24
+set firewall group network-group blocklist_v4 network 36.239.112.25/32
+set firewall group network-group blocklist_v4 network 102.249.83.214/32
+set firewall group network-group blocklist_v4 network 58.82.220.104/32
+set firewall group network-group blocklist_v4 network 87.215.100.24/32
+set firewall group network-group blocklist_v4 network 185.187.9.118/32
+set firewall group network-group blocklist_v4 network 113.9.196.160/32
+set firewall group network-group blocklist_v4 network 76.32.57.202/32
+set firewall group network-group blocklist_v4 network 59.53.43.0/24
+set firewall group network-group blocklist_v4 network 11.92.138.210/32
+set firewall group network-group blocklist_v4 network 109.132.207.0/24
+set firewall group network-group blocklist_v4 network 132.253.167.0/24
+set firewall group network-group blocklist_v4 network 15.93.217.69/32
+set firewall group network-group blocklist_v4 network 5.45.133.0/24
+set firewall group network-group blocklist_v4 network 220.113.34.0/24
+set firewall group network-group blocklist_v4 network 32.232.5.142/32
+set firewall group network-group blocklist_v4 network 107.137.66.0/24
+set firewall group network-group blocklist_v4 network 182.122.56.68/32
+set firewall group network-group blocklist_v4 network 13.92.103.161/32
+set firewall group network-group blocklist_v4 network 79.105.148.173/32
+set firewall group network-group blocklist_v4 network 46.138.177.65/32
+set firewall group network-group blocklist_v4 network 4.9.97.63/32
+set firewall group network-group blocklist_v4 network 115.54.221.140/32
+set firewall group network-group blocklist_v4 network 214.201.157.252/32
+set firewall group network-group blocklist_v4 network 59.175.101.181/32
+set firewall group network-group blocklist_v4 network 187.71.207.252/32
+set firewall group network-group blocklist_v4 network 14.66.7.0/24
+set firewall group network-group blocklist_v4 network 190.130.220.0/24
+set firewall group network-group blocklist_v4 network 22.195.144.178/32
+set firewall group network-group blocklist_v4 network 76.23.235.0/24
+set firewall group network-group blocklist_v4 network 69.228.1.0/24
+set firewall group network-group blocklist_v4 network 85.165.125.0/24
+set firewall group network-group blocklist_v4 network 80.111.182.0/24
+set firewall group network-group blocklist_v4 network 86.195.42.129/32
+set firewall group network-group blocklist_v4 network 168.102.127.2/32
+set firewall group network-group blocklist_v4 network 24.135.45.0/24
+set firewall group network-group blocklist_v4 network 151.21.201.0/24
+set firewall group network-group blocklist_v4 network 78.119.43.136/32
+set firewall group network-group blocklist_v4 network 219.79.199.185/32
+set firewall group network-group blocklist_v4 network 39.145.74.0/24
+set firewall group network-group blocklist_v4 network 214.219.71.193/32
+set firewall group network-group blocklist_v4 network 130.8.117.0/24
+set firewall group network-group blocklist_v4 network 11.68.184.97/32
+set firewall group network-group blocklist_v4 network 214.231.25.161/32
+set firewall group network-group blocklist_v4 network 137.125.250.0/24
+set firewall group network-group blocklist_v4 network 117.35.47.17/32
+set firewall group network-group blocklist_v4 network 191.242.129.217/32
+set firewall group network-group blocklist_v4 network 68.120.105.0/24
+set firewall group network-group blocklist_v4 network 167.235.252.20/32
+set firewall group network-group blocklist_v4 network 123.147.23.165/32
+set firewall group network-group blocklist_v4 network 51.39.75.167/32
+set firewall group network-group blocklist_v4 network 191.155.68.0/24
+set firewall group network-group blocklist_v4 network 16.248.137.26/32
+set firewall group network-group blocklist_v4 network 178.111.250.0/24
+set firewall group network-group blocklist_v4 network 133.146.237.197/32
+set firewall group network-group blocklist_v4 network 31.102.159.240/32
+set firewall group network-group blocklist_v4 network 122.8.148.210/32
+set firewall group network-group blocklist_v4 network 130.230.137.235/32
+set firewall group network-group blocklist_v4 network 54.38.46.0/24
+set firewall group network-group blocklist_v4 network 135.134.184.0/24
+set firewall group network-group blocklist_v4 network 210.143.57.60/32
+set firewall group network-group blocklist_v4 network 128.248.201.0/24
+set firewall group network-group blocklist_v4 network 1.251.230.187/32
+set firewall group network-group blocklist_v4 network 37.213.176.31/32
+set firewall group network-group blocklist_v4 network 216.169.0.87/32
+set firewall group network-group blocklist_v4 network 215.203.61.51/32
+set firewall group network-group blocklist_v4 network 183.6.148.0/24
+set firewall group network-group blocklist_v4 network 17.201.199.151/32
+set firewall group network-group blocklist_v4 network 20.184.219.219/32
+set firewall group network-group blocklist_v4 network 13.143.52.0/24
+set firewall group network-group blocklist_v4 network 170.146.76.0/24
+set firewall group network-group blocklist_v4 network 69.223.161.0/24
+set firewall group network-group blocklist_v4 network 96.219.14.162/32
+set firewall group network-group blocklist_v4 network 103.104.41.0/24
+set firewall group network-group blocklist_v4 network 188.210.230.36/32
+set firewall group network-group blocklist_v4 network 165.146.248.0/24
+set firewall group network-group blocklist_v4 network 141.65.87.88/32
+set firewall group network-group blocklist_v4 network 73.152.130.250/32
+set firewall group network-group blocklist_v4 network 168.133.207.78/32
+set firewall group network-group blocklist_v4 network 124.201.61.0/24
+set firewall group network-group blocklist_v4 network 42.38.106.208/32
+set firewall group network-group blocklist_v4 network 128.112.231.195/32
+set firewall group network-group blocklist_v4 network 116.218.71.63/32
+set firewall group network-group blocklist_v4 network 24.89.175.82/32
+set firewall group network-group blocklist_v4 network 62.188.132.52/32
+set firewall group network-group blocklist_v4 network 6.211.196.135/32
+set firewall group network-group blocklist_v4 network 54.192.138.16/32
+set firewall group network-group blocklist_v4 network 128.142.184.0/24
+set firewall group network-group blocklist_v4 network 129.110.47.0/24
+set firewall group network-group blocklist_v4 network 64.196.204.111/32
+set firewall group network-group blocklist_v4 network 80.11.65.0/24
+set firewall group network-group blocklist_v4 network 182.242.250.0/24
+set firewall group network-group blocklist_v4 network 101.239.229.0/24
+set firewall group network-group blocklist_v4 network 28.114.79.0/24
+set firewall group network-group blocklist_v4 network 175.55.234.0/24
+set firewall group network-group blocklist_v4 network 199.20.0.60/32
+set firewall group network-group blocklist_v4 network 146.19.155.161/32
+set firewall group network-group blocklist_v4 network 65.223.57.0/24
+set firewall group network-group blocklist_v4 network 77.98.198.0/24
+set firewall group network-group blocklist_v4 network 154.0.5.118/32
+set firewall group network-group blocklist_v4 network 72.161.124.61/32
+set firewall group network-group blocklist_v4 network 141.126.14.181/32
+set firewall group network-group blocklist_v4 network 167.157.28.0/24
+set firewall group network-group blocklist_v4 network 128.215.41.0/24
+set firewall group network-group blocklist_v4 network 171.217.189.0/24
+set firewall group network-group blocklist_v4 network 9.173.215.102/32
+set firewall group network-group blocklist_v4 network 51.3.149.130/32
+set firewall group network-group blocklist_v4 network 18.105.253.80/32
+set firewall group network-group blocklist_v4 network 197.99.118.68/32
+set firewall group network-group blocklist_v4 network 195.151.55.127/32
+set firewall group network-group blocklist_v4 network 157.95.114.234/32
+set firewall group network-group blocklist_v4 network 171.28.74.14/32
+set firewall group network-group blocklist_v4 network 55.12.72.182/32
+set firewall group network-group blocklist_v4 network 16.94.201.183/32
+set firewall group network-group blocklist_v4 network 81.57.40.85/32
+set firewall group network-group blocklist_v4 network 49.94.239.0/24
+set firewall group network-group blocklist_v4 network 171.193.191.114/32
+set firewall group network-group blocklist_v4 network 44.55.1.0/24
+set firewall group network-group blocklist_v4 network 21.179.215.32/32
+set firewall group network-group blocklist_v4 network 144.106.194.211/32
+set firewall group network-group blocklist_v4 network 80.221.44.0/24
+set firewall group network-group blocklist_v4 network 122.100.190.115/32
+set firewall group port-group web_ports port 80
+set firewall group port-group web_ports port 443
+set firewall group port-group web_ports port 8080
+set firewall group port-group web_ports port 8443
+set firewall group port-group mail_ports port 25
+set firewall group port-group mail_ports port 465
+set firewall group port-group mail_ports port 587
+set firewall group port-group mail_ports port 993
+set firewall group port-group mail_ports port 995
+set firewall ipv4 input filter default-action drop
+set firewall ipv4 input filter rule 1 action accept
+set firewall ipv4 input filter rule 1 state established
+set firewall ipv4 input filter rule 1 state related
+set firewall ipv4 input filter rule 2 action drop
+set firewall ipv4 input filter rule 2 state invalid
+set firewall ipv4 forward filter default-action drop
+set firewall ipv4 forward filter rule 1 action accept
+set firewall ipv4 forward filter rule 1 state established
+set firewall ipv4 forward filter rule 1 state related
+set firewall ipv4 forward filter rule 2 action drop
+set firewall ipv4 forward filter rule 2 state invalid
+set firewall ipv4 input filter rule 3 action accept
+set firewall ipv4 input filter rule 3 inbound-interface name lo
+set firewall ipv4 input filter rule 4 action accept
+set firewall ipv4 input filter rule 4 inbound-interface name eth0
+set firewall ipv4 input filter rule 4 protocol tcp
+set firewall ipv4 input filter rule 4 destination port 22,80,443,8080
+set firewall ipv4 input filter rule 4 description anti-lockout
+set firewall ipv4 input filter rule 10 action accept
+set firewall ipv4 input filter rule 10 inbound-interface name eth0
+set firewall ipv4 input filter rule 10 description 'DNS to router'
+set firewall ipv4 input filter rule 10 protocol udp
+set firewall ipv4 input filter rule 10 source address 192.168.1.0/24
+set firewall ipv4 input filter rule 10 destination port 53
+set firewall ipv4 input filter rule 11 action accept
+set firewall ipv4 input filter rule 11 inbound-interface name eth0
+set firewall ipv4 input filter rule 11 description 'DNS/TCP to router'
+set firewall ipv4 input filter rule 11 protocol tcp
+set firewall ipv4 input filter rule 11 source address 192.168.1.0/24
+set firewall ipv4 input filter rule 11 destination port 53
+set firewall ipv4 input filter rule 12 action accept
+set firewall ipv4 input filter rule 12 inbound-interface name eth0
+set firewall ipv4 input filter rule 12 description 'NTP to router'
+set firewall ipv4 input filter rule 12 protocol udp
+set firewall ipv4 input filter rule 12 source address 192.168.1.0/24
+set firewall ipv4 input filter rule 12 destination port 123
+set firewall ipv4 input filter rule 13 action accept
+set firewall ipv4 input filter rule 13 inbound-interface name eth0
+set firewall ipv4 input filter rule 13 description 'DHCP'
+set firewall ipv4 input filter rule 13 protocol udp
+set firewall ipv4 input filter rule 13 source address 192.168.1.0/24
+set firewall ipv4 input filter rule 13 destination port 67
+set firewall ipv4 input filter rule 14 action accept
+set firewall ipv4 input filter rule 14 inbound-interface name eth0
+set firewall ipv4 input filter rule 14 description 'admin SSH'
+set firewall ipv4 input filter rule 14 protocol tcp
+set firewall ipv4 input filter rule 14 source group address-group admin_hosts
+set firewall ipv4 input filter rule 14 destination port 22
+set firewall ipv4 input filter rule 15 action accept
+set firewall ipv4 input filter rule 15 inbound-interface name eth0
+set firewall ipv4 input filter rule 15 description 'admin GUI'
+set firewall ipv4 input filter rule 15 protocol tcp
+set firewall ipv4 input filter rule 15 source group address-group admin_hosts
+set firewall ipv4 input filter rule 15 destination port 443
+set firewall ipv4 input filter rule 16 action accept
+set firewall ipv4 input filter rule 16 inbound-interface name eth0
+set firewall ipv4 input filter rule 16 description 'ping router'
+set firewall ipv4 input filter rule 16 protocol icmp
+set firewall ipv4 input filter rule 16 source address 192.168.1.0/24
+set firewall ipv4 forward filter rule 10 action drop
+set firewall ipv4 forward filter rule 10 inbound-interface name eth0
+set firewall ipv4 forward filter rule 10 description 'blocklist'
+set firewall ipv4 forward filter rule 10 source address 192.168.1.0/24
+set firewall ipv4 forward filter rule 10 destination group network-group blocklist_v4
+set firewall ipv4 forward filter rule 11 action drop
+set firewall ipv4 forward filter rule 11 inbound-interface name eth0
+set firewall ipv4 forward filter rule 11 description 'IoT no mail'
+set firewall ipv4 forward filter rule 11 protocol tcp
+set firewall ipv4 forward filter rule 11 source group address-group iot_devices
+set firewall ipv4 forward filter rule 11 destination group port-group mail_ports
+set firewall ipv4 forward filter rule 12 action drop
+set firewall ipv4 forward filter rule 12 inbound-interface name eth0
+set firewall ipv4 forward filter rule 12 description 'IoT not to work'
+set firewall ipv4 forward filter rule 12 source group address-group iot_devices
+set firewall ipv4 forward filter rule 12 destination group network-group work_vpn_nets
+set firewall ipv4 forward filter rule 13 action accept
+set firewall ipv4 forward filter rule 13 inbound-interface name eth0
+set firewall ipv4 forward filter rule 13 description 'IoT web'
+set firewall ipv4 forward filter rule 13 protocol tcp
+set firewall ipv4 forward filter rule 13 source group address-group iot_devices
+set firewall ipv4 forward filter rule 13 destination group port-group web_ports
+set firewall ipv4 forward filter rule 14 action accept
+set firewall ipv4 forward filter rule 14 inbound-interface name eth0
+set firewall ipv4 forward filter rule 14 description 'IoT NTP'
+set firewall ipv4 forward filter rule 14 protocol udp
+set firewall ipv4 forward filter rule 14 source group address-group iot_devices
+set firewall ipv4 forward filter rule 14 destination port 123
+set firewall ipv4 forward filter rule 15 action drop
+set firewall ipv4 forward filter rule 15 inbound-interface name eth0
+set firewall ipv4 forward filter rule 15 description 'IoT default deny'
+set firewall ipv4 forward filter rule 15 source group address-group iot_devices
+set firewall ipv4 forward filter rule 16 action drop
+set firewall ipv4 forward filter rule 16 inbound-interface name eth0
+set firewall ipv4 forward filter rule 16 description 'kids no bittorrent'
+set firewall ipv4 forward filter rule 16 protocol tcp
+set firewall ipv4 forward filter rule 16 source group address-group kids_devices
+set firewall ipv4 forward filter rule 16 destination port 6881-6889
+set firewall ipv4 forward filter rule 17 action drop
+set firewall ipv4 forward filter rule 17 inbound-interface name eth0
+set firewall ipv4 forward filter rule 17 description 'kids no STUN'
+set firewall ipv4 forward filter rule 17 protocol udp
+set firewall ipv4 forward filter rule 17 source group address-group kids_devices
+set firewall ipv4 forward filter rule 17 destination port 3478-3480
+set firewall ipv4 forward filter rule 18 action accept
+set firewall ipv4 forward filter rule 18 inbound-interface name eth0
+set firewall ipv4 forward filter rule 18 description 'kids web'
+set firewall ipv4 forward filter rule 18 protocol tcp
+set firewall ipv4 forward filter rule 18 source group address-group kids_devices
+set firewall ipv4 forward filter rule 18 destination group port-group web_ports
+set firewall ipv4 forward filter rule 19 action drop
+set firewall ipv4 forward filter rule 19 inbound-interface name eth0
+set firewall ipv4 forward filter rule 19 description 'kids default deny'
+set firewall ipv4 forward filter rule 19 source group address-group kids_devices
+set firewall ipv4 forward filter rule 20 action drop
+set firewall ipv4 forward filter rule 20 inbound-interface name eth0
+set firewall ipv4 forward filter rule 20 description 'no SMB out'
+set firewall ipv4 forward filter rule 20 protocol tcp
+set firewall ipv4 forward filter rule 20 source address 192.168.1.0/24
+set firewall ipv4 forward filter rule 20 destination port 445
+set firewall ipv4 forward filter rule 21 action drop
+set firewall ipv4 forward filter rule 21 inbound-interface name eth0
+set firewall ipv4 forward filter rule 21 description 'no NetBIOS out'
+set firewall ipv4 forward filter rule 21 protocol tcp
+set firewall ipv4 forward filter rule 21 source address 192.168.1.0/24
+set firewall ipv4 forward filter rule 21 destination port 135-139
+set firewall ipv4 forward filter rule 22 action drop
+set firewall ipv4 forward filter rule 22 inbound-interface name eth0
+set firewall ipv4 forward filter rule 22 description 'no NetBIOS/udp out'
+set firewall ipv4 forward filter rule 22 protocol udp
+set firewall ipv4 forward filter rule 22 source address 192.168.1.0/24
+set firewall ipv4 forward filter rule 22 destination port 137-138
+set firewall ipv4 forward filter rule 23 action drop
+set firewall ipv4 forward filter rule 23 inbound-interface name eth0
+set firewall ipv4 forward filter rule 23 description 'no SSDP out'
+set firewall ipv4 forward filter rule 23 protocol udp
+set firewall ipv4 forward filter rule 23 source address 192.168.1.0/24
+set firewall ipv4 forward filter rule 23 destination port 1900
+set firewall ipv4 forward filter rule 24 action drop
+set firewall ipv4 forward filter rule 24 inbound-interface name eth0
+set firewall ipv4 forward filter rule 24 description 'no telnet out'
+set firewall ipv4 forward filter rule 24 protocol tcp
+set firewall ipv4 forward filter rule 24 source address 192.168.1.0/24
+set firewall ipv4 forward filter rule 24 destination port 23
+set firewall ipv4 forward filter rule 25 action accept
+set firewall ipv4 forward filter rule 25 inbound-interface name eth0
+set firewall ipv4 forward filter rule 25 description 'host exception 0'
+set firewall ipv4 forward filter rule 25 protocol udp
+set firewall ipv4 forward filter rule 25 source address 192.168.1.60
+set firewall ipv4 forward filter rule 25 destination address 198.18.0.0/24
+set firewall ipv4 forward filter rule 25 destination port 7000
+set firewall ipv4 forward filter rule 26 action drop
+set firewall ipv4 forward filter rule 26 inbound-interface name eth0
+set firewall ipv4 forward filter rule 26 description 'host exception 1'
+set firewall ipv4 forward filter rule 26 protocol tcp
+set firewall ipv4 forward filter rule 26 source address 192.168.1.61
+set firewall ipv4 forward filter rule 26 destination address 198.18.1.0/24
+set firewall ipv4 forward filter rule 26 destination port 7001
+set firewall ipv4 forward filter rule 27 action accept
+set firewall ipv4 forward filter rule 27 inbound-interface name eth0
+set firewall ipv4 forward filter rule 27 description 'host exception 2'
+set firewall ipv4 forward filter rule 27 protocol tcp
+set firewall ipv4 forward filter rule 27 source address 192.168.1.62
+set firewall ipv4 forward filter rule 27 destination address 198.18.2.0/24
+set firewall ipv4 forward filter rule 27 destination port 7002
+set firewall ipv4 forward filter rule 28 action drop
+set firewall ipv4 forward filter rule 28 inbound-interface name eth0
+set firewall ipv4 forward filter rule 28 description 'host exception 3'
+set firewall ipv4 forward filter rule 28 protocol udp
+set firewall ipv4 forward filter rule 28 source address 192.168.1.63
+set firewall ipv4 forward filter rule 28 destination address 198.18.3.0/24
+set firewall ipv4 forward filter rule 28 destination port 7003
+set firewall ipv4 forward filter rule 29 action accept
+set firewall ipv4 forward filter rule 29 inbound-interface name eth0
+set firewall ipv4 forward filter rule 29 description 'host exception 4'
+set firewall ipv4 forward filter rule 29 protocol tcp
+set firewall ipv4 forward filter rule 29 source address 192.168.1.64
+set firewall ipv4 forward filter rule 29 destination address 198.18.4.0/24
+set firewall ipv4 forward filter rule 29 destination port 7004
+set firewall ipv4 forward filter rule 30 action drop
+set firewall ipv4 forward filter rule 30 inbound-interface name eth0
+set firewall ipv4 forward filter rule 30 description 'host exception 5'
+set firewall ipv4 forward filter rule 30 protocol tcp
+set firewall ipv4 forward filter rule 30 source address 192.168.1.65
+set firewall ipv4 forward filter rule 30 destination address 198.18.5.0/24
+set firewall ipv4 forward filter rule 30 destination port 7005
+set firewall ipv4 forward filter rule 31 action accept
+set firewall ipv4 forward filter rule 31 inbound-interface name eth0
+set firewall ipv4 forward filter rule 31 description 'host exception 6'
+set firewall ipv4 forward filter rule 31 protocol udp
+set firewall ipv4 forward filter rule 31 source address 192.168.1.66
+set firewall ipv4 forward filter rule 31 destination address 198.18.6.0/24
+set firewall ipv4 forward filter rule 31 destination port 7006
+set firewall ipv4 forward filter rule 32 action drop
+set firewall ipv4 forward filter rule 32 inbound-interface name eth0
+set firewall ipv4 forward filter rule 32 description 'host exception 7'
+set firewall ipv4 forward filter rule 32 protocol tcp
+set firewall ipv4 forward filter rule 32 source address 192.168.1.67
+set firewall ipv4 forward filter rule 32 destination address 198.18.7.0/24
+set firewall ipv4 forward filter rule 32 destination port 7007
+set firewall ipv4 forward filter rule 33 action accept
+set firewall ipv4 forward filter rule 33 inbound-interface name eth0
+set firewall ipv4 forward filter rule 33 description 'host exception 8'
+set firewall ipv4 forward filter rule 33 protocol tcp
+set firewall ipv4 forward filter rule 33 source address 192.168.1.68
+set firewall ipv4 forward filter rule 33 destination address 198.18.8.0/24
+set firewall ipv4 forward filter rule 33 destination port 7008
+set firewall ipv4 forward filter rule 34 action drop
+set firewall ipv4 forward filter rule 34 inbound-interface name eth0
+set firewall ipv4 forward filter rule 34 description 'host exception 9'
+set firewall ipv4 forward filter rule 34 protocol udp
+set firewall ipv4 forward filter rule 34 source address 192.168.1.69
+set firewall ipv4 forward filter rule 34 destination address 198.18.9.0/24
+set firewall ipv4 forward filter rule 34 destination port 7009
+set firewall ipv4 forward filter rule 35 action accept
+set firewall ipv4 forward filter rule 35 inbound-interface name eth0
+set firewall ipv4 forward filter rule 35 description 'host exception 10'
+set firewall ipv4 forward filter rule 35 protocol tcp
+set firewall ipv4 forward filter rule 35 source address 192.168.1.70
+set firewall ipv4 forward filter rule 35 destination address 198.18.10.0/24
+set firewall ipv4 forward filter rule 35 destination port 7010
+set firewall ipv4 forward filter rule 36 action drop
+set firewall ipv4 forward filter rule 36 inbound-interface name eth0
+set firewall ipv4 forward filter rule 36 description 'host exception 11'
+set firewall ipv4 forward filter rule 36 protocol tcp
+set firewall ipv4 forward filter rule 36 source address 192.168.1.71
+set firewall ipv4 forward filter rule 36 destination address 198.18.11.0/24
+set firewall ipv4 forward filter rule 36 destination port 7011
+set firewall ipv4 forward filter rule 37 action accept
+set firewall ipv4 forward filter rule 37 inbound-interface name eth0
+set firewall ipv4 forward filter rule 37 description 'host exception 12'
+set firewall ipv4 forward filter rule 37 protocol udp
+set firewall ipv4 forward filter rule 37 source address 192.168.1.72
+set firewall ipv4 forward filter rule 37 destination address 198.18.12.0/24
+set firewall ipv4 forward filter rule 37 destination port 7012
+set firewall ipv4 forward filter rule 38 action drop
+set firewall ipv4 forward filter rule 38 inbound-interface name eth0
+set firewall ipv4 forward filter rule 38 description 'host exception 13'
+set firewall ipv4 forward filter rule 38 protocol tcp
+set firewall ipv4 forward filter rule 38 source address 192.168.1.73
+set firewall ipv4 forward filter rule 38 destination address 198.18.13.0/24
+set firewall ipv4 forward filter rule 38 destination port 7013
+set firewall ipv4 forward filter rule 39 action accept
+set firewall ipv4 forward filter rule 39 inbound-interface name eth0
+set firewall ipv4 forward filter rule 39 description 'host exception 14'
+set firewall ipv4 forward filter rule 39 protocol tcp
+set firewall ipv4 forward filter rule 39 source address 192.168.1.74
+set firewall ipv4 forward filter rule 39 destination address 198.18.14.0/24
+set firewall ipv4 forward filter rule 39 destination port 7014
+set firewall ipv4 forward filter rule 40 action drop
+set firewall ipv4 forward filter rule 40 inbound-interface name eth0
+set firewall ipv4 forward filter rule 40 description 'host exception 15'
+set firewall ipv4 forward filter rule 40 protocol udp
+set firewall ipv4 forward filter rule 40 source address 192.168.1.75
+set firewall ipv4 forward filter rule 40 destination address 198.18.15.0/24
+set firewall ipv4 forward filter rule 40 destination port 7015
+set firewall ipv4 forward filter rule 41 action accept
+set firewall ipv4 forward filter rule 41 inbound-interface name eth0
+set firewall ipv4 forward filter rule 41 description 'host exception 16'
+set firewall ipv4 forward filter rule 41 protocol tcp
+set firewall ipv4 forward filter rule 41 source address 192.168.1.76
+set firewall ipv4 forward filter rule 41 destination address 198.18.16.0/24
+set firewall ipv4 forward filter rule 41 destination port 7016
+set firewall ipv4 forward filter rule 42 action drop
+set firewall ipv4 forward filter rule 42 inbound-interface name eth0
+set firewall ipv4 forward filter rule 42 description 'host exception 17'
+set firewall ipv4 forward filter rule 42 protocol tcp
+set firewall ipv4 forward filter rule 42 source address 192.168.1.77
+set firewall ipv4 forward filter rule 42 destination address 198.18.17.0/24
+set firewall ipv4 forward filter rule 42 destination port 7017
+set firewall ipv4 forward filter rule 43 action accept
+set firewall ipv4 forward filter rule 43 inbound-interface name eth0
+set firewall ipv4 forward filter rule 43 description 'host exception 18'
+set firewall ipv4 forward filter rule 43 protocol udp
+set firewall ipv4 forward filter rule 43 source address 192.168.1.78
+set firewall ipv4 forward filter rule 43 destination address 198.18.18.0/24
+set firewall ipv4 forward filter rule 43 destination port 7018
+set firewall ipv4 forward filter rule 44 action drop
+set firewall ipv4 forward filter rule 44 inbound-interface name eth0
+set firewall ipv4 forward filter rule 44 description 'host exception 19'
+set firewall ipv4 forward filter rule 44 protocol tcp
+set firewall ipv4 forward filter rule 44 source address 192.168.1.79
+set firewall ipv4 forward filter rule 44 destination address 198.18.19.0/24
+set firewall ipv4 forward filter rule 44 destination port 7019
+set firewall ipv4 forward filter rule 45 action accept
+set firewall ipv4 forward filter rule 45 inbound-interface name eth0
+set firewall ipv4 forward filter rule 45 description 'host exception 20'
+set firewall ipv4 forward filter rule 45 protocol tcp
+set firewall ipv4 forward filter rule 45 source address 192.168.1.80
+set firewall ipv4 forward filter rule 45 destination address 198.18.20.0/24
+set firewall ipv4 forward filter rule 45 destination port 7020
+set firewall ipv4 forward filter rule 46 action drop
+set firewall ipv4 forward filter rule 46 inbound-interface name eth0
+set firewall ipv4 forward filter rule 46 description 'host exception 21'
+set firewall ipv4 forward filter rule 46 protocol udp
+set firewall ipv4 forward filter rule 46 source address 192.168.1.81
+set firewall ipv4 forward filter rule 46 destination address 198.18.21.0/24
+set firewall ipv4 forward filter rule 46 destination port 7021
+set firewall ipv4 forward filter rule 47 action accept
+set firewall ipv4 forward filter rule 47 inbound-interface name eth0
+set firewall ipv4 forward filter rule 47 description 'host exception 22'
+set firewall ipv4 forward filter rule 47 protocol tcp
+set firewall ipv4 forward filter rule 47 source address 192.168.1.82
+set firewall ipv4 forward filter rule 47 destination address 198.18.22.0/24
+set firewall ipv4 forward filter rule 47 destination port 7022
+set firewall ipv4 forward filter rule 48 action accept
+set firewall ipv4 forward filter rule 48 inbound-interface name eth0
+set firewall ipv4 forward filter rule 48 description 'LAN to any'
+set firewall ipv4 forward filter rule 48 source address 192.168.1.0/24
+set firewall ipv4 forward filter rule 49 action drop
+set firewall ipv4 forward filter rule 49 inbound-interface name eth1
+set firewall ipv4 forward filter rule 49 description 'WAN blocklist'
+set firewall ipv4 forward filter rule 49 source group network-group blocklist_v4
+set firewall ipv4 input filter rule 17 action accept
+set firewall ipv4 input filter rule 17 inbound-interface name eth1
+set firewall ipv4 input filter rule 17 description 'WAN ping'
+set firewall ipv4 input filter rule 17 protocol icmp
+set firewall ipv4 input filter rule 18 action drop
+set firewall ipv4 input filter rule 18 inbound-interface name eth1
+set firewall ipv4 input filter rule 18 description 'WAN SSH'
+set firewall ipv4 input filter rule 18 protocol tcp
+set firewall ipv4 input filter rule 18 destination port 22
+set firewall ipv4 input filter rule 19 action drop
+set firewall ipv4 input filter rule 19 inbound-interface name eth1
+set firewall ipv4 input filter rule 19 description 'WAN GUI'
+set firewall ipv4 input filter rule 19 protocol tcp
+set firewall ipv4 input filter rule 19 destination port 443
+set nat source rule 100 outbound-interface name eth1
+set nat source rule 100 source address 192.168.1.0/24
+set nat source rule 100 translation address masquerade

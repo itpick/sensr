@@ -1,0 +1,40 @@
+{"router": "opn", "part": "table_raw", "ts": 1794824183.5536304, "host_loadavg1": 2.35, "size": "1k", "entries": 1000, "rep": 0, "seconds": 0.0}
+{"router": "opn", "part": "table_raw", "ts": 1794824183.5907817, "host_loadavg1": 2.35, "size": "1k", "entries": 1000, "rep": 1, "seconds": 0.0}
+{"router": "opn", "part": "table_raw", "ts": 1794824183.6261954, "host_loadavg1": 2.35, "size": "1k", "entries": 1000, "rep": 2, "seconds": 0.0}
+{"router": "opn", "part": "table_raw", "ts": 1794824183.6630738, "host_loadavg1": 2.35, "size": "1k", "entries": 1000, "rep": 3, "seconds": 0.0}
+{"router": "opn", "part": "table_raw", "ts": 1794824183.6987643, "host_loadavg1": 2.35, "size": "1k", "entries": 1000, "rep": 4, "seconds": 0.0}
+{"router": "opn", "part": "table_raw", "ts": 1794824188.3280163, "host_loadavg1": 2.32, "size": "10k", "entries": 10000, "rep": 0, "seconds": 0.01}
+{"router": "opn", "part": "table_raw", "ts": 1794824188.37382, "host_loadavg1": 2.32, "size": "10k", "entries": 10000, "rep": 1, "seconds": 0.01}
+{"router": "opn", "part": "table_raw", "ts": 1794824188.4234614, "host_loadavg1": 2.32, "size": "10k", "entries": 10000, "rep": 2, "seconds": 0.01}
+{"router": "opn", "part": "table_raw", "ts": 1794824188.4737146, "host_loadavg1": 2.32, "size": "10k", "entries": 10000, "rep": 3, "seconds": 0.01}
+{"router": "opn", "part": "table_raw", "ts": 1794824188.5151162, "host_loadavg1": 2.32, "size": "10k", "entries": 10000, "rep": 4, "seconds": 0.0}
+{"router": "opn", "part": "table_raw", "ts": 1794824194.060394, "host_loadavg1": 2.46, "size": "100k", "entries": 100000, "rep": 0, "seconds": 0.18}
+{"router": "opn", "part": "table_raw", "ts": 1794824194.198574, "host_loadavg1": 2.46, "size": "100k", "entries": 100000, "rep": 1, "seconds": 0.1}
+{"router": "opn", "part": "table_raw", "ts": 1794824194.3379323, "host_loadavg1": 2.46, "size": "100k", "entries": 100000, "rep": 2, "seconds": 0.1}
+{"router": "opn", "part": "table_raw", "ts": 1794824194.4712315, "host_loadavg1": 2.46, "size": "100k", "entries": 100000, "rep": 3, "seconds": 0.09}
+{"router": "opn", "part": "table_raw", "ts": 1794824194.6123252, "host_loadavg1": 2.46, "size": "100k", "entries": 100000, "rep": 4, "seconds": 0.1}
+{"router": "obsd", "part": "apply", "ts": 1794824409.366816, "host_loadavg1": 2.99, "rep": 0, "total_s": 0.0, "active_after": false, "method": "pfctl -f (whole ruleset)"}
+{"router": "obsd", "part": "apply", "ts": 1794824409.416513, "host_loadavg1": 2.99, "rep": 1, "total_s": 0.0, "active_after": false, "method": "pfctl -f (whole ruleset)"}
+{"router": "obsd", "part": "apply", "ts": 1794824409.4676523, "host_loadavg1": 2.99, "rep": 2, "total_s": 0.0, "active_after": false, "method": "pfctl -f (whole ruleset)"}
+{"router": "obsd", "part": "apply", "ts": 1794824409.5189621, "host_loadavg1": 2.99, "rep": 3, "total_s": 0.0, "active_after": false, "method": "pfctl -f (whole ruleset)"}
+{"router": "obsd", "part": "apply", "ts": 1794824409.5692182, "host_loadavg1": 2.99, "rep": 4, "total_s": 0.0, "active_after": false, "method": "pfctl -f (whole ruleset)"}
+{"router": "obsd", "part": "table_raw", "ts": 1794824409.6346278, "host_loadavg1": 2.99, "size": "1k", "entries": 1000, "rep": 0, "seconds": 0.0}
+{"router": "obsd", "part": "table_raw", "ts": 1794824409.9503734, "host_loadavg1": 2.99, "size": "1k", "entries": 1000, "rep": 1, "seconds": 0.0}
+{"router": "obsd", "part": "table_raw", "ts": 1794824409.987591, "host_loadavg1": 2.99, "size": "1k", "entries": 1000, "rep": 2, "seconds": 0.0}
+{"router": "obsd", "part": "table_raw", "ts": 1794824410.024654, "host_loadavg1": 2.99, "size": "1k", "entries": 1000, "rep": 3, "seconds": 0.0}
+{"router": "obsd", "part": "table_raw", "ts": 1794824410.0621724, "host_loadavg1": 2.99, "size": "1k", "entries": 1000, "rep": 4, "seconds": 0.0}
+{"router": "obsd", "part": "table_raw", "ts": 1794824410.1657987, "host_loadavg1": 3.55, "size": "10k", "entries": 10000, "rep": 0, "seconds": 0.04}
+{"router": "obsd", "part": "table_raw", "ts": 1794824410.2320688, "host_loadavg1": 3.55, "size": "10k", "entries": 10000, "rep": 1, "seconds": 0.03}
+{"router": "obsd", "part": "table_raw", "ts": 1794824410.2985308, "host_loadavg1": 3.55, "size": "10k", "entries": 10000, "rep": 2, "seconds": 0.03}
+{"router": "obsd", "part": "table_raw", "ts": 1794824410.3630087, "host_loadavg1": 3.55, "size": "10k", "entries": 10000, "rep": 3, "seconds": 0.03}
+{"router": "obsd", "part": "table_raw", "ts": 1794824410.4311423, "host_loadavg1": 3.55, "size": "10k", "entries": 10000, "rep": 4, "seconds": 0.03}
+{"router": "obsd", "part": "table_raw", "ts": 1794824410.889867, "host_loadavg1": 3.55, "size": "100k", "entries": 100000, "rep": 0, "seconds": 0.38}
+{"router": "obsd", "part": "table_raw", "ts": 1794824411.2300344, "host_loadavg1": 3.55, "size": "100k", "entries": 100000, "rep": 1, "seconds": 0.3}
+{"router": "obsd", "part": "table_raw", "ts": 1794824411.576064, "host_loadavg1": 3.55, "size": "100k", "entries": 100000, "rep": 2, "seconds": 0.31}
+{"router": "obsd", "part": "table_raw", "ts": 1794824411.9805532, "host_loadavg1": 3.55, "size": "100k", "entries": 100000, "rep": 3, "seconds": 0.37}
+{"router": "obsd", "part": "table_raw", "ts": 1794824412.3602788, "host_loadavg1": 3.55, "size": "100k", "entries": 100000, "rep": 4, "seconds": 0.34}
+{"router": "obsdL", "part": "apply", "ts": 1794824412.7961493, "host_loadavg1": 3.55, "rep": 0, "total_s": 0.05, "active_after": false, "method": "pfctl -f (whole ruleset)"}
+{"router": "obsdL", "part": "apply", "ts": 1794824412.902439, "host_loadavg1": 3.55, "rep": 1, "total_s": 0.05, "active_after": false, "method": "pfctl -f (whole ruleset)"}
+{"router": "obsdL", "part": "apply", "ts": 1794824413.0111248, "host_loadavg1": 3.55, "rep": 2, "total_s": 0.05, "active_after": false, "method": "pfctl -f (whole ruleset)"}
+{"router": "obsdL", "part": "apply", "ts": 1794824413.1202905, "host_loadavg1": 3.55, "rep": 3, "total_s": 0.05, "active_after": false, "method": "pfctl -f (whole ruleset)"}
+{"router": "obsdL", "part": "apply", "ts": 1794824413.2397995, "host_loadavg1": 3.55, "rep": 4, "total_s": 0.06, "active_after": false, "method": "pfctl -f (whole ruleset)"}

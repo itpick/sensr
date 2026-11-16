@@ -1,0 +1,22 @@
+{"stage": "dataplane", "kind": "opn", "label": "as-shipped", "queues": 1, "uname": "FreeBSD OPNsense.internal 15.1-RELEASE-p1 FreeBSD 15.1-RELEASE-p1 stable/26.7-n283674-12334a596709 SMP amd64", "ts": 1794808641.9609103}
+{"stage": "dataplane", "kind": "opn", "label": "offload-on", "queues": 1, "uname": "FreeBSD OPNsense.internal 15.1-RELEASE-p1 FreeBSD 15.1-RELEASE-p1 stable/26.7-n283674-12334a596709 SMP amd64", "ts": 1794809327.5937414}
+{"stage": "dataplane", "kind": "opnL", "label": "large", "queues": 1, "uname": "FreeBSD OPNsense.internal 15.1-RELEASE-p1 FreeBSD 15.1-RELEASE-p1 stable/26.7-n283674-12334a596709 SMP amd64", "ts": 1794809663.1360927}
+{"stage": "dataplane", "kind": "obsd", "label": "as-shipped", "queues": 1, "uname": "OpenBSD obsd.lab 8.0 GENERIC.MP#84 amd64", "ts": 1794810353.3496282}
+{"stage": "dataplane", "kind": "obsd", "label": "large", "queues": 1, "uname": "OpenBSD obsd.lab 8.0 GENERIC.MP#84 amd64", "ts": 1794810697.210721}
+{"stage": "dataplane", "kind": "nixr", "label": "as-shipped", "queues": 1, "uname": "Linux sensrbench-nixr 6.18.55 #1-NixOS SMP PREEMPT_DYNAMIC Sat Oct  3 10:39:03 UTC 2026 x86_64 GNU/Linux", "ts": 1794811376.6674726}
+{"stage": "dataplane", "kind": "nixr", "label": "flowtable", "queues": 1, "uname": "Linux sensrbench-nixr 6.18.55 #1-NixOS SMP PREEMPT_DYNAMIC Sat Oct  3 10:39:03 UTC 2026 x86_64 GNU/Linux", "ts": 1794812060.3029323}
+{"stage": "dataplane", "kind": "nixr", "label": "no-gro-gso-tso", "queues": 1, "uname": "Linux sensrbench-nixr 6.18.55 #1-NixOS SMP PREEMPT_DYNAMIC Sat Oct  3 10:39:03 UTC 2026 x86_64 GNU/Linux", "ts": 1794812744.0477211}
+{"stage": "dataplane", "kind": "nixr", "label": "large", "queues": 1, "uname": "Linux sensrbench-nixr 6.18.55 #1-NixOS SMP PREEMPT_DYNAMIC Sat Oct  3 10:39:03 UTC 2026 x86_64 GNU/Linux", "ts": 1794813077.7178316}
+{"stage": "dataplane", "kind": "nixr", "label": "large-flowtable", "queues": 1, "uname": "Linux sensrbench-nixr 6.18.55 #1-NixOS SMP PREEMPT_DYNAMIC Sat Oct  3 10:39:03 UTC 2026 x86_64 GNU/Linux", "ts": 1794813411.2175598}
+{"stage": "dataplane", "kind": "vyos", "label": "as-shipped", "queues": 1, "uname": "Linux sensrbench-vyos 6.18.62-1-vyos #1 SMP Thu Nov 12 07:39:10 UTC 2026 x86_64 GNU/Linux", "ts": 1794814112.6290853}
+{"stage": "dataplane", "kind": "vyosL", "label": "large", "queues": 1, "uname": "Linux sensrbench-vyos 6.18.62-1-vyos #1 SMP Thu Nov 12 07:39:10 UTC 2026 x86_64 GNU/Linux", "ts": 1794814466.3728795}
+{"stage": "dataplane", "kind": "opn", "label": "as-shipped", "queues": 2, "uname": "FreeBSD OPNsense.internal 15.1-RELEASE-p1 FreeBSD 15.1-RELEASE-p1 stable/26.7-n283674-12334a596709 SMP amd64", "ts": 1794815147.7110114}
+{"stage": "dataplane", "kind": "obsd", "label": "as-shipped", "queues": 2, "uname": "OpenBSD obsd.lab 8.0 GENERIC.MP#84 amd64", "ts": 1794815665.37287}
+{"stage": "dataplane", "kind": "nixr", "label": "as-shipped", "queues": 2, "uname": "Linux sensrbench-nixr 6.18.55 #1-NixOS SMP PREEMPT_DYNAMIC Sat Oct  3 10:39:03 UTC 2026 x86_64 GNU/Linux", "ts": 1794816344.8290033}
+{"stage": "dataplane", "kind": "nixr", "label": "flowtable", "queues": 2, "uname": "Linux sensrbench-nixr 6.18.55 #1-NixOS SMP PREEMPT_DYNAMIC Sat Oct  3 10:39:03 UTC 2026 x86_64 GNU/Linux", "ts": 1794817028.917573}
+{"stage": "dataplane", "kind": "vyos", "label": "as-shipped", "queues": 2, "uname": "Linux sensrbench-vyos 6.18.62-1-vyos #1 SMP Thu Nov 12 07:39:10 UTC 2026 x86_64 GNU/Linux", "ts": 1794817731.4509766}
+{"stage": "dataplane", "kind": "opn", "label": "offload-boot", "queues": 1, "uname": "FreeBSD OPNsense.internal 15.1-RELEASE-p1 FreeBSD 15.1-RELEASE-p1 stable/26.7-n283674-12334a596709 SMP amd64", "ts": 1794818518.7609258}
+{"stage": "dataplane", "kind": "opn", "label": "offload-boot", "queues": 2, "uname": "FreeBSD OPNsense.internal 15.1-RELEASE-p1 FreeBSD 15.1-RELEASE-p1 stable/26.7-n283674-12334a596709 SMP amd64", "ts": 1794819287.0283606}
+{"stage": "dataplane", "kind": "obsd", "label": "as-shipped", "queues": 2, "uname": "OpenBSD obsd.lab 8.0 GENERIC.MP#84 amd64", "ts": 1794827878.1583135}
+{"stage": "dataplane", "kind": "opn", "label": "offload-boot-nolro", "queues": 1, "uname": "FreeBSD OPNsense.internal 15.1-RELEASE-p1 FreeBSD 15.1-RELEASE-p1 stable/26.7-n283674-12334a596709 SMP amd64", "ts": 1794828647.7495573}
+{"stage": "dataplane", "kind": "vyosL", "label": "large", "queues": 1, "uname": "Linux sensrbench-vyos 6.18.62-1-vyos #1 SMP Thu Nov 12 07:39:10 UTC 2026 x86_64 GNU/Linux", "ts": 1794834207.030051}
