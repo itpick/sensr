@@ -20,9 +20,12 @@ sensr-ipc = { path = "crates/sensr-ipc" }
 
 anyhow = "1.0.104"
 axum = "0.8.9"
+base64 = "0.23.1"
 ciborium = "0.2.2"
 clap = { version = "4.6.7", features = ["derive"] }
+indexmap = { version = "2.14.2", features = ["serde"] }
 insta = "1.49.0"
+ipnet = { version = "2.12.2", features = ["serde"] }
 leptos = "0.8.23"
 nftables = "0.6.3"
 pretty_assertions = "1.4.1"
@@ -37,6 +40,7 @@ thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.29.2", features = ["v4", "serde"] }
 
 [workspace.lints.cargo]
 # The table above pins the whole planned stack at its latest versions before the
