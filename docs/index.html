@@ -100,7 +100,8 @@
       <ul>
         <li>Onboard RP1 Ethernet with the mainline driver, no out-of-tree modules</li>
         <li>RTL8156 2.5&nbsp;GbE and RTL8157 5&nbsp;GbE USB NICs</li>
-        <li>SD, USB and NVMe boot</li>
+        <li>SD, USB and NVMe boot, straight from the Pi firmware with the mainline kernel (no UEFI), D0 boards (2&nbsp;GB/16&nbsp;GB) included</li>
+        <li>Try it from Raspberry Pi OS first: a one-time trial boot that falls back to your OS by itself</li>
       </ul>
       <a class="btn" aria-disabled="true" href="https://github.com/itpick/sensr/releases/latest/download/sensr-pi5.img.zst">Download for Pi 5</a>
       <div class="small">sha256 published alongside</div>
@@ -143,10 +144,10 @@
     <summary>x86 VM (relative only, not the Pi)</summary>
     <div class="scroll"><table class="startup">
       <tr><th>x86 VM, from VM start</th><th>OPNsense</th><th>VyOS</th><th>sensr</th></tr>
-      <tr><td>Traffic flowing</td><td class="num">14.5 s<br><span class="fine">17.7 s with 1k rules</span></td><td class="num">30.7 s<br><span class="fine">120.6 s with 1k rules</span></td><td class="num">10.7 s<br><span class="fine">config imported at first boot; 9.6 s with the factory config</span></td></tr>
-      <tr><td>UI/API ready</td><td class="num">15.4 s<br><span class="fine">19.4 s with 1k rules</span></td><td class="num">39.4 s<br><span class="fine">&gt;10 min with 1k rules</span></td><td class="num">18.3 s<br><span class="fine">SSH/API; being optimised</span></td></tr>
+      <tr><td>Traffic flowing</td><td class="num">14.5 s<br><span class="fine">17.7 s with 1k rules</span></td><td class="num">30.7 s<br><span class="fine">120.6 s with 1k rules</span></td><td class="num">8.6 s<br><span class="fine">home-router.xml imported at first boot; 8.6 s with the factory config</span></td></tr>
+      <tr><td>UI/API ready</td><td class="num">15.4 s<br><span class="fine">19.4 s with 1k rules</span></td><td class="num">39.4 s<br><span class="fine">&gt;10 min with 1k rules</span></td><td class="num">8.6 s<br><span class="fine">sensr-api; SSH 9.2 s</span></td></tr>
     </table></div>
-    <p class="fine">OPNsense and VyOS from the <a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md">sensr benchmark</a>: median of 5 boots from <code>virsh start</code>, virtio, boot loader delays as shipped; "1k rules" is 1,000 rules plus a 10k-entry table. sensr from its own boot benchmark (<a href="https://github.com/itpick/sensr/pull/53">nix/bench/boot-times.py</a>) with the same definitions: x86 qcow2 under KVM, median of 5 (5 of 5 succeeded), from QEMU start including OVMF and systemd-boot's 1&nbsp;s timeout; traffic flowing is a LAN client pinging the WAN host through NAT every 50&nbsp;ms. A fix to sensr's SSH/API start-up order is in progress. These show relative start-up cost on fast hardware, not Pi 5 times.</p>
+    <p class="fine">OPNsense and VyOS from the <a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md">sensr benchmark</a>: median of 5 boots from <code>virsh start</code>, virtio, boot loader delays as shipped; "1k rules" is 1,000 rules plus a 10k-entry table. sensr from its own boot benchmark (<a href="https://github.com/itpick/sensr/pull/53">nix/bench/boot-times.py</a>) with the same definitions: x86 qcow2 under KVM, median of 5 (5 of 5 succeeded), from QEMU start including OVMF (systemd-boot shows no menu unless a key is held); traffic flowing is a LAN client pinging the WAN host through NAT every 50&nbsp;ms. The host was shared with other VMs (load 6&ndash;9) during these runs. These show relative start-up cost on fast hardware, not Pi 5 times.</p>
   </details>
 
   <h3 id="image-size">Image size</h3>
@@ -154,9 +155,9 @@
     <tr><th></th><th>Pi 5 download (.img.xz)</th><th>Pi 4 download</th><th>Installed on disk<span class="fine">*</span></th></tr>
     <tr><td>opnsense-pi <span class="fine">(release <span data-release="opnsense-pi">26.7-4</span>)</span></td><td class="num"><span data-asset="opnsense-pi/opnsense-pi5.img.xz">1.32 GB</span></td><td class="num"><span data-asset="opnsense-pi/opnsense-pi4.img.xz">1.32 GB</span></td><td class="num">~2.1 GiB <span class="fine">(2,104 MiB)</span></td></tr>
     <tr><td>vyos-pi <span class="fine">(release <span data-release="vyos-pi">2026.11.16-2</span>)</span></td><td class="num"><span data-asset="vyos-pi/vyos-pi-pi5.img.xz">599 MB</span></td><td class="num"><span data-asset="vyos-pi/vyos-pi-pi4.img.xz">562 MB</span></td><td class="num">~0.7 GiB <span class="fine">(732 MiB squashfs)</span></td></tr>
-    <tr><td>sensr <span class="fine">(estimate; not built yet)</span></td><td class="num">~200&ndash;300 MB <span class="fine">(estimate)</span></td><td class="num">&mdash;</td><td class="num">~400&ndash;500 MiB <span class="fine">(estimate)</span></td></tr>
+    <tr><td>sensr <span class="fine">(development build, not released)</span></td><td class="num">~373 MB <span class="fine">(.img.zst from CI; 2.1 GB raw)</span></td><td class="num">&mdash;</td><td class="num">~0.85 GiB <span class="fine">(870 MiB x86 closure)</span></td></tr>
   </table></div>
-  <p class="fine">Downloads: the latest GitHub releases (this page updates the sizes from GitHub when it loads). *Installed: measured on x86 VMs in the <a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md#22-b-os-base-footprint-and-boot">sensr benchmark</a> (OPNsense 26.7, VyOS rolling), not on the Pi images. The sensr row is an estimate for a trimmed NixOS closure plus the Pi firmware; the benchmark's untrimmed NixOS image was 487&nbsp;MB compressed with a 915&nbsp;MiB closure, which includes Python, Perl and Kea that sensr will not need.</p>
+  <p class="fine">Downloads: the latest GitHub releases (this page updates the sizes from GitHub when it loads). *Installed: measured on x86 VMs in the <a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md#22-b-os-base-footprint-and-boot">sensr benchmark</a> (OPNsense 26.7, VyOS rolling), not on the Pi images. The sensr row is measured on its development builds: the Pi 5 image as CI builds it (zstd), and the closure of the x86 qcow2 image (no Perl, no nixpkgs source, Kea without its Python shell).</p>
 
   <h3 id="throughput">Throughput ceiling on the Pi 5</h3>
   <p class="fine">Theoretical; not yet measured with 5&nbsp;GbE dongles.</p>
@@ -165,7 +166,7 @@
     <tr><td>Onboard Ethernet</td><td>1&nbsp;Gbit/s</td></tr>
     <tr><td>Each blue USB 3.0 port</td><td>5&nbsp;Gbit/s signalling (USB 3.x Gen 1, 8b/10b coding), so at most 4&nbsp;Gbit/s of data. A 5&nbsp;GbE RTL8157 dongle can link at 5&nbsp;Gbit/s, but on a PC's Gen 1 port it moved <a href="https://lkml.iu.edu/hypermail/linux/kernel/2604.0/06464.html">3.47&nbsp;Gbit/s</a> in iperf3 (4.70 on Gen 2). Expect about 3.5&nbsp;Gbit/s per port. Each port has its own USB controller in the RP1 chip.</td></tr>
     <tr><td>RP1 &harr; SoC</td><td><a href="https://www.raspberrypi.com/news/rp1-the-silicon-controlling-raspberry-pi-5-i-o-designed-here-at-raspberry-pi/">PCIe 2.0 x4</a>, about 16&nbsp;Gbit/s each way, shared by both USB ports and the onboard Ethernet. It is not the limit with two dongles.</td></tr>
-    <tr><td>Driver</td><td>sensr uses Linux, as vyos-pi does. Mainline <code>r8152</code> drives the RTL8157 from Linux 7.1. The Raspberry Pi vendor kernel sensr plans to use (<code>rpi-6.18.y</code>) and mainline 6.18 do not have it, so 5&nbsp;GbE dongles need a 7.1+ kernel or a backport.</td></tr>
+    <tr><td>Driver</td><td>sensr uses Linux, as vyos-pi does. Mainline <code>r8152</code> drives the RTL8157 from Linux 7.1. sensr's Pi 5 image runs nixpkgs' mainline <code>linux_latest</code> (7.3 today), which has it, so no vendor kernel or backport is needed.</td></tr>
     <tr><td>Through the router</td><td>The lowest of the WAN port, the LAN port and what the CPU can forward. The firewall rules, NAT and Suricata set the real figure. <a href="https://github.com/itpick/vyos-pi/blob/main/docs/comparison/pi5-iperf-vyos-vs-opnsense.md">Measured so far</a>.</td></tr>
   </table></div>
 
@@ -178,24 +179,25 @@
   <p>Or, in Raspberry Pi Imager, choose <strong>Use custom</strong> and select the downloaded image.</p>
 
   <h3>First-boot settings</h3>
-  <p>The FAT boot partition has a <code>sensr/</code> folder, which works like the <code>opnsense-pi/</code> folder in opnsense-pi:</p>
+  <p>The FAT boot partition has a <code>sensr/</code> folder, which works like the <code>opnsense-pi/</code> folder in opnsense-pi. Put files there on any computer before the first boot. The last column says what the current development image already does with each one.</p>
   <div class="scroll">
   <table>
-    <tr><th>File</th><th>Effect</th></tr>
-    <tr><td><code>config.json</code></td><td>A full sensr config (a backup export), applied once and then renamed to <code>config.json.applied</code>.</td></tr>
-    <tr><td><code>seed.toml</code></td><td>A short hand-written seed: hostname, admin password hash or SSH keys, which NIC is LAN and WAN (by MAC), WAN type. Merged over the defaults, then renamed <code>.applied</code>.</td></tr>
-    <tr><td><code>config.xml</code></td><td>An OPNsense backup, converted to sensr config on first boot. <code>sensr/import-report.txt</code> lists anything it couldn't map.</td></tr>
-    <tr><td><code>ifnames</code></td><td><code>&lt;mac&gt; &lt;name&gt;</code> lines that pin NIC names, so USB adapters can't swap LAN and WAN.</td></tr>
-    <tr><td><code>authorized_keys</code></td><td>SSH keys for the admin account.</td></tr>
-    <tr><td><code>reboot-after-minutes</code></td><td>A safety net for remote installs: reboots to the last good generation unless the new config is confirmed in time.</td></tr>
+    <tr><th>File</th><th>Effect</th><th>Today</th></tr>
+    <tr><td><code>config.json</code></td><td>A full sensr config (a backup export), applied once and then renamed to <code>config.json.applied</code>.</td><td>Planned</td></tr>
+    <tr><td><code>seed.toml</code></td><td>A short hand-written seed: hostname, admin password hash or SSH keys, which NIC is LAN and WAN (by MAC), WAN type. Merged over the defaults, then renamed <code>.applied</code>.</td><td>Planned</td></tr>
+    <tr><td><code>config.xml</code></td><td>An OPNsense backup, converted to sensr config on first boot and applied.</td><td>Yes: imported once onto a box with no config yet; the import report is kept on the box (<code>/var/lib/sensr/import-report.txt</code>). The interface names it uses must exist; until <code>ifnames</code> works, rename FreeBSD names such as <code>igc0</code> to the Linux ones first.</td></tr>
+    <tr><td><code>ifnames</code></td><td><code>&lt;mac&gt; &lt;name&gt;</code> lines that pin NIC names, so USB adapters can't swap LAN and WAN.</td><td>Planned</td></tr>
+    <tr><td><code>authorized_keys</code></td><td>SSH keys for the admin account. SSH is key-only and never reachable from the WAN.</td><td>Yes: keys for <code>root</code></td></tr>
+    <tr><td><code>reboot-after-minutes</code></td><td>A number N. A safety net for remote installs: sensr reboots N minutes after every boot until you delete the file; on a Pi 5 trial boot that brings back the system you had. Config changes made with <code>sensr config commit --confirm</code> roll back by themselves unless confirmed.</td><td>Yes</td></tr>
   </table>
   </div>
+  <p>sensr also writes to the folder: <code>README.txt</code> (this list) and, on the Pi, <code>boot-log/</code> with one file per boot stage (early, running, shutdown, and the initrd's journal when it gives up), so a box that never reaches the network still leaves a post-mortem.</p>
 
   <h3>First boot</h3>
   <ol>
     <li>Pi: update the EEPROM bootloader first (Raspberry Pi OS: <code>sudo rpi-eeprom-update -a</code>).</li>
-    <li>Plug LAN into your computer. Without a seed, the first NIC found becomes LAN and the second becomes WAN; the console shows which is which.</li>
-    <li>Open <code>https://192.168.1.1</code> and finish the setup wizard. It makes you set an admin password.</li>
+    <li>Without a seed, the first NIC (<code>eth0</code>) is WAN (DHCP) and the second (<code>eth1</code>) is LAN with 192.168.1.1/24. Plug your computer into LAN.</li>
+    <li>Planned: open <code>https://192.168.1.1</code> and finish the setup wizard, which makes you set an admin password. Today the API answers plain HTTP on port 443 and the wizard does not exist yet.</li>
   </ol>
 
   <h3>Build it yourself</h3>
