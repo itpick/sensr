@@ -1,4 +1,4 @@
-//! Small text-shaped fields: URLs, country codes, hex byte strings.
+//! Small text-shaped fields: URLs, country codes, hex byte strings, PEM blocks.
 
 use std::fmt;
 use std::str::FromStr;
@@ -161,3 +161,40 @@ mod tests {
         }
     }
 }
+
+/// One or more PEM blocks (`-----BEGIN …-----` … `-----END …-----`), e.g. a
+/// certificate, a CSR or a private key. Syntax only: the armour must be
+/// balanced; the payload is not decoded here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Pem(String);
+
+impl Pem {
+    /// The PEM text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for Pem {
+    type Err = FieldError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let err = || FieldError::syntax("This is not a PEM encoded certificate or key.");
+        let t = s.trim();
+        if !t.starts_with("-----BEGIN ") || !t.ends_with("-----") {
+            return Err(err());
+        }
+        let begins = t.matches("-----BEGIN ").count();
+        let ends = t.matches("-----END ").count();
+        if begins == 0 || begins != ends {
+            return Err(err());
+        }
+        Ok(Self(format!("{t}\n")))
+    }
+}
+
+impl fmt::Display for Pem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+string_serde!(Pem);

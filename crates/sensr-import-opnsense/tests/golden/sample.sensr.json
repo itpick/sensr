@@ -201,5 +201,9 @@
   "gateways": {
     "gateways": {},
     "groups": {}
+  },
+  "trust": {
+    "authorities": {},
+    "certificates": {}
   }
 }
