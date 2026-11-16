@@ -229,6 +229,7 @@ pub const ALIAS_TYPES: &[(&str, &str)] = &[
     ("url", "URL (IPs)"),
     ("url_table", "URL Table (IPs)"),
     ("geo_ip", "GeoIP"),
+    ("asn", "BGP ASN"),
     ("network_group", "Network group"),
     ("mac", "MAC address"),
     ("external", "External (advanced)"),

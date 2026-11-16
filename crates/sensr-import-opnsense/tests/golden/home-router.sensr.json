@@ -752,6 +752,10 @@
       "log_default_block": true,
       "log_default_pass": true,
       "flow_offload": false
+    },
+    "feeds": {
+      "geoip_url": "https://geoip.example.net/download/GeoLite2-Country-CSV.zip",
+      "resolve_interval": 300
     }
   },
   "nat": {

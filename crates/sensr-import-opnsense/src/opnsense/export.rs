@@ -565,6 +565,12 @@ fn aliases(doc: &Document) -> Element {
                 families_text(*families),
                 String::new(),
             ),
+            AliasContent::Asn { asns, families } => (
+                "asn",
+                join(asns, "\n"),
+                families_text(*families),
+                String::new(),
+            ),
             AliasContent::NetworkGroup { members } => (
                 "networkgroup",
                 join(members, "\n"),
@@ -588,6 +594,11 @@ fn aliases(doc: &Document) -> Element {
         list.put(ae);
     }
     let mut e = Element::new("Alias");
+    if let Some(url) = &doc.firewall.feeds.geoip_url {
+        let mut g = Element::new("geoip");
+        g.put(leaf("url", url));
+        e.put(g);
+    }
     e.put(list);
     e
 }

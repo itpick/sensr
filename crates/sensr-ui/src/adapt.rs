@@ -258,6 +258,17 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
                 "url" => strings(item, "content.urls"),
                 "url_table" => Value::Array(vec![Value::String(s(item, "content.url"))]),
                 "geo_ip" => strings(item, "content.countries"),
+                "asn" => Value::Array(
+                    get_path(item, "content.asns")
+                        .and_then(Value::as_array)
+                        .map(|v| {
+                            v.iter()
+                                .filter_map(Value::as_u64)
+                                .map(|n| Value::String(n.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                ),
                 "network_group" => strings(item, "content.members"),
                 "mac" => strings(item, "content.addresses"),
                 _ => json!([]),
@@ -604,6 +615,7 @@ pub fn from_view(
                 "url" => &["urls"],
                 "url_table" => &["url", "refresh", "families"],
                 "geo_ip" => &["countries", "families"],
+                "asn" => &["asns", "families"],
                 "network_group" => &["members"],
                 "mac" => &["addresses"],
                 _ => &[],
@@ -622,6 +634,23 @@ pub fn from_view(
                     c.insert("url".into(), first);
                 }
                 "geo_ip" => drop(c.insert("countries".into(), lines)),
+                "asn" => {
+                    // "AS13335" or "13335"; anything else is left for the
+                    // schema validation to reject
+                    let asns: Vec<Value> = lines
+                        .as_array()
+                        .map(|l| {
+                            l.iter()
+                                .filter_map(Value::as_str)
+                                .map(|t| {
+                                    let d = t.trim().trim_start_matches(['A', 'S', 'a', 's']);
+                                    d.parse::<u64>().map(Value::from).unwrap_or(json!(t))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    c.insert("asns".into(), Value::Array(asns));
+                }
                 "network_group" => drop(c.insert("members".into(), lines)),
                 "mac" => drop(c.insert("addresses".into(), lines)),
                 _ => {}
@@ -1405,6 +1434,18 @@ mod tests {
             item.get("description").is_none(),
             "empty optional fields are omitted"
         );
+    }
+
+    #[test]
+    fn asn_alias_round_trips_as_numbers() {
+        let view = json!({"enabled": true, "name": "STARLINK", "type": "asn", "content": ["AS14593", "64500"], "description": ""});
+        let item = from_view(GridId::Aliases, &json!({}), "", None, &view);
+        assert_eq!(
+            item["content"],
+            json!({"type": "asn", "asns": [14593, 64500]})
+        );
+        let back = to_view(GridId::Aliases, &json!({}), &item);
+        assert_eq!(back["content"], json!(["14593", "64500"]));
     }
 
     #[test]

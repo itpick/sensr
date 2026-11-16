@@ -75,6 +75,10 @@ impl From<&fw::Alias> for AliasDef {
                 countries: countries.iter().map(|c| c.as_str().to_owned()).collect(),
                 families: families(f),
             },
+            AliasContent::Asn { asns, families: f } => AliasKind::Asn {
+                asns: asns.clone(),
+                families: families(f),
+            },
             AliasContent::NetworkGroup { members } => {
                 AliasKind::NetworkGroup(members.iter().map(|m| m.as_str().to_owned()).collect())
             }

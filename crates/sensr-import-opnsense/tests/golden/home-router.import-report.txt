@@ -1,6 +1,10 @@
 # sensr import report
 
+<<<<<<< HEAD
 ## mapped (37)
+=======
+## mapped (36)
+>>>>>>> dbb4b2b (aliases: URL tables, GeoIP, ASN, host and MAC feeds refreshed with last-good retention)
 /opnsense/system  <- system
 /opnsense/vlans  <- interfaces
 /opnsense/interfaces  <- interfaces
@@ -30,7 +34,11 @@
 /opnsense/nat/outbound  <- nat
 /opnsense/nat/rule[@uuid='fc2c1c65-ad69-489b-967c-8ff95e8f2f80']  <- nat
 /opnsense/OPNsense/Firewall/Filter/snatrules/rule[@uuid='7d2b8cc7-2217-4d32-b029-3ba292c7751e']  <- nat
+<<<<<<< HEAD
 /opnsense/OPNsense/Kea/dhcp4  <- kea
+=======
+/opnsense/OPNsense/Kea/dhcp4  <- kea-dhcp4
+>>>>>>> dbb4b2b (aliases: URL tables, GeoIP, ASN, host and MAC feeds refreshed with last-good retention)
 /opnsense/OPNsense/unboundplus  <- unbound
 /opnsense/OPNsense/wireguard  <- wireguard
 /opnsense/ntpd  <- ntpd
@@ -39,7 +47,11 @@
 /opnsense/OPNsense/Gateways  <- gateways
 /opnsense/OPNsense/Gateways/gateway_item[@uuid='9df1d26a-e824-425b-95df-aaf0fe534a17']  <- gateways
 
+<<<<<<< HEAD
 ## unmapped, expected (81)
+=======
+## unmapped, expected (66)
+>>>>>>> dbb4b2b (aliases: URL tables, GeoIP, ASN, host and MAC feeds refreshed with last-good retention)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -58,6 +70,7 @@
 /opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/language  (web GUI language)
 /opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/dashboard  (web GUI dashboard layout)
 /opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/menu_favorites  (web GUI menu favourites)
+<<<<<<< HEAD
 /opnsense/system/nextuid  (OPNsense's next free user id; sensr allocates ids itself)
 /opnsense/system/nextgid  (OPNsense's next free group id; sensr allocates ids itself)
 /opnsense/system/thermal_hardware  (FreeBSD thermal sensor driver; Linux loads its own)
@@ -67,6 +80,9 @@
 /opnsense/system/webgui/ssl-ciphers  (TLS cipher selection; sensr-api uses rustls' safe defaults (TLS 1.2+))
 /opnsense/system/webgui/compression  (HTTP compression level; sensr-api compresses with its own defaults)
 /opnsense/system/webgui/althostnames  (alternate host names for the HTTP referer check, which sensr-api does not do)
+=======
+/opnsense/system/webgui  (web GUI listener settings are not modelled yet)
+>>>>>>> dbb4b2b (aliases: URL tables, GeoIP, ASN, host and MAC feeds refreshed with last-good retention)
 /opnsense/system/usevirtualterminal  (FreeBSD console setting)
 /opnsense/system/disableconsolemenu  (the sensr console menu has its own setting)
 /opnsense/system/powerd_ac_mode  (FreeBSD powerd; CPU frequency scaling is a NixOS concern)
@@ -90,7 +106,6 @@
 /opnsense/filter/rule[@uuid='3f71ffc8-0a4b-4596-b1ff-22382acc4598']/created  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/rrd  (RRD graphs are replaced by sensr-monitor)
 /opnsense/revision  (OPNsense revision metadata; sensr keeps its own revision history)
-/opnsense/OPNsense/Firewall/Alias/geoip  (GeoIP database source is not modelled yet)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='2064ba71-29e9-4ca4-a655-3069cd2fb19e']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='8c3dc3ee-b23e-4170-af5a-5f23b2321d58']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='1aac7ca4-2950-47cf-af32-f24f076f55a2']/audit  (OPNsense change metadata; sensr keeps its own audit log)
@@ -109,6 +124,9 @@
 /opnsense/OPNsense/wireguard/server/servers/server[@uuid='b0f47197-dacd-43c1-ad57-5dc0649126d3']/allowed_ips  (client-export defaults are not modelled yet)
 /opnsense/OPNsense/Kea/dhcp4/lexpire  (Kea lease expiry tuning is not modelled yet)
 /opnsense/OPNsense/Kea/dhcp4/ha  (Kea high availability is not modelled yet)
+/opnsense/OPNsense/unboundplus/advanced  (Unbound tuning options are not modelled yet)
+/opnsense/OPNsense/unboundplus/acls  (Unbound access lists are not modelled yet)
+/opnsense/OPNsense/unboundplus/dnsbl  (DNS blocklists are not modelled yet)
 /opnsense/OPNsense/Syslog  (remote syslog is not modelled yet)
 /opnsense/OPNsense/trust  (trust store settings are not modelled yet)
 /opnsense/OPNsense/IPsec  (IPsec is disabled (sensr has no IPsec yet))
