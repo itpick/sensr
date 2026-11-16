@@ -1,0 +1,5 @@
+---
+source: crates/sensr-apply/src/templates.rs
+expression: r.contents
+---
+{"enabled": true, "greeting": "hello", "hosts": [{"address": "192.168.1.10", "name": "nas"}, {"address": "192.168.1.20", "name": "printer"}], "items": [{"name": "alpha", "value": 1}, {"name": "beta", "value": 2}]}

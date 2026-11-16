@@ -1,0 +1,15 @@
+{
+  "system": { "hostname": "sensr", "domain": "home.arpa" },
+  "sample": {
+    "enabled": true,
+    "greeting": "hello",
+    "items": [
+      { "name": "alpha", "value": 1 },
+      { "name": "beta", "value": 2 }
+    ],
+    "hosts": [
+      { "name": "nas", "address": "192.168.1.10" },
+      { "name": "printer", "address": "192.168.1.20" }
+    ]
+  }
+}

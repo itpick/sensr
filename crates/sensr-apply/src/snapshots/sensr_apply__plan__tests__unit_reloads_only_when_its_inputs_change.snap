@@ -1,0 +1,9 @@
+---
+source: crates/sensr-apply/src/plan.rs
+expression: d.dry_run(&old)
+---
+4 change(s):
+  [Sysctl] net.ipv4.ip_forward = 0 (was 1)
+  [Files] update /run/sensr/unbound/unbound.conf (23 bytes)
+  [Services] reload unbound.service
+  [Hooks] run config hooks

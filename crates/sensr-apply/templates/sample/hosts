@@ -1,0 +1,4 @@
+127.0.0.1	localhost
+{% for h in sample.hosts %}
+{{ h.address }}	{{ h.name }}.{{ system.domain }} {{ h.name }}
+{% endfor %}

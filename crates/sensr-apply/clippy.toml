@@ -1,0 +1,6 @@
+# T-0372: processes are spawned only through `cmd::SystemRunner`, never with a
+# shell. Scoped to this crate for now; the workspace-wide gate is
+# `cargo xtask lint-exec`.
+disallowed-methods = [
+  { path = "std::process::Command::new", reason = "use sensr_apply::cmd::Cmd + Runner (no shell strings, T-0372)" },
+]

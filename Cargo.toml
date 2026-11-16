@@ -20,6 +20,7 @@ sensr-ipc = { path = "crates/sensr-ipc" }
 sensr-auth = { path = "crates/sensr-auth" }
 sensr-agent = { path = "crates/sensr-agent" }
 sensr-import-opnsense = { path = "crates/sensr-import-opnsense" }
+sensr-apply = { path = "crates/sensr-apply" }
 
 anyhow = "1.0.104"
 argon2 = "0.6.0"
@@ -36,6 +37,7 @@ inventory = "0.3.25"
 ipnet = { version = "2.12.2", features = ["serde"] }
 leptos = "0.8.23"
 md-5 = "0.11.0"
+minijinja = "3.1.0"
 nftables = "0.6.3"
 pretty_assertions = "1.4.1"
 proptest = "1.12.0"
