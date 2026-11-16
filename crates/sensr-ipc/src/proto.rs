@@ -206,6 +206,23 @@ pub enum Op {
     /// The web GUI listener and its TLS material (trusted peers only: the
     /// reply carries a private key).
     WebListener,
+    /// Run-time state of a subsystem (never part of the configuration):
+    /// answered with [`Response::Value`].
+    Runtime {
+        /// Which subsystem.
+        section: RuntimeSection,
+    },
+}
+
+/// Subsystems with run-time state the UI shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeSection {
+    /// Gateway monitor: status, latency, loss, active group members.
+    Gateways,
+    /// Alias feeds: entries, last update, errors.
+    Aliases,
+    /// IPv6 prefix delegation: delegated prefix, lifetimes, per-LAN prefixes.
+    Ipv6,
 }
 
 impl Op {

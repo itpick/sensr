@@ -100,6 +100,9 @@ fn system(doc: &Document) -> Element {
     if s.ipv6_allow {
         e.put(leaf("ipv6allow", "1"));
     }
+    if doc.gateways.switch_default {
+        e.put(leaf("gw_switch_default", "1"));
+    }
     for (id, g) in s.groups.iter() {
         let members: Vec<String> = s
             .users
@@ -1070,6 +1073,22 @@ fn gateways(doc: &Document) -> Element {
             .put_opt("monitor", g.monitor_address)
             .put(leaf("priority", g.priority))
             .put(leaf("weight", g.weight));
+        if g.force_down {
+            ge.put(leaf("force_down", "1"));
+        }
+        let t = &g.thresholds;
+        for (k, v) in [
+            ("latencylow", t.latency_low),
+            ("latencyhigh", t.latency_high),
+            ("losslow", t.loss_low),
+            ("losshigh", t.loss_high),
+            ("interval", t.interval),
+            ("loss_interval", t.loss_interval),
+            ("time_period", t.time_period),
+            ("data_length", t.data_length),
+        ] {
+            ge.put_opt(k, v);
+        }
         e.put(ge);
     }
     e

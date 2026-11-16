@@ -33,6 +33,7 @@ pub struct SliceApplier {
     watching: bool,
     feeds: Option<Arc<Feeds>>,
     refreshing: bool,
+    gateways: Option<Arc<crate::gateways::GatewayService>>,
 }
 
 /// How often link addresses are compared with the ruleset's sets.
@@ -101,6 +102,7 @@ impl SliceApplier {
         };
         let mut a = Self::new(opts, Arc::new(SystemRunner))?;
         a.watch = Some(ADDRESS_POLL);
+        a.gateways = crate::gateways::GatewayService::start(Arc::new(SystemRunner));
         Ok(a)
     }
 
@@ -113,6 +115,7 @@ impl SliceApplier {
             watching: false,
             feeds: None,
             refreshing: false,
+            gateways: None,
         })
     }
 
@@ -342,6 +345,14 @@ impl Applier for SliceApplier {
         Ok(PlanView { nft, net, services })
     }
 
+    fn runtime(&self, section: sensr_ipc::RuntimeSection) -> Option<Value> {
+        match section {
+            sensr_ipc::RuntimeSection::Gateways => self.gateways_view(),
+            sensr_ipc::RuntimeSection::Aliases => serde_json::to_value(self.alias_status()).ok(),
+            _ => None,
+        }
+    }
+
     fn apply(&mut self, _running: Option<&Document>, next: &Document) -> Result<(), ApplyError> {
         let doc = document(next)?.clone();
         let mut engine = self.engine();
@@ -364,10 +375,21 @@ impl Applier for SliceApplier {
         if let Some(f) = &self.feeds {
             f.applied(rendered);
         }
+        if let Some(g) = &self.gateways {
+            g.applied(&doc);
+        }
         *lock(&self.applied) = Some((doc, addrs));
         self.start_watcher();
         self.start_refresher();
         Ok(())
+    }
+}
+
+impl SliceApplier {
+    /// Gateway monitor view (System › Gateways, dashboard widget).
+    pub fn gateways_view(&self) -> Option<Value> {
+        let g = self.gateways.as_ref()?;
+        serde_json::to_value(g.view()).ok()
     }
 }
 

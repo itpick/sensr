@@ -47,6 +47,8 @@ type Route = (&'static str, fn() -> MethodRouter<Arc<AppState>>);
 /// route cannot be added without a privilege that covers it.
 pub const ROUTES: &[Route] = &[
     ("/api/v1/status", || get(native::status)),
+    ("/api/v1/status/{section}", || get(native::runtime)),
+    ("/api/routes/gateway/status", || get(compat::gateway_status)),
     ("/api/v1/config/doc", || get(native::get_doc)),
     ("/api/v1/config/doc/{*path}", || {
         get(native::get_doc)

@@ -63,6 +63,7 @@ impl Mapper<Document> for SystemMapper {
             }
         }
         sys.ipv6_allow = ctx.flag(s, "ipv6allow");
+        out.gateways.switch_default = ctx.flag(s, "gw_switch_default");
         // Per-server gateway binding: "none" (no binding) is all sensr supports yet.
         for n in 1..=8 {
             let name = format!("dns{n}gw");

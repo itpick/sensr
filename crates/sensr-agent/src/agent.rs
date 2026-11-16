@@ -792,6 +792,7 @@ impl<A: Applier> Agent<A> {
                     .map(|l| Response::WebListener(Box::new(l)))
                     .map_err(|e| err(ErrorKind::Internal, e.to_string()))
             }
+            Op::Runtime { section } => Ok(Response::Value(inner.applier.runtime(section))),
         }
     }
 
@@ -959,6 +960,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::Authenticate { .. } => "authenticate",
         Op::Subscribe => "subscribe",
         Op::WebListener => "web_listener",
+        Op::Runtime { .. } => "runtime",
     }
 }
 
