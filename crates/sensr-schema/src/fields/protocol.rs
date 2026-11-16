@@ -94,6 +94,70 @@ impl fmt::Display for Protocol {
 }
 string_serde!(Protocol);
 
+/// IPv6 extension headers are skipped by the packet filter and cannot be
+/// policed, so they are not offered.
+const IPV6_EXTENSION_HEADERS: &[&str] = &[
+    "ipv6-route",
+    "ipv6-frag",
+    "ipv6-opts",
+    "ipv6-nonxt",
+    "mobility-header",
+];
+
+/// Protocol selector options (OPNsense `ProtocolField`): every IP protocol
+/// by name, `any` when the field is required, plus `AddOptions`. Values are
+/// upper-cased unless `ChangeCase` says otherwise; `any` is always
+/// lower-case.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProtocolField {
+    /// `AddOptions`: extra keys and labels (an `any` key only relabels `any`).
+    pub add_options: indexmap::IndexMap<String, String>,
+}
+
+impl ProtocolField {
+    /// True if `name` is an offered protocol name (case-insensitive).
+    pub fn is_offered(&self, name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        PROTOCOLS
+            .iter()
+            .any(|(n, num)| *num > 0 && *n == lower && !IPV6_EXTENSION_HEADERS.contains(n))
+            || self
+                .add_options
+                .keys()
+                .any(|k| !k.eq_ignore_ascii_case("any") && k.eq_ignore_ascii_case(name))
+    }
+}
+
+impl super::field::FieldType for ProtocolField {
+    fn check(&self, value: &str, ctx: &super::field::Ctx<'_>) -> Vec<FieldError> {
+        let ok = if value == "any" {
+            ctx.required
+        } else {
+            self.is_offered(value)
+        };
+        if ok {
+            Vec::new()
+        } else {
+            vec![FieldError::new(
+                crate::ValidatorKind::Callback,
+                ctx.msg("Option [%s] not in list.", value),
+            )]
+        }
+    }
+
+    fn default_change_case(&self) -> Option<super::field::ChangeCase> {
+        Some(super::field::ChangeCase::Upper)
+    }
+
+    fn on_set(&self, value: String) -> String {
+        if value.eq_ignore_ascii_case("any") {
+            value.to_ascii_lowercase()
+        } else {
+            value
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +182,71 @@ mod tests {
         assert!(Protocol::TcpUdp.has_ports());
         assert!(!Protocol::Icmp.has_ports());
         assert!("sctp".parse::<Protocol>().unwrap().has_ports());
+    }
+}
+
+#[cfg(test)]
+mod field_tests {
+    use super::*;
+    use crate::fields::field::{ChangeCase, Field};
+    use crate::testing::{validate, validate_err};
+    use crate::validation::ValidatorKind::*;
+
+    #[test]
+    fn constructs_t0241() {
+        let _ = Field::new(ProtocolField::default());
+    }
+
+    #[test]
+    fn required_empty_t0242() {
+        let mut f = Field::new(ProtocolField::default()).required();
+        f.set_value("");
+        assert_eq!(validate_err(&f), Err(PresenceOf));
+    }
+
+    #[test]
+    fn required_set_t0243() {
+        let mut f = Field::new(ProtocolField::default()).required();
+        f.set_value("TCP");
+        assert!(validate(&f).is_empty());
+    }
+
+    #[test]
+    fn valid_upper_t0244() {
+        let kind = ProtocolField {
+            add_options: [("xxX".to_owned(), "xxX".to_owned())].into_iter().collect(),
+        };
+        let mut f = Field::new(kind).required();
+        for v in ["TCP", "UDP", "any", "XXX"] {
+            f.set_value(v);
+            assert!(validate(&f).is_empty(), "{v}");
+        }
+        f.set_value("tcp");
+        assert_eq!(f.value(), "TCP");
+    }
+
+    #[test]
+    fn valid_lower_t0245() {
+        let mut f = Field::new(ProtocolField::default()).required();
+        f.set_change_case(ChangeCase::Lower);
+        for v in ["TcP", "UDp", "Any"] {
+            f.set_value(v);
+            assert!(validate(&f).is_empty(), "{v}");
+        }
+        assert_eq!(f.value(), "any");
+    }
+
+    #[test]
+    fn invalid_incl_any_when_optional_t0246() {
+        let mut f = Field::new(ProtocolField::default());
+        for v in ["XX", "YY", "any", "ANY", "IPV6-ROUTE", "ipv6-route"] {
+            f.set_value(v);
+            assert!(!validate(&f).is_empty(), "{v}");
+        }
+    }
+
+    #[test]
+    fn not_container_t0247() {
+        assert!(!Field::new(ProtocolField::default()).is_container());
     }
 }

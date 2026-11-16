@@ -87,12 +87,13 @@
     },
     "opt1": {
       "enabled": true,
-      "role": "lan",
+      "role": "wan",
       "description": "WAN_FIBER",
       "device": "igc2",
       "ipv4": {
         "mode": "static",
-        "address": "198.51.100.2/30"
+        "address": "198.51.100.2/30",
+        "gateway": "198.51.100.1"
       },
       "ipv6": {
         "mode": "none"
@@ -168,7 +169,8 @@
         },
         "log": false,
         "state_type": "keep",
-        "description": "Voice VLAN via cable first"
+        "description": "Voice VLAN via cable first",
+        "gateway": "VOICE_PREFER_CABLE"
       },
       "5ea88d07-4999-4bf5-8ac8-567ccb2bb10a": {
         "enabled": true,
@@ -216,7 +218,8 @@
         },
         "log": false,
         "state_type": "keep",
-        "description": "LAN to internet via failover group"
+        "description": "LAN to internet via failover group",
+        "gateway": "WAN_FAILOVER"
       },
       "b7d2074a-8644-4801-9415-009bcd75f9bc": {
         "enabled": true,
@@ -361,8 +364,67 @@
     "peers": {}
   },
   "gateways": {
-    "gateways": {},
-    "groups": {}
+    "gateways": {
+      "9ab67f66-1ace-470b-9bb6-14dc907831f9": {
+        "enabled": true,
+        "name": "WAN_DHCP",
+        "description": "Cable modem (DHCP)",
+        "interface": "wan",
+        "family": "inet",
+        "default_route": false,
+        "far": false,
+        "monitor": true,
+        "monitor_address": "203.0.113.53",
+        "priority": 255,
+        "weight": 1
+      },
+      "8d352ef5-0a0a-45a2-8bba-327804971e60": {
+        "enabled": true,
+        "name": "WAN2_GW",
+        "description": "Fiber static uplink",
+        "interface": "opt1",
+        "family": "inet",
+        "address": "198.51.100.1",
+        "default_route": true,
+        "far": false,
+        "monitor": true,
+        "monitor_address": "192.0.2.53",
+        "priority": 254,
+        "weight": 1
+      }
+    },
+    "groups": {
+      "2b2d395e-cfcf-4324-be48-7f65ebbc5323": {
+        "name": "WAN_FAILOVER",
+        "description": "Fiber primary, cable backup",
+        "members": [
+          {
+            "gateway": "WAN2_GW",
+            "tier": 1
+          },
+          {
+            "gateway": "WAN_DHCP",
+            "tier": 2
+          }
+        ],
+        "trigger": "down_loss_latency"
+      },
+      "60d77f02-8d93-4fec-b523-cf0d0af7f5dc": {
+        "name": "VOICE_PREFER_CABLE",
+        "description": "Cable primary for SIP, fiber backup",
+        "members": [
+          {
+            "gateway": "WAN_DHCP",
+            "tier": 1
+          },
+          {
+            "gateway": "WAN2_GW",
+            "tier": 2
+          }
+        ],
+        "trigger": "down"
+      }
+    }
   },
   "trust": {
     "authorities": {},

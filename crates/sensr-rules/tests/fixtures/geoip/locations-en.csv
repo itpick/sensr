@@ -1,0 +1,4 @@
+geoname_id,locale_code,continent_code,continent_name,country_iso_code,country_name,is_in_european_union
+2750405,en,EU,Europe,NL,Netherlands,1
+2921044,en,EU,Europe,DE,Germany,1
+6255148,en,EU,Europe,,,0

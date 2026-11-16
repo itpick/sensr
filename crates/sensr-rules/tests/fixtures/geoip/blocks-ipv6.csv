@@ -1,0 +1,4 @@
+network,geoname_id,registered_country_geoname_id,represented_country_geoname_id,is_anonymous_proxy,is_satellite_provider
+2001:db8:10::/48,2750405,2750405,,0,0
+2001:db8:11::/48,2750405,2750405,,0,0
+2001:db8:20::/48,2921044,2921044,,0,0

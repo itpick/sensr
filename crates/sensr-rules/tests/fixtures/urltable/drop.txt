@@ -1,0 +1,9 @@
+; Synthetic list in the Spamhaus DROP text format (documentation ranges)
+; Last-Modified: Mon, 16 Nov 2026 00:00:00 GMT
+192.0.2.0/25 ; SBL000001
+192.0.2.128/25 ; SBL000002
+198.51.100.0/24 ; SBL000003
+203.0.113.0/26 ; SBL000004
+// a comment style some lists use
+2001:db8:dead::/48 ; SBL000005
+2001:db8:beef::/48 ; SBL000006

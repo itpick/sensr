@@ -38,6 +38,13 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 ```
 
+`geoip/` and `asn/` are synthetic databases in the MaxMind GeoLite2 CSV and
+OPNsense `asn.csv` formats (documentation/benchmark address ranges, no real
+data), so the resolver tests are hermetic.
+
+`calc_rule_hash.json` labels were recorded by running OPNsense core's own
+`Util::calcRuleHash` under PHP 8.4 on the listed rule arrays.
+
 `*.nft.json` files under `../golden/` are sensr's own outputs (regenerate with
 `SENSR_GOLDEN_UPDATE=1 cargo test -p sensr-rules`); CI checks each one with
 `nft -c -j -f`.

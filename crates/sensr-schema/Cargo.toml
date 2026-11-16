@@ -12,6 +12,7 @@ base64.workspace = true
 indexmap.workspace = true
 inventory.workspace = true
 ipnet.workspace = true
+fancy-regex.workspace = true
 serde.workspace = true
 # preserve_order: dotted-path edits round-trip the document through
 # serde_json::Value, which must keep UUID-keyed list order (ArrayField).

@@ -1,0 +1,95 @@
+---
+source: crates/sensr-apply/src/appliers/kea.rs
+expression: out
+---
+{
+  "Dhcp4": {
+    "valid-lifetime": 4000,
+    "interfaces-config": {
+      "interfaces": [
+        "eth1"
+      ],
+      "dhcp-socket-type": "raw"
+    },
+    "lease-database": {
+      "type": "memfile",
+      "persist": true,
+      "name": "/var/lib/kea/dhcp4.leases",
+      "lfc-interval": 3600
+    },
+    "control-socket": {
+      "socket-type": "unix",
+      "socket-name": "/run/kea/kea4-ctrl-socket"
+    },
+    "loggers": [
+      {
+        "name": "kea-dhcp4",
+        "output-options": [
+          {
+            "output": "stdout"
+          }
+        ],
+        "severity": "INFO"
+      }
+    ],
+    "shared-networks": [
+      {
+        "name": "interface_eth1",
+        "interface": "eth1",
+        "subnet4": [
+          {
+            "id": 1581580291,
+            "subnet": "192.168.1.0/24",
+            "match-client-id": true,
+            "option-data": [
+              {
+                "name": "routers",
+                "data": "192.168.1.1"
+              },
+              {
+                "name": "domain-name-servers",
+                "data": "192.168.1.1"
+              },
+              {
+                "name": "domain-name",
+                "data": "home.arpa"
+              },
+              {
+                "name": "domain-search",
+                "data": "home.arpa"
+              },
+              {
+                "name": "ntp-servers",
+                "data": "192.168.1.1"
+              }
+            ],
+            "pools": [
+              {
+                "pool": "192.168.1.100 - 192.168.1.199"
+              }
+            ],
+            "reservations": [
+              {
+                "hw-address": "52:54:00:aa:bb:01",
+                "ip-address": "192.168.1.10",
+                "hostname": "nas",
+                "user-context": {
+                  "description": "NAS"
+                }
+              },
+              {
+                "client-id": "01:52:54:00:aa:bb:02",
+                "ip-address": "192.168.1.11",
+                "hostname": "printer"
+              }
+            ],
+            "user-context": {
+              "description": "LAN"
+            }
+          }
+        ]
+      }
+    ],
+    "subnet4": []
+  }
+}

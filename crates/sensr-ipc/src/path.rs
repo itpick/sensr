@@ -23,7 +23,21 @@ pub enum Segment {
 /// and either with numeric list indices (`filter.rule.0.descr`). The canonical
 /// [`Display`](fmt::Display) form is dotted, and `/` for the root.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
 pub struct ConfigPath(Vec<Segment>);
+
+impl From<ConfigPath> for String {
+    fn from(p: ConfigPath) -> Self {
+        p.to_string()
+    }
+}
+
+impl TryFrom<String> for ConfigPath {
+    type Error = PathError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
 
 /// Why a path string was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -225,6 +239,16 @@ mod tests {
             "a b".parse::<ConfigPath>(),
             Err(PathError::InvalidChar(' '))
         );
+    }
+
+    #[test]
+    fn serializes_as_dotted_string() {
+        assert_eq!(serde_json::to_string(&p("a.b.0")).unwrap(), r#""a.b.0""#);
+        assert_eq!(
+            serde_json::from_str::<ConfigPath>(r#""/a/b""#).unwrap(),
+            p("a.b")
+        );
+        assert!(serde_json::from_str::<ConfigPath>(r#""a..b""#).is_err());
     }
 
     #[test]

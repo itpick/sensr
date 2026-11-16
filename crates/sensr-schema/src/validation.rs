@@ -29,6 +29,8 @@ pub enum ValidatorKind {
     MinMax,
     /// The value is not an integer.
     Integer,
+    /// The value is not a decimal number.
+    Numericality,
     /// A cross-field or cross-item constraint failed.
     Constraint,
 }

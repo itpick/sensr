@@ -60,6 +60,7 @@ pub fn export_document(doc: &Document) -> XmlDocument {
     root.push_element(interfaces(doc));
     root.push_element(vlans(doc));
     root.push_element(nat(doc));
+    root.push_element(gateway_groups(doc));
     let mut opn = Element::new("OPNsense");
     let mut fw = Element::new("Firewall");
     fw.push_element(aliases(doc));
@@ -70,6 +71,7 @@ pub fn export_document(doc: &Document) -> XmlDocument {
     opn.push_element(kea);
     opn.push_element(unbound(doc));
     opn.push_element(wireguard(doc));
+    opn.push_element(gateways(doc));
     root.push_element(opn);
     XmlDocument { root }
 }
@@ -192,9 +194,13 @@ fn interfaces(doc: &Document) -> Element {
                     ie.put(leaf("dhcprejectfrom", join(reject_from, ",")));
                 }
             }
-            Ipv4Config::Static { address, .. } => {
+            Ipv4Config::Static { address, gateway } => {
                 ie.put(leaf("ipaddr", address.addr()))
-                    .put(leaf("subnet", address.prefix_len()));
+                    .put(leaf("subnet", address.prefix_len()))
+                    .put_opt(
+                        "gateway",
+                        gateway.and_then(|a| gateway_name(doc, id, a.into())),
+                    );
             }
         }
         match &i.ipv6 {
@@ -220,9 +226,13 @@ fn interfaces(doc: &Document) -> Element {
             Ipv6Config::Slaac => {
                 ie.put(leaf("ipaddrv6", "slaac"));
             }
-            Ipv6Config::Static { address, .. } => {
+            Ipv6Config::Static { address, gateway } => {
                 ie.put(leaf("ipaddrv6", address.addr()))
-                    .put(leaf("subnetv6", address.prefix_len()));
+                    .put(leaf("subnetv6", address.prefix_len()))
+                    .put_opt(
+                        "gatewayv6",
+                        gateway.and_then(|a| gateway_name(doc, id, a.into())),
+                    );
             }
             Ipv6Config::Track {
                 interface,
@@ -446,6 +456,7 @@ fn filter(doc: &Document) -> Element {
         mvc_endpoint(&mut re, "source", &r.source);
         mvc_endpoint(&mut re, "destination", &r.destination);
         re.put(leaf("log", flag01(r.log)))
+            .put_opt("gateway", r.gateway.as_ref())
             .put_opt("description", r.description.as_ref());
         rules.put(re);
     }
@@ -707,5 +718,78 @@ fn wireguard(doc: &Document) -> Element {
     server.put(servers);
     let mut e = Element::new("wireguard");
     e.put(general).put(client).put(server);
+    e
+}
+
+/// The gateway on `iface` with `addr`, which an interface's `gateway` names.
+fn gateway_name(
+    doc: &Document,
+    iface: &sensr_schema::fields::InterfaceId,
+    addr: std::net::IpAddr,
+) -> Option<String> {
+    doc.gateways
+        .gateways
+        .values()
+        .find(|g| &g.interface == iface && g.address == Some(addr))
+        .map(|g| g.name.to_string())
+}
+
+fn gateways(doc: &Document) -> Element {
+    let mut e = Element::new("Gateways");
+    for (id, g) in doc.gateways.gateways.iter() {
+        let mut ge = Element::new("gateway_item").attr("uuid", id.to_string());
+        ge.put(leaf("disabled", flag01(!g.enabled)))
+            .put(leaf("name", &g.name))
+            .put_opt("descr", g.description.as_ref())
+            .put(leaf("interface", &g.interface))
+            .put(leaf("ipprotocol", family(g.family)))
+            .put(leaf(
+                "gateway",
+                g.address.map(|a| a.to_string()).unwrap_or_default(),
+            ))
+            .put(leaf("defaultgw", flag01(g.default_route)))
+            .put(leaf("fargw", flag01(g.far)))
+            .put(leaf("monitor_disable", flag01(!g.monitor)))
+            .put_opt("monitor", g.monitor_address)
+            .put(leaf("priority", g.priority))
+            .put(leaf("weight", g.weight));
+        e.put(ge);
+    }
+    e
+}
+
+fn gateway_groups(doc: &Document) -> Element {
+    use sensr_schema::models::gateways::GroupTrigger;
+    let mut e = Element::new("gateways");
+    for (id, g) in doc.gateways.groups.iter() {
+        let mut ge = Element::new("gateway_group").attr("uuid", id.to_string());
+        ge.put(leaf("name", &g.name));
+        for (tag, tier) in [
+            ("item2", 2u8),
+            ("item3", 3),
+            ("item4", 4),
+            ("item5", 5),
+            ("item", 1),
+        ] {
+            let names: Vec<String> = g
+                .members
+                .iter()
+                .filter(|m| m.tier == tier)
+                .map(|m| m.gateway.to_string())
+                .collect();
+            ge.put(leaf(tag, names.join(",")));
+        }
+        ge.put(leaf(
+            "trigger",
+            match g.trigger {
+                GroupTrigger::Down => "down",
+                GroupTrigger::DownLoss => "downloss",
+                GroupTrigger::DownLatency => "downlatency",
+                GroupTrigger::DownLossLatency => "downlosslatency",
+            },
+        ))
+        .put_opt("descr", g.description.as_ref());
+        e.put(ge);
+    }
     e
 }

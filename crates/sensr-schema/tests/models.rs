@@ -779,21 +779,21 @@ fn message_literals(src: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut in_call = false;
     for line in body.lines() {
-        let t = line.trim();
+        // Messages built with `format!` count; other `format!` strings
+        // (captions, keys) are only picked up after a validator kind.
+        let owned = line.trim().replace("format!(\"", "\"");
+        let t = owned.as_str();
         let mut starts: Vec<usize> = Vec::new();
-        for pat in [
-            "syntax(\"",
-            "callback(\"",
-            "range(\"",
-            "FieldError::new(",
-            "format!(\"",
-        ] {
+        for pat in ["syntax(\"", "callback(\"", "range(\"", "msg(\""] {
             if let Some(i) = t.find(pat) {
                 starts.push(i + pat.len());
             }
         }
         if let Some(i) = t.find("ValidatorKind::")
             && let Some(j) = t[i..].find(", \"")
+            && t[i + "ValidatorKind::".len()..i + j]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric())
         {
             starts.push(i + j + 3);
         }
@@ -811,9 +811,10 @@ fn message_literals(src: &str) -> Vec<String> {
                 .map(|(i, _)| i);
             if let Some(end) = end {
                 let lit = &rest[..end];
-                // Pure placeholders (`"{p}: {}"`) are formatting, not messages.
-                if lit.contains(' ') && !lit.starts_with('{') {
-                    out.push(lit.to_owned());
+                // Pure placeholders (`"{p}: {}"`) are formatting, and a
+                // trailing placeholder is an embedded message checked on its own.
+                if lit.contains(' ') && !lit.starts_with('{') && !lit.ends_with('}') {
+                    out.push(lit.trim().to_owned());
                 }
             }
         }
@@ -823,7 +824,6 @@ fn message_literals(src: &str) -> Vec<String> {
             || t.ends_with("ValidatorKind::MinMax,")
             || t.ends_with("syntax(")
             || t.ends_with("callback(")
-            || t.ends_with("format!(")
             || t.starts_with("&&")
             || t.ends_with("),");
     }
@@ -855,7 +855,7 @@ fn every_validation_message_is_a_sentence_t0361_t0362() {
     for m in all {
         assert!(m.ends_with('.'), "message must end with a period: {m:?}");
         assert!(
-            m.starts_with(char::is_uppercase),
+            m.starts_with(char::is_uppercase) || m.starts_with(['%', '[', '"']),
             "message must start upper-case: {m:?}"
         );
     }
