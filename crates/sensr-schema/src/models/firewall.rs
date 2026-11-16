@@ -38,6 +38,51 @@ pub struct Firewall {
     /// Global behaviour.
     #[serde(default)]
     pub settings: FirewallSettings,
+    /// Where GeoIP and ASN aliases get their data, and how often host
+    /// names are re-resolved.
+    #[serde(default, skip_serializing_if = "FeedSettings::is_default")]
+    pub feeds: FeedSettings,
+}
+
+/// Data sources for country and ASN aliases (OPNsense `Alias/geoip/url`,
+/// `aliasesresolveinterval`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FeedSettings {
+    /// GeoIP database: a MaxMind GeoLite2 country CSV zip, an IPinfo
+    /// country CSV (gzip) or a DB-IP country CSV (gzip). `None` uses the
+    /// free DB-IP Lite country database (CC BY 4.0, "IP Geolocation by
+    /// DB-IP").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geoip_url: Option<HttpUrl>,
+    /// ASN database: `network asn` lines or an iptoasn.com TSV (gzip or
+    /// plain). `None` uses iptoasn.com's public-domain ip2asn database.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asn_url: Option<HttpUrl>,
+    /// Seconds between DNS lookups of host names in host aliases.
+    #[serde(default = "default_resolve_interval")]
+    pub resolve_interval: u32,
+}
+
+fn default_resolve_interval() -> u32 {
+    300
+}
+
+impl Default for FeedSettings {
+    fn default() -> Self {
+        Self {
+            geoip_url: None,
+            asn_url: None,
+            resolve_interval: default_resolve_interval(),
+        }
+    }
+}
+
+impl FeedSettings {
+    /// True when nothing differs from the defaults (kept out of documents).
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 impl Firewall {
@@ -178,6 +223,8 @@ pub enum AliasType {
     UrlTable,
     /// Country address blocks.
     GeoIp,
+    /// Networks announced by autonomous systems (BGP ASN).
+    Asn,
     /// A union of other address aliases.
     NetworkGroup,
     /// MAC addresses.
@@ -275,6 +322,14 @@ pub enum AliasContent {
         #[serde(default)]
         families: Families,
     },
+    /// Networks announced by autonomous systems (OPNsense "BGP ASN").
+    Asn {
+        /// AS numbers.
+        asns: Vec<u32>,
+        /// Families to load.
+        #[serde(default)]
+        families: Families,
+    },
     /// A union of other address aliases.
     NetworkGroup {
         /// Member aliases.
@@ -299,6 +354,7 @@ impl AliasContent {
             Self::Url { .. } => AliasType::Url,
             Self::UrlTable { .. } => AliasType::UrlTable,
             Self::GeoIp { .. } => AliasType::GeoIp,
+            Self::Asn { .. } => AliasType::Asn,
             Self::NetworkGroup { .. } => AliasType::NetworkGroup,
             Self::Mac { .. } => AliasType::Mac,
             Self::External => AliasType::External,
@@ -745,7 +801,16 @@ fn validate_alias(ctx: &dyn RefContext, alias: &Alias, at: &FieldPath, out: &mut
                 );
             }
         }
-        AliasContent::GeoIp { families, .. } | AliasContent::UrlTable { families, .. }
+        AliasContent::Asn { asns, .. } if asns.iter().any(|a| *a == 0 || *a > 4_294_967_294) => {
+            out.add(
+                at,
+                ValidatorKind::Callback,
+                "AS numbers range from 1 to 4294967294.",
+            );
+        }
+        AliasContent::GeoIp { families, .. }
+        | AliasContent::UrlTable { families, .. }
+        | AliasContent::Asn { families, .. }
             if !families.ipv4 && !families.ipv6 =>
         {
             out.add(

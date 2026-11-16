@@ -26,7 +26,7 @@
 /opnsense/gateways/gateway_group[@uuid='2b2d395e-cfcf-4324-be48-7f65ebbc5323']  <- gateways
 /opnsense/gateways/gateway_group[@uuid='60d77f02-8d93-4fec-b523-cf0d0af7f5dc']  <- gateways
 
-## unmapped, expected (35)
+## unmapped, expected (36)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -38,8 +38,7 @@
 /opnsense/system/user[@uuid='03c6af4c-3057-47b1-bd5c-98545a86db16']/language  (web GUI language)
 /opnsense/system/user[@uuid='03c6af4c-3057-47b1-bd5c-98545a86db16']/dashboard  (web GUI dashboard layout)
 /opnsense/system/user[@uuid='03c6af4c-3057-47b1-bd5c-98545a86db16']/menu_favorites  (web GUI menu favourites)
-/opnsense/system/webgui/ssl-ciphers  (TLS cipher selection; sensr-api uses rustls' safe defaults (TLS 1.2+))
-/opnsense/system/webgui/compression  (HTTP compression level; sensr-api compresses with its own defaults)
+/opnsense/system/webgui  (web GUI listener settings are not modelled yet)
 /opnsense/system/usevirtualterminal  (FreeBSD console setting)
 /opnsense/system/disableconsolemenu  (the sensr console menu has its own setting)
 /opnsense/system/powerd_ac_mode  (FreeBSD powerd; CPU frequency scaling is a NixOS concern)
@@ -53,13 +52,15 @@
 /opnsense/rrd  (RRD graphs are replaced by sensr-monitor)
 /opnsense/ntpd  (NTP server preferences are not modelled yet (system.time_servers is imported))
 /opnsense/revision  (OPNsense revision metadata; sensr keeps its own revision history)
-/opnsense/OPNsense/Firewall/Alias/geoip  (GeoIP database source is not modelled yet)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='2a511d4c-7829-427a-af2e-305619a096d2']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='5ea88d07-4999-4bf5-8ac8-567ccb2bb10a']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='364f3330-5d7a-494f-a6c9-63c1dbbebcbb']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='b7d2074a-8644-4801-9415-009bcd75f9bc']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Kea/dhcp4/lexpire  (Kea lease expiry tuning is not modelled yet)
 /opnsense/OPNsense/Kea/dhcp4/ha  (Kea high availability is not modelled yet)
+/opnsense/OPNsense/unboundplus/advanced  (Unbound tuning options are not modelled yet)
+/opnsense/OPNsense/unboundplus/acls  (Unbound access lists are not modelled yet)
+/opnsense/OPNsense/unboundplus/dnsbl  (DNS blocklists are not modelled yet)
 /opnsense/OPNsense/Syslog  (remote syslog is not modelled yet)
 /opnsense/OPNsense/trust  (trust store settings are not modelled yet)
 

@@ -154,7 +154,9 @@ async fn serve(args: Args) -> anyhow::Result<()> {
     match args.applier {
         ApplierKind::Preview => run_agent(args, store, PreviewApplier, settings).await,
         ApplierKind::Slice => {
-            let applier = SliceApplier::system().context("starting the apply engine")?;
+            let feeds = args.state_dir.as_ref().map(|d| d.join("state/aliases"));
+            let applier =
+                SliceApplier::system_with_feeds(feeds).context("starting the apply engine")?;
             run_agent(args, store, applier, settings).await
         }
     }

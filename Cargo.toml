@@ -25,6 +25,7 @@ sensr-apply = { path = "crates/sensr-apply" }
 sensr-ui = { path = "crates/sensr-ui" }
 sensr-monitor = { path = "crates/sensr-monitor" }
 sensr-net = { path = "crates/sensr-net" }
+sensr-feeds = { path = "crates/sensr-feeds" }
 
 anyhow = "1.0.104"
 argon2 = "0.6.0"
@@ -37,6 +38,7 @@ ciborium = "0.2.2"
 clap = { version = "4.6.7", features = ["derive"] }
 console_error_panic_hook = "0.1.7"
 fancy-regex = "0.20.2"
+flate2 = "1.1.11"
 futures = "0.3.34"
 getrandom = "0.4.3"
 hyper = "1.12.0"
@@ -83,9 +85,11 @@ tower-http = { version = "0.7.1", features = ["compression-br", "compression-gzi
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 trybuild = "1.0.125"
+ureq = "3.5.2"
 uuid = { version = "1.29.2", features = ["v4", "serde"] }
 wasm-bindgen = "0.2.130"
 web-sys = "0.3.107"
+zip = { version = "9.6.1", default-features = false, features = ["deflate"] }
 
 [workspace.lints.cargo]
 # The table above pins the whole planned stack at its latest versions before the

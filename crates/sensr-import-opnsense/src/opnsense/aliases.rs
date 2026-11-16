@@ -25,6 +25,14 @@ impl Mapper<Document> for AliasMapper {
     }
 
     fn map<'doc>(&self, s: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Document) {
+        if let Some(g) = s.child("geoip") {
+            ctx.consume(g);
+            if let Some(u) = ctx.non_empty(g, "url") {
+                out.firewall.feeds.geoip_url = parse_or_warn::<HttpUrl>(ctx, g, &u, "GeoIP URL");
+            } else {
+                ctx.defaults(g, &[("url", "")]);
+            }
+        }
         let Some(aliases) = ctx.child(s, "aliases") else {
             return;
         };
@@ -44,10 +52,7 @@ impl Mapper<Document> for AliasMapper {
     }
 
     fn expected_unmapped(&self) -> &'static [(&'static str, &'static str)] {
-        &[(
-            "OPNsense/Firewall/Alias/geoip",
-            "GeoIP database source is not modelled yet",
-        )]
+        &[]
     }
 }
 
@@ -131,6 +136,26 @@ fn map_alias<'doc>(
                 .collect(),
             families: families(),
         },
+        "asn" => AliasContent::Asn {
+            asns: items
+                .iter()
+                .filter_map(|n| {
+                    let digits = n.trim_start_matches(['A', 'S', 'a', 's']);
+                    match digits.parse::<u32>() {
+                        Ok(v) if v > 0 => Some(v),
+                        _ => {
+                            ctx.warn(
+                                at,
+                                Severity::Invalid,
+                                format!("AS number {n:?} not imported"),
+                            );
+                            None
+                        }
+                    }
+                })
+                .collect(),
+            families: families(),
+        },
         "networkgroup" => AliasContent::NetworkGroup {
             members: items
                 .iter()
@@ -144,7 +169,7 @@ fn map_alias<'doc>(
                 .collect(),
         },
         "external" => AliasContent::External,
-        // asn, dynipv6host, authgroup, urljson, internal: not modelled; the whole
+        // dynipv6host, authgroup, urljson, internal: not modelled; the whole
         // alias stays unconsumed and is reported.
         _ => return None,
     };
@@ -155,7 +180,7 @@ fn map_alias<'doc>(
     }
     if !matches!(
         content,
-        AliasContent::GeoIp { .. } | AliasContent::UrlTable { .. }
+        AliasContent::GeoIp { .. } | AliasContent::UrlTable { .. } | AliasContent::Asn { .. }
     ) {
         // Only feed aliases use the address-family selector.
         ctx.defaults(a, &[("proto", "")]);
