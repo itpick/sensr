@@ -9,6 +9,7 @@
 //! typed models (sensr-schema) ──┘                               └─ compile ─► render::nft (JSON)
 //! ```
 
+pub mod alias;
 pub mod compile;
 pub mod conf;
 pub mod icmp;
