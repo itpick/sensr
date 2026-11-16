@@ -869,7 +869,21 @@
     }
   },
   "gateways": {
-    "gateways": {},
+    "gateways": {
+      "9df1d26a-e824-425b-95df-aaf0fe534a17": {
+        "enabled": true,
+        "name": "WAN_DHCP",
+        "description": "Interface WAN Gateway",
+        "interface": "wan",
+        "family": "inet",
+        "default_route": true,
+        "far": false,
+        "monitor": true,
+        "monitor_address": "198.51.100.53",
+        "priority": 254,
+        "weight": 1
+      }
+    },
     "groups": {}
   }
 }

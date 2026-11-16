@@ -1,6 +1,6 @@
 # sensr import report
 
-## mapped (29)
+## mapped (31)
 /opnsense/system  <- system
 /opnsense/vlans  <- interfaces
 /opnsense/interfaces  <- interfaces
@@ -30,8 +30,10 @@
 /opnsense/OPNsense/Kea/dhcp4  <- kea-dhcp4
 /opnsense/OPNsense/unboundplus  <- unbound
 /opnsense/OPNsense/wireguard  <- wireguard
+/opnsense/OPNsense/Gateways  <- gateways
+/opnsense/OPNsense/Gateways/gateway_item[@uuid='9df1d26a-e824-425b-95df-aaf0fe534a17']  <- gateways
 
-## unmapped, expected (67)
+## unmapped, expected (66)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -87,7 +89,6 @@
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='ebd5ccfb-e396-4732-bc44-0f87bb45f5f7']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='cf87b7c6-ccf9-4131-ac97-f2497b1370c2']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/snatrules/rule[@uuid='7d2b8cc7-2217-4d32-b029-3ba292c7751e']/audit  (OPNsense change metadata; sensr keeps its own audit log)
-/opnsense/OPNsense/Gateways  (gateways are derived from interface addressing; monitoring is not modelled yet)
 /opnsense/OPNsense/wireguard/server/servers/server[@uuid='b0f47197-dacd-43c1-ad57-5dc0649126d3']/endpoint  (client-export defaults are not modelled yet)
 /opnsense/OPNsense/wireguard/server/servers/server[@uuid='b0f47197-dacd-43c1-ad57-5dc0649126d3']/allowed_ips  (client-export defaults are not modelled yet)
 /opnsense/OPNsense/Kea/dhcp4/lexpire  (Kea lease expiry tuning is not modelled yet)

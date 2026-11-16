@@ -38,7 +38,7 @@ pub trait Mapper<D> {
     }
 
     /// Runs after every mapper has mapped its sections, for cross-section fix-ups.
-    fn finish(&self, _doc: &Document, _ctx: &mut MapContext<'_>, _out: &mut D) {}
+    fn finish<'doc>(&self, _doc: &'doc Document, _ctx: &mut MapContext<'doc>, _out: &mut D) {}
 }
 
 /// Tracks which elements were consumed and collects warnings while mappers run.
