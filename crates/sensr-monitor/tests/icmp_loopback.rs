@@ -30,7 +30,12 @@ fn spec(target: IpAddr) -> ProbeSpec {
 
 /// Opens a prober or explains why the environment cannot run the test.
 fn open_or_skip(target: IpAddr) -> Option<IcmpProber> {
-    match IcmpProber::open(&spec(target)) {
+    open_spec_or_skip(&spec(target))
+}
+
+fn open_spec_or_skip(spec: &ProbeSpec) -> Option<IcmpProber> {
+    let target = spec.target;
+    match IcmpProber::open(spec) {
         Ok(p) => {
             println!("{target}: using a {:?} socket", p.kind());
             Some(p)
@@ -56,8 +61,11 @@ fn skippable(e: &io::Error) -> bool {
 }
 
 async fn echo(target: &str) {
-    let target: IpAddr = target.parse().expect("address");
-    let Some(prober) = open_or_skip(target) else {
+    echo_with(spec(target.parse().expect("address"))).await;
+}
+
+async fn echo_with(spec: ProbeSpec) {
+    let Some(prober) = open_spec_or_skip(&spec) else {
         return;
     };
     for seq in 1..=3u16 {
@@ -78,6 +86,20 @@ async fn echo_ipv4_loopback() {
 #[tokio::test]
 async fn echo_ipv6_loopback() {
     echo("::1").await;
+}
+
+/// SO_BINDTODEVICE plus a source address, as the agent opens WAN probes.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn echo_bound_to_lo() {
+    for (target, source) in [("127.0.0.1", "127.0.0.1"), ("::1", "::1")] {
+        echo_with(ProbeSpec {
+            device: Some("lo".into()),
+            source: Some(source.parse().expect("address")),
+            ..spec(target.parse().expect("address"))
+        })
+        .await;
+    }
 }
 
 #[tokio::test]
