@@ -87,7 +87,18 @@ fn seed_store(store: &Store, seed: Option<&PathBuf>) -> anyhow::Result<()> {
         .with_context(|| format!("reading seed {}", path.display()))?;
     let value: serde_json::Value = serde_json::from_str(&text).context("seed is not JSON")?;
     let document = sensr_agent::agent::decode(&value)
-        .map_err(|e| anyhow::anyhow!("seed {} does not fit the schema: {e}", path.display()))?;
+        .map_err(|e| {
+            let issues: Vec<String> = e
+                .validations
+                .iter()
+                .map(|v| format!("{}: {}", v.path, v.message))
+                .collect();
+            anyhow::anyhow!(
+                "seed {} does not fit the schema: {}",
+                path.display(),
+                issues.join("; ")
+            )
+        })?;
     store.import(
         &document,
         CommitMeta::new(
