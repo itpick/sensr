@@ -311,6 +311,7 @@ fn mvc_rule<'doc>(r: &'doc Element, ctx: &mut MapContext<'doc>, out: &Document) 
         log: ctx.flag(r, "log"),
         state_type: state,
         description: description(ctx, r, descr),
+        gateway: None,
     };
     ctx.defaults(r, MVC_DEFAULTS);
     Some(Staged {
@@ -409,6 +410,7 @@ fn legacy_rule<'doc>(
         log: ctx.flag(r, "log"),
         state_type: state,
         description: description(ctx, r, descr),
+        gateway: None,
     };
     if !floating && rule.interfaces.len() != 1 {
         ctx.warn(

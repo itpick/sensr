@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use super::{check, yes};
 use crate::array::ArrayField;
 use crate::fields::{
-    AddressRange, AliasName, CountryCode, Description, DomainName, HttpUrl, InterfaceId, IpFamily,
-    MacAddr, NetOrAlias, PortSpec, Protocol, string_serde,
+    AddressRange, AliasName, CountryCode, Description, DomainName, GatewayName, HttpUrl,
+    InterfaceId, IpFamily, MacAddr, NetOrAlias, PortSpec, Protocol, string_serde,
 };
 use crate::refs::{RefContext, Validate};
 use crate::validation::{FieldError, FieldPath, Validations, ValidatorKind, messages};
@@ -463,6 +463,10 @@ pub struct FilterRule {
     /// Free text; also shown in the live log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Description>,
+    /// Policy routing: send matching traffic via this gateway or gateway group
+    /// instead of the routing table (pass rules only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<GatewayName>,
 }
 
 fn one() -> u32 {
@@ -486,6 +490,7 @@ impl Default for FilterRule {
             log: false,
             state_type: StateType::Keep,
             description: None,
+            gateway: None,
         }
     }
 }
@@ -555,6 +560,21 @@ impl Validate for Firewall {
                 &p,
                 out,
             );
+            if let Some(gw) = &rule.gateway {
+                if !ctx.has_gateway(gw) {
+                    out.add(
+                        &p.join("gateway"),
+                        ValidatorKind::Callback,
+                        format!("Gateway {gw} does not exist."),
+                    );
+                } else if rule.action != RuleAction::Pass {
+                    out.add(
+                        &p.join("gateway"),
+                        ValidatorKind::Callback,
+                        "A gateway can only be set on a pass rule.",
+                    );
+                }
+            }
             if rule.interface_not && rule.interfaces.is_empty() {
                 out.add(
                     &p.join("interface_not"),
