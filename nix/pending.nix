@@ -10,9 +10,9 @@
   # (/run/sensr/agent.sock). Landed with the agent skeleton (PR #12).
   agentDaemon = false;
 
-  # `sensr config get / --json` answers over IPC (T-0401; sensr-cli +
-  # sensr-ipc + sensr-config).
-  configGet = true;
+  # `sensr config get --json` answers over IPC (T-0401). Landed with the
+  # CLI and agent store.
+  configGet = false;
 
   # sensr-api stays running and answers HTTP on the management address.
   apiDaemon = true;
@@ -23,7 +23,7 @@
   # router to be configured by sensr.
   importApply = true;
 
-  # `sensr config set` + `sensr apply --confirm-within`: an unconfirmed apply
-  # rolls back on its own (sensr-apply confirm timer).
-  commitConfirm = true;
+  # `sensr config set` + `sensr config commit --confirm SECS`: an
+  # unconfirmed commit rolls back on its own (agent confirm timer). Landed.
+  commitConfirm = false;
 }
