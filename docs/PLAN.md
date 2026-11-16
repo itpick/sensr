@@ -953,7 +953,7 @@ with `.sha256` and `manifest.json`):
 |---|---|---|---|
 | `iso-installer` | x86_64 UEFI (BIOS via GRUB fallback) | systemd-boot | live system + Rust installer TUI (disk, NIC roles, admin password, seed import), `nixos-install` from the ISO store offline; "install over SSH" via nixos-anywhere |
 | `raw-efi` | x86_64 appliances (PC Engines, Protectli, Deciso-class) | systemd-boot, boot counting | dd-able; grows root on first boot; serial console on by default (`console=ttyS0,115200 console=tty0`) |
-| `pi5` | Raspberry Pi 5 (SD, USB, NVMe) | Pi firmware → kernel (`nvmd` `kernel` mode, multi-generation), `tryboot` for A/B | vendor `rpi-6.18.y`; RP1 Ethernet via in-tree driver; `r8152` for RTL8156/8157 |
+| `pi5` | Raspberry Pi 5 (SD, USB, NVMe) | Pi firmware → kernel (`nvmd` `kernel` mode, multi-generation), `tryboot` for A/B | vendor `rpi-6.18.y`; RP1 Ethernet via in-tree driver; `r8152` for RTL8156 (RTL8157 5 GbE needs kernel ≥ 7.1 or a backport) |
 | `pi4` | Raspberry Pi 4 | U-Boot extlinux | `genet` LAN; no AES → WireGuard (ChaCha20) recommended, documented |
 | `qcow` | KVM/Proxmox/libvirt (x86_64, aarch64) | systemd-boot | the image CI tests boot; cloud variants (amazon, azure, proxmox, hyperv, vmware, oci) in Phase 3 |
 
