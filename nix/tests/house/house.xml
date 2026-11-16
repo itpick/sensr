@@ -1,0 +1,541 @@
+<?xml version="1.0"?>
+<opnsense>
+  <system>
+    <hostname>house-gw</hostname>
+    <domain>house.example</domain>
+    <dnsallowoverride>1</dnsallowoverride>
+    <timezone>Etc/UTC</timezone>
+    <timeservers>0.pool.ntp.example</timeservers>
+    <webgui>
+      <protocol>https</protocol>
+      <interfaces>lan</interfaces>
+    </webgui>
+    <ssh>
+      <group>admins</group>
+      <enabled>enabled</enabled>
+      <passwordauth>0</passwordauth>
+      <interfaces>lan,opt1</interfaces>
+    </ssh>
+    <group uuid="b2674711-ef67-5f96-a36b-2ba1f1d36738">
+      <name>admins</name>
+      <description>System Administrators</description>
+      <scope>system</scope>
+      <gid>1999</gid>
+      <member>0</member>
+      <priv>page-all</priv>
+    </group>
+    <user uuid="96d50e17-7040-5285-bad0-a3b4922ee479">
+      <name>root</name>
+      <descr>System Administrator</descr>
+      <scope>system</scope>
+      <groupname>admins</groupname>
+      <password>$2y$11$SYNTHETICSYNTHETICSYNTHEuLhd0Lr9E1eF0X0mT8X3iX7bA6kQe</password>
+      <uid>0</uid>
+    </user>
+  </system>
+  <interfaces>
+    <wan>
+      <if>igc0</if>
+      <descr>WAN</descr>
+      <enable>1</enable>
+      <blockpriv>1</blockpriv>
+      <blockbogons>1</blockbogons>
+      <ipaddr>dhcp</ipaddr>
+      <ipaddrv6>dhcp6</ipaddrv6>
+      <dhcp6-ia-pd-len>0</dhcp6-ia-pd-len>
+    </wan>
+    <lan>
+      <if>igc1</if>
+      <descr>LAN</descr>
+      <enable>1</enable>
+      <ipaddr>192.168.10.1</ipaddr>
+      <subnet>24</subnet>
+      <ipaddrv6>track6</ipaddrv6>
+      <track6-interface>wan</track6-interface>
+      <track6-prefix-id>0</track6-prefix-id>
+    </lan>
+    <opt1>
+      <if>igc2</if>
+      <descr>WIFI</descr>
+      <enable>1</enable>
+      <ipaddr>192.168.20.1</ipaddr>
+      <subnet>24</subnet>
+    </opt1>
+    <wireguard>
+      <internal_dynamic>1</internal_dynamic>
+      <descr>WireGuard (Group)</descr>
+      <if>wireguard</if>
+      <virtual>1</virtual>
+      <enable>1</enable>
+      <type>group</type>
+    </wireguard>
+  </interfaces>
+  <dhcpd>
+    <lan>
+      <enable>1</enable>
+      <range><from>192.168.10.100</from><to>192.168.10.199</to></range>
+      <staticmap>
+        <mac>02:00:5e:10:00:0a</mac>
+        <ipaddr>192.168.10.10</ipaddr>
+        <hostname>nas</hostname>
+        <descr>nas</descr>
+      </staticmap>
+    </lan>
+    <opt1>
+      <enable>1</enable>
+      <dnsserver>192.168.10.1</dnsserver>
+      <range><from>192.168.20.100</from><to>192.168.20.199</to></range>
+      <staticmap>
+        <mac>02:00:5e:20:01:33</mac>
+        <ipaddr>192.168.20.133</ipaddr>
+        <hostname>printer</hostname>
+        <descr>printer</descr>
+      </staticmap>
+    </opt1>
+  </dhcpd>
+  <nat>
+    <outbound>
+      <mode>hybrid</mode>
+      <rule uuid="b98a0a49-abe8-5c39-8af6-dcdf7e7c5e8e">
+        <interface>wan</interface>
+        <ipprotocol>inet</ipprotocol>
+        <descr>WireGuard outbound NAT</descr>
+        <source><network>10.10.10.0/24</network></source>
+        <destination><any>1</any></destination>
+        <target/>
+      </rule>
+    </outbound>
+  </nat>
+  <filter>
+    <rule uuid="7b86f8e5-60b3-5821-98c3-1bdf7c198b45">
+      <type>pass</type>
+      <interface>lan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <statetype>keep state</statetype>
+      <descr>Default allow LAN to any rule</descr>
+      <direction>in</direction>
+      <quick>1</quick>
+      <source><network>lan</network></source>
+      <destination><any>1</any></destination>
+    </rule>
+    <rule uuid="5073ee60-fade-5481-a1c5-35fcf952cdde">
+      <type>pass</type>
+      <interface>lan</interface>
+      <ipprotocol>inet6</ipprotocol>
+      <statetype>keep state</statetype>
+      <descr>Default allow LAN IPv6 to any rule</descr>
+      <direction>in</direction>
+      <quick>1</quick>
+      <source><network>lan</network></source>
+      <destination><any>1</any></destination>
+    </rule>
+    <rule uuid="1f923212-b9f8-5420-b933-ff8125223227">
+      <type>pass</type>
+      <interface>opt1</interface>
+      <ipprotocol>inet</ipprotocol>
+      <statetype>keep state</statetype>
+      <descr>Default allow WIFI to any rule</descr>
+      <direction>in</direction>
+      <quick>1</quick>
+      <source><network>opt1</network></source>
+      <destination><any>1</any></destination>
+    </rule>
+  </filter>
+  <OPNsense>
+    <Firewall>
+      <Alias version="1.0.1">
+        <aliases>
+          <alias uuid="f35c840c-3d5e-5d52-ae37-0a30da6af56b">
+            <enabled>1</enabled>
+            <name>Printers</name>
+            <type>host</type>
+            <proto/>
+            <counters>0</counters>
+            <updatefreq></updatefreq>
+            <content>192.168.20.133</content>
+            <description></description>
+          </alias>
+          <alias uuid="8d7332e1-ff55-5b74-8d02-1859ef984d76">
+            <enabled>1</enabled>
+            <name>BadNets</name>
+            <type>network</type>
+            <proto/>
+            <counters>0</counters>
+            <updatefreq></updatefreq>
+            <content>11.0.9.0/24</content>
+            <description></description>
+          </alias>
+          <alias uuid="22f6a9cc-c0c4-5b41-bdb5-bc5be4ac547a">
+            <enabled>1</enabled>
+            <name>BlockTable</name>
+            <type>urltable</type>
+            <proto/>
+            <counters>0</counters>
+            <updatefreq>1</updatefreq>
+            <content>http://11.0.1.10/blocklist.txt</content>
+            <description></description>
+          </alias>
+          <alias uuid="94803384-9e11-527b-bbe4-a75993768b91">
+            <enabled>1</enabled>
+            <name>TrustedMACs</name>
+            <type>mac</type>
+            <proto/>
+            <counters>0</counters>
+            <updatefreq></updatefreq>
+            <content>02:00:5e:20:00:aa</content>
+            <description></description>
+          </alias>
+        </aliases>
+      </Alias>
+      <Filter version="1.0.6">
+        <rules>
+          <rule uuid="2077e569-4c13-5dcd-bb14-bb6daf586692">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>10</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>wan</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>UDP</protocol>
+            <source_net>any</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>wanip</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port>51820</destination_port>
+            <log>1</log>
+            <description>WireGuard inbound</description>
+          </rule>
+          <rule uuid="157e1af2-271c-507a-be52-e4ea92e155ed">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>20</sequence>
+            <action>block</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>wan</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>any</protocol>
+            <source_net>BadNets</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>any</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port></destination_port>
+            <log>1</log>
+            <description>Block inbound from BadNets</description>
+          </rule>
+          <rule uuid="1ca442a5-a80b-52b6-9994-8deddc8fbb94">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>10</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>wireguard</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>any</protocol>
+            <source_net>any</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>any</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port></destination_port>
+            <log>0</log>
+            <description>WireGuard clients to anywhere</description>
+          </rule>
+          <rule uuid="1d1e1aaf-bc1c-56d6-b44a-e436c8395ed1">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>1</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>lan</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>any</protocol>
+            <source_net>any</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>any</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port></destination_port>
+            <log>0</log>
+            <description>Allow LAN to any</description>
+          </rule>
+          <rule uuid="072d03a2-56f6-52ba-b6c6-9e49a0ddc055">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>2</sequence>
+            <action>block</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>lan,opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>any</protocol>
+            <source_net>any</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>BadNets</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port></destination_port>
+            <log>1</log>
+            <description>Block outbound to BadNets</description>
+          </rule>
+          <rule uuid="4b4a7988-e2b0-5afd-9caa-4596affcf5f6">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>3</sequence>
+            <action>block</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>lan,opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>any</protocol>
+            <source_net>any</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>BlockTable</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port></destination_port>
+            <log>1</log>
+            <description>Block outbound to BlockTable</description>
+          </rule>
+          <rule uuid="529ec073-3235-553f-8fb8-d0707f23f5db">
+            <enabled>0</enabled>
+            <statetype>keep</statetype>
+            <sequence>1</sequence>
+            <action>block</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>any</protocol>
+            <source_net>Printers</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>any</destination_net>
+            <destination_not>1</destination_not>
+            <destination_port></destination_port>
+            <log>1</log>
+            <description>Printer: no internet (disabled)</description>
+          </rule>
+          <rule uuid="f992ce14-5ef5-595b-906c-97885f1f970d">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>1</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>any</protocol>
+            <source_net>192.168.20.23</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>lan</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port></destination_port>
+            <log>0</log>
+            <description>Laptop address may reach the LAN</description>
+          </rule>
+          <rule uuid="55829a96-8b31-5c86-aeb6-36750f01a6b0">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>20</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>any</protocol>
+            <source_net>TrustedMACs</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>lan</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port></destination_port>
+            <log>0</log>
+            <description>Wi-Fi: trusted devices to the LAN</description>
+          </rule>
+          <rule uuid="aa32d7f7-e991-5654-b0b1-5d432cf20674">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>21</sequence>
+            <action>block</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>any</protocol>
+            <source_net>opt1</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>lan</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port></destination_port>
+            <log>1</log>
+            <description>Wi-Fi: others blocked from the LAN</description>
+          </rule>
+          <rule uuid="934a4064-9a4b-50be-9346-962968051266">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>19</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>TCP/UDP</protocol>
+            <source_net>opt1</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>(self)</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port>53</destination_port>
+            <log>0</log>
+            <description>Wi-Fi: DNS to the router</description>
+          </rule>
+          <rule uuid="bf779065-4a3a-5c64-8738-b0b3ff2f9322">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>19</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>UDP</protocol>
+            <source_net>opt1</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>(self)</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port>123</destination_port>
+            <log>0</log>
+            <description>Wi-Fi: NTP to the router</description>
+          </rule>
+          <rule uuid="f685c0a8-883b-5306-baeb-9c9e6e19f496">
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>19</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interfacenot>0</interfacenot>
+            <interface>opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>ICMP</protocol>
+            <source_net>opt1</source_net>
+            <source_not>0</source_not>
+            <source_port/>
+            <destination_net>(self)</destination_net>
+            <destination_not>0</destination_not>
+            <destination_port></destination_port>
+            <log>0</log>
+            <description>Wi-Fi: ping the router</description>
+          </rule>
+        </rules>
+      </Filter>
+    </Firewall>
+    <Interfaces>
+      <settings version="1.0.0">
+        <disableipv6>0</disableipv6>
+      </settings>
+    </Interfaces>
+    <wireguard>
+      <client version="1.0.0">
+        <clients>
+          <client uuid="fb481886-6b1e-5f92-a73d-55477090e89d">
+            <enabled>1</enabled>
+            <name>phone</name>
+            <pubkey>U1lOVEhFVElDLUhPVVNFLXBob25lLXB1Yi1OT1QtUkU=</pubkey>
+            <tunneladdress>10.10.10.2/32</tunneladdress>
+            <keepalive>25</keepalive>
+          </client>
+        </clients>
+      </client>
+      <general version="0.0.1">
+        <enabled>1</enabled>
+      </general>
+      <server version="1.0.1">
+        <servers>
+          <server uuid="87856c41-5c89-551c-bf7a-0981d6602942">
+            <enabled>1</enabled>
+            <name>wg0</name>
+            <instance>0</instance>
+            <privkey>U1lOVEhFVElDLUhPVVNFLXNydi1wcml2LU5PVC1SRUE=</privkey>
+            <port>51820</port>
+            <tunneladdress>10.10.10.1/24</tunneladdress>
+            <disableroutes>0</disableroutes>
+            <peers>fb481886-6b1e-5f92-a73d-55477090e89d</peers>
+          </server>
+        </servers>
+      </server>
+    </wireguard>
+    <unboundplus version="1.0.15">
+      <general>
+        <enabled>1</enabled>
+        <port>53</port>
+        <dnssec/>
+        <dns64/>
+        <regdhcp>1</regdhcp>
+        <regdhcpstatic>1</regdhcpstatic>
+        <local_zone_type>transparent</local_zone_type>
+      </general>
+      <dnsbl>
+        <blocklist uuid="4398e763-b199-5ebe-9d0d-b4ec605d9fe6">
+          <enabled>1</enabled>
+          <type/>
+          <lists>http://11.0.1.10/dnsbl.txt</lists>
+          <nxdomain>0</nxdomain>
+          <description>house test list</description>
+        </blocklist>
+      </dnsbl>
+      <hosts>
+        <host uuid="d4dd4cce-c0a5-5063-9449-cc32386d32ab">
+          <enabled>1</enabled>
+          <hostname>svc</hostname>
+          <domain>internal.house.example</domain>
+          <rr>A</rr>
+          <server>192.168.10.10</server>
+          <addptr>1</addptr>
+          <description>split zone name</description>
+        </host>
+      </hosts>
+    </unboundplus>
+    <IDS version="1.0.9">
+      <general>
+        <enabled>1</enabled>
+        <mode>pcap</mode>
+        <interfaces>wan</interfaces>
+        <homenet>192.168.0.0/16,10.0.0.0/8,172.16.0.0/12</homenet>
+      </general>
+    </IDS>
+    <Netflow version="1.0.1">
+      <capture>
+        <interfaces>lan,wan,opt1</interfaces>
+        <egress_only>wan</egress_only>
+        <version>v9</version>
+        <targets>127.0.0.1:2056</targets>
+      </capture>
+      <collect>
+        <enable>1</enable>
+      </collect>
+    </Netflow>
+  </OPNsense>
+</opnsense>

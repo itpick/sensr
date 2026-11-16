@@ -1,0 +1,4 @@
+{
+  "_comment": "Checks of nix/tests/house.nix that must pass in CI (synthetic parameters). Add a check here in the PR that makes it pass; never remove one to make CI pass.",
+  "pass": []
+}

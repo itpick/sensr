@@ -166,7 +166,61 @@ pub enum ImportCmd {
         /// `--device igc0=enp1s0`.
         #[arg(long = "device", value_name = "FREEBSD=LINUX")]
         devices: Vec<String>,
+        /// Import without staging: no agent is contacted. Exits non-zero
+        /// when unexpected nodes were left unmapped.
+        #[arg(long)]
+        dry_run: bool,
+        /// With `--dry-run`, also write the imported document (JSON) here.
+        #[arg(long, value_name = "FILE", requires = "dry_run")]
+        output: Option<PathBuf>,
     },
+}
+
+/// `sensr import opnsense --dry-run`: the import report without an agent.
+/// Returns whether the import was clean.
+pub fn import_dry_run(
+    file: &std::path::Path,
+    devices: &[String],
+    report: bool,
+    output: Option<&std::path::Path>,
+    out: &mut dyn Write,
+) -> anyhow::Result<bool> {
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let imported = OpnsenseImporter::with_devices(devices)?.import(&bytes)?;
+    if report {
+        write!(out, "{}", imported.report)?;
+    }
+    if let Some(path) = output {
+        let json = serde_json::to_vec_pretty(&imported.document)?;
+        write_private(path, &json).with_context(|| format!("writing {}", path.display()))?;
+    }
+    if !imported.clean {
+        writeln!(
+            out,
+            "note: some nodes were not imported (see --report, \"unmapped, unexpected\")"
+        )?;
+    }
+    if !imported.invalid.is_empty() {
+        writeln!(
+            out,
+            "## does not validate ({}): sensr would refuse to commit it",
+            imported.invalid.len()
+        )?;
+        for line in &imported.invalid {
+            writeln!(out, "{line}")?;
+        }
+    }
+    Ok(imported.clean && imported.invalid.is_empty())
+}
+
+/// Imported documents hold secrets, so they are written owner-only.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    opts.open(path)?.write_all(bytes)
 }
 
 /// A document selector on the command line.
@@ -238,6 +292,22 @@ pub async fn run_with_input(
     input: &mut dyn std::io::BufRead,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
+    if let Command::Import(ImportCmd::Opnsense {
+        file,
+        report,
+        devices,
+        dry_run: true,
+        output,
+    }) = &cli.command
+    {
+        if !import_dry_run(file, devices, *report, output.as_deref(), out)? {
+            bail!(
+                "{}: not clean (unexpected unmapped nodes, or the document does not validate)",
+                file.display()
+            );
+        }
+        return Ok(());
+    }
     let mut c = Client::connect(&cli.socket, principal())
         .await
         .map_err(|e| anyhow::anyhow!(describe(&e)))?;
@@ -258,6 +328,7 @@ pub async fn run_with_input(
             file,
             report,
             devices,
+            ..
         }) => {
             let bytes =
                 std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
@@ -592,4 +663,60 @@ async fn config(c: &mut Client, cmd: ConfigCmd, out: &mut dyn Write) -> anyhow::
         },
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HOME_ROUTER: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../sensr-import-opnsense/tests/fixtures/corpus/home-router.xml"
+    );
+
+    #[test]
+    fn dry_run_reports_and_writes_the_document_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("doc.json");
+        let mut out = Vec::new();
+        import_dry_run(
+            std::path::Path::new(HOME_ROUTER),
+            &[],
+            true,
+            Some(&doc),
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("# sensr import report"), "{text}");
+        assert!(!text.contains("does not validate"), "{text}");
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&doc).unwrap()).unwrap();
+        assert!(json["interfaces"]["lan"].is_object());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&doc).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn dry_run_fails_a_document_that_does_not_validate() {
+        let dir = tempfile::tempdir().unwrap();
+        let xml = std::fs::read_to_string(HOME_ROUTER).unwrap();
+        // the LAN tracks the WAN, which then asks for no prefix
+        let broken = xml.replace(
+            "<dhcp6-ia-pd-len>8</dhcp6-ia-pd-len>",
+            "<dhcp6-ia-pd-len>none</dhcp6-ia-pd-len>",
+        );
+        assert_ne!(xml, broken, "fixture changed; update this test");
+        let file = dir.path().join("config.xml");
+        std::fs::write(&file, broken).unwrap();
+        let mut out = Vec::new();
+        let clean = import_dry_run(&file, &[], false, None, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!clean);
+        assert!(text.contains("does not validate"), "{text}");
+    }
 }
