@@ -272,11 +272,7 @@ impl Document {
 
         let mut wan = Interface::new("eth0".parse().expect("valid literal"), InterfaceRole::Wan);
         wan.ipv4 = Ipv4Config::dhcp();
-        wan.ipv6 = Ipv6Config::Dhcp6 {
-            prefix_delegation_len: Some(64),
-            send_prefix_hint: false,
-            prefix_only: false,
-        };
+        wan.ipv6 = Ipv6Config::dhcp6(Some(64));
         wan.block_private = true;
         wan.block_bogons = true;
         doc.interfaces.insert(id("wan"), wan);

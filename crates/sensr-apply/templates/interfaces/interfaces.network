@@ -29,7 +29,11 @@ VLAN={{ v }}
 {% endfor %}
 {% if item.track %}
 DHCPPrefixDelegation=yes
+{% endif %}
+{% if item.send_ra %}
 IPv6SendRA=yes
+{% elif item.track and item.track.uplink != ":self" %}
+IPv6SendRA=no
 {% endif %}
 {% if item.dhcp4 %}
 
@@ -45,17 +49,45 @@ Hostname={{ item.dhcp4.hostname }}
 {% if item.dhcp4.deny %}
 DenyList={{ item.dhcp4.deny | join(" ") }}
 {% endif %}
+{% if item.dhcp4.client_id == "mac" %}
+# type 1 + the link's current (spoofed) MAC, as dhclient sends it
+{% endif %}
+ClientIdentifier={{ item.dhcp4.client_id }}
+UseMTU={{ item.dhcp4.use_mtu }}
+{% if item.dhcp4.vendor_class %}
+VendorClassIdentifier={{ item.dhcp4.vendor_class }}
+{% endif %}
+{% if item.dhcp4.user_class %}
+UserClass={{ item.dhcp4.user_class }}
+{% endif %}
+{% if item.dhcp4.request_options %}
+RequestOptions={{ item.dhcp4.request_options }}
+{% endif %}
+{% for o in item.dhcp4.send_options %}
+SendOption={{ o }}
+{% endfor %}
+{% if item.dhcp4.socket_priority %}
+SocketPriority={{ item.dhcp4.socket_priority }}
+{% endif %}
 {% endif %}
 {% if item.dhcp6 %}
 
 [DHCPv6]
 UseDNS=no
 WithoutRA=solicit
-{% if item.dhcp6.pd_len %}
-PrefixDelegationHint=::/{{ item.dhcp6.pd_len }}
+UseDelegatedPrefix={{ item.dhcp6.use_pd }}
+{% if item.dhcp6.pd_hint %}
+PrefixDelegationHint=::/{{ item.dhcp6.pd_hint }}
 {% endif %}
 {% if item.dhcp6.prefix_only %}
 UseAddress=no
+{% endif %}
+RapidCommit={{ item.dhcp6.rapid_commit }}
+SendRelease={{ item.dhcp6.send_release }}
+# the ISP keys the delegation on the DUID: keep it stable
+DUIDType={{ item.dhcp6.duid_type }}
+{% if item.dhcp6.duid_raw %}
+DUIDRawData={{ item.dhcp6.duid_raw }}
 {% endif %}
 {% endif %}
 {% if item.track %}
@@ -63,7 +95,48 @@ UseAddress=no
 [DHCPPrefixDelegation]
 UplinkInterface={{ item.track.uplink }}
 SubnetId={{ item.track.subnet_id }}
-Announce=yes
+Announce={{ item.track.announce }}
+{% endif %}
+{% if item.send_ra %}
+{% set ra = item.send_ra %}
+
+[IPv6SendRA]
+Managed={{ ra.managed }}
+OtherInformation={{ ra.other }}
+{% if ra.router_lifetime %}
+RouterLifetimeSec={{ ra.router_lifetime }}
+{% endif %}
+{% if ra.preference %}
+RouterPreference={{ ra.preference }}
+{% endif %}
+{% if ra.hop_limit %}
+HopLimit={{ ra.hop_limit }}
+{% endif %}
+EmitDNS={{ ra.emit_dns }}
+{% if ra.dns %}
+DNS={{ ra.dns | join(" ") }}
+{% endif %}
+EmitDomains={{ ra.emit_domains }}
+{% if ra.domains %}
+Domains={{ ra.domains | join(" ") }}
+{% endif %}
+{% for p in ra.prefixes %}
+
+[IPv6Prefix]
+Prefix={{ p.prefix }}
+OnLink={{ p.on_link }}
+AddressAutoconfiguration={{ p.autonomous }}
+{% endfor %}
+{% for r in ra.routes %}
+
+[IPv6RoutePrefix]
+Route={{ r }}
+{% endfor %}
+{% if ra.pref64 %}
+
+[IPv6PREF64Prefix]
+Prefix={{ ra.pref64 }}
+{% endif %}
 {% endif %}
 {% for r in item.policy_routes %}
 

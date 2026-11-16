@@ -13,7 +13,7 @@ use sensr_schema::models::dns::{DnsRecord, LocalZoneType};
 use sensr_schema::models::firewall::{
     AliasContent, AliasValue, Direction, Endpoint, RuleAction, StateType,
 };
-use sensr_schema::models::interfaces::{Ipv4Config, Ipv6Config, VlanProtocol};
+use sensr_schema::models::interfaces::{DhcpOptionValue, Ipv4Config, Ipv6Config, VlanProtocol};
 use sensr_schema::models::nat::{ForwardFilter, OutboundNatMode, ReflectionMode};
 
 use super::common::stable_uuid;
@@ -76,6 +76,7 @@ pub fn export_document(doc: &Document) -> XmlDocument {
     opn.push_element(unbound(doc));
     opn.push_element(wireguard(doc));
     opn.push_element(gateways(doc));
+    opn.push_element(interface_settings(doc));
     root.push_element(opn);
     XmlDocument { root }
 }
@@ -169,6 +170,42 @@ fn system(doc: &Document) -> Element {
     e
 }
 
+/// A DHCP option value as dhclient.conf writes it (quoted text, hex bytes,
+/// an address or a number).
+fn dhcp_value(v: &DhcpOptionValue) -> String {
+    match v {
+        DhcpOptionValue::String(t) => format!("\"{t}\""),
+        DhcpOptionValue::Hex(h) => h.to_string(),
+        DhcpOptionValue::Ipv4(a) => a.to_string(),
+        DhcpOptionValue::Uint8(n) => n.to_string(),
+        DhcpOptionValue::Uint16(n) => n.to_string(),
+        DhcpOptionValue::Uint32(n) => n.to_string(),
+    }
+}
+
+/// `OPNsense/Interfaces/settings`: IPv6 on/off (`disableipv6`, which
+/// replaced `system/ipv6allow`), and the DHCPv6 DUID and release setting,
+/// global there, so the first DHCPv6 interface's carry over.
+fn interface_settings(doc: &Document) -> Element {
+    let (duid, send_release) = doc
+        .interfaces
+        .iter()
+        .find_map(|(_, i)| match &i.ipv6 {
+            Ipv6Config::Dhcp6 {
+                duid, send_release, ..
+            } => Some((duid.clone(), *send_release)),
+            _ => None,
+        })
+        .unwrap_or((None, true));
+    let mut settings = Element::new("settings");
+    settings.put(leaf("disableipv6", flag01(!doc.system.ipv6_allow)));
+    settings.put(leaf("dhcp6_norelease", flag01(!send_release)));
+    settings.put_opt("dhcp6_duid", duid);
+    let mut e = Element::new("Interfaces");
+    e.put(settings);
+    e
+}
+
 fn interfaces(doc: &Document) -> Element {
     let mut e = Element::new("interfaces");
     for (id, i) in doc.interfaces.iter() {
@@ -190,12 +227,46 @@ fn interfaces(doc: &Document) -> Element {
             Ipv4Config::Dhcp {
                 hostname,
                 reject_from,
+                vendor_class,
+                user_class,
+                send_options,
+                request_options,
+                vlan_priority,
+                use_mtu,
                 ..
             } => {
                 ie.put(leaf("ipaddr", "dhcp"))
                     .put_opt("dhcphostname", hostname.as_ref());
                 if !reject_from.is_empty() {
                     ie.put(leaf("dhcprejectfrom", join(reject_from, ",")));
+                }
+                if *use_mtu {
+                    ie.put(leaf("dhcphonourmtu", "1"));
+                }
+                ie.put_opt("dhcpvlanprio", *vlan_priority);
+                // Options live in the "advanced" form, the one the GUI keeps.
+                let mut sends: Vec<String> = Vec::new();
+                if let Some(v) = vendor_class {
+                    sends.push(format!("vendor-class-identifier \"{v}\""));
+                }
+                for u in user_class {
+                    sends.push(format!("user-class \"{u}\""));
+                }
+                for o in send_options {
+                    sends.push(format!("option-{} {}", o.code, dhcp_value(&o.value)));
+                }
+                if !sends.is_empty() || !request_options.is_empty() {
+                    ie.put(leaf("adv_dhcp_config_advanced", "1"));
+                    if !sends.is_empty() {
+                        ie.put(leaf("adv_dhcp_send_options", sends.join(", ")));
+                    }
+                    if !request_options.is_empty() {
+                        let names: Vec<String> = request_options
+                            .iter()
+                            .map(|c| format!("option-{c}"))
+                            .collect();
+                        ie.put(leaf("adv_dhcp_request_options", names.join(", ")));
+                    }
                 }
             }
             Ipv4Config::Static { address, gateway } => {
@@ -213,6 +284,9 @@ fn interfaces(doc: &Document) -> Element {
                 prefix_delegation_len,
                 send_prefix_hint,
                 prefix_only,
+                rapid_commit,
+                prefix_id,
+                ..
             } => {
                 ie.put(leaf("ipaddrv6", "dhcp6"));
                 ie.put(leaf(
@@ -226,6 +300,10 @@ fn interfaces(doc: &Document) -> Element {
                 if *prefix_only {
                     ie.put(leaf("dhcp6prefixonly", "1"));
                 }
+                if *rapid_commit {
+                    ie.put(leaf("dhcp6_rapid_commit", "1"));
+                }
+                ie.put_opt("dhcp6-prefix-id", *prefix_id);
             }
             Ipv6Config::Slaac => {
                 ie.put(leaf("ipaddrv6", "slaac"));

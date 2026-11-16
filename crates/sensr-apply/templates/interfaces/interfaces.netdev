@@ -8,3 +8,6 @@ Id={{ item.id }}
 {% if item.protocol %}
 Protocol={{ item.protocol }}
 {% endif %}
+{% if item.egress_qos %}
+EgressQOSMaps={{ item.egress_qos | join(" ") }}
+{% endif %}

@@ -20,6 +20,9 @@ UseRoutes=yes
 # below networkd's default 1024: a WAN's lease wins over any other DHCP link
 RouteMetric=100
 UseDNS=no
+# type 1 + the link's current (spoofed) MAC, as dhclient sends it
+ClientIdentifier=mac
+UseMTU=no
 
 [Route]
 Gateway=_dhcp4
