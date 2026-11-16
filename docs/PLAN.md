@@ -1025,14 +1025,18 @@ parity badge and the manifest link per release; wordmark colours stay
 
 **Open questions that need the owner's decision** (marked OWNER):
 
-1. OWNER — **Corpus privacy.** Can the opnsense-pi daily-driver `config.xml`
-   (anonymised: secrets, public IPs, MACs) be committed to a private
-   `sensr-corpus` submodule that CI can read? If not, the Phase 1 exit
-   criterion needs a stand-in config.
-2. OWNER — **Lab and CI infrastructure.** Who hosts the Pi lab (two Pi 5 + Pi 4
-   + x86 box on the yieldllc PXE reimager) and the aarch64 runners (GitHub
-   `ubuntu-24.04-arm` vs self-hosted Forgejo runners next to the lab)? Budget
-   and location.
+1. ANSWERED 2026-11-15 — **Corpus privacy.** No real router config is used. The
+   corpus is synthetic: `crates/sensr-import-opnsense/tests/fixtures/corpus/`
+   holds hand-written OPNsense `config.xml` files shaped like a typical home/SMB
+   router (DHCP WAN, LAN + IoT VLAN, WireGuard road warriors, Unbound, Kea/ISC
+   DHCP, GeoIP/URL aliases, port forwards, outbound NAT). Every "imports the
+   daily-driver config" exit criterion means "imports `corpus/home-router.xml`".
+2. ANSWERED 2026-11-15 — **Lab and CI infrastructure.** All-virtual testing for
+   now: no Pi or physical hardware lab. `nixosTest` suites and image boots run in
+   KVM on the `nixtop` builder (x86_64 NixOS, 16 cores, 30 GB; checkout, VM disks
+   and artifacts under `/mnt/vms/sensr`). aarch64/Pi images are boot-tested in
+   QEMU only. Hardware lab criteria in §3 and §6 are deferred until the owner
+   reopens this.
 3. OWNER — **Binary cache and signing.** Cachix (hosted, paid tier for private
    `lts`) vs self-hosted attic on pick.haus; who holds the Nix signing key and
    the release-signing key (hardware token?).
