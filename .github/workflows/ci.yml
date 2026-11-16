@@ -143,3 +143,17 @@ jobs:
       - uses: actions/checkout@v5
       - uses: DeterminateSystems/nix-installer-action@main
       - run: nix build -L .#checks.aarch64-linux.sensr
+      - name: Build the Pi 5 image
+        run: nix build -L .#images.pi5 -o pi5
+      - name: Image size
+        run: |
+          img=$(echo pi5/sd-image/*.img)
+          echo "pi5 image: $(stat -L -c %s "$img") bytes" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p out && zstd -T0 -10 -o "out/$(basename "$img").zst" "$img"
+      # Boot-tested under QEMU on the nixtop builder (nix/tests/pi5-qemu.sh),
+      # not here: no hardware and no KVM on this runner.
+      - uses: actions/upload-artifact@v5
+        with:
+          name: sensr-pi5-image
+          path: out/*.zst
+          retention-days: 7
