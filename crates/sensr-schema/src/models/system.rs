@@ -3,6 +3,7 @@
 
 use std::net::IpAddr;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{check, yes};
@@ -15,7 +16,7 @@ use crate::refs::{RefContext, Validate};
 use crate::validation::{FieldPath, Validations, ValidatorKind};
 
 /// Identity, resolvers, time and accounts of the firewall itself.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct System {
     /// Host name without domain (`OPNsense`, `fw1`).
@@ -66,7 +67,7 @@ impl Default for System {
 }
 
 /// A local account (OPNsense `system/user`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct User {
     /// Login name.
@@ -99,7 +100,7 @@ pub struct User {
 
 /// One API key: the public key and a crypt(3) hash of the secret (SHA-512-crypt
 /// `$6$…` as OPNsense writes it), so imported keys keep working.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApiKey {
     /// Public key, presented as the Basic-auth user name.
@@ -109,7 +110,7 @@ pub struct ApiKey {
 }
 
 /// A local group (OPNsense `system/group`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Group {
     /// Group name.
@@ -126,7 +127,7 @@ pub struct Group {
 }
 
 /// The SSH daemon.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Ssh {
     /// Run sshd.

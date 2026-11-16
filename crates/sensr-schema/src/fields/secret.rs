@@ -66,6 +66,18 @@ impl<T> fmt::Display for Secret<T> {
     }
 }
 
+impl<T: schemars::JsonSchema> schemars::JsonSchema for Secret<T> {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        format!("Secret_{}", T::schema_name()).into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut s = T::json_schema(generator);
+        s.insert("writeOnly".into(), true.into());
+        s
+    }
+}
+
 impl<T: Serialize> Serialize for Secret<T> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         if REDACT.with(Cell::get) {

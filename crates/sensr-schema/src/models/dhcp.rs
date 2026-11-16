@@ -8,6 +8,7 @@ use std::net::Ipv4Addr;
 use std::str::FromStr;
 
 use ipnet::Ipv4Net;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{check, yes};
@@ -19,7 +20,7 @@ use crate::refs::{ItemKind, RefContext, Validate};
 use crate::validation::{FieldError, FieldPath, Validations, ValidatorKind};
 
 /// The DHCPv4 service.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Dhcpv4 {
     /// Run the server.
@@ -67,10 +68,11 @@ impl Dhcpv4 {
 }
 
 /// A served subnet.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Subnet4 {
     /// The subnet, e.g. `192.168.1.0/24`.
+    #[schemars(with = "String")]
     pub subnet: Ipv4Net,
     /// Free text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,7 +120,7 @@ impl Subnet4 {
 }
 
 /// Commonly used DHCPv4 options.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Dhcp4Options {
     /// Option 3.
@@ -215,7 +217,7 @@ impl fmt::Display for Pool4 {
 string_serde!(Pool4);
 
 /// How a reservation recognises its client: exactly one of MAC or client-id.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientMatch {
     /// Hardware address.
@@ -225,7 +227,7 @@ pub enum ClientMatch {
 }
 
 /// A static reservation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Reservation4 {
     /// The subnet the reservation belongs to.

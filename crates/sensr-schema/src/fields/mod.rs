@@ -69,6 +69,16 @@ macro_rules! string_serde {
             }
         }
 
+        impl ::schemars::JsonSchema for $t {
+            fn schema_name() -> ::std::borrow::Cow<'static, str> {
+                ::std::borrow::Cow::Borrowed(stringify!($t))
+            }
+
+            fn json_schema(_: &mut ::schemars::SchemaGenerator) -> ::schemars::Schema {
+                ::schemars::json_schema!({ "type": "string", "x-sensr-text": stringify!($t) })
+            }
+        }
+
         impl<'de> ::serde::Deserialize<'de> for $t {
             fn deserialize<D: ::serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
                 let s = <::std::borrow::Cow<'de, str> as ::serde::Deserialize>::deserialize(d)?;

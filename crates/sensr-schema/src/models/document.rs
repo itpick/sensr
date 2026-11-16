@@ -3,6 +3,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::dhcp::{Dhcpv4, Pool4, Subnet4};
@@ -80,7 +81,9 @@ pub const SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(0, 1, 0);
 
 /// Top-level sections, the unit of change tracking: the apply engine
 /// re-renders only the subsystems whose section changed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Section {
     /// `system`.
@@ -135,7 +138,7 @@ impl Section {
 
 /// One complete configuration: everything the agent needs to render and
 /// apply the box.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Document {
     /// Schema version of this document.
@@ -281,6 +284,12 @@ impl Document {
             .validate(self, &root.join("gateways"), &mut out);
         self.trust.validate(self, &root.join("trust"), &mut out);
         out
+    }
+
+    /// The JSON Schema of a document (draft 2020-12), for UI forms, the
+    /// compat layer and `xtask lint-schema`.
+    pub fn json_schema() -> serde_json::Value {
+        serde_json::to_value(schemars::schema_for!(Document)).unwrap_or_default()
     }
 
     /// The sections whose content differs between `self` and `other`.
