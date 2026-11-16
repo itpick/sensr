@@ -61,6 +61,7 @@ pub fn export_document(doc: &Document) -> XmlDocument {
     root.push_element(vlans(doc));
     root.push_element(nat(doc));
     root.push_element(gateway_groups(doc));
+    trust(doc, &mut root);
     let mut opn = Element::new("OPNsense");
     let mut fw = Element::new("Firewall");
     fw.push_element(aliases(doc));
@@ -792,4 +793,32 @@ fn gateway_groups(doc: &Document) -> Element {
         e.put(ge);
     }
     e
+}
+
+fn b64(p: &sensr_schema::fields::Pem) -> String {
+    base64::engine::general_purpose::STANDARD.encode(p.as_str())
+}
+
+fn trust(doc: &Document, root: &mut Element) {
+    let refid = |id: &sensr_schema::Uuid| doc.trust.authorities.get(id).map(|c| c.refid.clone());
+    for (id, c) in doc.trust.authorities.iter() {
+        let mut e = Element::new("ca").attr("uuid", id.to_string());
+        e.put(leaf("refid", &c.refid))
+            .put(leaf("descr", &c.description))
+            .put(leaf("crt", b64(&c.certificate)))
+            .put_opt("prv", c.private_key.as_ref().map(|k| b64(k.expose())))
+            .put(leaf("serial", c.serial))
+            .put_opt("caref", c.issuer.as_ref().and_then(|i| refid(&i.id())));
+        root.put(e);
+    }
+    for (id, c) in doc.trust.certificates.iter() {
+        let mut e = Element::new("cert").attr("uuid", id.to_string());
+        e.put(leaf("refid", &c.refid))
+            .put(leaf("descr", &c.description))
+            .put_opt("caref", c.issuer.as_ref().and_then(|i| refid(&i.id())))
+            .put_opt("crt", c.certificate.as_ref().map(b64))
+            .put_opt("csr", c.request.as_ref().map(b64))
+            .put_opt("prv", c.private_key.as_ref().map(|k| b64(k.expose())));
+        root.put(e);
+    }
 }

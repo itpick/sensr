@@ -427,7 +427,23 @@
     }
   },
   "trust": {
-    "authorities": {},
-    "certificates": {}
+    "authorities": {
+      "7959b528-c70f-44b4-93e4-259c92e55107": {
+        "refid": "6723f0a2c3d4e",
+        "description": "Example Office CA",
+        "certificate": "-----BEGIN CERTIFICATE-----\nSYNTHETIC TEST CERTIFICATE - NOT A REAL KEY - CA Example Office CA\n-----END CERTIFICATE-----\n",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nSYNTHETIC TEST PRIVATE KEY - NOT A REAL KEY - CA Example Office CA\n-----END PRIVATE KEY-----\n",
+        "serial": 2
+      }
+    },
+    "certificates": {
+      "d5dccda9-c84a-487a-be74-309f12a4025c": {
+        "refid": "6723f0a91b2c4",
+        "description": "Web GUI edge01.office.example.com",
+        "certificate": "-----BEGIN CERTIFICATE-----\nSYNTHETIC TEST CERTIFICATE - NOT A REAL KEY - Web GUI edge01.office.example.com\n-----END CERTIFICATE-----\n",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nSYNTHETIC TEST PRIVATE KEY - NOT A REAL KEY - Web GUI edge01.office.example.com\n-----END PRIVATE KEY-----\n",
+        "issuer": "7959b528-c70f-44b4-93e4-259c92e55107"
+      }
+    }
   }
 }

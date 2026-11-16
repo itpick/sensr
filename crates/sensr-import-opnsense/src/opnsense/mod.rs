@@ -17,6 +17,7 @@ mod interfaces;
 mod kea;
 mod nat;
 mod system;
+mod trust;
 mod unbound;
 mod wireguard;
 
@@ -78,6 +79,7 @@ pub fn importer(options: &ImportOptions) -> Importer<SensrDocument> {
         .with_mapper(kea::KeaMapper)
         .with_mapper(unbound::UnboundMapper)
         .with_mapper(wireguard::WireGuardMapper)
+        .with_mapper(trust::TrustMapper)
         // Last: its fix-ups need the interfaces and the rules the others built.
         .with_mapper(gateways::GatewayMapper);
     for (pattern, reason) in EXPECTED_UNMAPPED {
@@ -163,8 +165,6 @@ pub const EXPECTED_UNMAPPED: &[(&str, &str)] = &[
         "OPNsense/trust",
         "trust store settings are not modelled yet",
     ),
-    ("ca", "certificate authorities are not modelled yet"),
-    ("cert", "certificates are not modelled yet"),
     (
         "OPNsense/unboundplus/dnsbl",
         "DNS blocklists are not modelled yet",

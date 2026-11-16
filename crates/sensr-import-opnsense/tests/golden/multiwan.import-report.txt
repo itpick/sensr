@@ -1,6 +1,6 @@
 # sensr import report
 
-## mapped (22)
+## mapped (24)
 /opnsense/system  <- system
 /opnsense/vlans  <- interfaces
 /opnsense/interfaces  <- interfaces
@@ -17,6 +17,8 @@
 /opnsense/nat/outbound  <- nat
 /opnsense/OPNsense/Kea/dhcp4  <- kea-dhcp4
 /opnsense/OPNsense/unboundplus  <- unbound
+/opnsense/ca[@uuid='7959b528-c70f-44b4-93e4-259c92e55107']  <- trust
+/opnsense/cert[@uuid='d5dccda9-c84a-487a-be74-309f12a4025c']  <- trust
 /opnsense/OPNsense/Gateways  <- gateways
 /opnsense/OPNsense/Gateways/gateway_item[@uuid='9ab67f66-1ace-470b-9bb6-14dc907831f9']  <- gateways
 /opnsense/OPNsense/Gateways/gateway_item[@uuid='8d352ef5-0a0a-45a2-8bba-327804971e60']  <- gateways
@@ -24,7 +26,7 @@
 /opnsense/gateways/gateway_group[@uuid='2b2d395e-cfcf-4324-be48-7f65ebbc5323']  <- gateways
 /opnsense/gateways/gateway_group[@uuid='60d77f02-8d93-4fec-b523-cf0d0af7f5dc']  <- gateways
 
-## unmapped, expected (39)
+## unmapped, expected (37)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -62,8 +64,6 @@
 /opnsense/OPNsense/unboundplus/dnsbl  (DNS blocklists are not modelled yet)
 /opnsense/OPNsense/Syslog  (remote syslog is not modelled yet)
 /opnsense/OPNsense/trust  (trust store settings are not modelled yet)
-/opnsense/ca[@uuid='7959b528-c70f-44b4-93e4-259c92e55107']  (certificate authorities are not modelled yet)
-/opnsense/cert[@uuid='d5dccda9-c84a-487a-be74-309f12a4025c']  (certificates are not modelled yet)
 
 ## unmapped, unexpected (3)
 /opnsense/system/gw_switch_default
