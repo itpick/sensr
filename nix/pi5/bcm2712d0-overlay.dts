@@ -1,0 +1,54 @@
+// The Raspberry Pi 5 firmware loads bcm2712-rpi-5-b.dtb on every Pi 5 and, on
+// D0-stepping boards (2 GB and 16 GB, and most made since late 2024), applies
+// an overlay named "bcm2712d0" from overlays/ to it. It never loads
+// bcm2712-d-rpi-5-b.dtb. Raspberry Pi's own overlay of that name targets their
+// downstream tree, so with a mainline tree sensr ships this one: the changes
+// mainline's bcm2712-d-rpi-5-b.dts makes to the C1 tree. Without it a D0 board
+// runs the C1 pin controller layout and the kernel dies about a second in with
+// an SError in brcmstb_pull_config_set (found by vyos-pi on a 16 GB board).
+//
+// nix/pi5/boot-files.nix applies this to the C1 tree at build time and fails
+// the build unless the result equals mainline's D0 tree, so a kernel bump that
+// changes the D0 delta cannot ship a stale overlay.
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2712";
+
+	fragment@0 {
+		target = <&uart10>;
+		__overlay__ {
+			interrupts = <0x00 0x78 0x04>;
+		};
+	};
+
+	fragment@1 {
+		target = <&pinctrl>;
+		__overlay__ {
+			compatible = "brcm,bcm2712d0-pinctrl";
+			reg = <0x7d504100 0x20>;
+		};
+	};
+
+	fragment@2 {
+		target = <&pinctrl_aon>;
+		__overlay__ {
+			compatible = "brcm,bcm2712d0-aon-pinctrl";
+			reg = <0x7d510700 0x1c>;
+		};
+	};
+
+	fragment@3 {
+		target = <&gio_aon>;
+		__overlay__ {
+			brcm,gpio-bank-widths = <0x0f 0x06>;
+			gpio-line-names = "RP1_SDA", "RP1_SCL", "RP1_RUN", "SD_IOVDD_SEL",
+				"SD_PWR_ON", "SD_CDET_N", "SD_FLG_N", "", "2712_WAKE",
+				"2712_STAT_LED", "", "", "PMIC_INT", "UART_TX_FS",
+				"UART_RX_FS", "", "", "", "", "", "", "", "", "", "", "",
+				"", "", "", "", "", "", "HDMI0_SCL", "HDMI0_SDA",
+				"HDMI1_SCL", "HDMI1_SDA", "PMIC_SCL", "PMIC_SDA";
+		};
+	};
+};

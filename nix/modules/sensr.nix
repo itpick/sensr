@@ -530,6 +530,30 @@ in
       };
     };
 
+    # The installer's safety net (PLAN §6, 06 §1 L4): while
+    # <seed>/reboot-after-minutes exists, reboot that many minutes after
+    # every boot. On a Pi trial boot that returns to the previous system.
+    systemd.services.sensr-reboot-after = {
+      description = "Reboot N minutes after boot while the seed folder asks for it";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "local-fs.target" ];
+      unitConfig = {
+        RequiresMountsFor = cfg.seedDir;
+        ConditionPathExists = "${cfg.seedDir}/reboot-after-minutes";
+      };
+      serviceConfig.ExecStart = pkgs.writeShellScript "sensr-reboot-after" ''
+        f=${cfg.seedDir}/reboot-after-minutes
+        n=$(head -c 16 "$f" | tr -dc 0-9)
+        [ -n "$n" ] || { echo "$f does not hold a number of minutes"; exit 0; }
+        echo "rebooting in $n minutes unless $f is deleted"
+        sleep $((n * 60))
+        if [ -e "$f" ]; then
+          echo "$f still exists: rebooting"
+          ${config.systemd.package}/bin/systemctl reboot
+        fi
+      '';
+    };
+
     systemd.services.sensr-selftest = mkIf cfg.selftest.enable {
       description = "sensr boot selftest (T-0391..T-0401)";
       wantedBy = [

@@ -80,12 +80,16 @@
       nixosConfigurations = {
         qcow = mkSystem "x86_64-linux" [ ./nix/images/qcow.nix ];
         qcow-aarch64 = mkSystem "aarch64-linux" [ ./nix/images/qcow.nix ];
+        pi5 = mkSystem "aarch64-linux" [ ./nix/images/pi5.nix ];
       };
 
       # nix build .#images.qcow (docs/PLAN.md §6)
       images = {
         qcow = self.nixosConfigurations.qcow.config.system.build.image;
         qcow-aarch64 = self.nixosConfigurations.qcow-aarch64.config.system.build.image;
+        # Raspberry Pi 5 SD/USB/NVMe image (aarch64-linux; boot-tested with
+        # nix/tests/pi5-qemu.sh)
+        pi5 = self.nixosConfigurations.pi5.config.system.build.sdImage;
       };
 
       packages = forAll (pkgs: {
@@ -117,6 +121,24 @@
           agent-api = import ./nix/tests/agent-api.nix {
             inherit pkgs;
             sensrModules = testModules;
+          };
+          pi5-trial-install = import ./nix/tests/pi5-trial-install.nix {
+            inherit pkgs;
+            trialInstall = pkgs.writeShellApplication {
+              name = "sensr-pi5-trial-install";
+              runtimeInputs = with pkgs; [
+                coreutils
+                util-linux
+                gnused
+                gnugrep
+                findutils
+                zstd
+                xz
+                parted
+                systemd
+              ];
+              text = builtins.readFile ./nix/pi5/trial-install.sh;
+            };
           };
           qcow-boot = import ./nix/tests/qcow-boot.nix {
             inherit pkgs;
