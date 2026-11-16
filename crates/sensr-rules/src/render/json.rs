@@ -44,6 +44,10 @@ pub enum Expr<'a> {
     Or(Box<Expr<'a>>, Box<Expr<'a>>),
     /// flag list `a | b | c` (as nft prints it)
     Flags(Vec<&'static str>),
+    /// `numgen inc mod <n>`
+    NumgenInc(u32),
+    /// anonymous map lookup `<key> map { k : v, … }`
+    Map(Box<Expr<'a>>, Vec<(Expr<'a>, Expr<'a>)>),
 }
 
 impl<'a> Expr<'a> {
@@ -89,6 +93,8 @@ impl Serialize for Expr<'_> {
                     s.collect_seq(f)
                 }
             }
+            Expr::NumgenInc(m) => one("numgen", &NumgenBody(*m), s),
+            Expr::Map(key, data) => one("map", &MapBody(key, data), s),
         }
     }
 }
@@ -97,6 +103,44 @@ fn one<S: Serializer, T: Serialize + ?Sized>(key: &str, v: &T, s: S) -> Result<S
     let mut m = s.serialize_map(Some(1))?;
     m.serialize_entry(key, v)?;
     m.end()
+}
+
+struct NumgenBody(u32);
+impl Serialize for NumgenBody {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut m = s.serialize_map(Some(3))?;
+        m.serialize_entry("mode", "inc")?;
+        m.serialize_entry("mod", &self.0)?;
+        m.serialize_entry("offset", &0)?;
+        m.end()
+    }
+}
+
+struct MapBody<'a, 'b>(&'b Expr<'a>, &'b [(Expr<'a>, Expr<'a>)]);
+impl Serialize for MapBody<'_, '_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut m = s.serialize_map(Some(2))?;
+        m.serialize_entry("key", self.0)?;
+        m.serialize_entry("data", &ExprPairs(self.1))?;
+        m.end()
+    }
+}
+
+struct ExprPairs<'a, 'b>(&'b [(Expr<'a>, Expr<'a>)]);
+impl Serialize for ExprPairs<'_, '_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        one("set", &PairList(self.0), s)
+    }
+}
+struct PairList<'a, 'b>(&'b [(Expr<'a>, Expr<'a>)]);
+impl Serialize for PairList<'_, '_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(Some(self.0.len()))?;
+        for (k, v) in self.0 {
+            seq.serialize_element(&(k, v))?;
+        }
+        seq.end()
+    }
 }
 
 struct PrefixBody<'a>(&'a IpAddr, u8);
