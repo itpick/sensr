@@ -393,6 +393,12 @@ in
 
     users.groups.sensr.gid = sensrGid;
     users.groups.suricata = { };
+    users.users.sensr-insight = {
+      isSystemUser = true;
+      group = "sensr";
+      extraGroups = [ "suricata" ];
+      description = "sensr traffic insight";
+    };
     users.users.suricata = {
       isSystemUser = true;
       group = "suricata";
@@ -941,6 +947,62 @@ in
         UMask = "0022";
         ProtectSystem = "strict";
       };
+    };
+
+    # Traffic accounting and IDS alert storage (Reporting > Insight,
+    # Intrusion Detection > Alerts). The agent loads the accounting table and
+    # writes /run/sensr/insight/insight.json; the databases are group sensr
+    # so sensr-api can read them.
+    systemd.services.sensr-insight = {
+      description = "sensr traffic insight and IDS alert storage";
+      after = [ "sensr-net.target" ];
+      partOf = [ "sensr-agent.service" ];
+      unitConfig.ConditionPathExists = "${runtimeDir}/insight/insight.json";
+      serviceConfig = commonHardening // {
+        ExecStart = lib.escapeShellArgs [
+          "${cfg.package}/bin/sensr-insight"
+          "--config"
+          "${runtimeDir}/insight/insight.json"
+          "--nft"
+          "${pkgs.nftables}/bin/nft"
+        ];
+        Restart = "on-failure";
+        RestartSec = 5;
+        User = "sensr-insight";
+        Group = "sensr";
+        SupplementaryGroups = [ "suricata" ];
+        StateDirectory = "sensr-insight";
+        StateDirectoryMode = "0750";
+        UMask = "0027";
+        # listing the accounting table
+        AmbientCapabilities = [ "CAP_NET_ADMIN" ];
+        CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
+        ProtectSystem = "strict";
+        PrivateDevices = true;
+        ProtectKernelTunables = true;
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_NETLINK"
+        ];
+        # small and steady: a lookup in the kernel per packet, a read every
+        # few seconds here
+        Nice = 5;
+        MemoryMax = "256M";
+      };
+    };
+
+    # eve.json grows with every alert; the alerts live in alerts.db.
+    services.logrotate.settings.sensr-suricata = {
+      files = [ "/var/log/suricata/*.json" ];
+      frequency = "daily";
+      maxsize = "50M";
+      rotate = 3;
+      compress = true;
+      delaycompress = true;
+      missingok = true;
+      notifempty = true;
+      su = "suricata suricata";
+      postrotate = "${config.systemd.package}/bin/systemctl kill -s HUP sensr-suricata.service || true";
     };
 
     # The seed folder explains itself to whoever mounts the card on a laptop

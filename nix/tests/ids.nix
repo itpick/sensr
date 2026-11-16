@@ -157,6 +157,7 @@ pkgs.testers.runNixOSTest {
       environment.systemPackages = with pkgs; [
         jq
         nftables
+        sqlite
       ];
     };
 
@@ -233,6 +234,13 @@ pkgs.testers.runNixOSTest {
         router.wait_until_succeeds("grep -q '\"signature_id\":9000001' /var/log/suricata/eve.json", timeout=30)
         a = json.loads(alerts(9000001)[0])
         assert a["dest_ip"] == wan_ip, a
+        # sensr-insight stores them for the alerts view
+        router.wait_for_unit("sensr-insight.service")
+        router.wait_until_succeeds(
+            "sqlite3 -readonly -cmd '.timeout 5000' /var/lib/sensr-insight/alerts.db"
+            " 'SELECT COUNT(*) FROM alerts WHERE sid=2100498' | grep -qv '^0$'",
+            timeout=30,
+        )
 
     with subtest("suppressions: STUN is silent by default, the control alerts"):
         stun(3478)

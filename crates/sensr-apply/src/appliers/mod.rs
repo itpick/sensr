@@ -13,6 +13,7 @@
 
 pub mod convert;
 pub mod dns_runtime;
+pub mod insight;
 pub mod interfaces;
 pub mod kea;
 pub mod nft;

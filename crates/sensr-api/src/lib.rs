@@ -8,6 +8,7 @@ pub mod agent;
 pub mod auth;
 pub mod compat;
 pub mod error;
+pub mod insight;
 pub mod native;
 pub mod tls;
 pub mod ui;
@@ -62,6 +63,11 @@ pub const ROUTES: &[Route] = &[
     ("/api/v1/apply/plan", || get(native::plan)),
     ("/api/v1/interfaces/nics", || get(native::nics)),
     ("/api/v1/interfaces/assign", || post(native::assign)),
+    ("/api/v1/insight/top", || get(insight::top)),
+    ("/api/v1/insight/series", || get(insight::series)),
+    ("/api/v1/ids/alerts", || get(insight::alerts)),
+    ("/api/v1/ids/signatures", || get(insight::signatures)),
+    ("/api/v1/ids/stats", || get(insight::stats)),
     ("/api/core/firmware/info", || get(compat::firmware_info)),
     ("/api/interfaces/overview/interfaces_info", || {
         get(compat::interfaces_info).post(compat::interfaces_info)

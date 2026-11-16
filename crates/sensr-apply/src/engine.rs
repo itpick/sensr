@@ -25,7 +25,7 @@ use sensr_schema::Document;
 use crate::appliers::convert::{self, ConvertError, SecretsDir};
 use crate::appliers::interfaces::InterfacesModel;
 use crate::appliers::sysctl::{Sysctl, SysctlApplyError};
-use crate::appliers::{SliceError, SliceModels, kea, nft, ntp, suricata, unbound};
+use crate::appliers::{SliceError, SliceModels, insight, kea, nft, ntp, suricata, unbound};
 use crate::cmd::{Cmd, CmdError, Runner};
 use crate::hooks::{HookLevel, Hooks};
 use crate::plan::{FileSpec, Plan, UnitAction, UnitSpec};
@@ -197,6 +197,7 @@ impl Engine {
         plan.sysctls
             .insert("kernel.hostname".into(), doc.system.hostname.to_string());
         self.plan_ids(doc, rt, &mut plan)?;
+        self.plan_insight(doc, &mut plan);
         let secrets = convert::secret_files(doc, &self.opts.secrets)
             .into_iter()
             .map(|(p, c)| (self.rooted(&p), c))
@@ -274,6 +275,37 @@ impl Engine {
             );
         }
         Ok(())
+    }
+
+    /// The insight daemon's config and the accounting table (nothing when
+    /// neither accounting nor IDS is on).
+    fn plan_insight(&self, doc: &Document, plan: &mut Plan) {
+        let Some(cfg) = insight::config(doc) else {
+            return;
+        };
+        let dir = self.staging.live_dir(insight::DIR);
+        let conf = dir.join(insight::CONFIG);
+        plan.files.insert(
+            conf.clone(),
+            FileSpec {
+                contents: serde_json::to_vec_pretty(&cfg).unwrap_or_default(),
+                mode: 0o644,
+            },
+        );
+        plan.files.insert(
+            dir.join(insight::NFT),
+            FileSpec {
+                contents: insight::ruleset(&cfg).into_bytes(),
+                mode: 0o600,
+            },
+        );
+        plan.units.insert(
+            insight::UNIT.into(),
+            UnitSpec {
+                action: UnitAction::Restart,
+                inputs: [conf].into(),
+            },
+        );
     }
 
     /// Rewrites HOME_NET when the box's addresses changed (a new WAN lease)
@@ -609,7 +641,7 @@ impl Engine {
         }
 
         // units a document no longer wants (IDS switched off)
-        for unit in suricata::OWNED_UNITS {
+        for unit in suricata::OWNED_UNITS.iter().chain(&[insight::UNIT]) {
             if applied.plan.units.contains_key(*unit) && !p.plan.units.contains_key(*unit) {
                 self.run(&Cmd::new("systemctl").args(["stop", unit]), &mut report)?;
             }
@@ -625,6 +657,17 @@ impl Engine {
             report
                 .commands
                 .push("nft -j -f - (ids queue removed)".into());
+        }
+
+        let flow = self.staging.live_dir(insight::DIR).join(insight::NFT);
+        if let Some(f) = delta.files.get(&flow) {
+            nft::load(r, f.contents.as_slice())?;
+            report.commands.push("nft -j -f - (accounting)".into());
+        } else if delta.remove_files.contains(&flow) {
+            nft::load(r, sensr_flow::nft::removal().as_str())?;
+            report
+                .commands
+                .push("nft -j -f - (accounting removed)".into());
         }
 
         if delta.hooks.contains(&HookLevel::Config) {

@@ -1,0 +1,33 @@
+[package]
+name = "sensr-flow"
+description = "Traffic accounting (Reporting > Insight) and IDS alert storage: nftables counter sets read into SQLite rollups, eve.json tailed into an alert database (OPNsense counterpart: flowd, flowd_aggregate, the IDS alert log)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["store"]
+# SQLite storage, queries and the daemon; without it only the shared
+# config/nft contract (what sensr-apply renders).
+store = ["dep:rusqlite", "dep:anyhow", "dep:clap", "dep:tracing-subscriber"]
+
+[[bin]]
+name = "sensr-insight"
+required-features = ["store"]
+
+[dependencies]
+anyhow = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
