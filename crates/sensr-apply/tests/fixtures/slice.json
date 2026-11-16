@@ -184,8 +184,8 @@
     "outgoing_interfaces": [],
     "dnssec": true,
     "dns64": false,
-    "register_dhcp_leases": false,
-    "register_dhcp_static": false,
+    "register_dhcp_leases": true,
+    "register_dhcp_static": true,
     "local_zone_type": "transparent",
     "forwarding": {
       "use_system_servers": false,
@@ -194,6 +194,11 @@
           "enabled": true,
           "domain": "corp.example",
           "address": "10.8.0.53"
+        },
+        "00000000-0000-0000-0000-00005e450021": {
+          "enabled": true,
+          "domain": "1.168.192.in-addr.arpa",
+          "address": "192.168.1.5"
         }
       }
     },
@@ -205,7 +210,8 @@
         "record": {
           "rr": "A",
           "address": "192.168.1.10"
-        }
+        },
+        "description": "NAS \"main\" box"
       },
       "00000000-0000-0000-0000-00005e450031": {
         "enabled": true,
@@ -253,6 +259,89 @@
           "rr": "A",
           "address": "192.168.1.99"
         }
+      },
+      "00000000-0000-0000-0000-00005e450036": {
+        "enabled": true,
+        "hostname": "files",
+        "domain": "home.arpa",
+        "record": {
+          "rr": "A",
+          "address": "192.168.1.10"
+        },
+        "ptr": true
+      },
+      "00000000-0000-0000-0000-00005e450037": {
+        "enabled": true,
+        "hostname": "cluster",
+        "domain": "internal.example.org",
+        "record": {
+          "rr": "A",
+          "address": "192.168.1.20"
+        },
+        "ptr": false
+      }
+    },
+    "statistics": true,
+    "txt_descriptions": true,
+    "access": {
+      "default_action": "allow",
+      "lists": {
+        "00000000-0000-0000-0000-00005e450040": {
+          "enabled": true,
+          "name": "guests",
+          "action": "refuse_non_local",
+          "networks": [
+            "192.168.30.0/24"
+          ]
+        }
+      }
+    },
+    "tuning": {
+      "hide_identity": true,
+      "hide_version": true,
+      "prefetch": true,
+      "msg_cache_size": "8m",
+      "cache_max_ttl": 86400,
+      "private_domains": [
+        "home.arpa"
+      ]
+    },
+    "blocklists": {
+      "00000000-0000-0000-0000-00005e450050": {
+        "enabled": true,
+        "description": "Ads and trackers",
+        "lists": [
+          "hagezi-pro"
+        ],
+        "block": [
+          "tracker.example.net"
+        ],
+        "block_subtrees": [
+          "ads.example.net"
+        ],
+        "allow": [
+          "ok.ads.example.net"
+        ]
+      },
+      "00000000-0000-0000-0000-00005e450051": {
+        "enabled": true,
+        "description": "IoT threat intel",
+        "lists": [
+          "hagezi-tif"
+        ],
+        "source_nets": [
+          "192.168.20.0/24"
+        ],
+        "answer": {
+          "mode": "nxdomain"
+        }
+      },
+      "00000000-0000-0000-0000-00005e450052": {
+        "enabled": false,
+        "description": "Off",
+        "block": [
+          "off.example.net"
+        ]
       }
     }
   },

@@ -16,10 +16,28 @@ server:
   do-ip6: yes
   do-udp: yes
   do-tcp: yes
-  hide-identity: yes
-  hide-version: yes
   harden-referral-path: no
   module-config: "iterator"
+  hide-identity: yes
+  hide-version: yes
+  prefetch: yes
+  prefetch-key: no
+  harden-dnssec-stripped: no
+  harden-below-nxdomain: yes
+  aggressive-nsec: yes
+  serve-expired: no
+  serve-expired-ttl-reset: no
+  qname-minimisation-strict: no
+  extended-statistics: no
+  log-queries: no
+  log-replies: no
+  log-tag-queryreply: no
+  log-servfail: no
+  log-local-actions: no
+  verbosity: 1
+  msg-cache-size: 8388608
+  cache-max-ttl: 86400
+  infra-keep-probing: no
 
   # Interfaces to bind to
   interface: 192.168.1.1
@@ -30,35 +48,47 @@ server:
   access-control: ::/0 allow
   access-control: 127.0.0.0/8 allow
   access-control: ::1/128 allow
+  # guests
+  access-control: 192.168.30.0/24 refuse_non_local
+  private-domain: "home.arpa"
+  private-domain: "corp.example"
+  domain-insecure: "corp.example"
+  domain-insecure: "1.168.192.in-addr.arpa"
 
   # Local zone and static records
   local-zone: "home.arpa." transparent
   local-zone: "lab.home.arpa." redirect
+  local-zone: "1.168.192.in-addr.arpa." typetransparent
   local-data: "localhost A 127.0.0.1"
   local-data: "localhost AAAA ::1"
   local-data: "localhost.home.arpa A 127.0.0.1"
   local-data: "localhost.home.arpa AAAA ::1"
   local-data: "sensr.home.arpa A 192.168.1.1"
+  local-data: "sensr A 192.168.1.1"
   local-data: "nas.home.arpa. IN A 192.168.1.10"
+  local-data: 'nas.home.arpa. TXT "NAS main box"'
   local-data: "nas.home.arpa. IN AAAA fd00:1::10"
   local-data: "home.arpa. IN MX 10 mail.home.arpa."
   local-data: "lab.home.arpa. IN A 192.168.1.50"
   local-data: '_info.home.arpa. 300 IN TXT "sensr router"'
+  local-data: "files.home.arpa. IN A 192.168.1.10"
+  local-data: "cluster.internal.example.org. IN A 192.168.1.20"
+  local-data: "printer.home.arpa. IN A 192.168.1.11"
   local-data-ptr: "127.0.0.1 localhost"
   local-data-ptr: "::1 localhost"
   local-data-ptr: "192.168.1.1 sensr.home.arpa"
   local-data-ptr: "192.168.1.10 nas.home.arpa"
   local-data-ptr: "fd00:1::10 nas.home.arpa"
-  domain-insecure: "corp.example"
-  private-domain: "corp.example"
-
-  # Registered DHCP leases (sensr keeps the file next to this one)
-  include: "/run/sensr/unbound/dhcp-leases.conf"
+  local-data-ptr: "192.168.1.11 printer.home.arpa"
   tls-cert-bundle: "/etc/ssl/certs/ca-certificates.crt"
 
 forward-zone:
   name: "corp.example."
   forward-addr: 10.8.0.53
+
+forward-zone:
+  name: "1.168.192.in-addr.arpa."
+  forward-addr: 192.168.1.5
 
 forward-zone:
   name: "."
@@ -69,3 +99,9 @@ remote-control:
   control-enable: yes
   control-interface: "/run/unbound/unbound.ctl"
   control-use-cert: no
+
+# Written by sensr-dns at run time (absent until it has run: the globs then
+# match nothing). Last, because the blocklist opens view: clauses.
+server:
+  include: "/var/lib/sensr-dns/leases*.conf"
+  include: "/var/lib/sensr-dns/blocklist*.conf"

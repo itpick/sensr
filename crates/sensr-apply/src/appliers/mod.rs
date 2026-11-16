@@ -12,6 +12,7 @@
 //! `nix shell nixpkgs#nftables nixpkgs#kea nixpkgs#unbound -c cargo test -p sensr-apply`.
 
 pub mod convert;
+pub mod dns_runtime;
 pub mod interfaces;
 pub mod kea;
 pub mod nft;
@@ -100,11 +101,17 @@ impl SliceModels {
         }
         if let Some(u) = &self.unbound {
             let files = staging.plan_files(&u.render(templates)?);
+            // control.conf and sensr-dns.json are read by sensr-dns, not by
+            // Unbound: changing them must not reload the resolver.
             p.units.insert(
                 "sensr-unbound.service".into(),
                 UnitSpec {
                     action: UnitAction::Reload,
-                    inputs: files.keys().cloned().collect(),
+                    inputs: files
+                        .keys()
+                        .filter(|f| f.ends_with("unbound.conf"))
+                        .cloned()
+                        .collect(),
                 },
             );
             p.files.extend(files);
