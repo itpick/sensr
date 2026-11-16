@@ -48,6 +48,43 @@ jobs:
         if: github.event_name == 'schedule'
         run: cargo xtask freshness --daemons
 
+  ui:
+    # sensr-ui: wasm clippy, release build with cargo-leptos, island bundle budget,
+    # browser tests (screenshots light/dark × desktop/phone, axe, interactions, load timings).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-leptos@0.3.12
+      - run: cargo clippy -p sensr-ui --lib --target wasm32-unknown-unknown --no-default-features --features hydrate -- -D warnings
+      - run: cargo leptos build --release
+      - name: Island bundle budget
+        run: |
+          sudo apt-get install -y --no-install-recommends brotli >/dev/null
+          crates/sensr-ui/scripts/bundle-size.sh | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Browser tests
+        working-directory: crates/sensr-ui/e2e
+        env:
+          SENSR_UI_SHOTS: ${{ github.workspace }}/ui-screenshots
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          npx playwright test
+          { echo '### Load timings (headless Chromium, median of 5, cold cache)'; echo '```json'; cat "$SENSR_UI_SHOTS/perf.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sensr-ui-screenshots
+          path: |
+            ui-screenshots
+            crates/sensr-ui/e2e/test-results
+          if-no-files-found: ignore
+
   deps:
     runs-on: ubuntu-24.04
     steps:
