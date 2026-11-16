@@ -31,6 +31,13 @@ const STEPS: &[&str] = &[
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );",
+    // 2: secret values, out of the revision documents.
+    "CREATE TABLE secrets (
+        revision INTEGER NOT NULL REFERENCES revisions(id),
+        pointer  TEXT    NOT NULL,
+        value    TEXT    NOT NULL,
+        PRIMARY KEY (revision, pointer)
+    );",
 ];
 
 /// Brings the database schema up to date inside one transaction.

@@ -3,7 +3,8 @@
 //! `/conf/backup/` history, `Core/Api/BackupController.php`).
 //!
 //! [`Store`] keeps every committed [`Document`] as a revision in SQLite
-//! (WAL): canonical JSON, a blake3 content hash and OPNsense-shaped metadata.
+//! (WAL): canonical JSON with secrets moved to their own table, a blake3
+//! content hash over the full document and OPNsense-shaped metadata.
 //! Commits validate the whole document first, never rewrite history
 //! (restores are new revisions), write the head atomically to `config.json`
 //! with secrets redacted, record an audit row and broadcast
@@ -15,6 +16,7 @@ mod canonical;
 mod diff;
 mod export;
 mod schema;
+mod secrets;
 mod store;
 
 pub use canonical::{ContentHash, canonical_json};
