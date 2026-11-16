@@ -8,14 +8,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ipnet.workspace = true
 minijinja = { workspace = true, features = ["serde", "json"] }
 serde.workspace = true
+serde_json.workspace = true
+sensr-schema.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
 proptest.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]
