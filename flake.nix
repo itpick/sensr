@@ -118,6 +118,10 @@
             sensrModules = testModules;
             mode = "reference";
           };
+          ids = import ./nix/tests/ids.nix {
+            inherit pkgs;
+            sensrModules = testModules;
+          };
           agent-api = import ./nix/tests/agent-api.nix {
             inherit pkgs;
             sensrModules = testModules;

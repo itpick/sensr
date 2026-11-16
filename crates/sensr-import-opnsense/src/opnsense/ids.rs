@@ -118,7 +118,7 @@ impl Mapper<Document> for IdsMapper {
         if let Some(ps) = ctx.child(s, "policies") {
             for p in ctx.children(ps, "policy") {
                 let id = item_uuid(ctx, p);
-                let rulesets = ctx
+                let rulesets: Vec<RuleFile> = ctx
                     .text(p, "rulesets")
                     .map(|t| list(&t, &[',']))
                     .unwrap_or_default()
@@ -137,7 +137,7 @@ impl Mapper<Document> for IdsMapper {
                         ),
                     );
                 }
-                let metadata = ctx
+                let metadata: Vec<MetadataMatch> = ctx
                     .text(p, "content")
                     .map(|t| list(&t, &[',']))
                     .unwrap_or_default()
@@ -157,6 +157,16 @@ impl Mapper<Document> for IdsMapper {
                     _ => PolicyAction::Alert,
                 };
                 let desc = ctx.text(p, "description");
+                let (rulesets, metadata) = if !rulesets.is_empty() && !metadata.is_empty() {
+                    ctx.warn(
+                        p,
+                        Severity::Degraded,
+                        "the policy combined rulesets and metadata; sensr keeps the rulesets and applies the policy to all their rules",
+                    );
+                    (rulesets, Vec::new())
+                } else {
+                    (rulesets, metadata)
+                };
                 let policy = IdsPolicy {
                     enabled: ctx.bool01(p, "enabled"),
                     priority: ctx.parse(p, "prio").unwrap_or(0),
@@ -543,7 +553,10 @@ mod tests {
         assert_eq!(ids.rule_overrides.len(), 1);
         let p = ids.policies.values().next().unwrap();
         assert_eq!(p.rulesets[0].as_str(), "botcc.rules");
-        assert_eq!(p.metadata[0].value, "Major");
+        assert!(
+            p.metadata.is_empty(),
+            "rulesets and metadata cannot combine"
+        );
         let u = ids.user_rules.values().next().unwrap();
         assert!(u.bypass && u.source.is_some());
         assert!(
@@ -558,6 +571,7 @@ mod tests {
         );
         assert!(text.contains("never downloaded"), "{text}");
         assert!(text.contains("HOME_NET also gets"), "{text}");
+        assert!(text.contains("combined rulesets and metadata"), "{text}");
     }
 
     #[test]

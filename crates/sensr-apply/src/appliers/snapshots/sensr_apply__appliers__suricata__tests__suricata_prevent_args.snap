@@ -1,0 +1,14 @@
+---
+source: crates/sensr-apply/src/appliers/suricata.rs
+expression: "files[\"suricata.args\"]"
+---
+-c
+/run/sensr/suricata/suricata.yaml
+--pidfile
+/run/suricata/suricata.pid
+-q
+0
+-q
+1
+-q
+2

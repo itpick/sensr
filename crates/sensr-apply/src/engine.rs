@@ -23,10 +23,10 @@ use sensr_schema::Document;
 use crate::appliers::convert::{self, ConvertError, SecretsDir};
 use crate::appliers::interfaces::InterfacesModel;
 use crate::appliers::sysctl::{Sysctl, SysctlApplyError};
-use crate::appliers::{SliceError, SliceModels, kea, nft, unbound};
+use crate::appliers::{SliceError, SliceModels, kea, nft, suricata, unbound};
 use crate::cmd::{Cmd, CmdError, Runner};
 use crate::hooks::{HookLevel, Hooks};
-use crate::plan::{FileSpec, Plan, UnitAction};
+use crate::plan::{FileSpec, Plan, UnitAction, UnitSpec};
 use crate::templates::{Staging, TemplateError, Templates, write_atomic};
 
 /// A config-file checker: `Ok(None)` when absent, `Ok(Some(""))` when accepted.
@@ -69,6 +69,9 @@ pub enum EngineError {
     /// Setting kernel tunables.
     #[error(transparent)]
     Sysctl(#[from] SysctlApplyError),
+    /// The IDS section cannot be resolved.
+    #[error(transparent)]
+    Ids(#[from] suricata::SuricataError),
     /// I/O.
     #[error("{path}: {source}")]
     Io {
@@ -191,6 +194,7 @@ impl Engine {
         // the system hostname is a kernel tunable too
         plan.sysctls
             .insert("kernel.hostname".into(), doc.system.hostname.to_string());
+        self.plan_ids(doc, rt, &mut plan)?;
         let secrets = convert::secret_files(doc, &self.opts.secrets)
             .into_iter()
             .map(|(p, c)| (self.rooted(&p), c))
@@ -208,6 +212,97 @@ impl Engine {
             alias_failed: compiled.aliases.failed.iter().cloned().collect(),
             secrets,
         })
+    }
+
+    /// Suricata's files and units (nothing when IDS is off). HOME_NET is
+    /// computed from `rt.addrs`, so it holds the WAN's current lease.
+    fn plan_ids(
+        &self,
+        doc: &Document,
+        rt: &Runtime<'_>,
+        plan: &mut Plan,
+    ) -> Result<(), EngineError> {
+        let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let Some(m) = suricata::SuricataModel::from_document(doc, &rt.addrs, cpus)? else {
+            return Ok(());
+        };
+        let files = self.staging.plan_files(&m.render(&self.templates)?);
+        let mut restart = std::collections::BTreeSet::new();
+        let mut reload = std::collections::BTreeSet::new();
+        let mut update = std::collections::BTreeSet::new();
+        for path in files.keys() {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            match name.as_deref().and_then(suricata::action_for) {
+                Some(UnitAction::Restart) => restart.insert(path.clone()),
+                Some(UnitAction::Reload) => reload.insert(path.clone()),
+                None => update.insert(path.clone()),
+            };
+        }
+        plan.files.extend(files);
+        plan.files.insert(
+            self.staging.live_dir(suricata::DIR).join(suricata::IPS_NFT),
+            FileSpec {
+                contents: m.ips_ruleset().into_bytes(),
+                mode: 0o600,
+            },
+        );
+        let unit = |action, inputs| UnitSpec { action, inputs };
+        plan.units
+            .insert(suricata::UNIT.into(), unit(UnitAction::Restart, restart));
+        plan.units.insert(
+            suricata::RELOAD_UNIT.into(),
+            unit(UnitAction::Restart, reload),
+        );
+        plan.units.insert(
+            suricata::TRIGGER_UNIT.into(),
+            unit(UnitAction::Restart, update),
+        );
+        if doc.ids.updates.enabled {
+            let dropin = self.rooted(Path::new(suricata::TIMER_DROPIN));
+            plan.files.insert(
+                dropin.clone(),
+                FileSpec {
+                    contents: suricata::timer_dropin(&doc.ids.updates).into_bytes(),
+                    mode: 0o644,
+                },
+            );
+            plan.units.insert(
+                suricata::TIMER_UNIT.into(),
+                unit(UnitAction::Restart, [dropin].into()),
+            );
+        }
+        Ok(())
+    }
+
+    /// Rewrites HOME_NET when the box's addresses changed (a new WAN lease)
+    /// and reloads Suricata's rules; `Ok(false)` when nothing changed or IDS
+    /// is off. The agent's address watcher calls this.
+    pub fn update_ids_home_net(
+        &self,
+        doc: &Document,
+        addrs: &BTreeMap<String, Vec<IfAddr>>,
+    ) -> Result<bool, EngineError> {
+        let Some(m) = suricata::SuricataModel::from_document(doc, addrs, 1)? else {
+            return Ok(false);
+        };
+        let Some(vars) = m
+            .render(&self.templates)?
+            .into_iter()
+            .find(|r| r.dest.as_os_str() == "vars.yaml")
+        else {
+            return Ok(false);
+        };
+        let path = self.staging.live_dir(suricata::DIR).join("vars.yaml");
+        if std::fs::read(&path).ok().as_deref() == Some(vars.contents.as_bytes()) {
+            return Ok(false);
+        }
+        write_atomic(&path, vars.contents.as_bytes(), 0o644)?;
+        let mut report = CommitReport::default();
+        self.run(
+            &Cmd::new("systemctl").args(["restart", suricata::RELOAD_UNIT]),
+            &mut report,
+        )?;
+        Ok(true)
     }
 
     fn rooted(&self, p: &Path) -> PathBuf {
@@ -471,6 +566,16 @@ impl Engine {
             self.run(&c, &mut report)?;
         }
 
+        let unit_dir = self.rooted(Path::new("/run/systemd/system"));
+        if delta
+            .files
+            .keys()
+            .chain(&delta.remove_files)
+            .any(|f| f.starts_with(&unit_dir))
+        {
+            self.run(&Cmd::new("systemctl").arg("daemon-reload"), &mut report)?;
+        }
+
         for (unit, spec) in &delta.units {
             let verb = match spec.action {
                 UnitAction::Reload => "reload-or-restart",
@@ -480,6 +585,25 @@ impl Engine {
                 &Cmd::new("systemctl").args([verb, unit.as_str()]),
                 &mut report,
             )?;
+        }
+
+        // units a document no longer wants (IDS switched off)
+        for unit in suricata::OWNED_UNITS {
+            if applied.plan.units.contains_key(*unit) && !p.plan.units.contains_key(*unit) {
+                self.run(&Cmd::new("systemctl").args(["stop", unit]), &mut report)?;
+            }
+        }
+        // the IPS queue goes live after Suricata (re)started: without
+        // fail-open a queue nobody reads drops everything
+        let ips = self.staging.live_dir(suricata::DIR).join(suricata::IPS_NFT);
+        if let Some(f) = delta.files.get(&ips) {
+            nft::load(r, f.contents.as_slice())?;
+            report.commands.push("nft -j -f - (ids queue)".into());
+        } else if delta.remove_files.contains(&ips) {
+            nft::load(r, suricata::ips_removal().as_str())?;
+            report
+                .commands
+                .push("nft -j -f - (ids queue removed)".into());
         }
 
         if delta.hooks.contains(&HookLevel::Config) {
@@ -725,6 +849,91 @@ mod tests {
                 .all(|c| c.contains("-c") || c.contains("-t") || c.contains("checkconf")),
             "{new_calls:#?}"
         );
+    }
+
+    #[test]
+    fn ids_lifecycle_detect_prevent_off() {
+        use sensr_schema::models::ids::IdsMode;
+        let root = tempfile::tempdir().unwrap();
+        let (mut e, runner) = engine(root.path());
+        let mut doc = home_router();
+        doc.ids.enabled = true;
+        let p = e.prepare(&doc, &Runtime::default()).unwrap();
+        e.commit(p).unwrap();
+        let dir = root.path().join("run/sensr/suricata");
+        for f in [
+            "suricata.yaml",
+            "vars.yaml",
+            "threshold.config",
+            "update.args",
+        ] {
+            assert!(dir.join(f).exists(), "{f}");
+        }
+        assert!(
+            root.path()
+                .join("run/systemd/system/sensr-suricata-update.timer.d/50-sensr.conf")
+                .exists()
+        );
+        let lines = runner.call_lines();
+        let has = |l: &[String], needle: &str| l.iter().any(|c| c.contains(needle));
+        assert!(has(&lines, "daemon-reload"), "{lines:#?}");
+        assert!(
+            has(&lines, "'restart' 'sensr-suricata.service'"),
+            "{lines:#?}"
+        );
+        assert!(has(
+            &lines,
+            "'restart' 'sensr-suricata-update-trigger.service'"
+        ));
+
+        // detect -> prevent: restart, and the queue table goes in after it
+        let before = runner.calls().len();
+        doc.ids.mode = IdsMode::Prevent;
+        let p = e.prepare(&doc, &Runtime::default()).unwrap();
+        let r = e.commit(p).unwrap();
+        let new = runner.call_lines()[before..].to_vec();
+        assert!(has(&new, "'restart' 'sensr-suricata.service'"), "{new:#?}");
+        let restart = r
+            .commands
+            .iter()
+            .position(|c| c.contains("sensr-suricata.service"));
+        let queue = r.commands.iter().position(|c| c.contains("ids queue"));
+        assert!(restart < queue && queue.is_some(), "{:#?}", r.commands);
+        assert!(
+            !has(&new, "update-trigger"),
+            "rule lists unchanged: no download"
+        );
+
+        // a new WAN lease only rewrites HOME_NET and reloads the rules
+        let before = runner.calls().len();
+        let addrs = BTreeMap::from([(
+            "wan".to_owned(),
+            vec![IfAddr {
+                addr: "198.51.100.7".parse().unwrap(),
+                prefix_len: 24,
+            }],
+        )]);
+        assert!(e.update_ids_home_net(&doc, &addrs).unwrap());
+        assert!(!e.update_ids_home_net(&doc, &addrs).unwrap(), "idempotent");
+        let vars = std::fs::read_to_string(dir.join("vars.yaml")).unwrap();
+        assert!(vars.contains("198.51.100.7/32"), "{vars}");
+        let new = runner.call_lines()[before..].to_vec();
+        assert_eq!(new.len(), 1, "{new:#?}");
+        assert!(new[0].contains("sensr-suricata-reload.service"));
+
+        // off: units stopped, queue table removed, files gone
+        let before = runner.calls().len();
+        doc.ids.enabled = false;
+        let p = e.prepare(&doc, &Runtime::default()).unwrap();
+        let r = e.commit(p).unwrap();
+        let new = runner.call_lines()[before..].to_vec();
+        assert!(has(&new, "'stop' 'sensr-suricata.service'"), "{new:#?}");
+        assert!(
+            has(&new, "'stop' 'sensr-suricata-update.timer'"),
+            "{new:#?}"
+        );
+        assert!(r.commands.iter().any(|c| c.contains("ids queue removed")));
+        assert!(!dir.join("suricata.yaml").exists());
     }
 
     #[test]

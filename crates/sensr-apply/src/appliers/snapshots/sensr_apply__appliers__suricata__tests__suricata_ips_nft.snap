@@ -1,0 +1,214 @@
+---
+source: crates/sensr-apply/src/appliers/suricata.rs
+expression: "serde_json::to_string_pretty(&nft).unwrap()"
+---
+{
+  "nftables": [
+    {
+      "add": {
+        "table": {
+          "family": "inet",
+          "name": "sensr_ips"
+        }
+      }
+    },
+    {
+      "delete": {
+        "table": {
+          "family": "inet",
+          "name": "sensr_ips"
+        }
+      }
+    },
+    {
+      "add": {
+        "table": {
+          "family": "inet",
+          "name": "sensr_ips"
+        }
+      }
+    },
+    {
+      "add": {
+        "chain": {
+          "family": "inet",
+          "table": "sensr_ips",
+          "name": "queue",
+          "type": "filter",
+          "hook": "forward",
+          "prio": 10,
+          "policy": "accept"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "family": "inet",
+          "table": "sensr_ips",
+          "chain": "queue",
+          "expr": [
+            {
+              "match": {
+                "op": "==",
+                "left": {
+                  "&": [
+                    {
+                      "ct": {
+                        "key": "mark"
+                      }
+                    },
+                    16777216
+                  ]
+                },
+                "right": 16777216
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "family": "inet",
+          "table": "sensr_ips",
+          "chain": "queue",
+          "expr": [
+            {
+              "match": {
+                "op": "==",
+                "left": {
+                  "meta": {
+                    "key": "iifname"
+                  }
+                },
+                "right": {
+                  "set": [
+                    "igc0"
+                  ]
+                }
+              }
+            },
+            {
+              "queue": {
+                "num": {
+                  "range": [
+                    0,
+                    2
+                  ]
+                },
+                "flags": [
+                  "bypass",
+                  "fanout"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "family": "inet",
+          "table": "sensr_ips",
+          "chain": "queue",
+          "expr": [
+            {
+              "match": {
+                "op": "==",
+                "left": {
+                  "meta": {
+                    "key": "oifname"
+                  }
+                },
+                "right": {
+                  "set": [
+                    "igc0"
+                  ]
+                }
+              }
+            },
+            {
+              "queue": {
+                "num": {
+                  "range": [
+                    0,
+                    2
+                  ]
+                },
+                "flags": [
+                  "bypass",
+                  "fanout"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "add": {
+        "chain": {
+          "family": "inet",
+          "table": "sensr_ips",
+          "name": "bypass",
+          "type": "filter",
+          "hook": "forward",
+          "prio": 11,
+          "policy": "accept"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "family": "inet",
+          "table": "sensr_ips",
+          "chain": "bypass",
+          "expr": [
+            {
+              "match": {
+                "op": "==",
+                "left": {
+                  "&": [
+                    {
+                      "meta": {
+                        "key": "mark"
+                      }
+                    },
+                    16777216
+                  ]
+                },
+                "right": 16777216
+              }
+            },
+            {
+              "mangle": {
+                "key": {
+                  "ct": {
+                    "key": "mark"
+                  }
+                },
+                "value": {
+                  "|": [
+                    {
+                      "ct": {
+                        "key": "mark"
+                      }
+                    },
+                    16777216
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

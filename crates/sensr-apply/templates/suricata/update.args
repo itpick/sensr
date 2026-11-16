@@ -1,0 +1,3 @@
+{% for a in s.update_args %}
+{{ a }}
+{% endfor %}

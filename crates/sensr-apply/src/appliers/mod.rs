@@ -16,6 +16,7 @@ pub mod interfaces;
 pub mod kea;
 pub mod nft;
 pub mod qdisc;
+pub mod suricata;
 pub mod sysctl;
 pub mod unbound;
 pub mod wireguard;

@@ -527,6 +527,7 @@ pub fn builtin_modules() -> Vec<Module> {
         crate::appliers::unbound::MODULE,
         crate::appliers::wireguard::MODULE,
         crate::appliers::interfaces::MODULE,
+        crate::appliers::suricata::MODULE,
     ]
 }
 
@@ -547,7 +548,9 @@ mod tests {
         let wg = crate::appliers::wireguard::tests::model();
         let wg = serde_json::to_value(wg.context().unwrap()).unwrap();
         let networkd = crate::appliers::interfaces::tests::context();
-        for part in [unbound, wg, networkd] {
+        let suricata =
+            serde_json::to_value(crate::appliers::suricata::tests::model().context()).unwrap();
+        for part in [unbound, wg, networkd, suricata] {
             for (k, v) in part.as_object().unwrap() {
                 obj.insert(k.clone(), v.clone());
             }
