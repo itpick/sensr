@@ -1,0 +1,6 @@
+/target
+/result*
+/.work
+/out
+/reference/opnsense/
+/reference/opnsense-issues/

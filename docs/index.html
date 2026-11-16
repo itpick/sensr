@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sensr installer</title>
+<meta name="description" content="sensr: a Rust firewall OS on NixOS, an OPNsense-style router for x86, Raspberry Pi 4/5 and VMs.">
+<style>
+  :root {
+    --bg: #f8fafa; --fg: #0f1a1a; --muted: #4b5a5a; --card: #fff; --line: #e1e8e8;
+    --accent: #0f766e; --accent-fg: #fff; --code: #eef3f3; --warn: #92400e; --warn-bg: #fef3c7;
+    --ok-bg: #dcfce7; --ok: #166534; --plan-bg: #e0e7ff; --plan: #3730a3; --logo-hl: #e0a800; --logo-s: #15803d; --logo-r: #b7410e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #081010; --fg: #eef5f5; --muted: #9db0b0; --card: #111c1c; --line: #1f2e2e;
+      --accent: #2dd4bf; --accent-fg: #062020; --code: #1a2626; --warn: #fcd34d; --warn-bg: #3a2a06;
+      --ok-bg: #0f3d22; --ok: #86efac; --plan-bg: #1e1b4b; --plan: #c7d2fe; --logo-hl: #facc15; --logo-s: #4ade80; --logo-r: #e2622f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 820px; margin: 0 auto; padding: 48px 16px 64px; }
+  h1 { font-size: 2.6rem; margin: 0 0 4px; letter-spacing: -0.03em; font-weight: 800; }
+  .logo .hl { color: var(--logo-hl); }
+  .logo .s { color: var(--logo-s); }
+  .logo .r { color: var(--logo-r); }
+  .sub { color: var(--muted); margin: 0 0 28px; }
+  .note { background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 10px 14px; font-size: .92rem; }
+  .boards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin: 28px 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; }
+  .card h2 { margin: 0 0 4px; font-size: 1.2rem; }
+  .tag { align-self: flex-start; font-size: .78rem; font-weight: 600; padding: 2px 8px; border-radius: 99px; margin-bottom: 10px; }
+  .plan { background: var(--plan-bg); color: var(--plan); }
+  .card ul { margin: 0 0 16px; padding-left: 18px; color: var(--muted); font-size: .92rem; flex: 1; }
+  .btn { display: block; text-align: center; background: var(--accent); color: var(--accent-fg);
+    text-decoration: none; font-weight: 600; padding: 12px 16px; border-radius: 8px; }
+  .btn:hover { filter: brightness(1.08); }
+  .btn[aria-disabled="true"] { background: transparent; color: var(--muted); border: 1px dashed var(--line); pointer-events: none; }
+  .small { font-size: .85rem; color: var(--muted); margin-top: 8px; text-align: center; }
+  .small a { color: inherit; }
+  h3 { margin: 32px 0 8px; }
+  .cmd { position: relative; }
+  pre { background: var(--code); border-radius: 8px; padding: 14px 16px; padding-right: 72px; overflow-x: auto; margin: 0;
+    font: 13.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .copy { position: absolute; top: 8px; right: 8px; font: 600 12px system-ui; padding: 4px 10px;
+    border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
+  ol { padding-left: 20px; } li { margin: 4px 0; }
+  code { background: var(--code); border-radius: 4px; padding: 1px 5px; font-size: .9em; }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  .scroll { overflow-x: auto; }
+  footer { margin-top: 40px; color: var(--muted); font-size: .85rem; }
+  footer a, p a, li a, td a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1 class="logo" aria-label="sensr"><span class="s">s</span><span class="hl">ens</span><span class="r">r</span></h1>
+  <p class="sub">A firewall and router OS written in Rust, built on NixOS. It aims to match OPNsense feature for feature, with atomic upgrades and rollback.</p>
+  <p class="note">Planning stage: no images have been released yet. The buttons below go live with the first release. If you need a router today, use <a href="https://itpick.github.io/opnsense-pi/">OPNsense for Raspberry Pi</a>.</p>
+
+  <div class="boards">
+    <div class="card">
+      <span class="tag plan">Planned</span>
+      <h2>x86_64 PC / appliance</h2>
+      <ul>
+        <li>UEFI USB installer, writes to an internal disk</li>
+        <li>Intel, Realtek and Mellanox NICs from the mainline kernel</li>
+        <li>AES-NI, so VPNs are fast</li>
+      </ul>
+      <a class="btn" aria-disabled="true" href="https://github.com/itpick/sensr/releases/latest/download/sensr-x86_64-installer.iso">Download installer ISO</a>
+      <div class="small">sha256 published alongside</div>
+    </div>
+    <div class="card">
+      <span class="tag plan">Planned</span>
+      <h2>Raspberry Pi 5</h2>
+      <ul>
+        <li>Onboard RP1 Ethernet with the mainline driver, no out-of-tree modules</li>
+        <li>RTL8156 2.5&nbsp;GbE and RTL8157 5&nbsp;GbE USB NICs</li>
+        <li>SD, USB and NVMe boot</li>
+      </ul>
+      <a class="btn" aria-disabled="true" href="https://github.com/itpick/sensr/releases/latest/download/sensr-pi5.img.zst">Download for Pi 5</a>
+      <div class="small">sha256 published alongside</div>
+    </div>
+    <div class="card">
+      <span class="tag plan">Planned</span>
+      <h2>Raspberry Pi 4</h2>
+      <ul>
+        <li>Onboard <code>genet</code> Ethernet as LAN</li>
+        <li>USB 3 NIC (RTL8153 / RTL8156 / AX88179) as WAN</li>
+        <li>No AES hardware, so VPNs are CPU-bound</li>
+      </ul>
+      <a class="btn" aria-disabled="true" href="https://github.com/itpick/sensr/releases/latest/download/sensr-pi4.img.zst">Download for Pi 4</a>
+      <div class="small">sha256 published alongside</div>
+    </div>
+    <div class="card">
+      <span class="tag plan">Planned</span>
+      <h2>Virtual machine</h2>
+      <ul>
+        <li>qcow2 for Proxmox, libvirt and QEMU</li>
+        <li>virtio NICs</li>
+        <li>The same image the CI tests boot</li>
+      </ul>
+      <a class="btn" aria-disabled="true" href="https://github.com/itpick/sensr/releases/latest/download/sensr-x86_64.qcow2.zst">Download qcow2</a>
+      <div class="small">aarch64 qcow2 also planned</div>
+    </div>
+  </div>
+
+  <h3>One-liner (Linux)</h3>
+  <p>Writes the Pi 5 image straight to a disk. Replace <code>/dev/sdX</code>; everything on it is erased.</p>
+  <div class="cmd">
+    <pre id="oneliner">curl -fL https://github.com/itpick/sensr/releases/latest/download/sensr-pi5.img.zst | zstd -dc | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress</pre>
+    <button class="copy" data-target="oneliner">Copy</button>
+  </div>
+  <p>Or, in Raspberry Pi Imager, choose <strong>Use custom</strong> and select the downloaded image.</p>
+
+  <h3>First-boot settings</h3>
+  <p>The FAT boot partition has a <code>sensr/</code> folder, which works like the <code>opnsense-pi/</code> folder in opnsense-pi:</p>
+  <div class="scroll">
+  <table>
+    <tr><th>File</th><th>Effect</th></tr>
+    <tr><td><code>config.json</code></td><td>A full sensr config (a backup export), applied once and then renamed to <code>config.json.applied</code>.</td></tr>
+    <tr><td><code>seed.toml</code></td><td>A short hand-written seed: hostname, admin password hash or SSH keys, which NIC is LAN and WAN (by MAC), WAN type. Merged over the defaults, then renamed <code>.applied</code>.</td></tr>
+    <tr><td><code>config.xml</code></td><td>An OPNsense backup, converted to sensr config on first boot. <code>sensr/import-report.txt</code> lists anything it couldn't map.</td></tr>
+    <tr><td><code>ifnames</code></td><td><code>&lt;mac&gt; &lt;name&gt;</code> lines that pin NIC names, so USB adapters can't swap LAN and WAN.</td></tr>
+    <tr><td><code>authorized_keys</code></td><td>SSH keys for the admin account.</td></tr>
+    <tr><td><code>reboot-after-minutes</code></td><td>A safety net for remote installs: reboots to the last good generation unless the new config is confirmed in time.</td></tr>
+  </table>
+  </div>
+
+  <h3>First boot</h3>
+  <ol>
+    <li>Pi: update the EEPROM bootloader first (Raspberry Pi OS: <code>sudo rpi-eeprom-update -a</code>).</li>
+    <li>Plug LAN into your computer. Without a seed, the first NIC found becomes LAN and the second becomes WAN; the console shows which is which.</li>
+    <li>Open <code>https://192.168.1.1</code> and finish the setup wizard. It makes you set an admin password.</li>
+  </ol>
+
+  <h3>Build it yourself</h3>
+  <div class="cmd">
+    <pre id="build">git clone https://github.com/itpick/sensr &amp;&amp; cd sensr &amp;&amp; nix build .#images.pi5</pre>
+    <button class="copy" data-target="build">Copy</button>
+  </div>
+
+  <footer>
+    Source and plan: <a href="https://github.com/itpick/sensr">github.com/itpick/sensr</a>.
+    Sibling project: <a href="https://itpick.github.io/opnsense-pi/">OPNsense for Raspberry Pi</a>.
+    sensr is an independent project. It is not affiliated with Deciso B.V., and it contains no OPNsense code. OPNsense® is a trademark of Deciso B.V.
+  </footer>
+</main>
+<script>
+  document.querySelectorAll(".copy").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var text = document.getElementById(b.dataset.target).textContent;
+      navigator.clipboard.writeText(text).then(function () {
+        b.textContent = "Copied";
+        setTimeout(function () { b.textContent = "Copy"; }, 1500);
+      });
+    });
+  });
+</script>
+</body>
+</html>

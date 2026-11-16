@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 72" role="img" aria-label="sensr">
+  <style>
+    .s { fill: #15803d; } .hl { fill: #e0a800; } .r { fill: #b7410e; }
+    @media (prefers-color-scheme: dark) { .s { fill: #4ade80; } .hl { fill: #facc15; } .r { fill: #e2622f; } }
+  </style>
+  <text x="4" y="56" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="64" font-weight="800" letter-spacing="-2"><tspan class="s">s</tspan><tspan class="hl">ens</tspan><tspan class="r">r</tspan></text>
+</svg>

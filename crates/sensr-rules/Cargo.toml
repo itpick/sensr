@@ -1,0 +1,13 @@
+[package]
+name = "sensr-rules"
+description = "Firewall rule IR, alias resolution and the nftables renderer (OPNsense counterpart: Firewall/FilterRule, filter.inc)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

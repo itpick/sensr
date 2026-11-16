@@ -1,0 +1,13 @@
+[package]
+name = "sensr-cli"
+description = "sensr command line and console menu: config import, validate, apply and diagnostics."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "rangeStrategy": "bump",
+  "lockFileMaintenance": { "enabled": true, "schedule": ["before 6am on monday"] },
+  "nix": { "enabled": true },
+  "packageRules": [
+    { "matchUpdateTypes": ["patch"], "groupName": "patch updates", "automerge": true },
+    { "matchUpdateTypes": ["minor"], "automerge": true },
+    { "matchUpdateTypes": ["major"], "automerge": false },
+    { "matchManagers": ["nix"], "schedule": ["before 6am on monday"], "automerge": true }
+  ],
+  "ignoreUnstable": true
+}

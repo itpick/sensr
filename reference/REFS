@@ -1,0 +1,8 @@
+# repo commit describe — pinned OPNsense reference sources (scripts/fetch-reference.sh --latest to bump)
+core 8b88393932c94b7dafea941803ae0fe34f966888 27.1.b-17-g8b88393932
+plugins af4166a2fe9f25fed16bd9d375375a6c61424935 27.1.d-233-gaf4166a2f
+docs 07a754a13b580393797a21321970a18b83b4dfb9 07a754a
+tools f8109cf12344e2b6aa280fcc4221631c9e57d468 26.7.9-3-gf8109cf
+changelog 666361ffd1fb9c987d22aa5033a8e046a2b8a854 666361f
+update 31df2fff576b01af96de687c553e2e9e529c3404 26.7-17-g31df2ff
+ports cb2106d1c2f125ca0dbcca0158add585e6b4dc74 26.7.9-4-gcb2106d1c2f

@@ -1,0 +1,52 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+# MSRV is always the latest stable; bumped with rust-toolchain.toml (docs/research/06 §5).
+rust-version = "1.100"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/itpick/sensr"
+
+# Every version here is the newest stable release on crates.io (checked 2026-11-15).
+# Renovate keeps them there; nightly CI fails if one falls >14 days behind.
+[workspace.dependencies]
+sensr-schema = { path = "crates/sensr-schema" }
+sensr-config = { path = "crates/sensr-config" }
+sensr-rules = { path = "crates/sensr-rules" }
+
+anyhow = "1.0.104"
+axum = "0.8.9"
+clap = { version = "4.6.7", features = ["derive"] }
+insta = "1.49.0"
+leptos = "0.8.23"
+nftables = "0.6.3"
+pretty_assertions = "1.4.1"
+proptest = "1.12.0"
+quick-xml = { version = "0.42.0", features = ["serialize"] }
+rtnetlink = "0.24.0"
+schemars = "1.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[workspace.lints.cargo]
+# The table above pins the whole planned stack at its latest versions before the
+# Phase 0 crates use it (docs/PLAN.md §8). Set this back to warn once they do.
+unused_workspace_dependencies = "allow"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

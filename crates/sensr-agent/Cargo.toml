@@ -1,0 +1,13 @@
+[package]
+name = "sensr-agent"
+description = "The privileged daemon: applies config via netlink and supervises the daemons sensr wraps."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

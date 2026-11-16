@@ -1,0 +1,13 @@
+[package]
+name = "sensr-config"
+description = "The config document store: revisions, history, audit and change events (OPNsense counterpart: Core/Config.php, config.xml)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

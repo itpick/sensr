@@ -1,0 +1,13 @@
+[package]
+name = "sensr-api"
+description = "Unprivileged HTTP API and web UI server (axum + Leptos SSR); talks to sensr-agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

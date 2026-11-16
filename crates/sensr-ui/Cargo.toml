@@ -1,0 +1,13 @@
+[package]
+name = "sensr-ui"
+description = "Leptos web UI with the OPNsense-style layout: sidebar menu tree, top bar, forms and grids."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
