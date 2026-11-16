@@ -198,6 +198,22 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for ArrayField<T> {
     }
 }
 
+impl<T: schemars::JsonSchema> schemars::JsonSchema for ArrayField<T> {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        format!("ArrayField_{}", T::schema_name()).into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let item = generator.subschema_for::<T>();
+        schemars::json_schema!({
+            "type": "object",
+            "description": "Items keyed by UUID, in order.",
+            "propertyNames": { "format": "uuid" },
+            "additionalProperties": item,
+        })
+    }
+}
+
 /// A typed reference to an item of an [`ArrayField<T>`] by UUID.
 ///
 /// The type parameter stops a reservation from pointing at, say, a firewall
@@ -261,6 +277,16 @@ impl<T> From<Uuid> for Relation<T> {
         Self::new(id)
     }
 }
+impl<T> schemars::JsonSchema for Relation<T> {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Relation".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string", "format": "uuid" })
+    }
+}
+
 impl<T> Serialize for Relation<T> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         self.id.serialize(s)

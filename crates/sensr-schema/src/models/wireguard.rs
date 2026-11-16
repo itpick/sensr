@@ -3,6 +3,7 @@
 use std::net::IpAddr;
 
 use ipnet::IpNet;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{check, yes};
@@ -12,7 +13,7 @@ use crate::refs::{ItemKind, RefContext, Validate};
 use crate::validation::{FieldPath, Validations, ValidatorKind, messages};
 
 /// WireGuard as a whole.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WireGuard {
     /// Master switch (OPNsense `general.enabled`).
@@ -27,7 +28,7 @@ pub struct WireGuard {
 }
 
 /// A local WireGuard instance (one `wg<instance>` device).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WgServer {
     /// Bring the instance up.
@@ -53,6 +54,7 @@ pub struct WgServer {
     pub dns: Vec<IpAddr>,
     /// Addresses of the tunnel interface.
     #[serde(default)]
+    #[schemars(with = "Vec<String>")]
     pub tunnel_addresses: Vec<IpNet>,
     /// Don't install routes for peers' allowed IPs.
     #[serde(default)]
@@ -66,7 +68,7 @@ pub struct WgServer {
 }
 
 /// A remote peer.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WgPeer {
     /// Use the peer.
@@ -81,6 +83,7 @@ pub struct WgPeer {
     pub preshared_key: Option<Secret<WgKey>>,
     /// Allowed IPs: traffic to these is routed to the peer, traffic from the
     /// peer must come from these (OPNsense `tunneladdress`).
+    #[schemars(with = "Vec<String>")]
     pub allowed_ips: Vec<IpNet>,
     /// Endpoint host; `None` waits for the peer to connect.
     #[serde(default, skip_serializing_if = "Option::is_none")]

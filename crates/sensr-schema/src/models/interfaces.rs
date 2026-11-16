@@ -9,6 +9,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use indexmap::IndexMap;
 use ipnet::{Ipv4Net, Ipv6Net};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{check, yes};
@@ -17,7 +18,7 @@ use crate::refs::{RefContext, Validate};
 use crate::validation::{FieldPath, Validations, ValidatorKind};
 
 /// All assigned interfaces, in assignment order.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct Interfaces(pub IndexMap<InterfaceId, Interface>);
 
@@ -51,7 +52,7 @@ impl Interfaces {
 /// What an interface is for. OPNsense infers this from the `wan`/`lan` ids
 /// and from whether a gateway is attached; sensr records it, because
 /// automatic outbound NAT, anti-lockout and default rules depend on it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InterfaceRole {
     /// Upstream: NAT source, default route, bogon/private blocking applies.
@@ -66,7 +67,7 @@ pub enum InterfaceRole {
 /// Queueing discipline on egress. The default is fq_codel because
 /// bufferbloat dominated the latency results in the evaluation
 /// (docs/research/07); OPNsense ships none.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Qdisc {
     /// Fair queueing with CoDel AQM.
@@ -84,7 +85,7 @@ pub enum Qdisc {
 }
 
 /// One assigned interface.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Interface {
     /// Administratively up.
@@ -131,7 +132,7 @@ pub struct Interface {
 }
 
 /// 802.1Q / 802.1ad tagging of a VLAN device.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum VlanProtocol {
     /// Customer tag (`802.1q`).
     #[default]
@@ -143,7 +144,7 @@ pub enum VlanProtocol {
 }
 
 /// A VLAN sub-interface: frames on `parent` tagged `tag`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Vlan {
     /// The device carrying the tagged frames.
@@ -180,7 +181,7 @@ impl Interface {
 }
 
 /// IPv4 addressing.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Ipv4Config {
     /// No IPv4.
@@ -201,6 +202,7 @@ pub enum Ipv4Config {
     /// Static address with prefix length (host bits are the address).
     Static {
         /// Address and prefix, e.g. `192.168.1.1/24`.
+        #[schemars(with = "String")]
         address: Ipv4Net,
         /// Upstream gateway, for WAN-type interfaces.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -228,7 +230,7 @@ impl Ipv4Config {
 }
 
 /// IPv6 addressing.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Ipv6Config {
     /// No IPv6 beyond link-local.
@@ -252,6 +254,7 @@ pub enum Ipv6Config {
     /// Static address with prefix length.
     Static {
         /// Address and prefix.
+        #[schemars(with = "String")]
         address: Ipv6Net,
         /// Upstream gateway.
         #[serde(default, skip_serializing_if = "Option::is_none")]

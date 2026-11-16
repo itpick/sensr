@@ -4,6 +4,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{check, yes};
@@ -14,7 +15,7 @@ use crate::validation::{FieldPath, Validations, ValidatorKind};
 
 /// Unbound `local-zone` type for the system domain: how names without local
 /// data are answered.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalZoneType {
     /// Answer local data, resolve everything else normally.
@@ -46,7 +47,7 @@ pub enum LocalZoneType {
 }
 
 /// The recursive resolver.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DnsResolver {
     /// Run the resolver.
@@ -112,7 +113,7 @@ impl Default for DnsResolver {
 
 /// Query forwarding (Unbound forward zones / OPNsense "Query Forwarding" and
 /// "DNS over TLS").
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Forwarding {
     /// Forward everything to `system.dns_servers` (OPNsense forwarding mode).
@@ -124,7 +125,7 @@ pub struct Forwarding {
 }
 
 /// One upstream server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Forwarder {
     /// Use this upstream.
@@ -147,7 +148,7 @@ pub struct Forwarder {
 }
 
 /// The data of a host override.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "rr", rename_all = "UPPERCASE", deny_unknown_fields)]
 pub enum DnsRecord {
     /// IPv4 address.
@@ -175,7 +176,7 @@ pub enum DnsRecord {
 }
 
 /// A static DNS record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HostOverride {
     /// Serve the record.

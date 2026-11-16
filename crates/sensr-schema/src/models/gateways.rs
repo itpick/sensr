@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{check, yes};
@@ -14,7 +15,7 @@ use crate::refs::{RefContext, Validate};
 use crate::validation::{FieldPath, Validations, ValidatorKind};
 
 /// All gateways and groups.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Gateways {
     /// Individual next hops.
@@ -38,7 +39,7 @@ impl Gateways {
 }
 
 /// One next hop on an interface.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Gateway {
     /// Disabled gateways are never used.
@@ -87,7 +88,7 @@ fn one() -> u8 {
 }
 
 /// When a group member counts as down (OPNsense `trigger`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupTrigger {
     /// The monitor reports it down.
@@ -102,7 +103,7 @@ pub enum GroupTrigger {
 }
 
 /// One member of a gateway group.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GroupMember {
     /// The gateway.
@@ -113,7 +114,7 @@ pub struct GroupMember {
 }
 
 /// A failover / load-balancing group, usable wherever a gateway is.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GatewayGroup {
     /// Name rules refer to.
