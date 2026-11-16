@@ -69,7 +69,7 @@ mod tests {
     fn lint_fixtures_t0347() {
         let all = all_xml();
         assert!(
-            all.len() >= 14,
+            all.len() >= 16,
             "fixture corpus went missing: {}",
             all.len()
         );
