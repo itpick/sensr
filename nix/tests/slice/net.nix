@@ -59,6 +59,8 @@
     phonePublic = "fRIi+M+cbRFQ1h80SGskSdjvmNqm7DXG/5KmeouX8yo=";
     # the fixture's psk for phone (32 bytes)
     phonePsk = "U1lOVEhFVElDLVdHLXBob25lLXBzay1OT1QtQS1SRUE=";
+    # peer "phone" in home-router.xml
+    phoneUuid = "6df6330a-0cd5-4702-8527-04771aa9d231";
     serverAddress = "10.10.10.1";
     phoneAddress = "10.10.10.2";
   };
