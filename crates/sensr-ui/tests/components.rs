@@ -7,7 +7,7 @@ use sensr_ui::api::{FieldError, Pending};
 use sensr_ui::form::{get_path, to_inputs};
 use sensr_ui::grid::{GridQuery, run_query};
 use sensr_ui::islands::{ApplyBanner, FormFields, GridIsland, SettingsFormIsland};
-use sensr_ui::models::{FormId, GridId, Location};
+use sensr_ui::models::{FormId, GridId};
 
 fn render(f: impl FnOnce() -> AnyView) -> Html {
     let owner = Owner::new();
@@ -62,14 +62,7 @@ const GRIDS: [GridId; 10] = [
 fn settings_forms_render_every_field_labelled() {
     let seed = sensr_ui::mock::seed();
     for form in FORMS {
-        let initial = match form.location(&None) {
-            Location::Path(p) => get_path(&seed, &p).cloned().unwrap_or_default(),
-            Location::Item { list, key, value } => get_path(&seed, &list)
-                .and_then(|l| l.as_array())
-                .and_then(|l| l.iter().find(|r| r[key] == value.as_str()))
-                .cloned()
-                .unwrap(),
-        };
+        let initial = sensr_ui::adapt::form_to_view(form, &seed, &form.scope(&None)).unwrap();
         let doc = render(|| view! { <SettingsFormIsland form scope=None initial/> }.into_any());
         assert_all_labelled(&doc, &format!("{form:?}"));
         let controls = doc
@@ -122,14 +115,18 @@ fn field_errors_attach_to_their_field() {
 fn grids_render_rows_with_table_semantics() {
     let seed = sensr_ui::mock::seed();
     for grid in GRIDS {
-        let loc = grid.location(&None);
-        let rows = get_path(&seed, &loc.list)
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let rows: Vec<_> = rows
-            .into_iter()
-            .filter(|r| loc.filter.as_ref().is_none_or(|(f, v)| r[*f] == v.as_str()))
+        let scope = grid.scope(&None);
+        let store = sensr_ui::adapt::store(grid, &scope, &seed);
+        let (sensr_ui::adapt::Store::Map(p) | sensr_ui::adapt::Store::Array(p)) = &store;
+        let items: Vec<serde_json::Value> = match get_path(&seed, p).unwrap() {
+            serde_json::Value::Object(m) => m.values().cloned().collect(),
+            serde_json::Value::Array(a) => a.clone(),
+            _ => unreachable!(),
+        };
+        let rows: Vec<_> = items
+            .iter()
+            .filter(|i| sensr_ui::adapt::in_scope(grid, &scope, &seed, i))
+            .map(|i| sensr_ui::adapt::to_view(grid, &seed, i))
             .collect();
         let page = run_query(&rows, grid.columns(), &GridQuery::default());
         let n = page.rows.len();

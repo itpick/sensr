@@ -18,6 +18,8 @@ pub mod pages;
 pub mod theme;
 
 #[cfg(feature = "ssr")]
+pub mod adapt;
+#[cfg(feature = "ssr")]
 pub mod mock;
 #[cfg(feature = "ssr")]
 pub mod server;
