@@ -681,6 +681,15 @@ impl Validate for Ids {
             }
         }
         for (id, m) in self.policies.iter() {
+            // suricata-update matchers are OR'ed, so "these rulesets AND this
+            // metadata" cannot be expressed: refuse it rather than widen it
+            if !m.rulesets.is_empty() && !m.metadata.is_empty() {
+                out.add(
+                    &at.join("policies").join(id),
+                    ValidatorKind::Callback,
+                    "A policy matches either rulesets or rule metadata, not both.",
+                );
+            }
             for (i, kv) in m.metadata.iter().enumerate() {
                 let ok = |s: &str| {
                     !s.is_empty()
@@ -912,6 +921,17 @@ mod tests {
                 description: None,
             });
         }
+        ids.policies.push(IdsPolicy {
+            enabled: true,
+            priority: 0,
+            rulesets: vec!["botcc.rules".parse().unwrap()],
+            metadata: vec![MetadataMatch {
+                key: "signature_severity".into(),
+                value: "Major".into(),
+            }],
+            action: PolicyAction::Drop,
+            description: None,
+        });
         ids.tuning.workers = Some(0);
         ids.updates.hour = 24;
         let v = doc_with(ids).validate();
@@ -925,6 +945,7 @@ mod tests {
             "already suppressed",
             "between 1 and 64",
             "between 0 and 23",
+            "not both",
         ] {
             assert!(text.contains(needle), "{needle}: {text}");
         }

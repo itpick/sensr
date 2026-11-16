@@ -91,6 +91,12 @@ impl SliceApplier {
                     if now == *known {
                         continue;
                     }
+                    // HOME_NET holds the WAN's lease: follow it
+                    match e.update_ids_home_net(doc, &now) {
+                        Ok(true) => tracing::info!("IDS HOME_NET updated"),
+                        Ok(false) => {}
+                        Err(err) => tracing::warn!(error = %err, "updating IDS HOME_NET"),
+                    }
                     match e.update_interface_sets(doc, &now) {
                         Ok(()) => {
                             tracing::info!(addresses = ?now, "interface sets updated");

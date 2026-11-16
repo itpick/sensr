@@ -1,0 +1,22 @@
+---
+source: crates/sensr-apply/src/appliers/suricata.rs
+expression: "files[\"update.args\"]"
+---
+--suricata-conf
+/run/sensr/suricata/suricata.yaml
+--data-dir
+/var/lib/suricata
+--output
+/var/lib/suricata/rules
+--no-merge
+--no-reload
+--no-test
+--enable-conf
+/run/sensr/suricata/enable.conf
+--disable-conf
+/run/sensr/suricata/disable.conf
+--drop-conf
+/run/sensr/suricata/drop.conf
+--modify-conf
+/run/sensr/suricata/modify.conf
+--etopen

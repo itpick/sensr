@@ -47,6 +47,31 @@ let
   # The daemons sensr-agent drives. They are in the agent's PATH and in
   # systemPackages (operators use nft/wg/unbound-control for diagnosis).
   kea = pkgs.sensr-kea;
+  suricata = pkgs.suricata;
+  # suricata-update is Python and needs PyYAML at run time
+  suricataPython = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+  # Suricata's command lines are rendered by the agent (capture mode, queue
+  # numbers), one argument per line, so nothing is re-split by a shell.
+  suricataStart = pkgs.writeShellScript "sensr-suricata-start" ''
+    set -eu
+    mapfile -t args < ${runtimeDir}/suricata/suricata.args
+    exec ${suricata}/bin/suricata "''${args[@]}"
+  '';
+  suricataUpdate = pkgs.writeShellScript "sensr-suricata-update" ''
+    set -eu
+    mapfile -t args < ${runtimeDir}/suricata/update.args
+    exec ${suricataPython.interpreter} ${suricata}/bin/suricata-update update "''${args[@]}"
+  '';
+  suricataSeed = pkgs.writeShellScript "sensr-suricata-seed" ''
+    set -eu
+    mkdir -p /var/lib/suricata/rules /var/lib/suricata/cache
+    # the classification and reference tables until the first rule update
+    # brings the sources' own
+    for f in classification.config reference.config; do
+      # the engine and the updater may both get here first
+      [ -e /var/lib/suricata/rules/$f ] || cp ${suricata}/etc/suricata/$f /var/lib/suricata/rules/$f || true
+    done
+  '';
   appliedPackages = with pkgs; [
     nftables
     kea
@@ -55,6 +80,7 @@ let
     iproute2
     conntrack-tools
     ethtool
+    suricata
   ];
 
   # /etc/sensr/version.json: the manifest of what this generation is
@@ -298,9 +324,19 @@ in
       "nf_conntrack"
       "wireguard"
       "8021q"
+      # IDS: af-packet capture, NFQUEUE for prevent mode
+      "af_packet"
+      "nft_queue"
+      "nfnetlink_queue"
     ];
 
     users.groups.sensr.gid = sensrGid;
+    users.groups.suricata = { };
+    users.users.suricata = {
+      isSystemUser = true;
+      group = "suricata";
+      description = "Suricata IDS";
+    };
     users.groups.sensr-api.gid = apiUid;
     users.users.sensr-api = {
       isSystemUser = true;
@@ -400,6 +436,8 @@ in
           runtimeDir
           # created by tmpfiles below; "-": a missing path must not stop the agent
           "-/run/systemd/network"
+          # runtime drop-ins (the IDS update timer's schedule)
+          "-/run/systemd/system"
           "-${cfg.seedDir}"
           "-/boot/firmware"
         ];
@@ -519,6 +557,116 @@ in
         CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
         ProtectSystem = "strict";
         UMask = "0022";
+      };
+    };
+
+    # Suricata (Services > Intrusion Detection). Config, arguments, HOME_NET
+    # and rule lists are rendered into /run/sensr/suricata by the agent.
+    systemd.services.sensr-suricata = {
+      description = "Suricata IDS/IPS (config rendered by sensr)";
+      after = [ "sensr-net.target" ];
+      partOf = [ "sensr-agent.service" ];
+      unitConfig.ConditionPathExists = "${runtimeDir}/suricata/suricata.yaml";
+      serviceConfig = commonHardening // {
+        ExecStartPre = suricataSeed;
+        ExecStart = suricataStart;
+        # a rule reload re-reads vars.yaml (HOME_NET), threshold.config and
+        # the rules; capture changes need a restart
+        ExecReload = "${pkgs.coreutils}/bin/kill -USR2 $MAINPID";
+        Restart = "on-failure";
+        RestartSec = 5;
+        User = "suricata";
+        Group = "suricata";
+        StateDirectory = "suricata";
+        StateDirectoryMode = "0750";
+        LogsDirectory = "suricata";
+        LogsDirectoryMode = "0750";
+        RuntimeDirectory = "suricata";
+        UMask = "0027";
+        AmbientCapabilities = [
+          "CAP_NET_ADMIN"
+          "CAP_NET_RAW"
+          "CAP_SYS_NICE"
+          "CAP_IPC_LOCK"
+        ];
+        CapabilityBoundingSet = [
+          "CAP_NET_ADMIN"
+          "CAP_NET_RAW"
+          "CAP_SYS_NICE"
+          "CAP_IPC_LOCK"
+        ];
+        # PCRE2's JIT needs writable+executable pages
+        MemoryDenyWriteExecute = false;
+        ProtectSystem = "strict";
+        PrivateDevices = true;
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_NETLINK"
+          "AF_PACKET"
+          "AF_INET"
+          "AF_INET6"
+        ];
+      };
+    };
+
+    # A rule reload for files Suricata re-reads (the agent restarts this).
+    systemd.services.sensr-suricata-reload = {
+      description = "Reload Suricata's rules if it runs";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${config.systemd.package}/bin/systemctl try-reload-or-restart sensr-suricata.service";
+      };
+    };
+
+    # Downloads rules with suricata-update, then reloads Suricata. Started by
+    # the agent when the rule lists change (through the trigger, so an apply
+    # never waits for a download) and daily by the timer.
+    systemd.services.sensr-suricata-update = {
+      description = "Download Suricata rules (lists rendered by sensr)";
+      wants = [ "network-online.target" ];
+      after = [
+        "network-online.target"
+        "sensr-net.target"
+      ];
+      unitConfig.ConditionPathExists = "${runtimeDir}/suricata/update.args";
+      startLimitIntervalSec = 0;
+      path = [ suricata ];
+      serviceConfig = commonHardening // {
+        Type = "oneshot";
+        ExecStartPre = suricataSeed;
+        ExecStart = suricataUpdate;
+        ExecStartPost = "+${config.systemd.package}/bin/systemctl try-reload-or-restart sensr-suricata.service";
+        User = "suricata";
+        Group = "suricata";
+        StateDirectory = "suricata";
+        StateDirectoryMode = "0750";
+        TimeoutStartSec = "15min";
+        # no network yet, a mirror down: try again instead of waiting a day
+        Restart = "on-failure";
+        RestartSec = "2min";
+        ProtectSystem = "strict";
+        PrivateDevices = true;
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_INET"
+          "AF_INET6"
+        ];
+      };
+    };
+    systemd.services.sensr-suricata-update-trigger = {
+      description = "Start a Suricata rule download in the background";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${config.systemd.package}/bin/systemctl start --no-block sensr-suricata-update.service";
+      };
+    };
+    # The agent sets the schedule (ids.updates) with a runtime drop-in and
+    # starts the timer; the default here only keeps the unit valid.
+    systemd.timers.sensr-suricata-update = {
+      description = "Daily Suricata rule download";
+      timerConfig = {
+        OnCalendar = "*-*-* 04:00:00";
+        Persistent = true;
       };
     };
 
