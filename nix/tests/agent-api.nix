@@ -53,6 +53,10 @@ pkgs.testers.runNixOSTest {
       virtualisation.memorySize = 1024;
       users.users.root.hashedPassword = pkgs.lib.mkForce null;
       services.sensr.seedDir = "/boot/sensr";
+      # First boot binds the test VLAN's card by MAC and renames it eth1 ->
+      # lan; the test network's own address (192.168.1.2; the client is .1)
+      # follows it.
+      systemd.network.networks."40-eth1".matchConfig.Name = pkgs.lib.mkForce "eth1 lan";
       systemd.tmpfiles.rules = [ "d /boot 0755 root root -" ];
       environment.etc."sensr-test/users.json".text = users;
       environment.etc."sensr-test/groups.json".text = groups;
