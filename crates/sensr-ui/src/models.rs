@@ -2261,6 +2261,7 @@ impl FormId {
             Self::UnboundCache => go::<UnboundCache>(),
             Self::UnboundAclDefault => go::<UnboundAclDefault>(),
             Self::UnboundForwarding => go::<UnboundForwarding>(),
+            Self::IdsSettings => go::<IdsSettings>(),
         }
     }
 

@@ -1089,6 +1089,7 @@ pub fn form_to_view(form: FormId, doc: &Value, scope: &str) -> Option<Value> {
                 "retention_days": get_path(&ids, "logging.retention_days").cloned().unwrap_or(Value::Null),
             })
         }
+        _ => return None,
     })
 }
 

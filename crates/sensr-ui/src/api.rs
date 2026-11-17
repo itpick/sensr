@@ -509,12 +509,6 @@ mod server {
         fn dns_stats(&self) -> BoxFuture<'_, ApiResult<DnsStats>> {
             Box::pin(async { Ok(crate::dnsstats::DnsStatsPaths::from_env().read()) })
         }
-        /// Run-time state of one subsystem as the agent reports it (`null` when the
-        /// subsystem is not running). Parse with [`crate::runtime::parse`].
-        fn runtime(
-            &self,
-            section: crate::runtime::RuntimeSection,
-        ) -> BoxFuture<'_, ApiResult<Value>>;
         /// Whether the caller's privileges cover `url` (an API path such as
         /// `/api/v1/ids/alerts`). Data the UI reads itself (the traffic and alert databases)
         /// is checked against the same ACL entries as the REST routes serving it.

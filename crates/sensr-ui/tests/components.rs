@@ -52,7 +52,7 @@ const FORMS: [FormId; 12] = [
     FormId::IdsSettings,
 ];
 
-const GRIDS: [GridId; 13] = [
+const GRIDS: [GridId; 15] = [
     GridId::Assignments,
     GridId::Aliases,
     GridId::FilterRules,
