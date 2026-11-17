@@ -498,7 +498,7 @@ mod tests {
                 .count()
         };
         let before = loads(&runner);
-        let typed: Document = serde_json::from_value(doc).unwrap();
+        let typed: Document = doc.clone();
         refresh_once(&feeds, &a.engine, &typed, 1_000);
         // BLOCKLIST arrived: one more transaction, a set update
         assert_eq!(loads(&runner), before + 1);
