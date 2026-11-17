@@ -3,15 +3,20 @@
 //! Pages are server-rendered; only the form, grid, banner and dashboard islands hydrate.
 
 use crate::actions::{
-    dns_stats, field_choices, form_load, grid_fetch, ids_alerts, insight_data, live_status,
-    revision_diff, revisions,
+    alias_feeds, dns_stats, field_choices, form_load, gateways_status, grid_fetch, ids_alerts,
+    insight_data, live_status, pd_status, revision_diff, revisions,
 };
 use crate::api::{
     AlertPage, DiffLine, DnsStats, INSIGHT_RANGES, InsightReport, TrafficPoint, TrafficRow,
 };
 use crate::grid::GridQuery;
-use crate::islands::{DashboardLive, GridIsland, SettingsFormIsland, bps, diff_class};
+use crate::islands::{
+    DashboardLive, GatewaysLive, GridIsland, SettingsFormIsland, bps, diff_class,
+};
+=======
+use crate::api::{DiffLine, DnsStats};
 use crate::models::*;
+use crate::runtime::{Ipv6Status, fmt_time, lifetime, until};
 use leptos::prelude::*;
 use leptos_router::hooks::{use_params_map, use_query_map};
 use std::marker::PhantomData;
@@ -116,10 +121,167 @@ pub fn InterfacePage() -> impl IntoView {
     view! { <SettingsForm<Interface> scope=id title="Basic configuration"/> }
 }
 
-/// Firewall › Aliases.
+/// Firewall › Aliases. Feed-backed aliases show what is loaded; GeoIP data carries the
+/// attribution its licence (CC BY 4.0) requires.
 #[component]
 pub fn Aliases() -> impl IntoView {
-    view! { <Grid<Alias>/> }
+    let credits = || {
+        Suspend::new(async move {
+            let mut notes: Vec<String> = alias_feeds()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|f| f.attribution)
+                .collect();
+            notes.sort();
+            notes.dedup();
+            notes
+                .into_iter()
+                .map(|n| view! { <p class="muted small attribution">{n}</p> })
+                .collect_view()
+        })
+    };
+    view! {
+        <Grid<Alias>/>
+        <Suspense fallback=|| ()>{credits}</Suspense>
+    }
+}
+
+/// System › Gateways › Status.
+#[component]
+pub fn GatewayStatusPage() -> impl IntoView {
+    let load = || {
+        Suspend::new(async move {
+            match gateways_status().await {
+                Ok(initial) => view! { <GatewaysLive initial/> }.into_any(),
+                Err(e) => load_error(e),
+            }
+        })
+    };
+    view! { <Suspense fallback=|| ()>{load}</Suspense> }
+}
+
+/// The IPv6 prefix delegation panel: delegated prefix and lifetimes per uplink, and the /64
+/// each LAN advertises (subnets of a withdrawn prefix flagged deprecated).
+#[component]
+pub fn Ipv6Prefixes(status: Ipv6Status) -> impl IntoView {
+    let now = status.now;
+    let body = if status.uplinks.is_empty() {
+        view! { <p class="muted">"No interface requests a delegated prefix."</p> }.into_any()
+    } else {
+        status
+            .uplinks
+            .into_iter()
+            .map(|u| {
+                let up = u.interface.to_uppercase();
+                let current = match u.state.current {
+                    Some(c) => view! {
+                        <dl class="kv">
+                            <dt>"Delegated prefix"</dt><dd><code>{c.prefix}</code></dd>
+                            <dt>"Preferred for"</dt><dd>{until(now, c.preferred_until)}</dd>
+                            <dt>"Valid for"</dt><dd>{until(now, c.valid_until)}</dd>
+                        </dl>
+                    }
+                    .into_any(),
+                    None => view! { <p class="muted">"No prefix delegated."</p> }.into_any(),
+                };
+                let stale = u
+                    .state
+                    .stale
+                    .into_iter()
+                    .map(|p| view! {
+                        <li><code>{p.prefix}</code>" "<span class="pill pill-warn">"deprecated"</span>
+                            <span class="muted">{format!(" withdrawn; advertised until {}", fmt_time(p.deprecate_until))}</span></li>
+                    })
+                    .collect_view();
+                let rows = u
+                    .advertised
+                    .into_iter()
+                    .flat_map(|(lan, list)| list.into_iter().map(move |a| (lan.clone(), a)))
+                    .map(|(lan, a)| view! {
+                        <tr class:disabled=a.deprecated>
+                            <td>{lan.to_uppercase()}</td>
+                            <td><code>{a.prefix}</code></td>
+                            <td class="num">{lifetime(a.preferred_lifetime_secs)}</td>
+                            <td class="num">{lifetime(a.valid_lifetime_secs)}</td>
+                            <td>{if a.deprecated {
+                                view! { <span class="pill pill-warn">"deprecated"</span> }.into_any()
+                            } else {
+                                view! { <span class="pill pill-on">"preferred"</span> }.into_any()
+                            }}</td>
+                        </tr>
+                    })
+                    .collect_view();
+                view! {
+                    <h3>{format!("Uplink {up}")}</h3>
+                    {current}
+                    <ul class="plain">{stale}</ul>
+                    <div class="table-wrap">
+                    <table>
+                        <caption class="sr-only">{format!("Prefixes advertised from {up}")}</caption>
+                        <thead><tr>
+                            <th scope="col">"Interface"</th><th scope="col">"Prefix"</th>
+                            <th scope="col">"Preferred lifetime"</th><th scope="col">"Valid lifetime"</th>
+                            <th scope="col">"State"</th>
+                        </tr></thead>
+                        <tbody>{rows}</tbody>
+                    </table>
+                    </div>
+                }
+            })
+            .collect_view()
+            .into_any()
+    };
+    view! {
+        <section class="card" aria-labelledby="pd-head">
+            <h2 id="pd-head">"IPv6 prefix delegation"</h2>
+            {body}
+        </section>
+    }
+}
+
+/// Interfaces › Overview: link state and addresses, plus IPv6 prefix delegation.
+#[component]
+pub fn InterfacesOverview() -> impl IntoView {
+    let load = || {
+        Suspend::new(async move {
+            let st = match live_status().await {
+                Ok(s) => s,
+                Err(e) => return load_error(e),
+            };
+            let pd = pd_status().await.unwrap_or_default();
+            let rows = st
+                .interfaces
+                .into_iter()
+                .map(|i| view! {
+                    <tr>
+                        <td><strong>{i.name}</strong></td>
+                        <td>{i.device}</td>
+                        <td><span class=if i.up { "pill pill-on" } else { "pill pill-off" }>{if i.up { "up" } else { "down" }}</span></td>
+                        <td>{i.ipv4.unwrap_or_default()}</td>
+                        <td>{i.ipv6.unwrap_or_default()}</td>
+                    </tr>
+                })
+                .collect_view();
+            view! {
+                <section class="card" aria-labelledby="if-head">
+                    <h2 id="if-head">"Interfaces"</h2>
+                    <div class="table-wrap">
+                    <table>
+                        <thead><tr>
+                            <th scope="col">"Interface"</th><th scope="col">"Device"</th><th scope="col">"Status"</th>
+                            <th scope="col">"IPv4 address"</th><th scope="col">"IPv6 address"</th>
+                        </tr></thead>
+                        <tbody>{rows}</tbody>
+                    </table>
+                    </div>
+                </section>
+                <Ipv6Prefixes status=pd/>
+            }
+            .into_any()
+        })
+    };
+    view! { <Suspense fallback=|| ()>{load}</Suspense> }
 }
 
 /// Firewall › Rules, one tab per interface; drag rows to reorder.
@@ -403,27 +565,6 @@ pub fn WireguardPeers() -> impl IntoView {
 #[component]
 pub fn SystemGeneralPage() -> impl IntoView {
     view! { <SettingsForm<SystemGeneral> title="System"/> }
-}
-
-fn fmt_time(t: u64) -> String {
-    // UTC, no tz database needed: civil-from-days (Howard Hinnant's algorithm).
-    let days = (t / 86_400) as i64;
-    let secs = t % 86_400;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC",
-        secs / 3600,
-        secs / 60 % 60,
-        secs % 60
-    )
 }
 
 /// System › Configuration › History: revisions, diff between any two, rollback.

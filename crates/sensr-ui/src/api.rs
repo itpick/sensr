@@ -1,9 +1,9 @@
 //! The UI's view of the sensr API: wire types shared with the browser, and (server side) the
 //! [`Backend`] trait the pages are written against.
 //!
-//! The trait mirrors the sensr-api REST surface (config get/set/commit/history/diff plus status
-//! and sessions) so the mock in [`crate::mock`] and the HTTP client can be swapped without the
-//! pages noticing.
+//! The trait mirrors the sensr-api REST surface (config get/set/commit/history/diff plus status,
+//! run-time views and sessions) so the mock in [`crate::mock`] and the HTTP client can be
+//! swapped without the pages noticing.
 
 use serde::{Deserialize, Serialize};
 
@@ -231,8 +231,10 @@ pub struct SystemStatus {
     pub mem_total: u64,
     /// Interfaces, in assignment order.
     pub interfaces: Vec<InterfaceStatus>,
-    /// Gateways.
-    pub gateways: Vec<GatewayStatus>,
+    /// Gateways, from the gateway monitor's run-time view (filled by the dashboard's
+    /// server function, so backends leave it empty).
+    #[serde(default)]
+    pub gateways: Vec<crate::runtime::GatewayRow>,
     /// Recent traffic per interface.
     pub traffic: Vec<TrafficSeries>,
     /// All interfaces together from the traffic database (Reporting › Insight), when
@@ -524,6 +526,12 @@ mod server {
                 std::path::PathBuf::from,
             )
         }
+        /// Run-time state of one subsystem as the agent reports it (`null` when the
+        /// subsystem is not running). Parse with [`crate::runtime::parse`].
+        fn runtime(
+            &self,
+            section: crate::runtime::RuntimeSection,
+        ) -> BoxFuture<'_, ApiResult<Value>>;
     }
 
     /// A backend bound to one signed-in user (their identity and privileges travel with

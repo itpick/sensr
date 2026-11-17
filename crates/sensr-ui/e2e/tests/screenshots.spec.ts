@@ -7,6 +7,7 @@ const pages: [string, string][] = [
   ["dashboard", "/"],
   ["interfaces-assignments", "/ui/interfaces/assignment"],
   ["interfaces-wan", "/ui/interfaces/if/wan"],
+  ["interfaces-overview", "/ui/interfaces/overview"],
   ["firewall-aliases", "/ui/firewall/alias"],
   ["firewall-rules-lan", "/ui/firewall/filter/lan"],
   ["firewall-source-nat", "/ui/firewall/source_nat"],
@@ -28,6 +29,7 @@ const pages: [string, string][] = [
   ["services-ids-alerts", "/ui/ids/alerts"],
   ["reporting-insight", "/ui/diagnostics/networkinsight"],
   ["reporting-insight-host", "/ui/diagnostics/networkinsight?range=7d&host=192.168.1.100"],
+  ["system-gateways-status", "/ui/routing/status"],
 ];
 
 const viewports = { desktop: { width: 1366, height: 860 }, phone: { width: 390, height: 844 } };

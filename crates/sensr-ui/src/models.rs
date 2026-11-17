@@ -250,6 +250,10 @@ pub struct Alias {
     pub kind: String,
     /// Entries, one per line.
     pub content: Vec<String>,
+    /// URL table refresh period, whole days.
+    pub refresh_days: Option<u16>,
+    /// URL table refresh period, additional hours.
+    pub refresh_hours: Option<u8>,
     /// Description.
     pub description: String,
 }
@@ -262,7 +266,13 @@ impl FormModel for Alias {
                 .required()
                 .help("Letters, digits and underscores; must not start with a digit."),
             F::new("type", "Type", K::Select(ALIAS_TYPES)).required(),
-            F::new("content", "Content", K::Lines).help("One entry per line."),
+            F::new("content", "Content", K::Lines).help(
+                "One entry per line. BGP ASN: AS numbers (AS64500 or 64500); URL table: one URL.",
+            ),
+            F::new("refresh_days", "Refresh frequency (days)", K::Number { min: 0, max: 999 })
+                .help("URL table only: how often the list is fetched again. Leave both empty for the default."),
+            F::new("refresh_hours", "Refresh frequency (hours)", K::Number { min: 0, max: 23 })
+                .help("URL table only: hours on top of the days."),
             F::new("description", "Description", K::Text),
         ];
         FIELDS
@@ -300,9 +310,23 @@ impl FormModel for Alias {
                 "url" | "url_table" => {
                     !(entry.starts_with("http://") || entry.starts_with("https://"))
                 }
+                "asn" => {
+                    let d = entry.trim();
+                    let d = d
+                        .strip_prefix("AS")
+                        .or_else(|| d.strip_prefix("as"))
+                        .unwrap_or(d);
+                    d.parse::<u32>().is_err()
+                }
                 _ => false,
             }
         };
+        if self.kind == "url_table" && self.content.len() > 1 {
+            e.push(FieldError::new(
+                "content",
+                "A URL table loads a single URL; use a URL alias for several.",
+            ));
+        }
         if let Some(entry) = self.content.iter().find(|c| bad(c)) {
             e.push(FieldError::new(
                 "content",
@@ -320,6 +344,8 @@ impl GridModel for Alias {
             Column::text("name", "Name"),
             Column::text("type", "Type"),
             Column::list("content", "Content"),
+            Column::status("loaded", "Loaded"),
+            Column::status("updated", "Last updated"),
             Column::text("description", "Description"),
         ];
         C
@@ -2539,7 +2565,12 @@ mod tests {
         ] {
             let meta = g.meta();
             assert!(!meta.columns.is_empty());
-            for c in meta.columns {
+            // Run-time columns are filled by the server, not stored.
+            for c in meta
+                .columns
+                .iter()
+                .filter(|c| c.kind != crate::grid::ColumnKind::Status)
+            {
                 assert!(
                     meta.default_row.get(c.path).is_some(),
                     "{g:?} column {} is not a model field",
