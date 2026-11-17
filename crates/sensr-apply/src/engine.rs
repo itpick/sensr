@@ -128,6 +128,8 @@ pub struct Prepared {
     pub warnings: Vec<String>,
     /// aliases whose contents could not be resolved (kept from before)
     pub alias_failed: Vec<String>,
+    /// alias contents the ruleset was rendered with
+    pub aliases: BTreeMap<String, rules_nft::ResolvedAlias>,
     secrets: Vec<(PathBuf, String)>,
 }
 
@@ -213,6 +215,7 @@ impl Engine {
                 .map(|w| format!("{}: {}", w.label, w.message))
                 .collect(),
             alias_failed: compiled.aliases.failed.iter().cloned().collect(),
+            aliases: compiled.aliases.aliases.clone(),
             secrets,
         })
     }
@@ -841,6 +844,31 @@ impl Engine {
                 source,
             },
         )?;
+        nft::load(self.runner.as_ref(), &buf)?;
+        Ok(())
+    }
+}
+
+impl Engine {
+    /// Replaces the contents of the named aliases' sets in one transaction
+    /// (alias refresh): no re-render, conntrack state untouched.
+    pub fn update_alias_sets(
+        &self,
+        updates: &[(String, rules_nft::ResolvedAlias)],
+    ) -> Result<(), EngineError> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let sets: Vec<_> = updates
+            .iter()
+            .flat_map(|(name, a)| rules_nft::alias_set_updates(name, a))
+            .collect();
+        let mut buf = Vec::new();
+        rules_nft::render_set_updates(&rules_nft::Options::default().table, &sets, &mut buf)
+            .map_err(|source| EngineError::Io {
+                path: PathBuf::from("<nft alias update>"),
+                source,
+            })?;
         nft::load(self.runner.as_ref(), &buf)?;
         Ok(())
     }

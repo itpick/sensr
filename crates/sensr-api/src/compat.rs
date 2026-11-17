@@ -258,6 +258,62 @@ pub async fn alias_search(
     Ok(Json(recordset(rows, &q.merge(body.map(|Json(b)| b)))))
 }
 
+/// `GET /api/routes/gateway/status` (dashboard Gateways widget): OPNsense's
+/// shape, `{"items": [{name, address, status, status_translated, loss,
+/// delay, stddev, monitor}], "status": "ok"}`.
+pub async fn gateway_status(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+) -> Result<Json<Value>, ApiError> {
+    let op = Op::Runtime {
+        section: sensr_ipc::RuntimeSection::Gateways,
+    };
+    let v = match crate::native::call(&state, &caller, op).await? {
+        Response::Value(v) => v.unwrap_or(Value::Null),
+        _ => Value::Null,
+    };
+    Ok(Json(gateway_items(&v)))
+}
+
+/// The native gateways view in OPNsense's widget shape.
+pub fn gateway_items(view: &Value) -> Value {
+    let fmt = |v: Option<f64>, unit: &str| match v {
+        Some(x) => format!("{x:.1} {unit}"),
+        None => "~".to_owned(),
+    };
+    let items: Vec<Value> = view
+        .get("gateways")
+        .and_then(Value::as_array)
+        .map(|gs| {
+            gs.iter()
+                .map(|g| {
+                    let text = g.get("status_text").and_then(Value::as_str).unwrap_or("down");
+                    let translated = match text {
+                        "none" => "Online",
+                        "delay" => "Latency",
+                        "loss" => "Packetloss",
+                        "delay+loss" => "Latency, Packetloss",
+                        "force_down" => "Offline (forced)",
+                        _ => "Offline",
+                    };
+                    json!({
+                        "name": g.get("name"),
+                        "address": g.get("next_hop").cloned().unwrap_or(json!("~")),
+                        "monitor": g.get("monitor_address").cloned().unwrap_or_else(|| g.get("next_hop").cloned().unwrap_or(json!("~"))),
+                        "status": text,
+                        "status_translated": translated,
+                        "loss": fmt(g.get("loss_pct").and_then(Value::as_f64), "%"),
+                        "delay": fmt(g.get("latency_ms").and_then(Value::as_f64), "ms"),
+                        "stddev": fmt(g.get("stddev_ms").and_then(Value::as_f64), "ms"),
+                        "defaultgw": g.get("active_default").cloned().unwrap_or(json!(false)),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({"items": items, "status": "ok"})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +322,19 @@ mod tests {
         (0..n)
             .map(|i| json!({"name": format!("alias{i}"), "type": "host"}))
             .collect()
+    }
+
+    #[test]
+    fn gateway_widget_shape() {
+        let view = json!({"gateways": [
+            {"name": "WAN_DHCP", "next_hop": "192.0.2.1", "status_text": "none", "latency_ms": 4.25, "stddev_ms": 0.5, "loss_pct": 0.0, "active_default": true},
+            {"name": "WAN_DHCP6", "next_hop": null, "status_text": "down"}
+        ]});
+        let v = gateway_items(&view);
+        assert_eq!(v["items"][0]["status_translated"], "Online");
+        assert_eq!(v["items"][0]["delay"], "4.2 ms");
+        assert_eq!(v["items"][1]["status_translated"], "Offline");
+        assert_eq!(v["items"][1]["loss"], "~");
     }
 
     #[test]

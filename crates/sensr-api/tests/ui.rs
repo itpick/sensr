@@ -226,3 +226,31 @@ async fn ui_login_renders_agent_data_and_shares_the_session() {
     .await;
     assert_eq!(status, 401, "logout ends the shared session");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_pages_render_without_runtime_data() {
+    // The fake applier reports no gateway monitor, feeds or prefix delegation: the pages
+    // still render, saying there is nothing to show.
+    let fx = start().await;
+    let (_, head) = login(&fx, "admin", "adminpw").await;
+    let cookie = format!("sensr_session={}", session_cookie(&head).unwrap());
+    for (path, title, expect) in [
+        (
+            "/ui/routing/status",
+            "System: Gateways: Status",
+            "No gateways are monitored.",
+        ),
+        (
+            "/ui/interfaces/overview",
+            "Interfaces: Overview",
+            "No interface requests a delegated prefix.",
+        ),
+        ("/", "Lobby: Dashboard", "No gateway data."),
+        ("/ui/firewall/alias", "Firewall: Aliases", "Last updated"),
+    ] {
+        let (status, _, body) = http(&fx, "GET", path, &[("Cookie", &cookie)], "").await;
+        assert_eq!(status, 200, "{path}");
+        assert!(body.contains(title), "{path}: title");
+        assert!(body.contains(expect), "{path}: {body}");
+    }
+}

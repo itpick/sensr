@@ -392,6 +392,90 @@ pub fn snat_rule(r: &crate::nat::SnatRule, ifs: &InterfaceMap, out: &mut String)
     out.push('\n');
 }
 
+/// One 1:1 NAT line as `DNatRule::__toString` renders it (`nat`,
+/// `nat_rdr` and `nat_refl` rule types).
+pub fn static_rule(r: &crate::nat::StaticRule, ifs: &InterfaceMap, out: &mut String) {
+    use crate::nat::{StaticKind, StaticPart};
+    if !r.debug.is_empty() {
+        let _ = writeln!(out, "#debug:{}", r.debug.join("|"));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        let t = s.trim();
+        if !t.is_empty() {
+            parts.push(t.to_owned());
+        }
+    };
+    if !r.enabled {
+        push("#".into());
+    }
+    // the external address is printed as configured, also when invalid
+    let external = match &r.external {
+        Addr::Any => None,
+        Addr::Invalid(t) => Some(t.clone()),
+        a => Some(addr_text(a, ifs)),
+    };
+    let dev = dev_of(&r.interface, ifs);
+    match &r.part {
+        StaticPart::Map(kind) => {
+            push(
+                match kind {
+                    StaticKind::Binat => "binat",
+                    StaticKind::Nat => "nat",
+                }
+                .into(),
+            );
+            if r.log {
+                push("log".into());
+            }
+            if let Some(d) = &dev {
+                push(format!("on {d}"));
+            }
+            push(format!("from {}", plain_addr(&r.internal, ifs)));
+            push(format!("to {}", plain_addr(&r.peer, ifs)));
+            if let Some(e) = external {
+                push(format!("-> {e}"));
+            }
+        }
+        StaticPart::Reflection => {
+            push("rdr".into());
+            if let Some(d) = &dev {
+                push(format!("on {d}"));
+            }
+            push(curly("from", &plain_addr(&r.peer, ifs)));
+            if let Some(e) = external {
+                push(curly("to", &e));
+            }
+            push(format!(
+                "{} bitmask",
+                curly("->", &plain_addr(&r.internal, ifs))
+            ));
+        }
+        StaticPart::Helper => {
+            push("nat".into());
+            if let Some(d) = &dev {
+                push(format!("on {d}"));
+            }
+            if let Some(f) = r.family {
+                push(f.pf().into());
+            }
+            if let Some(d) = &dev {
+                push(format!("from ({d}:network)"));
+            }
+            push(curly("to", &plain_addr(&r.internal, ifs)));
+            if let Some(d) = &dev {
+                push(format!("-> ({d})"));
+            }
+            push("port 1024:65535".into());
+        }
+    }
+    if !r.descr.is_empty() {
+        push(format!("# {}", r.descr.replace(['\r', '\n'], "")));
+    }
+    out.push_str(&parts.join(" "));
+    out.push('\n');
+}
+
 /// The NAT section as `Plugin::outputNatRules` orders it: by priority, one
 /// header per priority, rdr and nat rules of one priority in registration
 /// order (port forwards are registered after outbound rules).
@@ -401,12 +485,17 @@ pub fn nat_rules(nat: &crate::nat::NatRules, ifs: &InterfaceMap) -> String {
         .iter()
         .map(|r| r.priority)
         .chain(nat.rdr.iter().map(|r| r.priority))
+        .chain(nat.static_nat.iter().map(|r| r.priority))
         .collect();
     prios.sort_unstable();
     prios.dedup();
     let mut out = String::new();
     for p in prios {
         let _ = writeln!(out, "# [prio: {p}]");
+        // pf.inc registers 1:1 rules before filter.inc registers the rest
+        for r in nat.static_nat.iter().filter(|r| r.priority == p) {
+            static_rule(r, ifs, &mut out);
+        }
         for r in nat.snat.iter().filter(|r| r.priority == p) {
             snat_rule(r, ifs, &mut out);
         }

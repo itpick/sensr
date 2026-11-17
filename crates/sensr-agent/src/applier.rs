@@ -34,6 +34,12 @@ pub trait Applier: Send + 'static {
 
     /// Makes the system match `next`. Must be idempotent.
     fn apply(&mut self, running: Option<&Document>, next: &Document) -> Result<(), ApplyError>;
+
+    /// Run-time state of a subsystem (gateway status, alias feeds, PD), as
+    /// JSON; `None` when this pipeline has none.
+    fn runtime(&self, _section: sensr_ipc::RuntimeSection) -> Option<Value> {
+        None
+    }
 }
 
 /// Sections and the unit that serves them, for the preview plan.

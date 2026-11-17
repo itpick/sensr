@@ -63,8 +63,21 @@ left alone.
 
 Chains `nat_pre` (nat prerouting, prio −100) and `nat_post` (nat postrouting,
 prio 100) in the same table. pf NAT rules are first-match; so are nft NAT
-statements. Golden: `slice`; `scripts/netns-slice-test.sh` checks the slice
-golden with real packets in network namespaces.
+statements. Goldens: `slice`, `doc-home-router`, `nat-one-to-one`;
+`scripts/netns-slice-test.sh` and `scripts/netns-home-router-test.sh` check
+them with real packets in network namespaces; `tests/nat.rs` pins the order.
+
+Order: upstream registers rules by priority (`Plugin::outputNatRules`):
+MVC `snatrules` 50, legacy manual outbound 100 (only in hybrid and advanced
+mode), automatic outbound 200 (automatic and hybrid), anti-lockout `no rdr`
+300, 1:1 500, port forwards 600. pf keeps three translation rulesets and
+consults them as `pf_get_translation` does: inbound rdr, then binat;
+outbound binat, then nat. So `nat_pre` holds the rdr-type rules by priority
+followed by the inbound half of every `binat`, and `nat_post` starts with the
+outbound half of every `binat` (ahead of the CARP exemption, which pf only
+has in the nat ruleset), then the nat-type rules by priority. sensr keeps
+one manual outbound list and puts all of it at 100; the pf oracle therefore
+prints MVC rules under `# [prio: 100]` instead of 50 (order unchanged).
 
 | pf (OPNsense) | nftables |
 |---|---|
@@ -79,8 +92,16 @@ golden with real packets in network namespaces.
 | `rdr … port 1000:1010 -> … port 2000` (shifted range) | one rule per port (≤ 64), so the offset is exact |
 | `rdr pass …` | `ct mark set ct mark \| 0x10000` before `dnat`; `forward` accepts marked connections before the filter |
 | `no rdr …` (anti-lockout: `filter_auto_destination_nat`) | `accept` before the redirects |
-| NAT reflection (`natreflection` enable/purenat) | the `rdr` repeated on every interface without a gateway |
+| NAT reflection (`natreflection` enable/purenat) | the `rdr` repeated on every interface without a gateway that has an address of the forward's family; `enable` and `purenat` are the same in OPNsense (`ForwardRule`), FreeBSD's NAT+proxy mode does not exist there |
+| reflection per rule vs global | the rule's `natreflection` wins; empty takes `reflection_dnat` (`nat.reflection.port_forwards`) |
 | reflection helper (`enablenatreflectionhelper`) | `oifname "<if>" ip saddr @if_<if>_n4 ip daddr <target> th dport <port> masquerade` in `nat_post` |
+| `binat on wan from 10.0.0.5 to any -> 203.0.113.5` (1:1) | `nat_post`: `oifname "<wan>" ip saddr 10.0.0.5 snat ip to 203.0.113.5`; `nat_pre`: `iifname "<wan>" ip daddr 203.0.113.5 dnat ip to 10.0.0.5` |
+| `binat … from 10.0.0.0/24 … -> 203.0.113.0/24` | `snat ip prefix to 203.0.113.0/24` / `dnat ip prefix to 10.0.0.0/24` (JSON `"flags": ["netmap"], "type_flags": ["prefix"]`): host bits are kept, as pf's `pf_poolmask` does; a bare external host takes the internal prefix length (`DNatRule`) |
+| `binat … to 198.51.100.0/24` (1:1 destination) | outbound `ip daddr 198.51.100.0/24`, inbound `ip saddr 198.51.100.0/24` |
+| `nat on wan from (lan:network) to any -> 203.0.113.9` (1:1 type nat) | outbound only, at priority 500 among the nat rules; an external network maps every source to its first address as written (pf pool type none) |
+| 1:1 reflection `rdr on lan from {any} to {203.0.113.0/24} -> {10.0.0.0/24} bitmask` | `iifname "<lan>" ip daddr 203.0.113.0/24 dnat ip prefix to 10.0.0.0/24`, at priority 500 among the redirects; emitted when the rule's `natreflection` is `enable` or empty with `reflection_binat` (`nat.reflection.one_to_one`) |
+| 1:1 reflection helper `nat on lan inet from (lan:network) to {10.0.0.0/24} -> (lan)` | `oifname "<lan>" ip saddr @if_lan_n4 ip daddr 10.0.0.0/24 masquerade`; follows `reflection_snat` (`nat.reflection.source_nat`) whatever `natreflection` says, also on the rule's own interface |
+| a 1:1 external address on a real WAN | the address must reach the router: a virtual IP (proxy ARP / IP alias) or a routed block, as on OPNsense |
 | a port forward with filter association "rule" | its filter rule at priority 500000 (destination = target, port = local port) |
 | port given without protocol | `meta l4proto { 6, 17 }` — a pf port test only ever matches TCP/UDP |
 
@@ -106,7 +127,9 @@ packet test `scripts/netns-multiwan-test.sh`.
 | `modulate state` | no nftables equivalent |
 | `synproxy state` | not rendered yet |
 | state limits (`max`, `max-src-conn`, …) | not rendered yet |
-| NAT to an alias pool, `rdr` to an alias | not rendered yet |
+| NAT to an alias pool | not rendered yet (`rdr` to a host alias is a `numgen inc` round-robin map) |
+| 1:1 reflection of a type-nat rule whose source is an alias or interface network | not rendered (pf's `bitmask` needs a literal network); the `nat` itself loads |
+| `rdr` with a shifted port range wider than 64 ports | not rendered yet |
 | `allow-opts` | Linux does not block IP options by default |
 
 ## Fast path

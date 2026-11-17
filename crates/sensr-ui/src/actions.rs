@@ -11,6 +11,9 @@ use crate::api::{AlertPage, FieldError, InsightReport, Pending, SystemStatus};
 use crate::form::Inputs;
 use crate::grid::{GridPage, GridQuery};
 use crate::models::{FormId, GridId};
+#[cfg(feature = "ssr")]
+use crate::runtime::RuntimeSection;
+use crate::runtime::{AliasFeed, GatewaysView, Ipv6Status};
 use leptos::prelude::*;
 use leptos::server_fn::codec::Json;
 
@@ -52,6 +55,18 @@ mod imp {
 
     pub async fn doc() -> Result<Value, ServerFnError> {
         backend()?.get("").await.map_err(err)
+    }
+
+    /// Alias feed state; empty when the agent has none (feeds not running) or refuses.
+    pub async fn feeds() -> Vec<crate::runtime::AliasFeed> {
+        match backend() {
+            Ok(b) => b
+                .runtime(crate::runtime::RuntimeSection::Aliases)
+                .await
+                .map(crate::runtime::parse)
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// One grid row: its key, the stored item and the view.
@@ -226,10 +241,13 @@ pub async fn grid_fetch(
     query: GridQuery,
 ) -> Result<GridPage, ServerFnError> {
     let doc = imp::doc().await?;
-    let rows: Vec<_> = imp::rows(grid, &grid.scope(&scope), &doc)
+    let mut rows: Vec<_> = imp::rows(grid, &grid.scope(&scope), &doc)
         .into_iter()
         .map(|r| r.view)
         .collect();
+    if grid == GridId::Aliases {
+        crate::adapt::add_feed_status(&mut rows, &imp::feeds().await);
+    }
     Ok(crate::grid::run_query(&rows, grid.columns(), &query))
 }
 
@@ -550,6 +568,10 @@ pub async fn live_status() -> Result<SystemStatus, ServerFnError> {
             .ok()
             .flatten();
     }
+    // A missing gateway monitor (or a caller without the privilege) only empties the widget.
+    if let Ok(v) = b.runtime(RuntimeSection::Gateways).await {
+        status.gateways = crate::runtime::parse::<GatewaysView>(v).gateways;
+    }
     Ok(status)
 }
 
@@ -702,6 +724,38 @@ pub async fn ids_suppress(
         Some(e) => to(format!("error={}", crate::pages::url_encode(&e.message))),
     }
     Ok(())
+}
+
+/// System › Gateways › Status.
+#[server(prefix = "/ui/fn")]
+pub async fn gateways_status() -> Result<GatewaysView, ServerFnError> {
+    let v = imp::backend()?
+        .runtime(RuntimeSection::Gateways)
+        .await
+        .map_err(imp::err)?;
+    Ok(crate::runtime::parse(v))
+}
+
+/// Feed state of URL, URL table, GeoIP and ASN aliases.
+#[server(prefix = "/ui/fn")]
+pub async fn alias_feeds() -> Result<Vec<AliasFeed>, ServerFnError> {
+    Ok(imp::feeds().await)
+}
+
+/// IPv6 prefix delegation per uplink.
+#[server(prefix = "/ui/fn")]
+pub async fn pd_status() -> Result<Ipv6Status, ServerFnError> {
+    let v = imp::backend()?
+        .runtime(RuntimeSection::Ipv6)
+        .await
+        .map_err(imp::err)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    Ok(Ipv6Status {
+        uplinks: crate::runtime::parse(v),
+        now,
+    })
 }
 
 /// Blocklist and resolver statistics for Services › Unbound DNS › Blocklist.

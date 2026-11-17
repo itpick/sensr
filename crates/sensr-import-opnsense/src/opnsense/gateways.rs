@@ -5,7 +5,9 @@
 use std::net::IpAddr;
 
 use sensr_schema::fields::{GatewayName, IpFamily};
-use sensr_schema::models::gateways::{Gateway, GatewayGroup, GroupMember, GroupTrigger};
+use sensr_schema::models::gateways::{
+    Gateway, GatewayGroup, GroupMember, GroupTrigger, MonitorThresholds,
+};
 use sensr_schema::models::interfaces::{InterfaceRole, Ipv4Config, Ipv6Config};
 use sensr_schema::{Document, Uuid};
 
@@ -21,16 +23,7 @@ const MONITOR_DEFAULTS: &[(&str, &str)] = &[
     ("monitor_noroute", "0"),
     ("monitor_killstates", "0"),
     ("monitor_killstates_priority", "0"),
-    ("force_down", "0"),
     ("nosync", "0"),
-    ("latencylow", ""),
-    ("latencyhigh", ""),
-    ("losslow", ""),
-    ("losshigh", ""),
-    ("interval", ""),
-    ("time_period", ""),
-    ("loss_interval", ""),
-    ("data_length", ""),
 ];
 
 impl Mapper<Document> for GatewayMapper {
@@ -140,9 +133,37 @@ fn gateway<'doc>(
         monitor_address,
         priority: ctx.parse(g, "priority").unwrap_or(255),
         weight: ctx.parse(g, "weight").unwrap_or(1),
+        force_down: ctx.flag(g, "force_down"),
+        thresholds: MonitorThresholds {
+            latency_low: num(ctx, g, "latencylow"),
+            latency_high: num(ctx, g, "latencyhigh"),
+            loss_low: num(ctx, g, "losslow"),
+            loss_high: num(ctx, g, "losshigh"),
+            interval: num(ctx, g, "interval"),
+            loss_interval: num(ctx, g, "loss_interval"),
+            time_period: num(ctx, g, "time_period"),
+            data_length: num(ctx, g, "data_length"),
+        },
     };
     ctx.defaults(g, MONITOR_DEFAULTS);
     Some((id, gw))
+}
+
+/// A whole-number setting; empty means the default. Fractions (seconds
+/// like `0.5`) round up.
+fn num<'doc>(ctx: &mut MapContext<'doc>, g: &'doc Element, name: &str) -> Option<u32> {
+    let t = ctx.non_empty(g, name)?;
+    match t.trim().parse::<f64>() {
+        Ok(v) if (0.0..4.0e9).contains(&v) => Some(v.ceil() as u32),
+        _ => {
+            ctx.warn(
+                g,
+                Severity::Invalid,
+                format!("{name} {t:?} not imported; default used"),
+            );
+            None
+        }
+    }
 }
 
 fn group<'doc>(g: &'doc Element, ctx: &mut MapContext<'doc>) -> Option<(Uuid, GatewayGroup)> {

@@ -63,6 +63,7 @@ impl Mapper<Document> for SystemMapper {
             }
         }
         sys.ipv6_allow = ctx.flag(s, "ipv6allow");
+        out.gateways.switch_default = ctx.flag(s, "gw_switch_default");
         // Per-server gateway binding: "none" (no binding) is all sensr supports yet.
         for n in 1..=8 {
             let name = format!("dns{n}gw");
@@ -126,6 +127,9 @@ impl Mapper<Document> for SystemMapper {
         }
         if let Some(v) = ctx.text(s, "disablenatreflection") {
             out.nat.reflection.port_forwards = v.trim() != "yes";
+        }
+        if let Some(v) = ctx.text(s, "enablebinatreflection") {
+            out.nat.reflection.one_to_one = v.trim() == "yes";
         }
     }
 

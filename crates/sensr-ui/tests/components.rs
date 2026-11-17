@@ -325,3 +325,188 @@ fn dns_stats_panel_shows_no_data_then_figures() {
             .any(|a| a.text().collect::<String>().contains("unbound-stats.json"))
     );
 }
+fn block<T>(f: futures::future::BoxFuture<'_, T>) -> T {
+    futures::executor::block_on(f)
+}
+
+fn mock_runtime<T: serde::de::DeserializeOwned + Default>(
+    section: sensr_ui::runtime::RuntimeSection,
+) -> T {
+    use sensr_ui::api::Backend;
+    let m = sensr_ui::mock::MockBackend::with_clock(Box::new(|| 1_794_787_200));
+    sensr_ui::runtime::parse(block(m.runtime(section)).unwrap())
+}
+
+fn text(e: scraper::ElementRef<'_>) -> String {
+    e.text().collect()
+}
+
+#[test]
+fn gateway_status_page_shows_badges_markers_and_groups() {
+    use sensr_ui::islands::GatewaysLive;
+    use sensr_ui::runtime::{GatewayState, GatewaysView, RuntimeSection};
+    let mut initial: GatewaysView = mock_runtime(RuntimeSection::Gateways);
+    initial.gateways[0].status = GatewayState::Down;
+    initial.gateways.push(sensr_ui::runtime::GatewayRow {
+        name: "LTE".into(),
+        status: GatewayState::ForceDown,
+        ..Default::default()
+    });
+    let doc = render(|| view! { <GatewaysLive initial/> }.into_any());
+    let rows: Vec<_> = doc.select(&sel(".gw-table tbody tr")).collect();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(doc.select(&sel(".gw-table thead th[scope=col]")).count(), 9);
+    let row = |name: &str| {
+        rows.iter()
+            .find(|r| text(**r).contains(name))
+            .copied()
+            .unwrap()
+    };
+    // Colour per status: red for down, amber for latency, green for online.
+    let badge = |name: &str| {
+        let r = row(name);
+        let b = r.select(&sel("td:last-child .pill")).next().unwrap();
+        (b.value().attr("class").unwrap().to_owned(), text(b))
+    };
+    assert_eq!(badge("WAN_DHCP6"), ("pill pill-on".into(), "Online".into()));
+    assert_eq!(
+        badge("BACKUP_GW"),
+        ("pill pill-warn".into(), "Latency".into())
+    );
+    assert_eq!(
+        badge("LTE"),
+        ("pill pill-off".into(), "Offline (forced)".into())
+    );
+    let first = text(rows[0]);
+    assert!(
+        first.contains("WAN_DHCP") && first.contains("Offline"),
+        "{first}"
+    );
+    // The default gateway is marked; the backup is not.
+    assert!(text(row("WAN_DHCP6")).contains("active"));
+    assert!(!text(row("BACKUP_GW")).contains("active"));
+    let backup = text(row("BACKUP_GW"));
+    assert!(backup.contains("198.51.100.1") && backup.contains("198.51.100.53"));
+    assert!(
+        backup.contains(" ms") && backup.contains("2.0 %"),
+        "{backup}"
+    );
+    // LTE has no data yet: OPNsense's placeholder.
+    assert!(text(row("LTE")).contains('~'));
+    // Groups with their active members.
+    let groups: String = doc
+        .select(&sel("[aria-labelledby=gw-groups] tbody tr"))
+        .map(text)
+        .collect();
+    assert!(
+        groups.contains("WAN_FAILOVER") && groups.contains("WAN_DHCP"),
+        "{groups}"
+    );
+}
+
+#[test]
+fn gateway_status_page_without_monitor_says_so() {
+    use sensr_ui::islands::GatewaysLive;
+    let doc = render(|| view! { <GatewaysLive initial=Default::default()/> }.into_any());
+    let all = text(doc.root_element());
+    assert!(all.contains("No gateways are monitored."));
+    assert!(all.contains("No gateway groups."));
+}
+
+#[test]
+fn dashboard_gateways_widget_is_filled() {
+    use sensr_ui::api::Backend;
+    use sensr_ui::islands::DashboardLive;
+    use sensr_ui::runtime::{GatewaysView, RuntimeSection};
+    let m = sensr_ui::mock::MockBackend::with_clock(Box::new(|| 1_794_787_200));
+    let mut initial = block(m.status()).unwrap();
+    initial.gateways = mock_runtime::<GatewaysView>(RuntimeSection::Gateways).gateways;
+    let doc = render(|| view! { <DashboardLive initial/> }.into_any());
+    let items: Vec<String> = doc.select(&sel(".gw-list li")).map(text).collect();
+    assert_eq!(items.len(), 3);
+    assert!(items[0].contains("WAN_DHCP") && items[0].contains("(active)"));
+    assert!(items[0].contains("RTT") && items[0].contains("RTTd") && items[0].contains("Loss"));
+    assert!(items[2].contains("Latency") && !items[2].contains("(active)"));
+
+    initial = block(m.status()).unwrap();
+    let doc = render(|| view! { <DashboardLive initial/> }.into_any());
+    assert!(text(doc.root_element()).contains("No gateway data."));
+}
+
+#[test]
+fn alias_grid_shows_feed_status_with_error_badge() {
+    use sensr_ui::runtime::AliasFeed;
+    let seed = sensr_ui::mock::seed();
+    let mut rows: Vec<_> = get_path(&seed, "firewall.aliases")
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|i| sensr_ui::adapt::to_view(GridId::Aliases, &seed, i))
+        .collect();
+    let feeds = [
+        AliasFeed {
+            name: "spamhaus_drop".into(),
+            kind: "url_table".into(),
+            entries: 1234,
+            updated_at: Some(1_794_787_200),
+            ..Default::default()
+        },
+        AliasFeed {
+            name: "nas".into(),
+            error: Some("HTTP 503".into()),
+            ..Default::default()
+        },
+    ];
+    sensr_ui::adapt::add_feed_status(&mut rows, &feeds);
+    let page = run_query(&rows, GridId::Aliases.columns(), &GridQuery::default());
+    let doc = render(|| {
+        view! { <GridIsland grid=GridId::Aliases scope=None initial=page label="alias".to_owned() choices=Default::default()/> }.into_any()
+    });
+    let heads: Vec<String> = doc.select(&sel("thead th[scope=col]")).map(text).collect();
+    assert!(
+        heads.iter().any(|h| h.trim() == "Loaded")
+            && heads.iter().any(|h| h.trim() == "Last updated"),
+        "{heads:?}"
+    );
+    let tr = |name: &str| {
+        doc.select(&sel("tbody tr"))
+            .find(|r| text(*r).contains(name))
+            .unwrap()
+    };
+    let ok = text(tr("spamhaus_drop"));
+    assert!(
+        ok.contains("1234") && ok.contains("2026-11-16 00:00:00 UTC"),
+        "{ok}"
+    );
+    let bad = tr("nas");
+    let badge = bad.select(&sel(".pill-off")).next().expect("error badge");
+    assert_eq!(badge.value().attr("title"), Some("HTTP 503"));
+    assert!(text(bad).contains("never"));
+    // Aliases without a feed have no badge.
+    assert!(tr("web_ports").select(&sel(".pill-off")).next().is_none());
+}
+
+#[test]
+fn ipv6_panel_shows_prefix_lifetimes_and_deprecated_subnets() {
+    use sensr_ui::pages::Ipv6Prefixes;
+    use sensr_ui::runtime::{Ipv6Status, RuntimeSection};
+    let status = Ipv6Status {
+        uplinks: mock_runtime(RuntimeSection::Ipv6),
+        now: 1_794_787_200,
+    };
+    let doc = render(|| view! { <Ipv6Prefixes status/> }.into_any());
+    let all = text(doc.root_element());
+    assert!(all.contains("2001:db8:42::/56"), "{all}");
+    assert!(all.contains("30m 0s") && all.contains("1h 30m"), "{all}");
+    let rows: Vec<_> = doc.select(&sel("tbody tr")).collect();
+    assert_eq!(rows.len(), 2);
+    assert!(text(rows[0]).contains("2001:db8:42:1::/64") && text(rows[0]).contains("preferred"));
+    assert!(text(rows[1]).contains("deprecated"));
+    assert_eq!(rows[1].value().attr("class"), Some("disabled"));
+    // The withdrawn /56 is listed too.
+    assert!(all.contains("2001:db8:17::/56"));
+
+    let empty = render(|| view! { <Ipv6Prefixes status=Ipv6Status::default()/> }.into_any());
+    assert!(text(empty.root_element()).contains("No interface requests a delegated prefix."));
+}

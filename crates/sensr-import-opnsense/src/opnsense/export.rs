@@ -15,7 +15,9 @@ use sensr_schema::models::firewall::{
     AliasContent, AliasValue, Direction, Endpoint, RuleAction, StateType,
 };
 use sensr_schema::models::interfaces::{DhcpOptionValue, Ipv4Config, Ipv6Config, VlanProtocol};
-use sensr_schema::models::nat::{ForwardFilter, OutboundNatMode, ReflectionMode};
+use sensr_schema::models::nat::{
+    ForwardFilter, OneToOneKind, OneToOneReflection, OutboundNatMode, ReflectionMode,
+};
 use sensr_schema::models::ntp::NtpServerOptions;
 
 use super::common::stable_uuid;
@@ -140,6 +142,9 @@ fn system(doc: &Document) -> Element {
     if s.ipv6_allow {
         e.put(leaf("ipv6allow", "1"));
     }
+    if doc.gateways.switch_default {
+        e.put(leaf("gw_switch_default", "1"));
+    }
     for (id, g) in s.groups.iter() {
         let members: Vec<String> = s
             .users
@@ -229,6 +234,9 @@ fn system(doc: &Document) -> Element {
     }
     if !r.port_forwards {
         e.put(leaf("disablenatreflection", "yes"));
+    }
+    if r.one_to_one {
+        e.put(leaf("enablebinatreflection", "yes"));
     }
     e
 }
@@ -560,6 +568,12 @@ fn aliases(doc: &Document) -> Element {
                 families_text(*families),
                 String::new(),
             ),
+            AliasContent::Asn { asns, families } => (
+                "asn",
+                join(asns, "\n"),
+                families_text(*families),
+                String::new(),
+            ),
             AliasContent::NetworkGroup { members } => (
                 "networkgroup",
                 join(members, "\n"),
@@ -583,6 +597,11 @@ fn aliases(doc: &Document) -> Element {
         list.put(ae);
     }
     let mut e = Element::new("Alias");
+    if let Some(url) = &doc.firewall.feeds.geoip_url {
+        let mut g = Element::new("geoip");
+        g.put(leaf("url", url));
+        e.put(g);
+    }
     e.put(list);
     e
 }
@@ -669,8 +688,43 @@ fn filter(doc: &Document) -> Element {
         .put_opt("description", r.description.as_ref());
         snat.put(re);
     }
+    let mut one = Element::new("onetoone");
+    for (id, r) in doc.nat.one_to_one.iter() {
+        let mut re = Element::new("rule").attr("uuid", id.to_string());
+        let external = if r.external.prefix_len() == r.external.max_prefix_len() {
+            r.external.addr().to_string()
+        } else {
+            r.external.to_string()
+        };
+        re.put(leaf("enabled", flag01(r.enabled)))
+            .put(leaf("log", flag01(r.log)))
+            .put(leaf("sequence", r.sequence))
+            .put(leaf("interface", &r.interface))
+            .put(leaf(
+                "type",
+                match r.kind {
+                    OneToOneKind::Binat => "binat",
+                    OneToOneKind::Nat => "nat",
+                },
+            ))
+            .put(leaf("source_net", operand(&r.source.net)))
+            .put(leaf("source_not", flag01(r.source.not)))
+            .put(leaf("destination_net", operand(&r.destination.net)))
+            .put(leaf("destination_not", flag01(r.destination.not)))
+            .put(leaf("external", external))
+            .put(leaf(
+                "natreflection",
+                match r.reflection {
+                    None => "",
+                    Some(OneToOneReflection::Enable) => "enable",
+                    Some(OneToOneReflection::Disable) => "disable",
+                },
+            ))
+            .put_opt("description", r.description.as_ref());
+        one.put(re);
+    }
     let mut e = Element::new("Filter");
-    e.put(rules).put(snat);
+    e.put(rules).put(snat).put(one);
     e
 }
 
@@ -1061,6 +1115,22 @@ fn gateways(doc: &Document) -> Element {
             .put_opt("monitor", g.monitor_address)
             .put(leaf("priority", g.priority))
             .put(leaf("weight", g.weight));
+        if g.force_down {
+            ge.put(leaf("force_down", "1"));
+        }
+        let t = &g.thresholds;
+        for (k, v) in [
+            ("latencylow", t.latency_low),
+            ("latencyhigh", t.latency_high),
+            ("losslow", t.loss_low),
+            ("losshigh", t.loss_high),
+            ("interval", t.interval),
+            ("loss_interval", t.loss_interval),
+            ("time_period", t.time_period),
+            ("data_length", t.data_length),
+        ] {
+            ge.put_opt(k, v);
+        }
         e.put(ge);
     }
     e

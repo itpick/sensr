@@ -4,6 +4,7 @@
 use crate::adapt::REDACTED;
 use crate::api::*;
 use crate::form::{get_path, set_path};
+use crate::runtime::RuntimeSection;
 use futures::future::{BoxFuture, FutureExt};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -349,6 +350,17 @@ impl Backend for MockBackend {
         ready(Ok(cards))
     }
 
+    fn runtime(&self, section: RuntimeSection) -> BoxFuture<'_, ApiResult<Value>> {
+        ready(self.with(|s| {
+            let t = (s.clock)();
+            Ok(match section {
+                RuntimeSection::Gateways => simulated_gateways(t),
+                RuntimeSection::Aliases => simulated_feeds(&s.staged, t),
+                RuntimeSection::Ipv6 => simulated_pd(&s.staged, t),
+            })
+        }))
+    }
+
     fn dns_stats(&self) -> BoxFuture<'_, ApiResult<DnsStats>> {
         ready(Ok(simulated_dns_stats()))
     }
@@ -455,6 +467,125 @@ fn wave(t: u64, period: u64, phase: u64) -> f64 {
     (x.sin() + 1.0) / 2.0
 }
 
+/// The agent's gateway view (sensr-agent `GatewaysView`): the automatic WAN gateways, healthy,
+/// plus a static backup that is slow, so every badge colour shows up.
+fn simulated_gateways(t: u64) -> Value {
+    json!({
+        "gateways": [
+            {"name": "WAN_DHCP", "interface": "wan", "device": "eth0", "family": "inet",
+             "address": null, "monitor_address": null, "monitor": true, "default_route": true,
+             "priority": 255, "weight": 1, "force_down": false, "dynamic": true,
+             "next_hop": "203.0.113.1", "status": "online", "status_text": "none",
+             "latency_ms": 7.5 + wave(t, 20, 3) * 2.0, "stddev_ms": 0.4 + wave(t, 15, 1) * 0.3,
+             "loss_pct": 0.0, "error": null, "active_default": true},
+            {"name": "WAN_DHCP6", "interface": "wan", "device": "eth0", "family": "inet6",
+             "address": null, "monitor_address": null, "monitor": true, "default_route": true,
+             "priority": 255, "weight": 1, "force_down": false, "dynamic": true,
+             "next_hop": "fe80::1", "status": "online", "status_text": "none",
+             "latency_ms": 8.1 + wave(t, 25, 1) * 2.5, "stddev_ms": 0.6, "loss_pct": 0.0,
+             "error": null, "active_default": true},
+            {"name": "BACKUP_GW", "interface": "wan", "device": "eth0", "family": "inet",
+             "address": "198.51.100.1", "monitor_address": "198.51.100.53", "monitor": true,
+             "default_route": true, "priority": 200, "weight": 1, "force_down": false,
+             "dynamic": false, "next_hop": "198.51.100.1", "status": "delay", "status_text": "delay",
+             "latency_ms": 480.0 + wave(t, 30, 7) * 60.0, "stddev_ms": 35.2, "loss_pct": 2.0,
+             "error": null, "active_default": false}
+        ],
+        "groups": {"WAN_FAILOVER": ["WAN_DHCP"]},
+        "switch_default": true
+    })
+}
+
+/// The feed status (sensr-feeds `AliasStatus`) for every URL, URL table, GeoIP and ASN alias.
+/// URLs on the reserved `.invalid` TLD fail, to show the error state.
+fn simulated_feeds(doc: &Value, t: u64) -> Value {
+    let aliases = get_path(doc, "firewall.aliases")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten();
+    let list: Vec<Value> = aliases
+        .filter_map(|(_, a)| {
+            let kind = get_path(a, "content.type")?.as_str()?.to_owned();
+            if !matches!(kind.as_str(), "url" | "url_table" | "geo_ip" | "asn") {
+                return None;
+            }
+            let name = get_path(a, "name")?.as_str()?.to_owned();
+            let content = get_path(a, "content").map(Value::to_string).unwrap_or_default();
+            let failing = content.contains(".invalid");
+            // Stable per alias, so the counts do not jump between refreshes.
+            let entries = 200 + content.bytes().map(u64::from).sum::<u64>() % 1800;
+            Some(json!({
+                "name": name,
+                "kind": kind,
+                "entries": if failing { 0 } else { entries },
+                "updated_at": (!failing).then(|| t.saturating_sub(1_800)),
+                "error": failing.then_some("fetch failed: dns error: failed to lookup address information"),
+                "next_check": t + 1_800,
+                "attribution": (kind == "geo_ip")
+                    .then_some("IP Geolocation by DB-IP (https://db-ip.com), CC BY 4.0"),
+            }))
+        })
+        .collect();
+    Value::Array(list)
+}
+
+/// Prefix delegation (sensr-agent `PdView`) for each DHCPv6 uplink with a requested prefix,
+/// handing one /64 to every interface that tracks it. One older prefix is being phased out.
+fn simulated_pd(doc: &Value, t: u64) -> Value {
+    let ifaces = doc.get("interfaces").and_then(Value::as_object);
+    let list: Vec<Value> = ifaces
+        .into_iter()
+        .flatten()
+        .filter(|(_, i)| {
+            get_path(i, "ipv6.mode").and_then(Value::as_str) == Some("dhcp6")
+                && get_path(i, "ipv6.prefix_delegation_len").is_some()
+        })
+        .map(|(up, _)| {
+            let lans: Vec<&String> = ifaces
+                .into_iter()
+                .flatten()
+                .filter(|(_, i)| {
+                    get_path(i, "ipv6.mode").and_then(Value::as_str) == Some("track")
+                        && get_path(i, "ipv6.interface").and_then(Value::as_str) == Some(up)
+                })
+                .map(|(id, _)| id)
+                .collect();
+            let advertised: serde_json::Map<String, Value> = lans
+                .iter()
+                .enumerate()
+                .map(|(n, id)| {
+                    let n = n + 1;
+                    (
+                        (*id).clone(),
+                        json!([
+                            {"prefix": format!("2001:db8:42:{n:x}::/64"),
+                             "preferred_lifetime_secs": 1_800, "valid_lifetime_secs": 5_400,
+                             "deprecated": false},
+                            {"prefix": format!("2001:db8:17:{n:x}::/64"),
+                             "preferred_lifetime_secs": 0, "valid_lifetime_secs": 3_600,
+                             "deprecated": true}
+                        ]),
+                    )
+                })
+                .collect();
+            json!({
+                "interface": up,
+                "state": {
+                    "current": {"prefix": "2001:db8:42::/56", "preferred_until": t + 1_800,
+                                "valid_until": t + 5_400, "iaid": 1,
+                                "obtained_at": t.saturating_sub(86_400), "renewed_at": t.saturating_sub(1_800)},
+                    "confirmed": true,
+                    "stale": [{"prefix": "2001:db8:17::/56", "stale_since": t.saturating_sub(3_600),
+                               "deprecate_until": t + 3_600}],
+                    "last_now": t
+                },
+                "advertised": advertised,
+            })
+        })
+        .collect();
+    Value::Array(list)
+}
+
 fn simulated_status(doc: &Value, t: u64) -> SystemStatus {
     let text = |p: &str, d: &str| {
         get_path(doc, p)
@@ -540,24 +671,7 @@ fn simulated_status(doc: &Value, t: u64) -> SystemStatus {
         mem_used: 1_310_000_000 + (wave(t, 90, 5) * 120_000_000.0) as u64,
         mem_total: 8_000_000_000,
         interfaces,
-        gateways: vec![
-            GatewayStatus {
-                name: "WAN_DHCP".into(),
-                interface: "WAN".into(),
-                address: "203.0.113.1".into(),
-                rtt_ms: (7.5 + wave(t, 20, 3) * 2.0) as f32,
-                loss_pct: 0.0,
-                health: GatewayHealth::Online,
-            },
-            GatewayStatus {
-                name: "WAN_DHCP6".into(),
-                interface: "WAN".into(),
-                address: "fe80::1%eth0".into(),
-                rtt_ms: (8.1 + wave(t, 25, 1) * 2.5) as f32,
-                loss_pct: 0.0,
-                health: GatewayHealth::Online,
-            },
-        ],
+        gateways: Vec::new(),
         traffic,
         history: None,
     }
@@ -1335,5 +1449,35 @@ mod tests {
         assert_eq!(s.interfaces.len(), 3);
         assert_eq!(s.interfaces[1].ipv4.as_deref(), Some("192.168.1.1/24"));
         assert_eq!(s.traffic[0].rx.len(), 60);
+    }
+
+    #[test]
+    fn runtime_views_parse_into_the_ui_types() {
+        use crate::runtime::{AliasFeed, GatewayState, GatewaysView, PdUplink, parse};
+        let (m, _) = mock_with_clock();
+        let gw: GatewaysView = parse(block(m.runtime(RuntimeSection::Gateways)).unwrap());
+        assert_eq!(gw.gateways.len(), 3);
+        assert!(gw.gateways.iter().any(|g| g.status == GatewayState::Delay));
+        assert_eq!(gw.groups["WAN_FAILOVER"], ["WAN_DHCP"]);
+
+        // Feed aliases only, and the GeoIP one carries the DB-IP attribution.
+        block(m.set(
+            "firewall.aliases.6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a99",
+            json!({"enabled": true, "name": "geo", "content": {"type": "geo_ip", "countries": ["NL"]}}),
+        ))
+        .unwrap();
+        let feeds: Vec<AliasFeed> = parse(block(m.runtime(RuntimeSection::Aliases)).unwrap());
+        let names: Vec<&str> = feeds.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names.contains(&"spamhaus_drop") && names.contains(&"geo"));
+        let geo = feeds.iter().find(|f| f.name == "geo").unwrap();
+        assert!(geo.attribution.as_deref().unwrap().contains("DB-IP"));
+        assert!(geo.entries > 0 && geo.updated_at.is_some());
+
+        let pd: Vec<PdUplink> = parse(block(m.runtime(RuntimeSection::Ipv6)).unwrap());
+        assert_eq!(pd.len(), 1);
+        assert_eq!(pd[0].interface, "wan");
+        assert_eq!(pd[0].advertised["lan"].len(), 2);
+        assert!(pd[0].advertised["lan"].iter().any(|a| a.deprecated));
     }
 }

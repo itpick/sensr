@@ -6,9 +6,13 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use sensr_apply::cmd::{Runner, SystemRunner};
+use std::path::PathBuf;
+
+use sensr_apply::cmd::{Cmd, Runner, SystemRunner};
 use sensr_apply::engine::{Engine, EngineError, EngineOptions, Prepared};
 use sensr_apply::plan::UnitAction;
+use sensr_feeds::http::HttpFetcher;
+use sensr_feeds::{Feeds, SystemResolver};
 use sensr_ipc::{FileDiff, PlanView, ServiceAction, ServiceChange, ValidationIssue};
 use sensr_rules::document::Runtime;
 use sensr_rules::ir::IfAddr;
@@ -27,10 +31,24 @@ pub struct SliceApplier {
     applied: Arc<Mutex<Applied>>,
     watch: Option<Duration>,
     watching: bool,
+    feeds: Option<Arc<Feeds>>,
+    refreshing: bool,
+    gateways: Option<Arc<crate::gateways::GatewayService>>,
+    pd: Option<Arc<crate::pd::PdService>>,
 }
 
 /// How often link addresses are compared with the ruleset's sets.
 const ADDRESS_POLL: Duration = Duration::from_secs(2);
+/// How often alias feeds are checked for due refreshes (each feed keeps its
+/// own schedule; this is only the tick).
+const FEED_TICK: Duration = Duration::from_secs(10);
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     // a panic mid-apply leaves nothing half-held worth protecting
@@ -38,6 +56,48 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl SliceApplier {
+    /// On the host (`/`, real commands), following address changes; alias
+    /// feeds (URL tables, GeoIP, ASN, host names, MACs) are kept under
+    /// `feeds_dir` when given.
+    pub fn system_with_feeds(feeds_dir: Option<PathBuf>) -> Result<SliceApplier, EngineError> {
+        let mut a = Self::system()?;
+        if let Some(state) = feeds_dir.as_ref().and_then(|d| d.parent()) {
+            let pd = crate::pd::PdService::new(Arc::new(SystemRunner), "/", state.join("pd"));
+            pd.start();
+            a.pd = Some(pd);
+        }
+        if let Some(dir) = feeds_dir {
+            let runner: Arc<dyn Runner> = Arc::new(SystemRunner);
+            let neighbours = move || {
+                runner
+                    .run(&Cmd::new("ip").args(["-j", "neigh", "show"]), None)
+                    .map(|o| sensr_feeds::neigh::parse_ip_neigh_json(&o.stdout))
+                    .unwrap_or_default()
+            };
+            a.feeds = Some(Arc::new(Feeds::new(
+                dir,
+                Arc::new(HttpFetcher::default()),
+                Arc::new(SystemResolver),
+                Arc::new(neighbours),
+            )));
+        }
+        Ok(a)
+    }
+
+    /// With an explicit feed store (tests).
+    pub fn with_feeds(mut self, feeds: Arc<Feeds>) -> SliceApplier {
+        self.feeds = Some(feeds);
+        self
+    }
+
+    /// Alias feed status of the applied document (API, UI).
+    pub fn alias_status(&self) -> Vec<sensr_feeds::AliasStatus> {
+        let (Some(f), Some((doc, _))) = (&self.feeds, lock(&self.applied).as_ref().cloned()) else {
+            return Vec::new();
+        };
+        f.status(&doc, unix_now())
+    }
+
     /// On the host (`/`, real commands), following address changes.
     pub fn system() -> Result<SliceApplier, EngineError> {
         let opts = EngineOptions {
@@ -48,6 +108,7 @@ impl SliceApplier {
         };
         let mut a = Self::new(opts, Arc::new(SystemRunner))?;
         a.watch = Some(ADDRESS_POLL);
+        a.gateways = crate::gateways::GatewayService::start(Arc::new(SystemRunner));
         Ok(a)
     }
 
@@ -58,7 +119,39 @@ impl SliceApplier {
             applied: Arc::new(Mutex::new(None)),
             watch: None,
             watching: false,
+            feeds: None,
+            refreshing: false,
+            gateways: None,
+            pd: None,
         })
+    }
+
+    /// Feeds refresh on their own schedules; changed aliases reach the
+    /// ruleset as one set transaction each tick, never as a reload.
+    fn start_refresher(&mut self) {
+        let (Some(feeds), false) = (self.feeds.clone(), self.refreshing) else {
+            return;
+        };
+        if self.watch.is_none() {
+            // tests drive refresh() themselves
+            return;
+        }
+        self.refreshing = true;
+        let engine = Arc::clone(&self.engine);
+        let applied = Arc::clone(&self.applied);
+        std::thread::Builder::new()
+            .name("sensr-alias-feeds".into())
+            .spawn(move || {
+                loop {
+                    let doc = lock(&applied).as_ref().map(|(d, _)| d.clone());
+                    if let Some(doc) = doc {
+                        refresh_once(&feeds, &engine, &doc, unix_now());
+                    }
+                    std::thread::sleep(FEED_TICK);
+                }
+            })
+            .map(|_| ())
+            .unwrap_or_else(|e| tracing::error!(error = %e, "alias feed refresher not started"));
     }
 
     fn engine(&self) -> std::sync::MutexGuard<'_, Engine> {
@@ -111,6 +204,28 @@ impl SliceApplier {
     }
 }
 
+/// One refresh tick: fetch what is due, push what changed.
+pub fn refresh_once(feeds: &Feeds, engine: &Mutex<Engine>, doc: &Document, now: u64) {
+    let r = feeds.refresh(doc, now);
+    for f in &r.fetches {
+        tracing::info!(url = %f.url, outcome = %f.outcome, bytes = f.bytes, ms = f.millis as u64, "alias feed fetched");
+    }
+    if r.updates.is_empty() {
+        return;
+    }
+    let names: Vec<&str> = r.updates.iter().map(|(n, _)| n.as_str()).collect();
+    let t0 = std::time::Instant::now();
+    match lock(engine).update_alias_sets(&r.updates) {
+        Ok(()) => {
+            tracing::info!(aliases = ?names, ms = t0.elapsed().as_millis() as u64, "alias sets updated")
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, aliases = ?names, "alias set update failed; retrying next tick");
+            feeds.reset();
+        }
+    }
+}
+
 fn issue(path: &str, message: impl Into<String>) -> ValidationIssue {
     let mut message = message.into();
     if !message.ends_with('.') {
@@ -144,14 +259,18 @@ fn document(doc: &Document) -> Result<&Document, ApplyError> {
 fn prepare(
     engine: &Engine,
     doc: &Document,
+    feeds: Option<&Feeds>,
 ) -> Result<(Prepared, BTreeMap<String, Vec<IfAddr>>), EngineError> {
     // what DHCP/SLAAC gave the links right now; sets follow later changes
     let addrs = engine.current_addrs(doc).unwrap_or_default();
+    let sources = feeds.map(Feeds::sources);
     let p = engine.prepare(
         doc,
         &Runtime {
             addrs: addrs.clone(),
-            sources: None,
+            sources: sources
+                .as_ref()
+                .map(|s| s as &dyn sensr_rules::alias::Sources),
         },
     )?;
     Ok((p, addrs))
@@ -171,11 +290,11 @@ impl Applier for SliceApplier {
     fn plan(&self, running: Option<&Document>, next: &Document) -> Result<PlanView, ApplyError> {
         let doc = document(next)?;
         let engine = self.engine();
-        let (p, _) = prepare(&engine, doc).map_err(rejected)?;
+        let (p, _) = prepare(&engine, doc, self.feeds.as_deref()).map_err(rejected)?;
         engine.check(&p).map_err(rejected)?;
         let delta = engine.delta(&p);
         let old_ruleset = match running.map(document) {
-            Some(Ok(old)) => prepare(&engine, old)
+            Some(Ok(old)) => prepare(&engine, old, self.feeds.as_deref())
                 .map(|(o, _)| String::from_utf8_lossy(&o.ruleset).into_owned())
                 .unwrap_or_default(),
             _ => String::new(),
@@ -233,10 +352,22 @@ impl Applier for SliceApplier {
         Ok(PlanView { nft, net, services })
     }
 
+    fn runtime(&self, section: sensr_ipc::RuntimeSection) -> Option<Value> {
+        match section {
+            sensr_ipc::RuntimeSection::Gateways => self.gateways_view(),
+            sensr_ipc::RuntimeSection::Aliases => serde_json::to_value(self.alias_status()).ok(),
+            sensr_ipc::RuntimeSection::Ipv6 => self
+                .pd
+                .as_ref()
+                .and_then(|p| serde_json::to_value(p.view(unix_now())).ok()),
+        }
+    }
+
     fn apply(&mut self, _running: Option<&Document>, next: &Document) -> Result<(), ApplyError> {
         let doc = document(next)?.clone();
         let mut engine = self.engine();
-        let (p, addrs) = prepare(&engine, &doc).map_err(rejected)?;
+        let (p, addrs) = prepare(&engine, &doc, self.feeds.as_deref()).map_err(rejected)?;
+        let rendered = p.aliases.clone();
         for w in &p.warnings {
             tracing::warn!(rule = %w, "firewall rule degraded");
         }
@@ -251,9 +382,27 @@ impl Applier for SliceApplier {
             "applied"
         );
         drop(engine);
+        if let Some(f) = &self.feeds {
+            f.applied(rendered);
+        }
+        if let Some(g) = &self.gateways {
+            g.applied(&doc);
+        }
+        if let Some(p) = &self.pd {
+            p.applied(&doc);
+        }
         *lock(&self.applied) = Some((doc, addrs));
         self.start_watcher();
+        self.start_refresher();
         Ok(())
+    }
+}
+
+impl SliceApplier {
+    /// Gateway monitor view (System › Gateways, dashboard widget).
+    pub fn gateways_view(&self) -> Option<Value> {
+        let g = self.gateways.as_ref()?;
+        serde_json::to_value(g.view()).ok()
     }
 }
 
@@ -325,6 +474,78 @@ mod tests {
                 .any(|l| l.starts_with("nft '-j'"))
         );
         assert!(a.plan(Some(&doc), &doc).unwrap().is_empty());
+    }
+
+    struct OneList;
+    impl sensr_feeds::http::Fetcher for OneList {
+        fn get(
+            &self,
+            url: &str,
+            _: &sensr_rules::alias::Auth,
+            _: &sensr_feeds::http::Conditional,
+        ) -> Result<sensr_feeds::http::Fetched, sensr_feeds::http::HttpError> {
+            if url.ends_with("/blocklist.txt") {
+                Ok(sensr_feeds::http::Fetched::Body {
+                    bytes: b"198.51.100.0/24\n".to_vec(),
+                    conditional: Default::default(),
+                })
+            } else {
+                Err(sensr_feeds::http::HttpError("unreachable".into()))
+            }
+        }
+    }
+
+    #[test]
+    fn alias_refresh_pushes_a_set_update_not_a_reload() {
+        let root = tempfile::tempdir().unwrap();
+        for k in sensr_apply::appliers::sysctl::SysctlModel::default()
+            .to_map()
+            .unwrap()
+            .into_keys()
+            .chain(["net.core.default_qdisc".into(), "kernel.hostname".into()])
+        {
+            let p = root.path().join("proc/sys").join(k.replace('.', "/"));
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "0\n").unwrap();
+        }
+        let runner = Arc::new(FakeRunner::new());
+        let feeds = Arc::new(Feeds::new(
+            root.path().join("aliases"),
+            Arc::new(OneList),
+            Arc::new(SystemResolver),
+            Arc::new(Vec::new),
+        ));
+        let mut a = SliceApplier::new(
+            EngineOptions {
+                root: root.path().to_owned(),
+                ..EngineOptions::default()
+            },
+            runner.clone(),
+        )
+        .unwrap()
+        .with_feeds(feeds.clone());
+        let doc = home_router();
+        a.apply(None, &doc).unwrap();
+        let loads = |r: &FakeRunner| {
+            r.call_lines()
+                .iter()
+                .filter(|l| l.starts_with("nft '-j'"))
+                .count()
+        };
+        let before = loads(&runner);
+        let typed: Document = doc.clone();
+        refresh_once(&feeds, &a.engine, &typed, 1_000);
+        // BLOCKLIST arrived: one more transaction, a set update
+        assert_eq!(loads(&runner), before + 1);
+        let st = a.alias_status();
+        let bl = st.iter().find(|s| s.name == "BLOCKLIST").unwrap();
+        assert_eq!(bl.entries, 1);
+        assert!(bl.error.is_none());
+        let drop = st.iter().find(|s| s.name == "DROP_FEED").unwrap();
+        assert!(drop.error.as_deref().unwrap().contains("unreachable"));
+        // nothing due: nothing pushed
+        refresh_once(&feeds, &a.engine, &typed, 1_005);
+        assert_eq!(loads(&runner), before + 1);
     }
 
     #[test]

@@ -27,7 +27,7 @@
 /opnsense/gateways/gateway_group[@uuid='2b2d395e-cfcf-4324-be48-7f65ebbc5323']  <- gateways
 /opnsense/gateways/gateway_group[@uuid='60d77f02-8d93-4fec-b523-cf0d0af7f5dc']  <- gateways
 
-## unmapped, expected (34)
+## unmapped, expected (33)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -53,7 +53,6 @@
 /opnsense/system/firmware  (FreeBSD package mirror and plugin selection; sensr updates through NixOS generations)
 /opnsense/rrd  (RRD graphs are replaced by sensr-monitor)
 /opnsense/revision  (OPNsense revision metadata; sensr keeps its own revision history)
-/opnsense/OPNsense/Firewall/Alias/geoip  (GeoIP database source is not modelled yet)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='2a511d4c-7829-427a-af2e-305619a096d2']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='5ea88d07-4999-4bf5-8ac8-567ccb2bb10a']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='364f3330-5d7a-494f-a6c9-63c1dbbebcbb']/audit  (OPNsense change metadata; sensr keeps its own audit log)
@@ -63,8 +62,7 @@
 /opnsense/OPNsense/Syslog  (remote syslog is not modelled yet)
 /opnsense/OPNsense/trust  (trust store settings are not modelled yet)
 
-## unmapped, unexpected (3)
-/opnsense/system/gw_switch_default
+## unmapped, unexpected (2)
 /opnsense/system/dns1gw
 /opnsense/system/dns2gw
 

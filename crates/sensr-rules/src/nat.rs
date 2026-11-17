@@ -1,5 +1,5 @@
-//! Outbound NAT and port forwards (`SNatRule`, `ForwardRule`,
-//! `filter_auto_source_nat`, `filter_auto_destination_nat`).
+//! Outbound NAT, port forwards and 1:1 NAT (`SNatRule`, `ForwardRule`,
+//! `DNatRule`, `filter_auto_source_nat`, `filter_auto_destination_nat`).
 //!
 //! The same two-layer approach as filter rules: upstream's rule arrays are
 //! normalised into typed [`SnatRule`] / [`RdrRule`]s (reflection copies
@@ -135,6 +135,74 @@ pub struct ReflectionDefaults {
     pub source_nat: bool,
 }
 
+/// 1:1 NAT flavour (`type`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StaticKind {
+    /// pf `binat`: both directions, prefix-preserving
+    #[default]
+    Binat,
+    /// pf `nat`: outbound only
+    Nat,
+}
+
+/// Which of the lines a 1:1 rule expands to (`DNatRule` rule types).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StaticPart {
+    /// the mapping itself (`binat` / `nat`)
+    Map(StaticKind),
+    /// reflection: redirect internal clients that use the external address
+    /// (`rdr … bitmask` on an interface without a gateway)
+    Reflection,
+    /// reflection helper: source NAT so the internal host answers through
+    /// the firewall
+    Helper,
+}
+
+/// One expanded 1:1 NAT line.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaticRule {
+    /// priority band
+    pub priority: u32,
+    /// description
+    pub descr: String,
+    /// rendered at all
+    pub enabled: bool,
+    /// normalisation notes
+    pub debug: Vec<String>,
+    /// log translations
+    pub log: bool,
+    /// what this line does
+    pub part: StaticPart,
+    /// interface the line applies on
+    pub interface: Option<String>,
+    /// family, explicit on helper lines only (as upstream prints it)
+    pub family: Option<IpFamily>,
+    /// internal side (`from` of the mapping)
+    pub internal: Endpoint,
+    /// peers (`to` of the mapping)
+    pub peer: Endpoint,
+    /// external address or network, prefix already taken from `internal`
+    /// when it was a bare host
+    pub external: Addr,
+}
+
+impl StaticRule {
+    /// The family the line works in: explicit, or that of a literal address.
+    pub fn effective_family(&self) -> Option<IpFamily> {
+        self.family.or_else(|| {
+            [&self.external, &self.internal.addr, &self.peer.addr]
+                .into_iter()
+                .find_map(|a| match a {
+                    Addr::Host(ip) => Some(IpFamily::of(ip)),
+                    Addr::Net(n) => Some(IpFamily::of(&n.addr())),
+                    _ => None,
+                })
+        })
+    }
+}
+
 /// All NAT rules of a ruleset.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NatRules {
@@ -142,14 +210,151 @@ pub struct NatRules {
     pub rdr: Vec<RdrRule>,
     /// outbound rules in priority order
     pub snat: Vec<SnatRule>,
+    /// 1:1 NAT lines in priority order
+    pub static_nat: Vec<StaticRule>,
 }
 
 impl NatRules {
-    /// Sorts both lists by priority (stable), as `Plugin::outputNatRules`.
+    /// Sorts the lists by priority (stable), as `Plugin::outputNatRules`.
     pub fn sort(&mut self) {
         self.rdr.sort_by_key(|r| r.priority);
         self.snat.sort_by_key(|r| r.priority);
+        self.static_nat.sort_by_key(|r| r.priority);
     }
+}
+
+/// 1:1 reflection settings that act as defaults
+/// (`Plugin::$systemDefaults['nat']`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaticDefaults {
+    /// reflect 1:1 rules (`reflection_binat`)
+    pub reflection: bool,
+    /// helper source NAT (`reflection_snat`)
+    pub helper: bool,
+}
+
+/// `DNatRule::parseNatRules` for one registered 1:1 rule array: the
+/// mapping, its reflection redirects, then its helper source NAT lines.
+pub fn static_rules(
+    conf: &Conf,
+    priority: u32,
+    defaults: StaticDefaults,
+    ctx: &Context<'_>,
+) -> Vec<StaticRule> {
+    let mut base = conf.clone();
+    // registerStaticNatRule: array_merge(defaults, conf); the model omits
+    // empty values, so an empty key takes the default
+    if defaults.reflection && base.is_empty_at("natreflection") {
+        base.set("natreflection", "enable");
+    }
+    if defaults.helper && base.is_empty_at("enablenatreflectionhelper") {
+        base.set("enablenatreflectionhelper", true);
+    }
+    normalize::move_address_fields(&mut base);
+    let kind = match base.text("type").as_deref() {
+        Some("nat") => StaticKind::Nat,
+        _ => StaticKind::Binat,
+    };
+    let mut out = Vec::new();
+    for (from, to, iface, fam) in normalize::expansions(&base) {
+        let mut notes = Notes {
+            debug: Vec::new(),
+            enabled: base.is_empty_at("disabled"),
+        };
+        let internal = endpoint(&base, ("from", ""), fam, from.as_deref(), ctx, &mut notes);
+        let peer = endpoint(&base, ("to", ""), fam, to.as_deref(), ctx, &mut notes);
+        let Notes {
+            mut debug,
+            mut enabled,
+        } = notes;
+        if let Some(i) = &iface
+            && !ctx.interfaces.get(i).is_some_and(|x| !x.device.is_empty())
+        {
+            debug.push(format!("Interface {i} not found"));
+            enabled = false;
+        }
+        let external = match base.text("external").filter(|t| !t.is_empty()) {
+            None => Addr::Any,
+            Some(t) if ctx.aliases.contains_key(&t) => Addr::Alias(t),
+            Some(t) => match t.parse::<IpAddr>() {
+                // a bare host takes the internal network's prefix length
+                Ok(ip) => match &internal.addr {
+                    Addr::Net(n) => IpNet::new(ip, n.prefix_len())
+                        .map(Addr::Net)
+                        .unwrap_or(Addr::Host(ip)),
+                    _ => Addr::Host(ip),
+                },
+                Err(_) => match t.parse::<IpNet>() {
+                    Ok(n) => Addr::Net(n),
+                    Err(_) => {
+                        debug.push(format!("Invalid address {t}"));
+                        enabled = false;
+                        Addr::Invalid(t)
+                    }
+                },
+            },
+        };
+        let map = StaticRule {
+            priority,
+            descr: base.text("descr").unwrap_or_default(),
+            enabled,
+            debug,
+            log: !base.is_empty_at("log"),
+            part: StaticPart::Map(kind),
+            interface: iface.clone(),
+            family: fam,
+            internal,
+            peer,
+            external,
+        };
+        let v4 = match map.effective_family() {
+            Some(f) => f == IpFamily::V4,
+            None => false,
+        };
+        let has = |name: &str| {
+            ctx.interfaces
+                .get(name)
+                .is_some_and(|i| i.has_family(if v4 { IpFamily::V4 } else { IpFamily::V6 }))
+        };
+        // reflectionInterfaces(): no gateway, not the rule's own, not loopback
+        let others: Vec<String> = ctx
+            .interfaces
+            .iter()
+            .filter(|(name, i)| {
+                !i.gateway_v4
+                    && !i.gateway_v6
+                    && iface.as_deref() != Some(name.as_str())
+                    && name.as_str() != "loopback"
+            })
+            .map(|(n, _)| n.clone())
+            .collect();
+        let live = map.enabled;
+        let reflect = base.text("natreflection").as_deref() == Some("enable");
+        let helper = !base.is_empty_at("enablenatreflectionhelper");
+        out.push(map.clone());
+        if live && reflect {
+            for name in others.iter().filter(|n| has(n)) {
+                out.push(StaticRule {
+                    part: StaticPart::Reflection,
+                    interface: Some(name.clone()),
+                    debug: Vec::new(),
+                    ..map.clone()
+                });
+            }
+        }
+        if live && helper {
+            for name in others.iter().chain(iface.iter()).filter(|n| has(n)) {
+                out.push(StaticRule {
+                    part: StaticPart::Helper,
+                    interface: Some(name.clone()),
+                    family: Some(if v4 { IpFamily::V4 } else { IpFamily::V6 }),
+                    debug: Vec::new(),
+                    ..map.clone()
+                });
+            }
+        }
+    }
+    out
 }
 
 /// What normalising one expansion found wrong.

@@ -25,6 +25,20 @@
     upstream = "11.0.1.1";
     host = "11.0.1.10";
     prefix = 24;
+    # listed in the served blocklist (URL table alias BLOCKLIST)
+    blocked = "11.0.1.20";
+    # country "ZZ" in the served GeoIP database (alias GEO_BLOCK)
+    geo = "11.0.1.30";
+    # feed server (blocklist, GeoIP CSV)
+    listsPort = 8081;
+  };
+  # IPv6: the upstream delegates /56s out of a /48 by DHCPv6-PD (Kea).
+  wan6 = {
+    upstream = "2001:db8:ffff::1";
+    prefix = 64;
+    pdPool = "2001:db8:100::";
+    pdPoolLen = 48;
+    delegatedLen = 56;
   };
   lan = {
     vlan = 2;

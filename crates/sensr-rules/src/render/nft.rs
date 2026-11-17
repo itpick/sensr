@@ -25,8 +25,8 @@ use ipnet::IpNet;
 use crate::compile::{
     self, ChainOptions, Field, Item, Low, SetRefs, Val, Verdict as LowVerdict, Warning,
 };
-use crate::ir::{Addr, FilterRule, InterfaceMap, IpFamily, PortMatch};
-use crate::nat::{NatRules, RdrRule, SnatTarget};
+use crate::ir::{Addr, Endpoint, FilterRule, InterfaceMap, IpFamily, PortMatch};
+use crate::nat::{NatRules, RdrRule, SnatTarget, StaticKind, StaticPart, StaticRule};
 use crate::render::json::{Expr, Hook, Nat, Object, SetType, Stmt, Verdict, Writer};
 use crate::routing::{PolicyRouting, REPLY_MASK, ROUTE_MASK};
 
@@ -752,8 +752,12 @@ fn lower_nat(
         ]
     };
     // "no nat proto carp all" / "no rdr proto carp all"
-    let mut pre: Vec<RuleStmts> = vec![(carp(), None)];
+    let mut pre_rows: Vec<(u32, RuleStmts)> = Vec::new();
     let mut post_rows: Vec<(u32, RuleStmts)> = Vec::new();
+    // pf consults the binat rules after the rdr rules inbound, and before
+    // the nat rules outbound (pf_get_translation)
+    let mut binat_in: Vec<RuleStmts> = Vec::new();
+    let mut binat_out: Vec<RuleStmts> = Vec::new();
     let mut rdr_pass = false;
     let mut warn = |descr: &str, m: String| {
         warnings.push(Warning {
@@ -787,7 +791,7 @@ fn lower_nat(
             if r.nordr {
                 let mut v = common_stmts(head, &matches, r.log, opts);
                 v.push(Stmt::Verdict(Verdict::Accept));
-                pre.push((v, comment(&r.descr)));
+                pre_rows.push((r.priority, (v, comment(&r.descr))));
                 continue;
             }
             rdr_pass |= r.pass;
@@ -800,7 +804,7 @@ fn lower_nat(
                     v.push(Stmt::CtMarkOr(RDR_PASS_MARK));
                 }
                 v.push(stmt);
-                pre.push((v, comment(&r.descr)));
+                pre_rows.push((r.priority, (v, comment(&r.descr))));
             }
             if r.helper
                 && let Some(Ok((tf, texpr))) = &target
@@ -851,19 +855,19 @@ fn lower_nat(
                     family: None,
                     addr: None,
                     port,
-                    flags: Vec::new(),
+                    ..Nat::default()
                 }),
                 SnatTarget::Host(ip) => Stmt::Snat(Nat {
                     family: Some(nat_family(fam.unwrap_or(IpFamily::of(ip)))),
                     addr: Some(Expr::Ip(*ip)),
                     port,
-                    flags: Vec::new(),
+                    ..Nat::default()
                 }),
                 SnatTarget::Net(n) => Stmt::Snat(Nat {
                     family: Some(nat_family(fam.unwrap_or(IpFamily::of(&n.addr())))),
                     addr: Some(addr_range(n)),
                     port,
-                    flags: Vec::new(),
+                    ..Nat::default()
                 }),
                 SnatTarget::Alias(a) => {
                     warn(&r.descr, format!("alias pool target {a} not rendered yet"));
@@ -874,13 +878,194 @@ fn lower_nat(
             post_rows.push((r.priority, (v, comment(&r.descr))));
         }
     }
+    for r in nat.static_nat.iter().filter(|r| r.enabled) {
+        lower_static(
+            r,
+            ifs,
+            refs,
+            opts,
+            &mut warn,
+            &mut StaticOut {
+                pre: &mut pre_rows,
+                post: &mut post_rows,
+                binat_in: &mut binat_in,
+                binat_out: &mut binat_out,
+            },
+        );
+    }
+    pre_rows.sort_by_key(|(p, _)| *p);
+    let mut pre: Vec<RuleStmts> = vec![(carp(), None)];
+    pre.extend(pre_rows.into_iter().map(|(_, r)| r));
+    pre.extend(binat_in);
     post_rows.sort_by_key(|(p, _)| *p);
-    let mut post: Vec<RuleStmts> = vec![(carp(), None)];
+    let mut post: Vec<RuleStmts> = binat_out;
+    post.push((carp(), None));
     post.extend(post_rows.into_iter().map(|(_, r)| r));
     LoweredNat {
         pre,
         post,
         rdr_pass,
+    }
+}
+
+/// Where the lowered lines of 1:1 rules go.
+struct StaticOut<'a> {
+    pre: &'a mut Vec<(u32, RuleStmts)>,
+    post: &'a mut Vec<(u32, RuleStmts)>,
+    binat_in: &'a mut Vec<RuleStmts>,
+    binat_out: &'a mut Vec<RuleStmts>,
+}
+
+/// A literal address as a NAT target: a host maps to itself, a network
+/// prefix-preserving (pf's `binat` and `bitmask` pools).
+fn static_target(a: &Addr, fam: IpFamily) -> Option<Nat<'static>> {
+    let (addr, prefix) = match a {
+        Addr::Host(ip) => (Expr::Ip(*ip), false),
+        Addr::Net(n) if n.prefix_len() == n.max_prefix_len() => (Expr::Ip(n.addr()), false),
+        Addr::Net(n) => {
+            let t = n.trunc();
+            (Expr::Prefix(t.addr(), t.prefix_len()), true)
+        }
+        _ => return None,
+    };
+    Some(Nat {
+        family: Some(nat_family(fam)),
+        addr: Some(addr),
+        prefix,
+        ..Nat::default()
+    })
+}
+
+/// One 1:1 line → nft rows. `binat` is a source NAT out of the interface
+/// plus a destination NAT into it; `nat` only the former, at its priority
+/// among the outbound rules.
+fn lower_static(
+    r: &StaticRule,
+    ifs: &InterfaceMap,
+    refs: &mut SetRefs,
+    opts: &Options,
+    warn: &mut impl FnMut(&str, String),
+    out: &mut StaticOut<'_>,
+) {
+    let ext = Endpoint {
+        addr: r.external.clone(),
+        negate: false,
+        port: None,
+    };
+    let fam_hint = r.effective_family();
+    let lower = |src: &Endpoint, dst: &Endpoint, refs: &mut SetRefs| {
+        compile::lower_matches(
+            &compile::MatchSpec {
+                family: r.family,
+                family_hint: fam_hint,
+                proto: crate::proto::ProtoMatch::Any,
+                src,
+                dst,
+                icmp: &[],
+                icmp6: &[],
+                tcp_flags: None,
+            },
+            ifs,
+            refs,
+        )
+    };
+    let fam_of = |f: Option<IpFamily>| f.or(fam_hint).unwrap_or(IpFamily::V4);
+    let row = |head: Option<Stmt<'static>>, m: &[compile::Match], stmt: Stmt<'static>| {
+        let mut v = common_stmts(head, m, r.log, opts);
+        v.push(stmt);
+        (v, comment(&r.descr))
+    };
+    match &r.part {
+        StaticPart::Map(kind) => {
+            // pf drops the inversion of a binat source
+            let internal = Endpoint {
+                negate: r.internal.negate && *kind == StaticKind::Nat,
+                ..r.internal.clone()
+            };
+            let alts = match lower(&internal, &r.peer, refs) {
+                Ok(a) => a,
+                Err(m) => return warn(&r.descr, m),
+            };
+            for (fam, m) in &alts {
+                let f = fam_of(*fam);
+                let snat = match kind {
+                    StaticKind::Binat => static_target(&r.external, f),
+                    // a plain nat pool of one network: pf (pool type none)
+                    // translates to its address as written
+                    StaticKind::Nat => match &r.external {
+                        Addr::Net(n) => static_target(&Addr::Host(n.addr()), f),
+                        a => static_target(a, f),
+                    },
+                };
+                let Some(snat) = snat else {
+                    return warn(
+                        &r.descr,
+                        "1:1 external address must be a literal address".into(),
+                    );
+                };
+                let head = iface_match("oifname", &r.interface, ifs);
+                let line = row(head, m, Stmt::Snat(snat));
+                match kind {
+                    StaticKind::Binat => out.binat_out.push(line),
+                    StaticKind::Nat => out.post.push((r.priority, line)),
+                }
+            }
+            if *kind == StaticKind::Binat {
+                // inbound: from the peers, to the external side
+                let alts = match lower(&r.peer, &ext, refs) {
+                    Ok(a) => a,
+                    Err(m) => return warn(&r.descr, m),
+                };
+                for (fam, m) in &alts {
+                    let Some(dnat) = static_target(&r.internal.addr, fam_of(*fam)) else {
+                        return warn(&r.descr, "binat source must be a literal address".into());
+                    };
+                    let head = iface_match("iifname", &r.interface, ifs);
+                    out.binat_in.push(row(head, m, Stmt::Dnat(dnat)));
+                }
+            }
+        }
+        StaticPart::Reflection => {
+            let alts = match lower(&r.peer, &ext, refs) {
+                Ok(a) => a,
+                Err(m) => return warn(&r.descr, m),
+            };
+            for (fam, m) in &alts {
+                let Some(dnat) = static_target(&r.internal.addr, fam_of(*fam)) else {
+                    return warn(
+                        &r.descr,
+                        "1:1 reflection needs a literal internal address".into(),
+                    );
+                };
+                let head = iface_match("iifname", &r.interface, ifs);
+                out.pre.push((r.priority, row(head, m, Stmt::Dnat(dnat))));
+            }
+        }
+        StaticPart::Helper => {
+            let Some(iface) = &r.interface else { return };
+            let f = fam_of(r.family);
+            let local = Endpoint {
+                addr: Addr::IfaceNet {
+                    iface: iface.clone(),
+                    link_local: false,
+                },
+                negate: false,
+                port: None,
+            };
+            let to = Endpoint {
+                port: None,
+                ..r.internal.clone()
+            };
+            let alts = match lower(&local, &to, refs) {
+                Ok(a) => a,
+                Err(m) => return warn(&r.descr, m),
+            };
+            for (_, m) in alts.iter().filter(|(fam, _)| fam.is_none_or(|x| x == f)) {
+                let head = iface_match("oifname", &r.interface, ifs);
+                out.post
+                    .push((r.priority, row(head, m, Stmt::Masquerade(Nat::default()))));
+            }
+        }
     }
 }
 
@@ -956,7 +1141,7 @@ fn rdr_actions(
             family: Some(nat_family(f)),
             addr: Some(addr.clone()),
             port,
-            flags: Vec::new(),
+            ..Nat::default()
         })
     };
     match (&r.local_port, &r.dst.port) {
@@ -1041,7 +1226,7 @@ fn hairpin(
         family: None,
         addr: None,
         port: None,
-        flags: Vec::new(),
+        ..Nat::default()
     }));
     Some(v)
 }

@@ -1139,7 +1139,18 @@ fn map_ipv6<'doc>(
         "dhcp6" => {
             ctx.consume(mode_el);
             let prefix_delegation_len = match ctx.non_empty(i, "dhcp6-ia-pd-len").as_deref() {
-                None | Some("none") => None,
+                Some("none") => None,
+                // Never chosen in the form, which then shows /64 (its first
+                // option): tracking LANs need a prefix, so ask for the /64
+                // the page displays. (dhcp6c itself sends no IA_PD then.)
+                None => {
+                    ctx.warn(
+                        i,
+                        Severity::Info,
+                        "no prefix delegation size set; a /64 is requested, as the interface page shows",
+                    );
+                    Some(64)
+                }
                 // OPNsense stores the number of bits below /64: 8 means a /56.
                 Some(bits) => match bits.trim().parse::<u8>() {
                     Ok(b) if b <= 32 => Some(64 - b),

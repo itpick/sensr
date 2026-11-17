@@ -258,15 +258,35 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
                 "url" => strings(item, "content.urls"),
                 "url_table" => Value::Array(vec![Value::String(s(item, "content.url"))]),
                 "geo_ip" => strings(item, "content.countries"),
+                "asn" => Value::Array(
+                    get_path(item, "content.asns")
+                        .and_then(Value::as_array)
+                        .map(|v| {
+                            v.iter()
+                                .filter_map(Value::as_u64)
+                                .map(|n| Value::String(n.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                ),
                 "network_group" => strings(item, "content.members"),
                 "mac" => strings(item, "content.addresses"),
                 _ => json!([]),
+            };
+            let refresh = |k: &str| {
+                (ty == "url_table").then(|| {
+                    get_path(item, &format!("content.refresh.{k}"))
+                        .cloned()
+                        .unwrap_or(json!(0))
+                })
             };
             json!({
                 "enabled": b(item, "enabled", true),
                 "name": s(item, "name"),
                 "type": ty,
                 "content": content,
+                "refresh_days": refresh("days"),
+                "refresh_hours": refresh("hours"),
                 "description": s(item, "description"),
             })
         }
@@ -604,6 +624,7 @@ pub fn from_view(
                 "url" => &["urls"],
                 "url_table" => &["url", "refresh", "families"],
                 "geo_ip" => &["countries", "families"],
+                "asn" => &["asns", "families"],
                 "network_group" => &["members"],
                 "mac" => &["addresses"],
                 _ => &[],
@@ -620,8 +641,33 @@ pub fn from_view(
                         .cloned()
                         .unwrap_or(json!(""));
                     c.insert("url".into(), first);
+                    let n = |k: &str| get_path(view, k).and_then(Value::as_u64).unwrap_or(0);
+                    let (days, hours) = (n("refresh_days"), n("refresh_hours"));
+                    if days == 0 && hours == 0 {
+                        // Zero means "the feed default"; keep the stored item minimal.
+                        c.remove("refresh");
+                    } else {
+                        c.insert("refresh".into(), json!({"days": days, "hours": hours}));
+                    }
                 }
                 "geo_ip" => drop(c.insert("countries".into(), lines)),
+                "asn" => {
+                    // "AS13335" or "13335"; anything else is left for the
+                    // schema validation to reject
+                    let asns: Vec<Value> = lines
+                        .as_array()
+                        .map(|l| {
+                            l.iter()
+                                .filter_map(Value::as_str)
+                                .map(|t| {
+                                    let d = t.trim().trim_start_matches(['A', 'S', 'a', 's']);
+                                    d.parse::<u64>().map(Value::from).unwrap_or(json!(t))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    c.insert("asns".into(), Value::Array(asns));
+                }
                 "network_group" => drop(c.insert("members".into(), lines)),
                 "mac" => drop(c.insert("addresses".into(), lines)),
                 _ => {}
@@ -880,6 +926,26 @@ pub fn decorate(grid: GridId, doc: &Value, key: &str, row: &mut Value) {
     }
 }
 
+/// Adds the feed columns to alias rows: `loaded` (entries) and `updated`, a status cell
+/// (`{text, tone, title}`) that turns red with the error as its tooltip when the last fetch
+/// failed. Aliases without a feed keep both empty.
+pub fn add_feed_status(rows: &mut [Value], feeds: &[crate::runtime::AliasFeed]) {
+    for row in rows {
+        let name = s(row, "name");
+        let Some(f) = feeds.iter().find(|f| f.name == name) else {
+            continue;
+        };
+        row["loaded"] = json!(f.entries);
+        let text = f
+            .updated_at
+            .map_or_else(|| "never".to_owned(), crate::runtime::fmt_time);
+        row["updated"] = match &f.error {
+            Some(e) => json!({"text": text, "tone": "bad", "badge": "error", "title": e}),
+            None => json!({"text": text}),
+        };
+    }
+}
+
 /// Schema field (relative to the item) → view field.
 pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
     let first = schema.split('.').next().unwrap_or(schema);
@@ -896,6 +962,9 @@ pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
         ],
         GridId::Aliases => &[
             ("name", "name"),
+            ("content.refresh.days", "refresh_days"),
+            ("content.refresh.hours", "refresh_hours"),
+            ("content.refresh", "refresh_days"),
             ("content", "content"),
             ("description", "description"),
         ],
@@ -1405,6 +1474,83 @@ mod tests {
             item.get("description").is_none(),
             "empty optional fields are omitted"
         );
+    }
+
+    #[test]
+    fn asn_alias_round_trips_as_numbers() {
+        let view = json!({"enabled": true, "name": "STARLINK", "type": "asn", "content": ["AS14593", "64500"], "description": ""});
+        let item = from_view(GridId::Aliases, &json!({}), "", None, &view);
+        assert_eq!(
+            item["content"],
+            json!({"type": "asn", "asns": [14593, 64500]})
+        );
+        let back = to_view(GridId::Aliases, &json!({}), &item);
+        assert_eq!(back["content"], json!(["14593", "64500"]));
+    }
+
+    #[test]
+    fn url_table_refresh_round_trips() {
+        let view = json!({"enabled": true, "name": "drop", "type": "url_table",
+            "content": ["https://feeds.example.org/drop.txt"], "refresh_days": 1, "refresh_hours": 12});
+        let item = from_view(GridId::Aliases, &json!({}), "", None, &view);
+        assert_eq!(
+            item["content"],
+            json!({"type": "url_table", "url": "https://feeds.example.org/drop.txt",
+                   "refresh": {"days": 1, "hours": 12}})
+        );
+        let back = to_view(GridId::Aliases, &json!({}), &item);
+        assert_eq!(
+            (back["refresh_days"].clone(), back["refresh_hours"].clone()),
+            (json!(1), json!(12))
+        );
+        // Clearing both falls back to the default period.
+        let view = json!({"name": "drop", "type": "url_table", "content": ["https://feeds.example.org/drop.txt"]});
+        let item = from_view(GridId::Aliases, &json!({}), "", Some(&item), &view);
+        assert!(item["content"].get("refresh").is_none());
+        // Other types carry no refresh fields.
+        let host = to_view(
+            GridId::Aliases,
+            &json!({}),
+            &json!({"name": "h", "content": {"type": "host", "entries": []}}),
+        );
+        assert!(host["refresh_days"].is_null());
+        assert_eq!(
+            view_path(GridId::Aliases, "content.refresh.hours"),
+            Some("refresh_hours")
+        );
+    }
+
+    #[test]
+    fn feed_status_decorates_alias_rows() {
+        use crate::runtime::AliasFeed;
+        let mut rows = vec![
+            json!({"name": "drop"}),
+            json!({"name": "bad"}),
+            json!({"name": "nas"}),
+        ];
+        let feeds = [
+            AliasFeed {
+                name: "drop".into(),
+                entries: 1234,
+                updated_at: Some(0),
+                ..Default::default()
+            },
+            AliasFeed {
+                name: "bad".into(),
+                error: Some("HTTP 404".into()),
+                ..Default::default()
+            },
+        ];
+        add_feed_status(&mut rows, &feeds);
+        assert_eq!(rows[0]["loaded"], json!(1234));
+        assert_eq!(
+            rows[0]["updated"],
+            json!({"text": "1970-01-01 00:00:00 UTC"})
+        );
+        assert_eq!(rows[1]["updated"]["tone"], "bad");
+        assert_eq!(rows[1]["updated"]["title"], "HTTP 404");
+        assert_eq!(rows[1]["updated"]["text"], "never");
+        assert!(rows[2].get("loaded").is_none());
     }
 
     #[test]

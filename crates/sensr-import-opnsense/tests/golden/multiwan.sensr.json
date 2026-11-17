@@ -442,7 +442,8 @@
         ],
         "trigger": "down"
       }
-    }
+    },
+    "switch_default": true
   },
   "trust": {
     "authorities": {

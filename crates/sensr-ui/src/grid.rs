@@ -22,6 +22,9 @@ pub enum ColumnKind {
     Endpoint,
     /// Port or port alias; empty means any.
     Port,
+    /// Run-time state: a string, or `{text, tone, badge, title}` where a `tone` of `bad`
+    /// adds a red `badge` whose tooltip is `title` (e.g. a feed's last error).
+    Status,
 }
 
 /// One grid column.
@@ -66,6 +69,14 @@ impl Column {
             path,
             label,
             kind: ColumnKind::Endpoint,
+        }
+    }
+    /// A run-time status column (not editable, filled by the server).
+    pub const fn status(path: &'static str, label: &'static str) -> Self {
+        Self {
+            path,
+            label,
+            kind: ColumnKind::Status,
         }
     }
     /// A port column.
@@ -177,6 +188,15 @@ pub fn cell_text(row: &Value, col: &Column) -> String {
             .and_then(Value::as_str)
             .unwrap_or_default();
         return pretty_endpoint(raw);
+    }
+    if col.kind == ColumnKind::Status
+        && let Some(Value::Object(o)) = get_path(row, col.path)
+    {
+        return o
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
     }
     match get_path(row, col.path) {
         None | Some(Value::Null) => String::new(),

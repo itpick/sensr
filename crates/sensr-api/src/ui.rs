@@ -15,6 +15,7 @@ use sensr_ui::api::{
     Session, Sessions, SystemStatus,
 };
 use sensr_ui::hoststats::Sampler;
+use sensr_ui::runtime::RuntimeSection;
 use serde_json::Value;
 
 use crate::AppState;
@@ -290,6 +291,21 @@ impl Backend for UiBackend {
         self.state
             .registry
             .grants(self.caller.info.privileges.iter().map(String::as_str), url)
+    }
+
+    fn runtime(&self, section: RuntimeSection) -> BoxFuture<'_, ApiResult<Value>> {
+        async move {
+            let section = match section {
+                RuntimeSection::Gateways => sensr_ipc::RuntimeSection::Gateways,
+                RuntimeSection::Aliases => sensr_ipc::RuntimeSection::Aliases,
+                RuntimeSection::Ipv6 => sensr_ipc::RuntimeSection::Ipv6,
+            };
+            match self.call(Op::Runtime { section }).await? {
+                Response::Value(v) => Ok(v.unwrap_or(Value::Null)),
+                other => Err(unexpected(other)),
+            }
+        }
+        .boxed()
     }
 }
 
