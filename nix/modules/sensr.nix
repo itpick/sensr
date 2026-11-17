@@ -374,7 +374,12 @@ in
     environment.variables.SENSR_AGENT_SOCKET = socket;
 
     # networkd reads runtime config from here; the agent writes into it.
-    systemd.tmpfiles.rules = [ "d /run/systemd/network 0755 root root -" ];
+    systemd.tmpfiles.rules = [
+      "d /run/systemd/network 0755 root root -"
+      # unbound.conf globs for sensr-dns's include files here; Unbound
+      # accepts a glob that matches nothing, not one in a missing directory.
+      "d /var/lib/sensr-dns 0755 root root -"
+    ];
 
     systemd.targets.sensr-net = {
       description = "sensr has applied interfaces, addresses and routes";
