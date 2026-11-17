@@ -1044,3 +1044,87 @@ fn webgui_listener_settings_are_imported() {
         i.report
     );
 }
+
+fn reasons(i: &Imported<SensrDocument>) -> Vec<(&str, &str)> {
+    i.report
+        .unmapped_expected
+        .iter()
+        .map(|e| (e.xpath.as_str(), e.reason.unwrap_or_default()))
+        .collect()
+}
+
+#[test]
+fn disabled_services_are_expected_and_enabled_ones_reported() {
+    let section = |enabled: &str| {
+        format!(
+            "<opnsense>{IFACES}\
+             <OPNsense><IPsec><general><enabled>{enabled}</enabled><preferred_oldsa>0</preferred_oldsa></general></IPsec>\
+             <monit><general><enabled>{enabled}</enabled><interval>120</interval></general></monit>\
+             <Kea><dhcp6><general><enabled>{enabled}</enabled><valid_lifetime>4000</valid_lifetime></general></dhcp6></Kea></OPNsense>\
+             <dhcpdv6><lan><enable>{}</enable></lan></dhcpdv6>\
+             <hasync><pfsyncversion>1400</pfsyncversion><synchronizetoip>{}</synchronizetoip></hasync>\
+             </opnsense>",
+            if enabled == "1" { "1" } else { "-1" },
+            if enabled == "1" { "192.0.2.2" } else { "" },
+        )
+    };
+    let off = import_str(&section("0"));
+    let r = reasons(&off);
+    for path in [
+        "/opnsense/OPNsense/IPsec",
+        "/opnsense/OPNsense/monit",
+        "/opnsense/OPNsense/Kea/dhcp6",
+        "/opnsense/dhcpdv6",
+        "/opnsense/hasync",
+    ] {
+        assert!(
+            r.iter().any(|(p, _)| *p == path),
+            "{path} not expected: {r:?}"
+        );
+    }
+    assert!(unexpected(&off).is_empty(), "{}", off.report);
+    // Switched on, each is a feature sensr would drop: reported.
+    let on = import_str(&section("1"));
+    let reported = unexpected(&on);
+    for path in [
+        "/opnsense/OPNsense/IPsec",
+        "/opnsense/OPNsense/monit",
+        "/opnsense/OPNsense/Kea/dhcp6",
+        "/opnsense/dhcpdv6",
+        "/opnsense/hasync",
+    ] {
+        assert!(
+            reported.iter().any(|u| path.starts_with(u)),
+            "{path} not reported: {reported:?}"
+        );
+        assert!(!reasons(&on).iter().any(|(p, _)| *p == path));
+    }
+}
+
+#[test]
+fn stale_port_forward_link_is_expected_only_without_its_forward() {
+    let xml = |nat_link: &str| {
+        format!(
+            "<opnsense>{IFACES}<filter><rule><type>pass</type><interface>lan</interface>\
+             <associated-rule-id>nat_1</associated-rule-id><source><any/></source>\
+             <destination><any/></destination><disabled>1</disabled></rule></filter>\
+             <nat><rule><associated-rule-id>{nat_link}</associated-rule-id></rule></nat></opnsense>"
+        )
+    };
+    let stale = import_str(&xml(""));
+    assert!(
+        reasons(&stale)
+            .iter()
+            .any(|(p, _)| p.ends_with("/associated-rule-id")),
+        "{}",
+        stale.report
+    );
+    let linked = import_str(&xml("nat_1"));
+    assert!(
+        !reasons(&linked)
+            .iter()
+            .any(|(p, _)| p.starts_with("/opnsense/filter/") && p.ends_with("/associated-rule-id")),
+        "{}",
+        linked.report
+    );
+}

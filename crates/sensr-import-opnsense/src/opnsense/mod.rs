@@ -15,6 +15,7 @@ mod export;
 mod filter;
 mod gateways;
 mod ids;
+mod inert;
 mod interfaces;
 mod kea;
 mod nat;
@@ -88,7 +89,8 @@ pub fn importer(options: &ImportOptions) -> Importer<SensrDocument> {
         .with_mapper(ids::IdsMapper)
         .with_mapper(ids::NetflowMapper)
         // Last: its fix-ups need the interfaces and the rules the others built.
-        .with_mapper(gateways::GatewayMapper);
+        .with_mapper(gateways::GatewayMapper)
+        .with_mapper(inert::InertMapper);
     for (pattern, reason) in EXPECTED_UNMAPPED {
         importer = importer.expect_unmapped(pattern, reason);
     }
@@ -138,6 +140,40 @@ pub const EXPECTED_UNMAPPED: &[(&str, &str)] = &[
         "FreeBSD powerd; CPU frequency scaling is a NixOS concern",
     ),
     ("system/usevirtualterminal", "FreeBSD console setting"),
+    (
+        "system/serialspeed",
+        "FreeBSD console setting; the image sets its own console",
+    ),
+    (
+        "system/primaryconsole",
+        "FreeBSD console setting; the image sets its own console",
+    ),
+    (
+        "system/nextuid",
+        "OPNsense's next free user id; sensr allocates ids itself",
+    ),
+    (
+        "system/nextgid",
+        "OPNsense's next free group id; sensr allocates ids itself",
+    ),
+    (
+        "system/rrdbackup",
+        "RRD backup interval; RRD graphs are replaced by sensr-monitor",
+    ),
+    (
+        "system/netflowbackup",
+        "NetFlow database backup interval; sensr's traffic insight keeps its own store",
+    ),
+    (
+        "system/thermal_hardware",
+        "FreeBSD thermal sensor driver; Linux loads its own",
+    ),
+    ("system/pfdebug", "pf debug log level"),
+    ("widgets", "web GUI dashboard layout"),
+    (
+        "OPNsense/SystemHealth",
+        "RRD health graphs; replaced by sensr-monitor and the traffic insight",
+    ),
     (
         "system/disableconsolemenu",
         "the sensr console menu has its own setting",

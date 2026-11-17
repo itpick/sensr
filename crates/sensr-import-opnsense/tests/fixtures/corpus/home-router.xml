@@ -87,6 +87,12 @@ U1lOVEhFVElDIEFQSSBLRVkgLSBOT1QgQSBSRUFMIENSRURFTlRJQUwgLSBzZW5zciB0ZXN0IGNvcnB1
       <menu_favorites/>
     </user>
     <timezone>Europe/Amsterdam</timezone>
+    <nextuid>2000</nextuid>
+    <nextgid>2000</nextgid>
+    <thermal_hardware>amdtemp</thermal_hardware>
+    <serialspeed>115200</serialspeed>
+    <primaryconsole>video</primaryconsole>
+    <maximumstates/>
     <timeservers>ntp1.example.net ntp2.example.net 203.0.113.123</timeservers>
     <webgui>
       <protocol>https</protocol>
@@ -1934,6 +1940,34 @@ U1lOVEhFVElDIEFQSSBLRVkgLSBOT1QgQSBSRUFMIENSRURFTlRJQUwgLSBzZW5zciB0ZXN0IGNvcnB1
         <MinProtocol_DTLS/>
       </general>
     </trust>
+    <IPsec version="1.0.4">
+      <general>
+        <enabled/>
+        <preferred_oldsa>0</preferred_oldsa>
+        <disablevpnrules>0</disablevpnrules>
+        <passthrough_networks/>
+      </general>
+      <keyPairs/>
+      <preSharedKeys/>
+    </IPsec>
+    <Swanctl version="1.0.0">
+      <Connections/>
+      <locals/>
+      <remotes/>
+      <children/>
+    </Swanctl>
+    <monit version="1.0.13">
+      <general>
+        <enabled>0</enabled>
+        <interval>120</interval>
+        <startdelay>120</startdelay>
+      </general>
+    </monit>
+    <SystemHealth version="1.0.1">
+      <general>
+        <enabled>1</enabled>
+      </general>
+    </SystemHealth>
   </OPNsense>
   <ca uuid="9a7d8f90-ce35-4ce7-ae7f-952ebd95d44d">
     <refid>6721b4c9a0e3f</refid>
@@ -1951,4 +1985,42 @@ U1lOVEhFVElDIEFQSSBLRVkgLSBOT1QgQSBSRUFMIENSRURFTlRJQUwgLSBzZW5zciB0ZXN0IGNvcnB1
     <csr/>
     <prv>LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tClNZTlRIRVRJQyBURVNUIFBSSVZBVEUgS0VZIC0gTk9UIEEgUkVBTCBLRVkgLSBXZWIgR1VJIGd3LWhvbWUuaG9tZS5leGFtcGxlCi0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0K</prv>
   </cert>
+  <dhcpdv6>
+    <lan>
+      <enable>-1</enable>
+    </lan>
+  </dhcpdv6>
+  <hasync version="1.0.2">
+    <disablepreempt>0</disablepreempt>
+    <pfsyncinterface/>
+    <pfsyncpeerip/>
+    <pfsyncversion>1400</pfsyncversion>
+    <synchronizetoip/>
+    <username/>
+    <password/>
+  </hasync>
+  <load_balancer>
+    <monitor_type>
+      <name>ICMP</name>
+      <type>icmp</type>
+      <descr>ICMP</descr>
+      <options/>
+    </monitor_type>
+    <monitor_type>
+      <name>HTTP</name>
+      <type>http</type>
+      <descr>Generic HTTP</descr>
+      <options>
+        <path>/</path>
+        <host/>
+        <code>200</code>
+      </options>
+    </monitor_type>
+  </load_balancer>
+  <widgets>
+    <sequence>system_information-container:00000000-col3:show</sequence>
+    <column_count>2</column_count>
+  </widgets>
+  <laggs/>
+  <staticroutes/>
 </opnsense>
