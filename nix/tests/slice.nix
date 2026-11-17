@@ -59,6 +59,14 @@ let
       '';
     };
 
+  # What the internet's feed server serves: a blocklist for the URL table
+  # alias and a DB-IP-format country database (gzip) for GeoIP.
+  feeds = pkgs.runCommand "slice-feeds" { nativeBuildInputs = [ pkgs.gzip ]; } ''
+    mkdir -p $out
+    printf '# synthetic blocklist\n${net.internet.blocked}\n' > $out/blocklist.txt
+    printf '${net.internet.geo},${net.internet.geo},ZZ\n198.51.100.0,198.51.100.255,QQ\n' | gzip -9n > $out/geo.csv.gz
+  '';
+
   client =
     extra:
     lib.recursiveUpdate {
@@ -109,7 +117,10 @@ pkgs.testers.runNixOSTest {
       systemd.network.networks = {
         "10-wan0" = {
           matchConfig.Name = "wan0";
-          address = [ "${net.wan.upstream}/${toString net.wan.prefix}" ];
+          address = [
+            "${net.wan.upstream}/${toString net.wan.prefix}"
+            "${net.wan6.upstream}/${toString net.wan6.prefix}"
+          ];
           networkConfig.DHCPServer = true;
           dhcpServerConfig = {
             PoolOffset = 100;
@@ -123,6 +134,32 @@ pkgs.testers.runNixOSTest {
           address = [ "${net.internet.upstream}/${toString net.internet.prefix}" ];
         };
       };
+      # DHCPv6 with prefix delegation for the router's WAN
+      services.kea.dhcp6 = {
+        enable = true;
+        settings = {
+          interfaces-config.interfaces = [ "wan0" ];
+          lease-database = {
+            type = "memfile";
+            persist = false;
+          };
+          subnet6 = [
+            {
+              id = 1;
+              subnet = "${net.wan6.upstream}/${toString net.wan6.prefix}";
+              interface = "wan0";
+              pools = [ { pool = "2001:db8:ffff::100-2001:db8:ffff::1ff"; } ];
+              pd-pools = [
+                {
+                  prefix = net.wan6.pdPool;
+                  prefix-len = net.wan6.pdPoolLen;
+                  delegated-len = net.wan6.delegatedLen;
+                }
+              ];
+            }
+          ];
+        };
+      };
     };
 
     internet = {
@@ -132,7 +169,11 @@ pkgs.testers.runNixOSTest {
       networking.firewall.enable = false;
       systemd.network.networks."10-inet0" = {
         matchConfig.Name = "inet0";
-        address = [ "${net.internet.host}/${toString net.internet.prefix}" ];
+        address = [
+          "${net.internet.host}/${toString net.internet.prefix}"
+          "${net.internet.blocked}/${toString net.internet.prefix}"
+          "${net.internet.geo}/${toString net.internet.prefix}"
+        ];
         routes = [ { Gateway = net.internet.upstream; } ];
       };
       systemd.services.http-echo = httpEcho { port = 80; };
@@ -162,6 +203,11 @@ pkgs.testers.runNixOSTest {
           synchronization.local-stratum = 1;
         };
       };
+      systemd.services.feeds = {
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network.target" ];
+        serviceConfig.ExecStart = "${pkgs.python3}/bin/python3 -m http.server --directory ${feeds} --bind ${net.internet.host} ${toString net.internet.listsPort}";
+      };
       environment.systemPackages = with pkgs; [
         curl
         wireguard-tools
@@ -183,7 +229,9 @@ pkgs.testers.runNixOSTest {
         };
         virtualisation.memorySize = 1024;
         environment.systemPackages = with pkgs; [
+          curl
           dig
+          jq
           nftables
           wireguard-tools
         ];
@@ -267,6 +315,9 @@ pkgs.testers.runNixOSTest {
     NAS = "${net.nas.ip}"
     IOT = "${net.iot.ip}"
     INTERNET = "${net.internet.host}"
+    BLOCKED = "${net.internet.blocked}"
+    GEO = "${net.internet.geo}"
+    LISTS = f"http://{INTERNET}:${toString net.internet.listsPort}"
 
     def hostname_in(source):
         out = router.succeed(f"sensr config get system.hostname --json --source {source}")
@@ -477,6 +528,101 @@ pkgs.testers.runNixOSTest {
                 print(lan.execute("ntp-ctl status; journalctl -b -u ntpd-rs --no-pager | tail -n 20")[1])
                 print(router.execute("for c in /run/sensr/ntp/ntp.toml /etc/ntpd-rs/ntp.toml; do [ -e $c ] && cat $c && ntp-ctl -c $c status; done; journalctl -b -u sensr-ntpd -u ntpd-rs --no-pager | tail -n 30")[1])
                 print(internet.execute("ntp-ctl status; journalctl -b -u ntpd-rs --no-pager | tail -n 20")[1])
+    def runtime(section):
+        return json.loads(router.succeed(f"sensr runtime {section}"))
+
+    def gateway(name):
+        for g in runtime("gateways")["gateways"]:
+            if g["name"] == name:
+                return g
+        raise AssertionError(f"no gateway {name}")
+
+    def rule_packets(chain, label):
+        out = json.loads(router.succeed(f"nft -j list chain inet sensr {chain}"))
+        n = 0
+        for item in out["nftables"]:
+            r = item.get("rule")
+            if r and r.get("comment") == label:
+                for e in r["expr"]:
+                    if "counter" in e and e["counter"]:
+                        n += e["counter"]["packets"]
+        return n
+
+    if not REFERENCE and not PENDING["importApply"]:
+        with subtest("URL table alias: the lan,opt1 blocklist wins over 'Allow LAN to any'"):
+            # before the list is reachable the alias is empty: traffic passes
+            assert lan.succeed(f"curl -sf --max-time 5 http://{BLOCKED}/").strip() == wan_ip
+            router.succeed(
+                f"sensr config set firewall.aliases.4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1b01.content.url {LISTS}/blocklist.txt"
+                " && sensr config commit -m 'slice: local blocklist'"
+            )
+            router.wait_until_succeeds(f"nft list set inet sensr a_BLOCKLIST_4 | grep -q '{BLOCKED}'", timeout=90)
+            blocked(lan, f"curl http://{BLOCKED}/")
+            # everything else still passes
+            assert lan.succeed(f"curl -sf --max-time 5 http://{INTERNET}/").strip() == wan_ip
+            status = {a["name"]: a for a in runtime("aliases")}
+            assert status["BLOCKLIST"]["entries"] == 1 and not status["BLOCKLIST"]["error"], status["BLOCKLIST"]
+            # the disabled alias was never fetched and matches nothing
+            assert status["PAUSED_FEED"]["entries"] == 0, status["PAUSED_FEED"]
+
+        with subtest("URL table alias: a reload with the source down renders the last good list"):
+            internet.succeed("systemctl stop feeds")
+            router.succeed(
+                "sensr config set firewall.aliases.4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1b01.content.refresh.hours 1"
+                " && sensr config commit -m 'slice: refresh hourly'"
+            )
+            router.sleep(15)
+            router.succeed(f"nft list set inet sensr a_BLOCKLIST_4 | grep -q '{BLOCKED}'")
+            blocked(lan, f"curl http://{BLOCKED}/")
+            internet.succeed("systemctl start feeds")
+
+        with subtest("GeoIP alias from a DB-IP-format database"):
+            router.succeed(
+                f"sensr config set firewall.feeds.geoip_url {LISTS}/geo.csv.gz"
+                " && sensr config commit -m 'slice: local GeoIP database'"
+            )
+            router.wait_until_succeeds(f"nft list set inet sensr a_GEO_BLOCK_4 | grep -q '{GEO}'", timeout=90)
+            before = rule_packets("in_wan", "8c3dc3ee-b23e-4170-af5a-5f23b2321d58")
+            internet.execute(f"curl --interface {GEO} --connect-timeout 2 -s http://{wan_ip}:8080/")
+            after = rule_packets("in_wan", "8c3dc3ee-b23e-4170-af5a-5f23b2321d58")
+            assert after > before, f"GeoIP block rule did not match ({before} -> {after})"
+
+        with subtest("gateway monitoring: WAN_DHCP online, then down, then back"):
+            # the fixture's monitor address is not on the test network
+            router.succeed(
+                "sensr config delete gateways.gateways.9df1d26a-e824-425b-95df-aaf0fe534a17.monitor_address"
+                " && sensr config commit -m 'slice: monitor the gateway itself'"
+            )
+            router.wait_until_succeeds(
+                "sensr runtime gateways | jq -e '.gateways[] | select(.name==\"WAN_DHCP\") | .status==\"online\"'",
+                timeout=120,
+            )
+            g = gateway("WAN_DHCP")
+            assert g["next_hop"] == "${net.wan.upstream}" and g["latency_ms"] is not None, g
+            assert g["active_default"], g
+            upstream.succeed("sysctl -w net.ipv4.icmp_echo_ignore_all=1")
+            router.wait_until_succeeds(
+                "sensr runtime gateways | jq -e '.gateways[] | select(.name==\"WAN_DHCP\") | .status==\"down\"'",
+                timeout=120,
+            )
+            upstream.succeed("sysctl -w net.ipv4.icmp_echo_ignore_all=0")
+            router.wait_until_succeeds(
+                "sensr runtime gateways | jq -e '.gateways[] | select(.name==\"WAN_DHCP\") | .status==\"online\"'",
+                timeout=180,
+            )
+
+        with subtest("IPv6: a delegated prefix reaches the LAN client (PD, RA)"):
+            router.wait_until_succeeds("ip -6 route show table all type unreachable proto dhcp | grep -q '2001:db8:100'", timeout=120)
+            lan.wait_until_succeeds("ip -6 addr show dev eth1 scope global | grep -q 'inet6 2001:db8:100:'", timeout=120)
+            pd = runtime("ipv6")
+            print(json.dumps(pd, indent=1))
+            assert pd and pd[0]["interface"] == "wan", pd
+            assert pd[0]["state"]["current"]["prefix"].startswith("2001:db8:100:"), pd
+            # persisted for the next boot
+            router.succeed("test -s /var/lib/sensr/state/pd/wan.json")
+            # the router's own address is advertised as the DNS server (RDNSS)
+            rdnss = lan.succeed("networkctl status eth1 --json=short | jq -r '.DNS[]?.AddressString // empty' || true")
+            print(f"LAN RDNSS: {rdnss}")
 
     with subtest("commit-confirm: an unconfirmed apply rolls back"):
         if PENDING["commitConfirm"]:
