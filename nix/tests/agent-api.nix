@@ -196,7 +196,9 @@ pkgs.testers.runNixOSTest {
         out = machine.succeed("curl -s -o /dev/null -w '%{redirect_url}' http://localhost/")
         assert out == "https://localhost:8443/", out
 
-        lan = machine.succeed("ip -4 -o addr show dev eth1 | awk '{print $4}' | cut -d/ -f1").strip()
+        # first boot binds LAN to its card by MAC and names it after the role
+        lan_dev = machine.succeed("sensr config get interfaces.lan.device --source applied").strip()
+        lan = machine.succeed(f"ip -4 -o addr show dev {lan_dev} | awk '{{print $4}}' | cut -d/ -f1").strip()
         probe = f"curl -sk -o /dev/null -w '%{{http_code}}' --connect-timeout 3 https://{lan}:8443/api/v1/status"
         client.wait_for_unit("multi-user.target")
         client.succeed(f"{probe} | grep -qx 401")
