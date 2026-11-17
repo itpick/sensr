@@ -471,7 +471,7 @@ pkgs.testers.runNixOSTest {
             try:
                 # Stratum 3: the client follows the router (2), which follows
                 # the internet's server (1); unsynchronised is 16.
-                lan.wait_until_succeeds("ntp-ctl status | grep -Eq 'Stratum: +3$'", timeout=300)
+                lan.wait_until_succeeds("ntp-ctl status | grep -Eq 'Stratum:[[:space:]]+3([[:space:]]|$)'", timeout=300)
             finally:
                 print(lan.execute("ntp-ctl status; journalctl -b -u ntpd-rs --no-pager | tail -n 20")[1])
                 print(router.execute("for c in /run/sensr/ntp/ntp.toml /etc/ntpd-rs/ntp.toml; do [ -e $c ] && cat $c && ntp-ctl -c $c status; done; journalctl -b -u sensr-ntpd -u ntpd-rs --no-pager | tail -n 30")[1])
