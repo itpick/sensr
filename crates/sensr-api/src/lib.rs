@@ -60,6 +60,8 @@ pub const ROUTES: &[Route] = &[
     ("/api/v1/config/history", || get(native::history)),
     ("/api/v1/config/diff", || get(native::diff)),
     ("/api/v1/apply/plan", || get(native::plan)),
+    ("/api/v1/interfaces/nics", || get(native::nics)),
+    ("/api/v1/interfaces/assign", || post(native::assign)),
     ("/api/core/firmware/info", || get(compat::firmware_info)),
     ("/api/interfaces/overview/interfaces_info", || {
         get(compat::interfaces_info).post(compat::interfaces_info)

@@ -82,12 +82,14 @@ pkgs.testers.runNixOSTest {
         machine.succeed("sensr config diff | grep -q '+    \"hostname\": \"base\"'")
         machine.succeed("sensr config commit -m base")
         assert applied("system.hostname") == "base"
+        # first boot may have committed the MAC pins before this: count from here
+        base = json.loads(machine.succeed("sensr status --json"))["head"]["id"]
 
     with subtest("commit-confirm: confirmed in time"):
         machine.succeed("sensr config set system.hostname kept")
         machine.succeed("sensr config commit --confirm 60 | grep -q provisional")
-        machine.succeed("sensr status | grep -q 'rolls back to 2'")
-        machine.succeed("sensr config confirm | grep -q 'revision 3 confirmed'")
+        machine.succeed(f"sensr status | grep -q 'rolls back to {base}'")
+        machine.succeed(f"sensr config confirm | grep -q 'revision {base + 1} confirmed'")
         assert applied("system.hostname") == "kept"
 
     with subtest("commit-confirm: timeout rolls back"):

@@ -167,6 +167,14 @@ fn apply_banner_states() {
     let clean = render(|| view! { <ApplyBanner initial=Pending::default()/> }.into_any());
     assert!(clean.select(&sel(".banner")).next().is_none());
 
+    let alert = Pending {
+        alert: Some("config.xml not imported: see import-report.txt".into()),
+        ..Default::default()
+    };
+    let doc = render(|| view! { <ApplyBanner initial=alert/> }.into_any());
+    let text: String = doc.root_element().text().collect();
+    assert!(text.contains("config.xml not imported"), "{text}");
+
     let dirty = Pending {
         changed: vec!["firewall".into()],
         ..Default::default()
@@ -187,6 +195,7 @@ fn apply_banner_states() {
             deadline: 1_060,
         }),
         now: 1_000,
+        alert: None,
     };
     let doc = render(|| view! { <ApplyBanner initial=probation/> }.into_any());
     let text: String = doc.root_element().text().collect();

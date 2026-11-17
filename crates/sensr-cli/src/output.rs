@@ -127,6 +127,15 @@ pub fn status(out: &mut dyn Write, st: &Status) -> io::Result<()> {
     if let Some(e) = &st.last_apply_error {
         writeln!(out, "last error: {e}")?;
     }
+    if let Some(e) = &st.seed_error {
+        for (n, line) in e.lines().enumerate() {
+            writeln!(
+                out,
+                "{} {line}",
+                if n == 0 { "seed:      " } else { "           " }
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -200,6 +209,69 @@ pub fn plan(out: &mut dyn Write, p: &PlanView) -> io::Result<()> {
         for f in &s.files {
             write!(out, "{}", f.unified)?;
         }
+    }
+    Ok(())
+}
+
+/// The NIC table of `sensr interfaces list` (numbered for prompts).
+pub fn nics(out: &mut dyn Write, nics: &[sensr_ipc::Nic], numbered: bool) -> io::Result<()> {
+    let opt = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".into());
+    let rows: Vec<[String; 7]> = nics
+        .iter()
+        .map(|n| {
+            [
+                n.name.clone(),
+                n.pin_mac().to_owned(),
+                opt(&n.driver),
+                match (&n.bus, &n.bus_path) {
+                    (Some(b), Some(p)) => format!("{b} {p}"),
+                    (Some(b), None) => b.clone(),
+                    _ => "-".into(),
+                },
+                match (n.carrier, n.speed_mbps) {
+                    (Some(true), Some(s)) => format!("up {s}M"),
+                    (Some(true), None) => "up".into(),
+                    (Some(false), _) => "no carrier".into(),
+                    (None, _) => n.operstate.clone(),
+                },
+                opt(&n.assigned),
+                String::new(),
+            ]
+        })
+        .collect();
+    let head = ["NAME", "MAC", "DRIVER", "BUS", "LINK", "INTERFACE", ""];
+    let mut w = [0usize; 7];
+    for r in rows
+        .iter()
+        .map(|r| r.each_ref().map(String::len))
+        .chain([head.map(str::len)])
+    {
+        for (i, l) in r.iter().enumerate() {
+            w[i] = w[i].max(*l);
+        }
+    }
+    let line = |out: &mut dyn Write, n: &str, cols: [&str; 6]| -> io::Result<()> {
+        let mut s = if numbered {
+            format!("{n:>3}  ")
+        } else {
+            String::new()
+        };
+        for (i, c) in cols.iter().enumerate() {
+            s += &format!("{c:<width$}  ", width = w[i]);
+        }
+        writeln!(out, "{}", s.trim_end())
+    };
+    line(
+        out,
+        "",
+        [head[0], head[1], head[2], head[3], head[4], head[5]],
+    )?;
+    for (i, r) in rows.iter().enumerate() {
+        line(
+            out,
+            &(i + 1).to_string(),
+            [&r[0], &r[1], &r[2], &r[3], &r[4], &r[5]],
+        )?;
     }
     Ok(())
 }

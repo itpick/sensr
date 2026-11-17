@@ -120,6 +120,7 @@ impl UiBackend {
                 deadline: u64::try_from(p.deadline_ms / 1000).unwrap_or(0),
             }),
             now: now_secs(),
+            alert: status.seed_error.clone(),
         })
     }
 }
@@ -258,6 +259,29 @@ impl Backend for UiBackend {
             };
             let doc = self.get("").await?;
             Ok(self.sampler.sample(&doc, &version))
+        }
+        .boxed()
+    }
+
+    fn nics(&self) -> BoxFuture<'_, ApiResult<Vec<sensr_ui::api::NetworkCard>>> {
+        async move {
+            match self.call(Op::Nics).await? {
+                Response::Nics(n) => Ok(n
+                    .into_iter()
+                    .map(|n| sensr_ui::api::NetworkCard {
+                        mac: n.pin_mac().to_owned(),
+                        bus: match (&n.bus, &n.bus_path) {
+                            (Some(b), Some(p)) => Some(format!("{b} {p}")),
+                            (b, _) => b.clone(),
+                        },
+                        link: n.carrier.map(|c| (c, n.speed_mbps)),
+                        name: n.name,
+                        driver: n.driver,
+                        assigned: n.assigned,
+                    })
+                    .collect()),
+                other => Err(unexpected(other)),
+            }
         }
         .boxed()
     }

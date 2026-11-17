@@ -253,6 +253,31 @@ pub async fn status(
     }
 }
 
+/// `GET /api/v1/interfaces/nics`: the host's network cards and the
+/// interface each carries.
+pub async fn nics(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+) -> ApiResult {
+    match call(&state, &caller, Op::Nics).await? {
+        Response::Nics(n) => Ok(to_json(&n)),
+        other => Err(unexpected(other)),
+    }
+}
+
+/// `POST /api/v1/interfaces/assign`: `[{interface, nic}]`, staged in the
+/// candidate like any edit.
+pub async fn assign(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    Json(assignments): Json<Vec<sensr_ipc::Assignment>>,
+) -> ApiResult {
+    match call(&state, &caller, Op::InterfacesAssign { assignments }).await? {
+        Response::Staged { dirty } => Ok(to_json(&serde_json::json!({ "dirty": dirty }))),
+        other => Err(unexpected(other)),
+    }
+}
+
 /// Body of `POST /api/v1/session`.
 #[derive(Deserialize)]
 pub struct LoginBody {

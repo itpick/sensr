@@ -229,6 +229,7 @@ impl Backend for MockBackend {
                 changed: s.changed(),
                 confirm: s.confirm.clone(),
                 now: (s.clock)(),
+                alert: None,
             })
         }))
     }
@@ -318,6 +319,24 @@ impl Backend for MockBackend {
 
     fn status(&self) -> BoxFuture<'_, ApiResult<SystemStatus>> {
         ready(self.with(|s| Ok(simulated_status(&s.staged, (s.clock)()))))
+    }
+
+    fn nics(&self) -> BoxFuture<'_, ApiResult<Vec<crate::api::NetworkCard>>> {
+        let cards = crate::models::DEVICES
+            .iter()
+            .filter_map(|(name, label)| {
+                let mac = label.split_once('(')?.1.trim_end_matches(')');
+                mac.contains(':').then(|| crate::api::NetworkCard {
+                    name: (*name).to_owned(),
+                    mac: mac.to_owned(),
+                    driver: Some("virtio_net".into()),
+                    bus: None,
+                    link: Some((true, Some(1000))),
+                    assigned: None,
+                })
+            })
+            .collect();
+        ready(Ok(cards))
     }
 }
 

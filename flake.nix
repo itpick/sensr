@@ -135,6 +135,10 @@
             inherit pkgs;
             sensrModules = testModules;
           };
+          ifnames = import ./nix/tests/ifnames.nix {
+            inherit pkgs;
+            sensrModules = testModules;
+          };
           pi5-trial-install = import ./nix/tests/pi5-trial-install.nix {
             inherit pkgs;
             trialInstall = pkgs.writeShellApplication {

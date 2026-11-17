@@ -18,6 +18,19 @@ once, applies it and renames it to <name>.applied so it is not applied again.
   reboot-after-minutes   a number N: reboot into the previous generation N
                          minutes after every boot until you delete this file
 
+Binding networks to cards. sensr binds each interface to a card by its MAC
+address, never by slot or USB port, so a card that moves keeps its network:
+
+  seed.toml        hostname = "gw"
+                   [interfaces]
+                   wan = "00:e0:4c:68:00:01"   # MAC, or a kernel name: "end0"
+                   lan = "2c:cf:67:00:00:01"
+  ifnames          00:e0:4c:68:00:01 ue0       # binds the interface that uses
+                   2c:cf:67:00:00:01 igc1      # an imported OPNsense device
+
+After boot, `sensr interfaces list` shows the cards and `sensr interfaces
+assign` changes the binding (interactively without arguments).
+
 sensr writes diag-<stage>.txt here (journal, addresses, nft ruleset, kernel
 log) so a box that never reaches the network still leaves a post-mortem.
 

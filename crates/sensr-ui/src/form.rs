@@ -58,6 +58,9 @@ pub enum ChoiceSet {
     Interfaces,
     /// "Floating" plus the assigned interfaces (filter rules).
     RuleInterfaces,
+    /// The host's network cards (by MAC) plus devices that are not cards
+    /// (VLANs, WireGuard), for Interfaces › Assignments.
+    Devices,
 }
 
 /// Runtime option lists, `(value, label)`, per set.

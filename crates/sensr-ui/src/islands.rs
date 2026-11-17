@@ -202,6 +202,11 @@ pub fn ApplyBanner(initial: Pending) -> impl IntoView {
 
     view! {
         <div class="banner-slot" role="region" aria-label="Pending changes" aria-live="polite">
+            {move || state.get().alert.map(|a| view! {
+                <div class="banner banner-warn" role="alert">
+                    <p><strong>"First-boot seed: "</strong>{a}</p>
+                </div>
+            })}
             {move || {
                 let p = state.get();
                 if let Some(w) = p.confirm.clone() {

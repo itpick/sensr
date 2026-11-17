@@ -42,6 +42,9 @@ pub enum Command {
     /// Import a foreign configuration into the candidate.
     #[command(subcommand)]
     Import(ImportCmd),
+    /// Network cards and which interface each one carries.
+    #[command(subcommand)]
+    Interfaces(InterfacesCmd),
     /// Show what applying would change.
     Apply {
         /// Plan only; change nothing (the only mode: applying happens on commit).
@@ -126,6 +129,29 @@ pub enum ConfigCmd {
     },
 }
 
+/// `sensr interfaces …`
+#[derive(Debug, Subcommand)]
+pub enum InterfacesCmd {
+    /// List the host's network cards: name, MAC, driver, bus position,
+    /// link, and the interface bound to each.
+    List {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Bind interfaces to cards by MAC, so moving a card to another slot
+    /// or USB port never changes its network. Without arguments, asks for
+    /// each interface on standard input.
+    Assign {
+        /// `INTERFACE=CARD`, where CARD is a MAC address or a current kernel
+        /// name (`wan=00:e0:4c:68:00:01`, `lan=end0`).
+        assignments: Vec<String>,
+        /// Commit right away (otherwise review with `sensr config diff`).
+        #[arg(long)]
+        commit: bool,
+    },
+}
+
 /// `sensr import …`
 #[derive(Debug, Subcommand)]
 pub enum ImportCmd {
@@ -199,8 +225,19 @@ fn unexpected(r: Response) -> anyhow::Error {
     anyhow::anyhow!("unexpected reply from sensr-agent: {r:?}")
 }
 
-/// Runs one command, writing human output to `out`.
+/// Runs one command, writing human output to `out`; interactive prompts
+/// read standard input.
 pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
+    let stdin = std::io::stdin();
+    run_with_input(cli, &mut stdin.lock(), out).await
+}
+
+/// [`run`] with prompts answered from `input`.
+pub async fn run_with_input(
+    cli: Cli,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     let mut c = Client::connect(&cli.socket, principal())
         .await
         .map_err(|e| anyhow::anyhow!(describe(&e)))?;
@@ -216,6 +253,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             }
         }
         Command::Config(cmd) => config(&mut c, cmd, out).await?,
+        Command::Interfaces(cmd) => interfaces(&mut c, cmd, input, out).await?,
         Command::Import(ImportCmd::Opnsense {
             file,
             report,
@@ -266,6 +304,177 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             match call(&mut c, Op::ApplyDryRun { source: source.0 }).await? {
                 Response::Plan(plan) if json => writeln!(out, "{}", output::json(&plan))?,
                 Response::Plan(plan) => output::plan(out, &plan)?,
+                other => return Err(unexpected(other)),
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn nics(c: &mut Client) -> anyhow::Result<Vec<sensr_ipc::Nic>> {
+    match call(c, Op::Nics).await? {
+        Response::Nics(n) => Ok(n),
+        other => Err(unexpected(other)),
+    }
+}
+
+/// Asks which card each interface gets. Answers: a number from the list,
+/// a MAC, a kernel name, empty to keep the current binding.
+async fn ask_assignments(
+    c: &mut Client,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn Write,
+) -> anyhow::Result<Vec<sensr_ipc::Assignment>> {
+    let cards = nics(c).await?;
+    if cards.is_empty() {
+        bail!("no network cards found");
+    }
+    output::nics(out, &cards, true)?;
+    let ids: Vec<String> = match call(
+        c,
+        Op::ConfigGet {
+            path: "interfaces".parse()?,
+            source: Source::Candidate,
+        },
+    )
+    .await?
+    {
+        Response::Value(Some(Value::Object(m))) => m
+            .iter()
+            .filter(|(_, i)| i.get("vlan").is_none())
+            .map(|(k, _)| k.clone())
+            .collect(),
+        _ => Vec::new(),
+    };
+    let mut line = String::new();
+    let mut read = |out: &mut dyn Write, prompt: &str| -> anyhow::Result<Option<String>> {
+        write!(out, "{prompt}")?;
+        out.flush()?;
+        line.clear();
+        if input.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        Ok(Some(line.trim().to_owned()))
+    };
+    let pick = |answer: &str| -> anyhow::Result<String> {
+        match answer.parse::<usize>() {
+            Ok(n) if (1..=cards.len()).contains(&n) => Ok(cards[n - 1].pin_mac().to_owned()),
+            Ok(n) => bail!("there is no card {n}"),
+            Err(_) => Ok(answer.to_owned()),
+        }
+    };
+    let mut picked = Vec::new();
+    for id in ids {
+        let current = cards
+            .iter()
+            .find(|n| n.assigned.as_deref() == Some(id.as_str()))
+            .map(|n| format!(" [{} {}]", n.name, n.pin_mac()))
+            .unwrap_or_default();
+        let Some(answer) = read(
+            out,
+            &format!("card for {id}{current} (number, MAC or name; enter keeps): "),
+        )?
+        else {
+            break;
+        };
+        if !answer.is_empty() {
+            picked.push(sensr_ipc::Assignment {
+                interface: id,
+                nic: pick(&answer)?,
+            });
+        }
+    }
+    while let Some(answer) = read(out, "another interface as NAME=CARD (enter to finish): ")? {
+        if answer.is_empty() {
+            break;
+        }
+        let Some((id, card)) = answer.split_once('=') else {
+            writeln!(out, "expected NAME=CARD")?;
+            continue;
+        };
+        picked.push(sensr_ipc::Assignment {
+            interface: id.trim().to_owned(),
+            nic: pick(card.trim())?,
+        });
+    }
+    Ok(picked)
+}
+
+async fn interfaces(
+    c: &mut Client,
+    cmd: InterfacesCmd,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    match cmd {
+        InterfacesCmd::List { json } => {
+            let n = nics(c).await?;
+            if json {
+                writeln!(out, "{}", output::json(&n))?;
+            } else {
+                output::nics(out, &n, false)?;
+            }
+        }
+        InterfacesCmd::Assign {
+            assignments,
+            commit,
+        } => {
+            let picked = if assignments.is_empty() {
+                ask_assignments(c, input, out).await?
+            } else {
+                assignments
+                    .iter()
+                    .map(|a| {
+                        let (interface, nic) = a
+                            .split_once('=')
+                            .with_context(|| format!("{a:?}: expected INTERFACE=CARD"))?;
+                        Ok(sensr_ipc::Assignment {
+                            interface: interface.trim().to_owned(),
+                            nic: nic.trim().to_owned(),
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?
+            };
+            if picked.is_empty() {
+                writeln!(out, "nothing assigned")?;
+                return Ok(());
+            }
+            let what = picked
+                .iter()
+                .map(|a| format!("{}={}", a.interface, a.nic))
+                .collect::<Vec<_>>()
+                .join(" ");
+            match call(
+                c,
+                Op::InterfacesAssign {
+                    assignments: picked,
+                },
+            )
+            .await?
+            {
+                Response::Staged { dirty } => {
+                    if !dirty {
+                        writeln!(out, "already assigned that way")?;
+                    } else if commit {
+                        match call(
+                            c,
+                            Op::ConfigCommit {
+                                description: Some(format!("interfaces assign {what}")),
+                                confirm_secs: None,
+                            },
+                        )
+                        .await?
+                        {
+                            Response::Committed(o) => output::committed(out, &o)?,
+                            other => return Err(unexpected(other)),
+                        }
+                    } else {
+                        writeln!(
+                            out,
+                            "staged {what}; review with `sensr config diff`, then `sensr config commit`"
+                        )?;
+                    }
+                }
                 other => return Err(unexpected(other)),
             }
         }
