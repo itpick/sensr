@@ -1091,3 +1091,36 @@ fn webgui_listener_settings_are_imported() {
         i.report
     );
 }
+
+#[test]
+fn missing_pd_size_requests_a_64_so_tracking_lans_validate() {
+    // acceptance V1: a dhcp6 WAN that never had its delegation size chosen
+    let i = import_str(&wan_xml(
+        "<ipaddr>dhcp</ipaddr><ipaddrv6>dhcp6</ipaddrv6>",
+        "",
+    ));
+    match &wan(&i).ipv6 {
+        sensr_schema::models::interfaces::Ipv6Config::Dhcp6 {
+            prefix_delegation_len,
+            ..
+        } => assert_eq!(*prefix_delegation_len, Some(64)),
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        i.document.validate().is_empty(),
+        "{:?}",
+        i.document.validate()
+    );
+    // an explicit "none" stays none
+    let none = import_str(&wan_xml(
+        "<ipaddr>dhcp</ipaddr><ipaddrv6>dhcp6</ipaddrv6><dhcp6-ia-pd-len>none</dhcp6-ia-pd-len>",
+        "",
+    ));
+    assert!(matches!(
+        &wan(&none).ipv6,
+        sensr_schema::models::interfaces::Ipv6Config::Dhcp6 {
+            prefix_delegation_len: None,
+            ..
+        }
+    ));
+}
