@@ -339,10 +339,9 @@ pkgs.testers.runNixOSTest {
                 assert out.strip() == "thermostat.iot.home.example.", out
                 # The LAN client's own lease, registered under the name it sent.
                 lan_ip = ipv4(lan, "eth1")
-                out = lan.wait_until_succeeds(
-                    "dig +short @${net.lan.router} lan.home.example A | grep .", timeout=60
+                lan.wait_until_succeeds(
+                    f"dig +short @${net.lan.router} lan.home.example A | grep -x {lan_ip}", timeout=60
                 )
-                assert out.strip() == lan_ip, f"lan.home.example is {out!r}, lease {lan_ip}"
                 out = lan.succeed(f"dig +short @${net.lan.router} -x {lan_ip}")
                 assert out.strip() == "lan.home.example.", out
 
@@ -354,10 +353,10 @@ pkgs.testers.runNixOSTest {
                     """ --json '["http://${net.internet.host}:8080/list.txt"]'"""
                     " && sensr config commit -m 'slice: domain override and a reachable blocklist'"
                 )
-                out = lan.wait_until_succeeds(
-                    "dig +short @${net.lan.router} www.internet.example A | grep .", timeout=60
+                # The commit reloads Unbound: a query may time out meanwhile.
+                lan.wait_until_succeeds(
+                    f"dig +short @${net.lan.router} www.internet.example A | grep -x {INTERNET}", timeout=60
                 )
-                assert out.strip() == INTERNET, out
 
             with subtest("DNSBL: blocked names answer 0.0.0.0, allowed and local names resolve"):
                 # Custom entries of the imported policy, and a name from the
