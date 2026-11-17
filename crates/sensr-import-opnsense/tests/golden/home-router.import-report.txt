@@ -2,6 +2,7 @@
 
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 ## mapped (37)
 =======
 ## mapped (36)
@@ -9,6 +10,9 @@
 =======
 ## mapped (37)
 >>>>>>> edade14 (firewall: MAC aliases are valid rule sources (resolved through the neighbour table))
+=======
+## mapped (40)
+>>>>>>> f1a61dd (goldens after rebase)
 /opnsense/system  <- system
 /opnsense/vlans  <- interfaces
 /opnsense/interfaces  <- interfaces
@@ -17,6 +21,7 @@
 /opnsense/filter/rule[@uuid='7fdf1e38-9c02-4739-9175-2108029af84a']  <- filter
 /opnsense/filter/rule[@uuid='3f71ffc8-0a4b-4596-b1ff-22382acc4598']  <- filter
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='2064ba71-29e9-4ca4-a655-3069cd2fb19e']  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='5a7e0c21-3f4b-4d1e-9c2a-6b8d0e1f4a40']  <- filter
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='8c3dc3ee-b23e-4170-af5a-5f23b2321d58']  <- filter
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='1aac7ca4-2950-47cf-af32-f24f076f55a2']  <- filter
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a01']  <- filter
@@ -41,6 +46,7 @@
 /opnsense/OPNsense/Firewall/Filter/snatrules/rule[@uuid='7d2b8cc7-2217-4d32-b029-3ba292c7751e']  <- nat
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 /opnsense/OPNsense/Kea/dhcp4  <- kea
 =======
 /opnsense/OPNsense/Kea/dhcp4  <- kea-dhcp4
@@ -48,6 +54,11 @@
 =======
 /opnsense/OPNsense/Kea/dhcp4  <- kea-dhcp4
 >>>>>>> edade14 (firewall: MAC aliases are valid rule sources (resolved through the neighbour table))
+=======
+/opnsense/OPNsense/Firewall/Filter/onetoone/rule[@uuid='7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e40']  <- nat
+/opnsense/OPNsense/Firewall/Filter/onetoone/rule[@uuid='7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e41']  <- nat
+/opnsense/OPNsense/Kea/dhcp4  <- kea
+>>>>>>> f1a61dd (goldens after rebase)
 /opnsense/OPNsense/unboundplus  <- unbound
 /opnsense/OPNsense/wireguard  <- wireguard
 /opnsense/ntpd  <- ntpd
@@ -58,6 +69,7 @@
 
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 ## unmapped, expected (81)
 =======
 ## unmapped, expected (66)
@@ -65,6 +77,9 @@
 =======
 ## unmapped, expected (68)
 >>>>>>> cf72f38 (goldens after rebase onto main)
+=======
+## unmapped, expected (70)
+>>>>>>> f1a61dd (goldens after rebase)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -125,8 +140,8 @@
 /opnsense/filter/rule[@uuid='3f71ffc8-0a4b-4596-b1ff-22382acc4598']/created  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/rrd  (RRD graphs are replaced by sensr-monitor)
 /opnsense/revision  (OPNsense revision metadata; sensr keeps its own revision history)
-/opnsense/OPNsense/Firewall/Alias/geoip  (GeoIP database source is not modelled yet)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='2064ba71-29e9-4ca4-a655-3069cd2fb19e']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='5a7e0c21-3f4b-4d1e-9c2a-6b8d0e1f4a40']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='8c3dc3ee-b23e-4170-af5a-5f23b2321d58']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='1aac7ca4-2950-47cf-af32-f24f076f55a2']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a01']/audit  (OPNsense change metadata; sensr keeps its own audit log)
@@ -141,6 +156,8 @@
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='ebd5ccfb-e396-4732-bc44-0f87bb45f5f7']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='cf87b7c6-ccf9-4131-ac97-f2497b1370c2']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/snatrules/rule[@uuid='7d2b8cc7-2217-4d32-b029-3ba292c7751e']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/onetoone/rule[@uuid='7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e40']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/onetoone/rule[@uuid='7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e41']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/wireguard/server/servers/server[@uuid='b0f47197-dacd-43c1-ad57-5dc0649126d3']/endpoint  (client-export defaults are not modelled yet)
 /opnsense/OPNsense/wireguard/server/servers/server[@uuid='b0f47197-dacd-43c1-ad57-5dc0649126d3']/allowed_ips  (client-export defaults are not modelled yet)
 /opnsense/OPNsense/Kea/dhcp4/lexpire  (Kea lease expiry tuning is not modelled yet)
