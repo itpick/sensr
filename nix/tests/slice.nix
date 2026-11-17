@@ -612,7 +612,12 @@ pkgs.testers.runNixOSTest {
             )
 
         with subtest("IPv6: a delegated prefix reaches the LAN client (PD, RA)"):
-            router.wait_until_succeeds("ip -6 route show table all type unreachable proto dhcp | grep -q '2001:db8:100'", timeout=120)
+            try:
+                router.wait_until_succeeds("ip -6 route show table all type unreachable proto dhcp | grep -q '2001:db8:100'", timeout=120)
+            except Exception:
+                print(router.execute("networkctl status igc0 --no-pager 2>&1; ip -6 addr; ip -6 route show table all; journalctl -b -u systemd-networkd --no-pager | grep -i -E 'dhcp6|igc0' | tail -40; nft list ruleset | grep -n -i -E '546|547|dhcpv6' | head")[1])
+                print(upstream.execute("systemctl status kea-dhcp6-server --no-pager 2>&1 | head -20; journalctl -b -u kea-dhcp6-server --no-pager | tail -30; ip -6 addr show dev wan0")[1])
+                raise
             lan.wait_until_succeeds("ip -6 addr show dev eth1 scope global | grep -q 'inet6 2001:db8:100:'", timeout=120)
             pd = runtime("ipv6")
             print(json.dumps(pd, indent=1))
