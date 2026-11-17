@@ -14,6 +14,9 @@
 #   wifi      a LAN2 client that switches MACs (untrusted, trusted, printer)
 #             and addresses
 #
+# The router's NICs are bound by sensr itself (the `ifnames` seed); with
+# router.harness_names_nics the harness renames them instead.
+#
 # Everything house-specific comes from a parameter file and a seed folder.
 # The defaults are synthetic (house/example.json, house/house.xml). A private
 # run passes its own at run time, without putting anything into the nix store
@@ -38,12 +41,12 @@ let
   example = builtins.fromJSON (builtins.readFile ./house/example.json);
   expect = builtins.fromJSON (builtins.readFile ./house/expect.json);
 
-  # The default seed folder: the synthetic config and the NIC names the
-  # harness gives the router's NICs (by MAC) until sensr names them itself.
+  # The default seed folder: the synthetic config and sensr's `ifnames` seed
+  # (each imported device bound to its card's MAC).
   exampleSeed = pkgs.runCommand "sensr-house-example-seed" { } ''
     mkdir -p $out
     cp ${./house/house.xml} $out/config.xml
-    cat > $out/harness-ifnames <<EOF
+    cat > $out/ifnames <<EOF
     ${example.router.wan.mac} ${example.router.wan.device}
     ${example.router.lan.mac} ${example.router.lan.device}
     ${example.router.lan2.mac} ${example.router.lan2.device}
@@ -287,6 +290,11 @@ pkgs.testers.runNixOSTest {
           for f in ifnames authorized_keys seed.toml; do
             if [ -e "/run/house-seed/$f" ]; then install -m 0600 "/run/house-seed/$f" "/boot/sensr/$f"; fi
           done
+          # strict (default) or partial: how the agent imports a config.xml
+          # that does not validate
+          if [ -e /run/house-seed/seed-import ]; then
+            systemctl set-environment SENSR_SEED_IMPORT="$(cat /run/house-seed/seed-import)"
+          fi
           if [ -e /run/house-seed/harness-ifnames ]; then
             udevadm settle
             while read -r mac name; do
@@ -486,10 +494,28 @@ pkgs.testers.runNixOSTest {
 
     check("import.clean", import_clean)
 
+    def import_seed():
+        assert report, "no import report"
+        assert "## rejected" not in report, "the seed import was rejected (strict); see the report"
+        lines = report.splitlines()
+        dropped, inside = [], False
+        for line in lines:
+            if line.startswith("## "):
+                inside = line.startswith("## dropped")
+            elif inside and line.strip():
+                dropped.append(line.strip())
+        print("seed import dropped:", dropped)
+        return f"imported; {len(dropped)} dropped" + (": " + "; ".join(dropped)[:300] if dropped else "")
+
+
+    check("import.seed", import_seed)
+
     def overlay():
         for path, value in P.get("overlay", []):
-            v = value if isinstance(value, str) else json.dumps(value)
-            router.succeed(f"sensr config set {q(path)} {q(v)}")
+            if isinstance(value, str):
+                router.succeed(f"sensr config set {q(path)} {q(value)}")
+            else:
+                router.succeed(f"sensr config set --json {q(path)} {q(json.dumps(value))}")
         if P.get("overlay"):
             router.succeed("sensr config commit -m 'house: overlay'")
         return f"{len(P.get('overlay', []))} settings"

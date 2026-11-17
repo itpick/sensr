@@ -19,7 +19,8 @@
     },
     "hostname": "house-gw",
     "domain": "house.example",
-    "harness_names_nics": true
+    "harness_names_nics": false,
+    "seed_import": "strict"
   },
   "overlay": [
     [

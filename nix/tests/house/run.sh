@@ -7,8 +7,9 @@
 # PARAMS.json  the house parameters (format: nix/tests/house/example.json)
 # SEED_DIR     what the router's seed folder gets: config.xml (an OPNsense
 #              backup), and optionally ifnames, authorized_keys, seed.toml;
-#              this script adds harness-ifnames when the parameters say the
-#              harness names the NICs
+#              this script adds ifnames from the parameters' NIC MACs (or
+#              harness-ifnames with router.harness_names_nics), and
+#              seed-import with router.seed_import (strict|partial)
 # OUT_DIR      results and logs (default: ./house-out); house-results.json
 #
 # Environment: SENSR_HOUSE_REAL_INTERNET=1 gives the upstream a NAT to the
@@ -29,9 +30,14 @@ share=$(mktemp -d "$out/seed.XXXXXX")
 tmp=$(mktemp -d "$out/vm.XXXXXX")
 trap 'rm -rf "$share" "$tmp"' EXIT
 cp -r "$seed"/. "$share"/
-if [ "$(jq -r '.router.harness_names_nics // true' "$params")" = true ]; then
-  jq -r '.router | [.wan, .lan, .lan2][] | "\(.mac) \(.device)"' "$params" > "$share/harness-ifnames"
+names=$(jq -r '.router | [.wan, .lan, .lan2][] | "\(.mac) \(.device)"' "$params")
+if [ "$(jq -r '.router.harness_names_nics // false' "$params")" = true ]; then
+  echo "$names" > "$share/harness-ifnames"
+elif [ ! -e "$share/ifnames" ]; then
+  echo "$names" > "$share/ifnames"
 fi
+mode=$(jq -r '.router.seed_import // empty' "$params")
+if [ -n "$mode" ]; then echo "$mode" > "$share/seed-import"; fi
 
 driver=$(nix build --no-link --print-out-paths "path:$here#checks.x86_64-linux.house.driver")
 export SENSR_HOUSE_PARAMS=$params SENSR_HOUSE_SEED=$share SENSR_HOUSE_RESULTS=$out/house-results.json
