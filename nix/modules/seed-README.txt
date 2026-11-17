@@ -17,6 +17,9 @@ once, applies it and renames it to <name>.applied so it is not applied again.
   authorized_keys        SSH keys for the admin account (SSH on LAN only)
   reboot-after-minutes   a number N: reboot into the previous generation N
                          minutes after every boot until you delete this file
+  trial-health.env       on a trial boot (sensr-pi5-trial-install), the
+                         checks it must pass or reboot to the previous OS;
+                         `sensr-trial-health confirm` keeps the trial
 
 sensr writes diag-<stage>.txt here (journal, addresses, nft ruleset, kernel
 log) so a box that never reaches the network still leaves a post-mortem.

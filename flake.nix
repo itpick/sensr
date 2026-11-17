@@ -149,9 +149,32 @@
                 xz
                 parted
                 systemd
+                e2fsprogs
               ];
               text = builtins.readFile ./nix/pi5/trial-install.sh;
             };
+            trialHealth = pkgs.writeShellApplication {
+              name = "sensr-trial-health";
+              runtimeInputs = with pkgs; [
+                coreutils
+                gnugrep
+                gnused
+                iproute2
+                dig
+                curl
+                inetutils
+                systemd
+              ];
+              bashOptions = [ ];
+              text =
+                builtins.replaceStrings [ "@seedDir@" ] [ "/tmp/seed" ]
+                  (builtins.readFile ./nix/pi5/trial-health.sh);
+            };
+          };
+          # every way a trial boot can end, ending back on the previous OS
+          trial-revert = import ./nix/tests/trial-revert.nix {
+            inherit pkgs;
+            sensrModules = testModules;
           };
           qcow-boot = import ./nix/tests/qcow-boot.nix {
             inherit pkgs;

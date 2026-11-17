@@ -138,6 +138,20 @@ in
     ];
   };
 
+  # The trial installer's log partition (sensr-pi5-trial-install
+  # --logs-mib): the journal lives there, so a trial that fell back to the
+  # previous OS can be read from it. Optional: without the partition the
+  # journal stays on the root.
+  fileSystems."/var/log" = {
+    device = "/dev/disk/by-label/SENSR_LOGS";
+    fsType = "ext4";
+    options = [
+      "nofail"
+      "noatime"
+      "x-systemd.device-timeout=10s"
+    ];
+  };
+
   sdImage = {
     firmwareSize = 512;
     compressImage = false;

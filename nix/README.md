@@ -10,6 +10,9 @@
 | `tests/qcow-boot.nix` | `checks.x86_64-linux.qcow-boot`: boots the real qcow2 three times, records boot seconds |
 | `tests/slice.nix` | `checks.x86_64-linux.slice` (sensr) and `slice-reference` (hand-written oracle): the routing vertical slice with 6 VMs |
 | `tests/slice/` | the slice's addressing plan (`net.nix`) and the oracle router (`reference-router.nix`) |
+| `pi5/trial-install.sh` | `sensr-pi5-trial-install`: one tryboot trial of sensr on a Pi 5 running another OS, from NVMe/USB or (OS on NVMe) the SD card; log partition; commit/uncommit |
+| `pi5/trial-health.sh` | `sensr-trial-health`: a trial boot's self-health gate (reboot to the previous OS on failure), confirm, UDP journal stream |
+| `tests/pi5-trial-install.nix` | `checks.x86_64-linux.pi5-trial-install`: both layouts on disk images, a model of the firmware's documented boot selection, the health gate |
 | `pending.nix` | which assertions wait on crates that have not landed |
 
 ## Contract between the module and the Rust crates

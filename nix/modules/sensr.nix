@@ -188,6 +188,25 @@ let
     '';
   };
 
+  trialHealth = pkgs.writeShellApplication {
+    name = "sensr-trial-health";
+    runtimeInputs = with pkgs; [
+      coreutils
+      gnugrep
+      gnused
+      iproute2
+      dig
+      curl
+      inetutils
+      config.systemd.package
+    ];
+    # Checks fail softly and are reported; the script decides when to reboot.
+    bashOptions = [ ];
+    text = builtins.replaceStrings [ "@seedDir@" ] [ cfg.seedDir ] (
+      builtins.readFile ../pi5/trial-health.sh
+    );
+  };
+
   seedReadme = pkgs.writeText "sensr-seed-README.txt" (
     builtins.replaceStrings [ "@SEED_DIR@" ] [ cfg.seedDir ] (builtins.readFile ./seed-README.txt)
   );
@@ -288,6 +307,16 @@ in
       };
     };
 
+    initrdTimeoutSec = mkOption {
+      type = types.ints.positive;
+      default = 300;
+      description = ''
+        Force a reboot when stage 1 has not reached
+        initrd.target this many seconds after boot (a hung root mount, a hung
+        unit). On a Pi trial boot the reboot returns to the previous OS.
+      '';
+    };
+
     selftest.enable = mkOption {
       type = types.bool;
       default = true;
@@ -368,7 +397,11 @@ in
       description = "sensr API";
     };
 
-    environment.systemPackages = [ cfg.package ] ++ appliedPackages;
+    environment.systemPackages = [
+      cfg.package
+      trialHealth
+    ]
+    ++ appliedPackages;
     environment.etc."sensr/version.json".text = builtins.toJSON versionJson;
 
     environment.variables.SENSR_AGENT_SOCKET = socket;
@@ -782,6 +815,72 @@ in
           ${config.systemd.package}/bin/systemctl reboot
         fi
       '';
+    };
+
+    boot.initrd.systemd.targets.initrd.unitConfig = {
+      JobTimeoutSec = cfg.initrdTimeoutSec;
+      JobTimeoutAction = "reboot-force";
+    };
+
+    # A trial boot (sensr.trial=1 on the kernel command line, from the trial
+    # installer's cmdline.txt; nix/pi5/trial-health.sh): detected first, so
+    # PID 1 owns the hard deadline before anything else runs; then the
+    # self-health gate and the live log stream, with a trial-health.env in
+    # the seed folder.
+    systemd.services.sensr-trial-detect = {
+      description = "Trial boot: detect it, arm the hard deadline";
+      wantedBy = [ "sysinit.target" ];
+      before = [
+        "sysinit.target"
+        "sensr-trial-health.service"
+        "sensr-trial-logstream.service"
+      ];
+      unitConfig = {
+        DefaultDependencies = false;
+        ConditionKernelCommandLine = "sensr.trial=1";
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${lib.getExe trialHealth} detect";
+      };
+    };
+    systemd.services.sensr-trial-health = {
+      description = "Trial boot self-health gate (reboots to the previous OS on failure)";
+      wantedBy = [ "multi-user.target" ];
+      after = [
+        "local-fs.target"
+        "network-online.target"
+        "sensr-agent.service"
+      ];
+      wants = [ "network-online.target" ];
+      unitConfig = {
+        ConditionPathExists = [
+          "/run/sensr-trial/active"
+          "${cfg.seedDir}/trial-health.env"
+        ];
+        RequiresMountsFor = cfg.seedDir;
+      };
+      serviceConfig.ExecStart = "${lib.getExe trialHealth} run";
+    };
+    systemd.services.sensr-trial-logstream = {
+      description = "Trial boot: stream the journal over UDP";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      unitConfig = {
+        ConditionPathExists = [
+          "/run/sensr-trial/active"
+          "${cfg.seedDir}/trial-health.env"
+        ];
+        RequiresMountsFor = cfg.seedDir;
+      };
+      serviceConfig = {
+        ExecStart = "${lib.getExe trialHealth} stream";
+        # no LOG_UDP: it exits cleanly and stays down
+        Restart = "on-failure";
+        RestartSec = "10s";
+      };
     };
 
     systemd.services.sensr-selftest = mkIf cfg.selftest.enable {
