@@ -42,7 +42,7 @@
 /opnsense/OPNsense/Gateways  <- gateways
 /opnsense/OPNsense/Gateways/gateway_item[@uuid='9df1d26a-e824-425b-95df-aaf0fe534a17']  <- gateways
 
-## unmapped, expected (70)
+## unmapped, expected (69)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
