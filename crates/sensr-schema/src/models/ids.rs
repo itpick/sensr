@@ -87,8 +87,9 @@ string_serde!(RuleFile);
 pub enum RuleProfile {
     /// A curated ET Open subset for a home or small-office router: exploits,
     /// malware, command-and-control, compromised hosts, attack responses,
-    /// scans, coin miners, DNS and phishing. About a third of the full set,
-    /// so a Raspberry Pi 5 keeps up at gigabit.
+    /// scans, coin miners, DNS and phishing: 29,624 of ET Open's 53,492
+    /// enabled rules (2026-11-16), without the chatty INFO, DYN_DNS and
+    /// server-side WEB_SPECIFIC_APPS sets.
     #[default]
     Home,
     /// Every file the sources ship.
