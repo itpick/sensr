@@ -8,6 +8,10 @@
 #
 #   nix/tests/pi5-qemu.sh IMAGE.img [BOOTS]
 #
+# Last, a trial boot (sensr-pi5-trial-install's kernel parameters, with a
+# deadline): it must reboot by itself, through PID 1's deadline timer.
+# TRIAL_DEADLINE (default 900 s, TCG boots are slow) sets it.
+#
 # Needs qemu-system-aarch64, mtools, jq, sfdisk. Runs under TCG on an x86
 # host (nixtop): boot times are relative indicators only.
 set -euo pipefail
@@ -93,3 +97,12 @@ cp --no-preserve=mode "$img" "$disk"
 boot initrd-failure "rd.systemd.unit=emergency.target" 900 "Rebooting in 10 seconds"
 fat mdir -b ::sensr/boot-log | grep -q 'initrd-emergency-'
 echo "   initrd failure: panicked and rebooted, journal on the FAT partition: ok"
+
+# A trial boot ends by itself: PID 1's deadline reboots it (QEMU runs with
+# -no-reboot, so the reboot ends the run, as the Pi's one-shot tryboot would).
+deadline=${TRIAL_DEADLINE:-900}
+cp --no-preserve=mode "$img" "$disk"
+boot trial-deadline "sensr.trial=1 sensr.trial.deadline=$deadline" $((deadline + 600)) "reboot: Restarting system"
+grep -aq "Started.*Trial deadline ($deadline s after boot)" "$work/trial-deadline.log"
+grep -aq "Trial deadline: reboot" "$work/trial-deadline.log"
+echo "   trial boot: deadline armed by PID 1 and the box rebooted by itself: ok"

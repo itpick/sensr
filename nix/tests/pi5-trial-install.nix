@@ -52,16 +52,26 @@ let
       dd if=fat.img of=$out bs=1M seek=8 conv=notrunc status=none
       dd if=root.img of=$out bs=1M seek=72 conv=notrunc status=none
     '';
+  # The image the test installs: the fake one, or (a run outside the
+  # sandbox, SENSR_TRIAL_IMAGE_DIR) a directory holding a real
+  # images.pi5 build as image.img, shared into the VM at run time.
+  imageDir = pkgs.runCommand "pi5-trial-test-image" { } "mkdir $out && ln -s ${fakeImage} $out/image.img";
 in
 pkgs.testers.runNixOSTest {
   name = "sensr-pi5-trial-install";
   nodes.machine = {
+    virtualisation.qemu.options = [
+      "-virtfs local,path=\${SENSR_TRIAL_IMAGE_DIR:-${imageDir}},mount_tag=trialimg,security_model=none,readonly=on"
+    ];
+    virtualisation.diskSize = 4096;
+    virtualisation.memorySize = 2048;
+    # Sparse; big enough for a real images.pi5 build (SENSR_TRIAL_IMAGE_DIR).
     virtualisation.emptyDiskImages = [
-      128
-      256
-      # the second layout: "NVMe" (the running OS) and a bigger "SD card"
-      128
       512
+      8192
+      # the second layout: "NVMe" (the running OS) and a bigger "SD card"
+      512
+      8192
     ];
     environment.systemPackages = [
       trialInstall
@@ -74,6 +84,10 @@ pkgs.testers.runNixOSTest {
   };
   testScript = ''
     machine.wait_for_unit("multi-user.target")
+    machine.succeed("mkdir -p /mnt/img && mount -t 9p -o trans=virtio,version=9p2000.L,ro trialimg /mnt/img")
+    IMAGE = "/mnt/img/image.img"
+    real = "fake-system" not in machine.succeed(f"MTOOLS_SKIP_CHECK=1 mtype -i {IMAGE}@@8M ::current/system 2>/dev/null || true")
+    print(f"image under test: {'a real images.pi5 build' if real else 'the fake image'}")
     env = "SENSR_TRIAL_SKIP_MODEL_CHECK=1 SENSR_TRIAL_SKIP_BOOT_ORDER=1"
     t = f"{env} sensr-pi5-trial-install"
 
@@ -85,20 +99,24 @@ pkgs.testers.runNixOSTest {
 
     with subtest("refuses a card that already uses autoboot.txt"):
         machine.succeed("touch /boot/firmware/autoboot.txt")
-        machine.fail(f"{t} ${fakeImage} /dev/vdc --yes")
+        machine.fail(f"{t} {IMAGE} /dev/vdc --yes")
         machine.succeed("rm /boot/firmware/autoboot.txt")
 
     with subtest("refuses to replace a tryboot.txt it did not write"):
         machine.succeed("echo 'os_prefix=other/' > /boot/firmware/tryboot.txt")
-        machine.fail(f"{t} ${fakeImage} /dev/vdc --yes")
+        machine.fail(f"{t} {IMAGE} /dev/vdc --yes")
         machine.succeed("rm /boot/firmware/tryboot.txt")
 
     with subtest("install: image on the target, trial armed on the SD card"):
-        machine.succeed(f"{t} ${fakeImage} /dev/vdc --seed /etc/seed --minutes 7 --logs-mib 0 --yes")
+        machine.succeed(f"{t} {IMAGE} /dev/vdc --seed /etc/seed --minutes 7 --logs-mib 0 --yes")
         tb = machine.succeed("cat /boot/firmware/tryboot.txt")
         assert "os_prefix=sensr-trial/" in tb, tb
         assert "kernel_watchdog_timeout=300" in tb, tb
-        machine.succeed("grep -q 'fake kernel' /boot/firmware/sensr-trial/Image")
+        if real:
+            machine.succeed("test -s /boot/firmware/sensr-trial/Image && test -s /boot/firmware/sensr-trial/initrd")
+            machine.succeed("grep -q 'init=/nix/store/' /boot/firmware/sensr-trial/cmdline.txt")
+        else:
+            machine.succeed("grep -q 'fake kernel' /boot/firmware/sensr-trial/Image")
         machine.succeed("test -e /boot/firmware/sensr-trial/overlays/bcm2712d0.dtbo")
         machine.succeed("grep -q 'sensr.trial=1' /boot/firmware/sensr-trial/cmdline.txt")
         machine.succeed("grep -q 'kernel_2712' /boot/firmware/config.txt")
@@ -110,7 +128,7 @@ pkgs.testers.runNixOSTest {
         assert "armed" in out, out
 
     with subtest("re-arming over its own trial is fine"):
-        machine.succeed(f"{t} ${fakeImage} /dev/vdc --minutes 9 --logs-mib 0 --yes")
+        machine.succeed(f"{t} {IMAGE} /dev/vdc --minutes 9 --logs-mib 0 --yes")
 
     with subtest("commit: SD config.txt renamed, trial timer removed; uncommit undoes it"):
         machine.succeed(f"{t} --commit")
@@ -132,7 +150,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("mkfs.vfat -n NVMEFAT /dev/vdd && mount /dev/vdd /boot/firmware && echo x > /boot/firmware/config.txt")
         machine.fail(
             "SENSR_TRIAL_SKIP_MODEL_CHECK=1 SENSR_TRIAL_RUNNING_KIND=6 SENSR_TRIAL_TARGET_KIND=1"
-            " sensr-pi5-trial-install ${fakeImage} /dev/vde --boot-order 0xf461 --logs-mib 0 --yes"
+            f" sensr-pi5-trial-install {IMAGE} /dev/vde --boot-order 0xf461 --logs-mib 0 --yes"
         )
         machine.succeed("umount /boot/firmware && wipefs -aq /dev/vdc1 /dev/vdc2 /dev/vdc && wipefs -aq /dev/vde")
 
@@ -179,15 +197,15 @@ pkgs.testers.runNixOSTest {
         assert boots(ORDER) == "nvme:config.txt"
 
     with subtest("refuses when BOOT_ORDER cannot be read"):
-        machine.fail(f"{t2} ${fakeImage} /dev/vde --yes")
+        machine.fail(f"{t2} {IMAGE} /dev/vde --yes")
 
     with subtest("refuses a BOOT_ORDER that never tries the SD card"):
-        machine.fail(f"{t2} ${fakeImage} /dev/vde --boot-order 0xf46 --yes")
+        machine.fail(f"{t2} {IMAGE} /dev/vde --boot-order 0xf46 --yes")
 
     with subtest("install onto the SD card: dormant config.txt, logs partition, health file"):
         machine.succeed("printf 'WAN_IP=198.51.100.7\\n' > /tmp/health.env")
         machine.succeed(
-            f"{t2} ${fakeImage} /dev/vde --boot-order {ORDER} --minutes 15 --logs-mib 128"
+            f"{t2} {IMAGE} /dev/vde --boot-order {ORDER} --minutes 15 --logs-mib 128"
             " --health /tmp/health.env --deadline-minutes 8 --watchdog-seconds 120 --yes"
         )
         sd = fat_files("/dev/vde1")
