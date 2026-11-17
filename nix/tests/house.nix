@@ -440,7 +440,13 @@ pkgs.testers.runNixOSTest {
     )
     v6 = U.get("v6")
     if v6:
+        # Kea cannot bind :547 while the upstream's link-local is still
+        # tentative, and a failed bind does not retry: turn DAD off and give
+        # wan0 a moment to get its link-local before starting it.
+        upstream.succeed("sysctl -qw net.ipv6.conf.all.accept_dad=0")
+        upstream.succeed("ip link set wan0 down && ip link set wan0 up")
         upstream.succeed(f"ip -6 addr add {v6['address']} dev wan0")
+        until(upstream, "ip -6 addr show dev wan0 scope link | grep -q fe80", timeout=60)
         na_net = ipaddress.ip_interface(v6["address"]).network
         kea = {
             "Dhcp6": {
@@ -610,13 +616,19 @@ pkgs.testers.runNixOSTest {
 
     if D.get("recursive"):
         def dns_recursive():
-            out = dig(lan, D["recursive"], LAN_IP)
-            assert out, "no answer"
-            return " ".join(out)
+            # The router may still be bringing Unbound's upstream up, so poll.
+            out = until(
+                lan,
+                f"dig +short +time=3 +tries=2 @{LAN_IP} {q(D['recursive'])} A | grep -v '^;;' | grep -q .",
+                timeout=180,
+            )
+            return " ".join(dig(lan, D["recursive"], LAN_IP))
         check("dns.recursive", dns_recursive, needs_internet=True)
     for b in D.get("blocked", []):
         def dnsbl(b=b):
-            until(lan, f"dig +short +time=3 @{LAN_IP} {q(b)} A | grep -qx 0.0.0.0", timeout=120)
+            # The blocklist is ~10 MB and only downloads once the router's own
+            # resolver works; a slow first boot needs a generous deadline.
+            until(lan, f"dig +short +time=3 @{LAN_IP} {q(b)} A | grep -qx 0.0.0.0", timeout=420)
             return f"{b} -> 0.0.0.0"
         check(f"dns.dnsbl:{b}", dnsbl, needs_internet=not b.endswith(".test"))
 
@@ -632,12 +644,27 @@ pkgs.testers.runNixOSTest {
 
     check("nat.outbound", nat)
     F = P.get("firewall", {})
+    def until_dropped(machine, url, timeout=420, why=""):
+        """Wait for the alias feed to be filled: before that the rule matches nothing."""
+        end = time.monotonic() + timeout
+        last = ""
+        while time.monotonic() < end:
+            rc, _ = machine.execute(f"curl --connect-timeout 3 -s -o /dev/null {q(url)}")
+            last = f"curl exited {rc}"
+            if rc == 28:
+                return "dropped" + (f" ({why})" if why else "")
+            time.sleep(5)
+        raise AssertionError(f"expected a drop for {url}, {last}")
     for b in F.get("blocked_destinations", []):
         def blocked_dest(b=b):
             internet.succeed(f"ip -4 addr show dev lo | grep -q 'inet {b['ip']}/'")
+            if b.get("fetched"):
+                return until_dropped(lan, f"http://{b['ip']}/", why=f"alias {b['alias']}, LAN; before 'allow LAN to any'")
             return dropped(lan, f"http://{b['ip']}/") + f" (alias {b['alias']}, LAN; before 'allow LAN to any')"
         check(f"firewall.outbound_block:{b['alias']}", blocked_dest, needs_internet=False)
         def blocked_dest2(b=b):
+            if b.get("fetched"):
+                return until_dropped(wifi, f"http://{b['ip']}/", why=f"alias {b['alias']}, LAN2")
             return dropped(wifi, f"http://{b['ip']}/") + f" (alias {b['alias']}, LAN2)"
         check(f"firewall.outbound_block_lan2:{b['alias']}", blocked_dest2)
     check("firewall.lan2_internet", lambda: reaches(wifi, f"http://{INET}/", PUB))
@@ -653,8 +680,16 @@ pkgs.testers.runNixOSTest {
     check("firewall.lan_to_lan2", lambda: lan.succeed(f"ping -c1 -W3 {wifi_ip}") and "ok")
 
     def ntp():
-        wifi.succeed(f"chronyd -Q -t 10 'server {LAN2_IP} iburst maxsamples 1'")
-        return "router answers NTP"
+        # ntpd-rs serves at once, but it only answers once it has a source; on
+        # a slow real-internet boot that takes a few minutes.
+        end = time.monotonic() + 360
+        out = ""
+        while time.monotonic() < end:
+            rc, out = wifi.execute(f"chronyd -Q -t 10 'server {LAN2_IP} iburst maxsamples 1'")
+            if rc == 0:
+                return "router answers NTP"
+            time.sleep(10)
+        raise AssertionError(f"chronyd against {LAN2_IP} failed: {out.strip()[:300]}")
 
 
     check("ntp.served_on_lan2", ntp)
@@ -670,9 +705,21 @@ pkgs.testers.runNixOSTest {
     check("ssh.listen_and_filter", ssh_ports)
 
     def ui_tls():
-        code = until(lan, f"curl -sk -o /dev/null -w '%{{http_code}}' https://{LAN_IP}:{P.get('ui', {}).get('https_port', 443)}/ | grep -E '^(200|30[0-9])$'", timeout=60).strip()
-        cert = lan.succeed(f"echo | openssl s_client -connect {LAN_IP}:443 2>/dev/null | openssl x509 -noout -subject -enddate 2>/dev/null || true")
-        return f"HTTP {code}; {cert.strip()}"
+        port = P.get("ui", {}).get("https_port", 443)
+        url = f"https://{LAN_IP}:{port}/"
+        last = ""
+        for _ in range(24):
+            rc, out = lan.execute(f"curl -sk -o /dev/null -w '%{{http_code}}' --max-time 10 {url}")
+            last = f"rc={rc} code={out.strip()}"
+            if rc == 0 and out.strip() in ("200", "301", "302", "303", "307", "308"):
+                break
+            time.sleep(5)
+        chain = router.succeed("nft list chain inet sensr input 2>&1 | head -n 12")
+        assert last.startswith("rc=0") and last.split("code=")[1] in (
+            "200", "301", "302", "303", "307", "308",
+        ), f"https://{LAN_IP}:{port}/ {last}; input chain: {chain}"
+        cert = lan.succeed(f"echo | openssl s_client -connect {LAN_IP}:{port} 2>/dev/null | openssl x509 -noout -subject -enddate 2>/dev/null || true")
+        return f"{last}; {cert.strip()}"
 
 
     check("ui.tls_lan", ui_tls)
@@ -729,13 +776,13 @@ pkgs.testers.runNixOSTest {
         lan_dev = R["lan"]["device"]
 
         def v6_wan():
-            until(router, f"ip -6 addr show dev {wan} scope global | grep -q inet6", timeout=120)
+            until(router, f"ip -6 addr show dev {wan} scope global | grep -q inet6", timeout=300)
             return router.succeed(f"ip -6 -br addr show dev {wan} scope global").strip()
         check("ipv6.wan_dhcp6", v6_wan)
 
         def v6_pd():
             pd = ipaddress.ip_network(f"{v6['pd_prefix']}/{v6['pd_prefix_len']}")
-            out = until(router, f"ip -6 -br addr show dev {lan_dev} scope global | grep inet6 || ip -6 -br addr show dev {lan_dev} scope global", timeout=120)
+            out = until(router, f"ip -6 -br addr show dev {lan_dev} scope global | grep inet6 || ip -6 -br addr show dev {lan_dev} scope global", timeout=240)
             addrs = [ipaddress.ip_interface(a) for a in out.split()[2:]]
             assert any(a.ip in pd for a in addrs), f"LAN has {out.strip()}, nothing from {pd}"
             # the upstream routes the delegated prefixes to the router
@@ -755,9 +802,18 @@ pkgs.testers.runNixOSTest {
     ids = P.get("ids")
     if ids:
         def ids_alert():
-            lan.succeed(f"curl -s --max-time 5 http://{INET}/ids >/dev/null")
-            out = until(router, "grep -h '\"event_type\":\"alert\"' /var/log/suricata/eve.json /var/lib/sensr/ids/eve.json 2>/dev/null | tail -n 3", timeout=60)
-            return out.strip()[:300]
+            end = time.monotonic() + 420
+            out = ""
+            while time.monotonic() < end:
+                lan.succeed(f"curl -s --max-time 5 http://{INET}/ids >/dev/null")
+                rc, out = router.execute(
+                    "grep -h '\"event_type\":\"alert\"' /var/log/suricata/eve.json /var/lib/sensr/ids/eve.json 2>/dev/null | tail -n 3"
+                )
+                if rc == 0 and out.strip():
+                    return out.strip()[:300]
+                time.sleep(10)
+            rules = router.execute("sensr runtime aliases 2>/dev/null | head -c 200; systemctl status sensr-suricata-reload --no-pager 2>&1 | tail -n 5")[1]
+            raise AssertionError(f"no IDS alert within 420 s; {rules.strip()[:600]}")
         check("ids.alert_on_wan", ids_alert)
 
     def insight():

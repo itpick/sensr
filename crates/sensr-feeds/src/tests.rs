@@ -157,11 +157,11 @@ fn failed_fetch_keeps_last_good_and_backs_off() {
     let st = f.status(&doc, t0 + 3_600);
     assert!(st[0].error.as_deref().unwrap().contains("503"));
     assert_eq!(st[0].entries, 1);
-    // back-off: 300 s after the failure, then 600 s
-    assert!(f.refresh(&doc, t0 + 3_600 + 299).fetches.is_empty());
-    assert_eq!(f.refresh(&doc, t0 + 3_600 + 300).fetches.len(), 1);
-    assert!(f.refresh(&doc, t0 + 3_900 + 599).fetches.is_empty());
-    assert_eq!(f.refresh(&doc, t0 + 3_900 + 600).fetches.len(), 1);
+    // back-off: 30 s after the failure, then 60 s
+    assert!(f.refresh(&doc, t0 + 3_600 + 29).fetches.is_empty());
+    assert_eq!(f.refresh(&doc, t0 + 3_600 + 30).fetches.len(), 1);
+    assert!(f.refresh(&doc, t0 + 3_630 + 59).fetches.is_empty());
+    assert_eq!(f.refresh(&doc, t0 + 3_630 + 60).fetches.len(), 1);
 }
 
 #[test]

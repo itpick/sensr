@@ -46,7 +46,13 @@ pub const MAC_INTERVAL: u64 = 30;
 /// How often the country and AS databases are checked (upstream TTL).
 pub const DB_INTERVAL: u64 = 86_400;
 /// First retry after a failed fetch; doubles per failure up to [`MAX_BACKOFF`].
-pub const RETRY_AFTER: u64 = 300;
+///
+/// Short on purpose: the first fetch at boot often runs before the router's
+/// own resolver answers, and a five-minute wait would leave the aliases empty
+/// far too long.
+pub const RETRY_AFTER: u64 = 30;
+/// First retry for a database that failed to download.
+pub const DB_RETRY_AFTER: u64 = 300;
 /// Longest retry interval.
 pub const MAX_BACKOFF: u64 = 3_600;
 /// URL sources fetched at once.
@@ -158,20 +164,26 @@ fn url_ttl(kind: &AliasKind) -> Option<u64> {
     }
 }
 
-/// When a source may be tried again after failures.
-fn retry_at(m: &Meta) -> u64 {
+/// When a source may be tried again after failures. Databases (GeoIP, ASN) are
+/// republished daily, so they back off from the longer interval.
+fn retry_at(m: &Meta, ttl: Option<u64>) -> u64 {
     if m.failures == 0 {
         return 0;
     }
+    let base = if ttl == Some(DB_INTERVAL) {
+        DB_RETRY_AFTER
+    } else {
+        RETRY_AFTER
+    };
     let shift = (m.failures - 1).min(10);
-    let wait = (RETRY_AFTER << shift).min(MAX_BACKOFF);
+    let wait = (base << shift).min(MAX_BACKOFF);
     m.attempted_at.unwrap_or(0) + wait
 }
 
 /// When `m` is next due, given a refresh period.
 fn next_due(m: &Meta, ttl: Option<u64>) -> Option<u64> {
     if m.fetched_at.is_none() || m.failures > 0 {
-        return Some(retry_at(m));
+        return Some(retry_at(m, ttl));
     }
     ttl.map(|t| m.checked_at.unwrap_or(0) + t)
 }
@@ -321,7 +333,7 @@ impl Feeds {
             let meta_key = format!("{key}:{url}");
             let mut m = self.cache.meta(&meta_key);
             let due = if need_full {
-                now >= retry_at(&m)
+                now >= retry_at(&m, Some(DB_INTERVAL))
             } else {
                 next_due(&m, Some(DB_INTERVAL)).is_some_and(|d| now >= d)
             };
