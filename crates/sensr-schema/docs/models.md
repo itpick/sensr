@@ -20,7 +20,8 @@ else bumps `SCHEMA_VERSION` and ships a migration.
 | `nat.outbound` | `nat::OutboundNat` (mode + manual rules) | `nat/outbound`, `Filter.xml` snatrules |
 | `nat.port_forwards` | `ArrayField<nat::PortForward>` | `Firewall/DNat.xml` (`nat/rule`) |
 | `dhcpv4` | `dhcp::Dhcpv4` (subnets, pools, options, reservations) | `Kea/KeaDhcpv4.xml` (and legacy ISC/dnsmasq via the importer) |
-| `dns` | `dns::DnsResolver` (settings, forwarding, host_overrides) | `Unbound/Unbound.xml` |
+| `dns` | `dns::DnsResolver` (settings, forwarding, host_overrides, access lists, tuning, blocklists) | `Unbound/Unbound.xml` |
+| `dns.blocklists` | `ArrayField<dnsbl::Blocklist>` (curated lists by name, URLs, extra names, allow entries, source networks, answer mode, refresh) | `unboundplus/dnsbl/blocklist` |
 | `wireguard` | `wireguard::WireGuard` (servers, peers) | `Wireguard/{General,Server,Client}.xml` |
 | `devices` | `devices::Devices` (bridges with STP, LAGGs/bonds, loopbacks; omitted while empty) | `Interfaces/{Bridge,Lagg,Loopback}.xml` |
 | `virtual_ips` | `devices::VirtualIps` (IP alias, proxy ARP, CARP/VRRP; omitted while empty) | `Interfaces/Vip.xml` |
@@ -112,6 +113,8 @@ not modelled yet and surface as unmapped when set.
 | `AliasEntry` | `[!]` + address, `a-b` range, CIDR, host name, or `alias:<name>` |
 | `Protocol` | `any`, `tcp/udp`, IANA names or numbers, case-insensitive; displays lower-case |
 | `Pool4` | `start-end` or CIDR; displays `start-end` |
+| `AllowEntry` | `example.com` (exactly), `*.example.com` (and below), `/regex/` |
+| `CacheSize` | bytes or `4m`, `512k`, `1g` |
 
 ## Rule evaluation order
 
@@ -145,3 +148,7 @@ with sequence 9 still runs before a `lan` allow with sequence 1.
 | DHCPv6 DUID and "do not release" are global (`Interfaces/settings`) | per DHCPv6 interface (`duid`, `send_release`); the importer copies the global values | networkd configures them per link |
 | DHCPv4 client identifier is the host name when one is set (basic mode) | `client_id`: `mac` or `duid` | networkd cannot send an arbitrary identifier; `mac` is dhclient's default |
 | Kea6 `subnet` empty when `dynamic_prefix` | `addressing` is `static {subnet, pools}` or `dynamic_prefix` | invalid combinations unrepresentable |
+| DNSBL `type` short codes (`hgz003`) | `lists`: `hagezi-pro`, ... | readable; codes kept for import/export |
+| DNSBL allowlists are regular expressions | `allow`: names, `*.name` subtrees, or `/regex/` | a plain name means that name; regexes cannot open a hole under a blocked subtree (compiled, not evaluated per query) |
+| DNSBL `nxdomain` + `address` | `answer`: `{"mode":"address","address":...}` or `{"mode":"nxdomain"}` | one meaning per state |
+| `noregrecords`, `addptr` | `register_firewall_records`, `ptr` | positive booleans |

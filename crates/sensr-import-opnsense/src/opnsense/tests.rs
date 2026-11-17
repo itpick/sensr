@@ -281,6 +281,30 @@ fn isc_dhcpd_maps_to_dhcpv4() {
     assert_eq!(import_str(&xml).document, i.document);
 }
 
+/// MVC BooleanFields: empty means off. A stock config writes `<dnssec/>`,
+/// `<dns64/>` and `<forwarding><enabled/></forwarding>`; reading them as
+/// presence flags turned DNSSEC, DNS64 and forwarding on (the router must
+/// recurse), and an empty `privateaddress` keeps rebinding protection on
+/// only when the list holds networks.
+#[test]
+fn unbound_empty_booleans_are_off() {
+    let i = import_str(
+        "<opnsense><OPNsense><unboundplus version=\"1.0.15\"><general><enabled>1</enabled><port>53</port><dnssec/><dns64/><regdhcp>1</regdhcp><regdhcpstatic/><stats>1</stats></general><advanced><belownxdomain>1</belownxdomain><aggressivensec>1</aggressivensec><privateaddress>10.0.0.0/8,192.168.0.0/16</privateaddress></advanced><forwarding><enabled/></forwarding><dots/><hosts/></unboundplus></OPNsense></opnsense>",
+    );
+    let d = &i.document.dns;
+    assert!(d.enabled && d.statistics && d.register_dhcp_leases);
+    assert!(!d.dnssec && !d.dns64 && !d.register_dhcp_static);
+    assert!(!d.forwarding.use_system_servers, "the router recurses");
+    assert!(d.tuning.harden_below_nxdomain && d.tuning.aggressive_nsec);
+    assert_eq!(
+        d.tuning.private_addresses,
+        [
+            "10.0.0.0/8".parse::<ipnet::IpNet>().unwrap(),
+            "192.168.0.0/16".parse().unwrap()
+        ]
+    );
+}
+
 #[test]
 fn device_names_can_be_mapped_to_linux() {
     let mut options = ImportOptions::default();

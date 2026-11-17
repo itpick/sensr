@@ -1716,7 +1716,7 @@ U1lOVEhFVElDIEFQSSBLRVkgLSBOT1QgQSBSRUFMIENSRURFTlRJQUwgLSBzZW5zciB0ZXN0IGNvcnB1
       <general>
         <enabled>1</enabled>
         <port>53</port>
-        <stats>0</stats>
+        <stats>1</stats>
         <active_interface/>
         <dnssec>1</dnssec>
         <dns64>0</dns64>
@@ -1777,15 +1777,22 @@ U1lOVEhFVElDIEFQSSBLRVkgLSBOT1QgQSBSRUFMIENSRURFTlRJQUwgLSBzZW5zciB0ZXN0IGNvcnB1
       </advanced>
       <acls>
         <default_action>allow</default_action>
+        <acl uuid="5b0c3f7e-2d41-4c8a-9e57-0a6f1d2c3b41">
+          <enabled>1</enabled>
+          <name>guest-wifi</name>
+          <action>refuse_non_local</action>
+          <networks>192.168.30.0/24</networks>
+          <description>Guests may only ask for local names</description>
+        </acl>
       </acls>
       <dnsbl>
         <blocklist uuid="14d4cffe-087b-45c1-b3a5-b06c07bf285e">
           <enabled>1</enabled>
           <type>hgz003,oisd0</type>
           <lists>https://lists.example.net/extra-ads.txt</lists>
-          <allowlists>updates.example.com</allowlists>
-          <blocklists/>
-          <wildcards/>
+          <allowlists>updates.example.com,ok.ads.example.net,^cdn[0-9]+\.example\.net$</allowlists>
+          <blocklists>tracker.example.org</blocklists>
+          <wildcards>ads.example.net</wildcards>
           <source_nets/>
           <address/>
           <nxdomain>0</nxdomain>
@@ -1801,7 +1808,7 @@ U1lOVEhFVElDIEFQSSBLRVkgLSBOT1QgQSBSRUFMIENSRURFTlRJQUwgLSBzZW5zciB0ZXN0IGNvcnB1
           <wildcards/>
           <source_nets>192.168.20.0/24</source_nets>
           <address/>
-          <nxdomain>0</nxdomain>
+          <nxdomain>1</nxdomain>
           <cache_ttl>72000</cache_ttl>
           <description>IoT threat intel only</description>
         </blocklist>
@@ -1872,6 +1879,19 @@ U1lOVEhFVElDIEFQSSBLRVkgLSBOT1QgQSBSRUFMIENSRURFTlRJQUwgLSBzZW5zciB0ZXN0IGNvcnB1
           <txtdata/>
           <addptr>1</addptr>
           <description>Router GUI</description>
+        </host>
+        <host uuid="3c9e6a1b-7f20-4d5e-8b13-6e2f0a9d4c77">
+          <enabled>1</enabled>
+          <hostname>cluster</hostname>
+          <domain>internal.home.example</domain>
+          <rr>A</rr>
+          <mxprio/>
+          <mx/>
+          <ttl/>
+          <server>192.168.1.20</server>
+          <txtdata/>
+          <addptr>1</addptr>
+          <description>Split-horizon name for the cluster VIP</description>
         </host>
       </hosts>
       <aliases/>
