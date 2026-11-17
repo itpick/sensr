@@ -43,7 +43,7 @@ pub enum FetchError {
 
 /// Something that downloads a URL into a file (HTTP in production, a map
 /// in tests).
-pub trait Fetch {
+pub trait Fetch: Sync {
     /// Download `url` into `dest`, conditionally on the validators.
     fn fetch(
         &self,

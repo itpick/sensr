@@ -292,8 +292,26 @@ fn load_sources(
     }
     let mut sources = BTreeMap::new();
     let mut status = BTreeMap::new();
-    for (url, age) in &max_age {
-        let r = cache.refresh(fetcher, url, *age, force, now);
+    // Downloads run in parallel: a slow or unreachable list (DNS timeouts
+    // take tens of seconds) must not hold up the others.
+    let refreshed: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = max_age
+            .iter()
+            .map(|(url, age)| s.spawn(move || cache.refresh(fetcher, url, *age, force, now)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join().unwrap_or_else(|_| crate::fetch::Refreshed {
+                    path: None,
+                    fetched: None,
+                    from_cache: false,
+                    error: Some("download thread panicked".into()),
+                })
+            })
+            .collect()
+    });
+    for ((url, _), r) in max_age.iter().zip(refreshed) {
         let mut entries = Vec::new();
         let mut error = r.error.clone();
         if let Some(path) = &r.path {

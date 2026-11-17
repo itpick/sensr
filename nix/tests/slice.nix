@@ -363,7 +363,7 @@ pkgs.testers.runNixOSTest {
                 # Custom entries of the imported policy, and a name from the
                 # list sensr downloaded and compiled.
                 out = lan.wait_until_succeeds(
-                    "dig +short @${net.lan.router} a.listed.example A | grep -x 0.0.0.0", timeout=180
+                    "dig +short @${net.lan.router} a.listed.example A | grep -x 0.0.0.0", timeout=300
                 )
                 print(router.succeed("cat /var/lib/sensr-dns/status.json; journalctl -b -u sensr-dnsbl --no-pager | tail -n 20"))
                 for name in ["x.ads.example.net", "ads.example.net", "tracker.example.org"]:

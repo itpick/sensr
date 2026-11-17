@@ -80,23 +80,34 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::BlocklistUpdate { force } => {
-            let cfg = load(&cli.config)?;
-            let control = Control::new(&SystemRunner, &cfg.control_conf);
-            let st = update::run(
-                &cfg,
-                &Paths::new(&cfg.state_dir),
-                &HttpFetcher::default(),
-                &control,
-                force,
-                now(),
-            )?;
-            tracing::info!(
-                "blocklist: {} names in {} ms, {}; peak RSS {}",
-                st.names,
-                st.duration_ms,
-                st.applied,
-                peak_rss().unwrap_or_else(|| "?".into())
-            );
+            // A configuration change while a refresh runs (its path unit
+            // cannot start it twice) is picked up by running again.
+            let mut text = fs::read_to_string(&cli.config).unwrap_or_default();
+            loop {
+                let cfg = load(&cli.config)?;
+                let control = Control::new(&SystemRunner, &cfg.control_conf);
+                let st = update::run(
+                    &cfg,
+                    &Paths::new(&cfg.state_dir),
+                    &HttpFetcher::default(),
+                    &control,
+                    force,
+                    now(),
+                )?;
+                tracing::info!(
+                    "blocklist: {} names in {} ms, {}; peak RSS {}",
+                    st.names,
+                    st.duration_ms,
+                    st.applied,
+                    peak_rss().unwrap_or_else(|| "?".into())
+                );
+                let again = fs::read_to_string(&cli.config).unwrap_or_default();
+                if again == text {
+                    break;
+                }
+                tracing::info!("configuration changed during the refresh; running again");
+                text = again;
+            }
         }
         Cmd::Watch => watch(&cli.config)?,
         Cmd::Check { name, client } => {
