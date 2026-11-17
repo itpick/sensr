@@ -39,4 +39,4 @@ SENSR_HOUSE_MAC_LAN=$(jq -r .router.lan.mac "$params")
 SENSR_HOUSE_MAC_LAN2=$(jq -r .router.lan2.mac "$params")
 export SENSR_HOUSE_MAC_WAN SENSR_HOUSE_MAC_LAN SENSR_HOUSE_MAC_LAN2
 cd "$tmp"
-TMPDIR=$tmp "$driver/bin/nixos-test-driver" --output_directory "$out" 2>&1 | tee "$out/house.log"
+PYTHONUNBUFFERED=1 TMPDIR=$tmp "$driver/bin/nixos-test-driver" --output_directory "$out" 2>&1 | tee "$out/house.log"
