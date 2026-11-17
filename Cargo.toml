@@ -39,6 +39,8 @@ console_error_panic_hook = "0.1.7"
 fancy-regex = "0.20.2"
 futures = "0.3.34"
 getrandom = "0.4.3"
+hyper = "1.12.0"
+hyper-util = { version = "0.1.21", features = ["server-auto", "tokio", "service"] }
 indexmap = { version = "2.14.2", features = ["serde"] }
 insta = "1.49.0"
 inventory = "0.3.25"
@@ -55,9 +57,12 @@ proc-macro2 = "1.0.107"
 proptest = "1.12.0"
 quick-xml = { version = "0.42.0", features = ["serialize"] }
 quote = "1.0.47"
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
 regex = "1.13.1"
 rtnetlink = "0.24.0"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = "1.16.0"
 schemars = "1.2.3"
 scraper = "0.29.0"
 sd-notify = "0.5.0"
@@ -71,6 +76,7 @@ syn = "3.0.10"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 toml = "1.2.1"
 tower = "0.5.3"
 tower-http = { version = "0.7.1", features = ["compression-br", "compression-gzip", "fs"] }

@@ -16,6 +16,7 @@ pub mod seed;
 pub mod slice_applier;
 pub mod store;
 pub mod systemd;
+pub mod tls;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

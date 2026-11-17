@@ -7,11 +7,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{check, yes};
-use crate::array::ArrayField;
+use crate::array::{ArrayField, Relation};
 use crate::fields::{
     Description, DomainName, GroupName, Host, Hostname, InterfaceId, Port, Secret, SshPublicKey,
     Timezone, Username,
 };
+use crate::models::trust::Certificate;
 use crate::refs::{RefContext, Validate};
 use crate::validation::{FieldPath, Validations, ValidatorKind};
 
@@ -47,6 +48,9 @@ pub struct System {
     /// SSH daemon.
     #[serde(default)]
     pub ssh: Ssh,
+    /// The web GUI and API listener (OPNsense `system/webgui`).
+    #[serde(default)]
+    pub webgui: WebGui,
 }
 
 impl Default for System {
@@ -62,6 +66,7 @@ impl Default for System {
             users: ArrayField::new(),
             groups: ArrayField::new(),
             ssh: Ssh::default(),
+            webgui: WebGui::default(),
         }
     }
 }
@@ -167,6 +172,80 @@ impl Default for Ssh {
     }
 }
 
+/// How the web GUI is served.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WebProtocol {
+    /// TLS (the default).
+    #[default]
+    Https,
+    /// Plain HTTP (credentials travel in clear; only for isolated
+    /// management networks).
+    Http,
+}
+
+/// The web GUI and API listener (OPNsense System › Settings ›
+/// Administration, `system/webgui`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebGui {
+    /// HTTPS or HTTP.
+    #[serde(default)]
+    pub protocol: WebProtocol,
+    /// Listen port; `None` is 443 for HTTPS, 80 for HTTP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<Port>,
+    /// Interfaces to listen on (loopback always included); empty means
+    /// all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<InterfaceId>,
+    /// With HTTPS, also answer on port 80 with a redirect (inverse of
+    /// OPNsense `disablehttpredirect`).
+    #[serde(default = "yes")]
+    pub http_redirect: bool,
+    /// The server certificate from the trust store; `None` uses the
+    /// self-signed one sensr generates at first boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<Relation<Certificate>>,
+}
+
+impl Default for WebGui {
+    fn default() -> Self {
+        Self {
+            protocol: WebProtocol::Https,
+            port: None,
+            interfaces: Vec::new(),
+            http_redirect: true,
+            certificate: None,
+        }
+    }
+}
+
+/// Port of the HTTP-to-HTTPS redirect listener.
+pub const HTTP_REDIRECT_PORT: u16 = 80;
+
+impl WebGui {
+    /// True when served over TLS.
+    pub fn https(&self) -> bool {
+        self.protocol == WebProtocol::Https
+    }
+
+    /// The port the GUI listens on.
+    pub fn listen_port(&self) -> u16 {
+        match (self.port, self.protocol) {
+            (Some(p), _) => p.get(),
+            (None, WebProtocol::Https) => 443,
+            (None, WebProtocol::Http) => 80,
+        }
+    }
+
+    /// The redirect listener's port, when there is one.
+    pub fn redirect_port(&self) -> Option<u16> {
+        (self.https() && self.http_redirect && self.listen_port() != HTTP_REDIRECT_PORT)
+            .then_some(HTTP_REDIRECT_PORT)
+    }
+}
+
 impl Validate for System {
     fn validate(&self, ctx: &dyn RefContext, at: &FieldPath, out: &mut Validations) {
         let users = at.join("users");
@@ -257,6 +336,25 @@ impl Validate for System {
         );
         let ssh = at.join("ssh");
         check::interfaces(ctx, &self.ssh.interfaces, &ssh.join("interfaces"), out);
+        let web = at.join("webgui");
+        check::interfaces(ctx, &self.webgui.interfaces, &web.join("interfaces"), out);
+        if self.webgui.https()
+            && self.webgui.http_redirect
+            && self.webgui.listen_port() == HTTP_REDIRECT_PORT
+        {
+            out.add(
+                &web.join("port"),
+                ValidatorKind::Constraint,
+                "HTTPS on port 80 leaves no port for the HTTP redirect; choose another port or disable the redirect.",
+            );
+        }
+        if self.ssh.enabled && self.ssh.port.get() == self.webgui.listen_port() {
+            out.add(
+                &web.join("port"),
+                ValidatorKind::Constraint,
+                "The web GUI port is already used by SSH.",
+            );
+        }
         if let Some(g) = &self.ssh.group
             && !ctx.has_group(g)
         {

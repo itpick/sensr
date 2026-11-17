@@ -272,9 +272,19 @@ in
         description = "Run sensr-api, the HTTP API and web UI.";
       };
       listen = mkOption {
-        type = types.str;
-        default = "[::]:443";
-        description = "Address sensr-api listens on ($SENSR_API_LISTEN).";
+        type = types.nullOr types.str;
+        default = null;
+        description = ''
+          Override for development and tests ($SENSR_API_LISTEN): serve on
+          this one address. By default sensr-api listens where the config's
+          `system.webgui` says (port, interfaces, HTTP redirect), over HTTPS
+          with the certificate the agent hands it.
+        '';
+      };
+      insecureHttp = mkOption {
+        type = types.bool;
+        default = false;
+        description = "With `listen`: plain HTTP instead of HTTPS (credentials in clear).";
       };
     };
 
@@ -481,12 +491,18 @@ in
       wants = [ "sensr-agent.service" ];
       environment = {
         SENSR_AGENT_SOCKET = socket;
-        SENSR_API_LISTEN = cfg.api.listen;
         RUST_LOG = "info";
       };
       serviceConfig = commonHardening // {
         Type = "exec";
-        ExecStart = "${cfg.package}/bin/sensr-api";
+        ExecStart = lib.escapeShellArgs (
+          [ "${cfg.package}/bin/sensr-api" ]
+          ++ lib.optionals (cfg.api.listen != null) [
+            "--listen"
+            cfg.api.listen
+          ]
+          ++ lib.optional cfg.api.insecureHttp "--insecure-http"
+        );
         Restart = "on-failure";
         RestartSec = 2;
         User = "sensr-api";

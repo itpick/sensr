@@ -13,7 +13,7 @@ nat on igc2 inet from (igc1_vlan50:network) to any -> (igc2:0) port 1024:65535 #
 nat on igc2 inet from 127.0.0.0/8 to any -> (igc2:0) port 1024:65535 # Automatic outbound rule
 # [prio: 300]
 no rdr on igc1 proto tcp from {any} to {(igc1)} port {80} # Anti-lockout; prevent redirects for protected ports to this interface address
-no rdr on igc1 proto tcp from {any} to {(igc1)} port {443} # Anti-lockout; prevent redirects for protected ports to this interface address
+no rdr on igc1 proto tcp from {any} to {(igc1)} port {8443} # Anti-lockout; prevent redirects for protected ports to this interface address
 # [prio: 1]
 # block in log quick inet6 from {any} to {any} label "92c36e7dd6e900eff9263c0c36eaa001" # Block all IPv6
 block in log inet from {any} to {any} label "02f4bab031b57d1e30553ce08e0ec131" # Default deny / state violation rule
@@ -30,7 +30,7 @@ block in log quick inet6 proto {tcp udp} from {any} port {0} to {any} label "aec
 block in log quick inet proto {tcp udp} from {any} to {any} port {0} label "6bf37cddd4ab4919991fd6799f2d087d" # block all targeting port 0
 block in log quick inet6 proto {tcp udp} from {any} to {any} port {0} label "6bf37cddd4ab4919991fd6799f2d087d" # block all targeting port 0
 block in log quick proto tcp from {<sshlockout>} to {(self)} port {22} label "046c96a70b46cb24b27bd1a1fad15e53" # sshlockout
-block in log quick proto tcp from {<sshlockout>} to {(self)} port {443} label "8bb995882b5c4cca530badeff674944c" # sshlockout
+block in log quick proto tcp from {<sshlockout>} to {(self)} port {8443} label "1b3e0e680cb6b2aaedb363b20878f749" # sshlockout
 block in log quick from {<virusprot>} to {any} label "10750fe8ac153c0b36d8a70f277ffe00" # virusprot overload table
 pass in log quick on igc0 proto udp from {any} port {67} to {any} port {68} label "f994f615e00b8be0042263f86c79913f" # allow DHCP client on WAN_CABLE
 pass out log quick on igc0 proto udp from {any} port {68} to {any} port {67} label "5cf7ab808da1fcbca1ddb9ba9b46b669" # allow DHCP client on WAN_CABLE
@@ -77,7 +77,7 @@ block in quick on igc2 inet6 from {fe80::/10} to {any} label "39dc8bf60a9965e61c
 # block in quick on igc1_vlan50 inet6 from {fe80::/10} to {any} label "d7f88369674218772b6bf4b61c749431" # Block private networks from VOICE
 pass out log from {any} to {any} keep state allow-opts label "fae559338f65e11c53669fc3642c93c2" # let out anything from firewall host itself
 pass in log quick on igc1 proto tcp from {any} to {(self)} port {80} keep state label "58d2221c91b735e99192dc8437637bd5" # anti-lockout rule
-pass in log quick on igc1 proto tcp from {any} to {(self)} port {443} keep state label "9a848dfc8ff33b16d39603d170c32486" # anti-lockout rule
+pass in log quick on igc1 proto tcp from {any} to {(self)} port {8443} keep state label "15d8d4e8f13fb5156f780d2c70690e4e" # anti-lockout rule
 # [prio: 400000]
 pass in quick on igc1_vlan50 inet from {(igc1_vlan50:network)} to {any} keep state label "2a511d4c-7829-427a-af2e-305619a096d2" # Voice VLAN via cable first
 pass in quick on igc1 inet from {(igc1:network)} to $LOCAL_NETS keep state label "5ea88d07-4999-4bf5-8ac8-567ccb2bb10a" # LAN to local networks (no policy routing)

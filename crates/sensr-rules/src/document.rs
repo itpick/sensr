@@ -534,6 +534,11 @@ pub fn compile(doc: &Document, rt: &Runtime<'_>) -> Compiled {
         log_default_block: fs.log_default_block,
         anti_lockout: fs.anti_lockout,
         ssh: doc.system.ssh.enabled.then(|| doc.system.ssh.port.get()),
+        webgui: crate::system_rules::WebGui {
+            https: doc.system.webgui.https(),
+            port: doc.system.webgui.port.map(|p| p.get()),
+            http_redirect: doc.system.webgui.http_redirect,
+        },
         kea4_interfaces: if doc.dhcpv4.enabled && doc.dhcpv4.firewall_rules {
             doc.dhcpv4
                 .interfaces

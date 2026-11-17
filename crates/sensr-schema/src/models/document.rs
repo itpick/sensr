@@ -350,6 +350,22 @@ impl Document {
         self.gateways
             .validate(self, &root.join("gateways"), &mut out);
         self.trust.validate(self, &root.join("trust"), &mut out);
+        if let Some(c) = &self.system.webgui.certificate {
+            let p = root.join("system").join("webgui").join("certificate");
+            match c.resolve(&self.trust.certificates) {
+                None => out.add(
+                    &p,
+                    crate::validation::ValidatorKind::Callback,
+                    "The certificate does not exist in the trust store.",
+                ),
+                Some(cert) if cert.certificate.is_none() || cert.private_key.is_none() => out.add(
+                    &p,
+                    crate::validation::ValidatorKind::Callback,
+                    "The web GUI needs a certificate with its private key.",
+                ),
+                Some(_) => {}
+            }
+        }
         self.routes.validate(self, &root.join("routes"), &mut out);
         self.devices.validate(self, &root.join("devices"), &mut out);
         self.virtual_ips

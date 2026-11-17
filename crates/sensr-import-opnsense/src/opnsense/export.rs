@@ -161,6 +161,26 @@ fn system(doc: &Document) -> Element {
         se.put(leaf("enabled", "enabled"));
     }
     e.put(se);
+    let w = &s.webgui;
+    let mut we = Element::new("webgui");
+    we.put(leaf("protocol", if w.https() { "https" } else { "http" }));
+    if let Some(cert) = w
+        .certificate
+        .as_ref()
+        .and_then(|c| doc.trust.certificates.get(&c.id()))
+    {
+        we.put(leaf("ssl-certref", &cert.refid));
+    }
+    if let Some(p) = w.port {
+        we.put(leaf("port", p));
+    }
+    if !w.interfaces.is_empty() {
+        we.put(leaf("interfaces", join(&w.interfaces, ",")));
+    }
+    if !w.http_redirect {
+        we.put(leaf("disablehttpredirect", "1"));
+    }
+    e.put(we);
     let r = &doc.nat.reflection;
     if r.source_nat {
         e.put(leaf("enablenatreflectionhelper", "yes"));

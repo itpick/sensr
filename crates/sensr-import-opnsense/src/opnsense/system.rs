@@ -116,6 +116,9 @@ impl Mapper<Document> for SystemMapper {
         if let Some(ssh) = ctx.child(s, "ssh") {
             map_ssh(ssh, ctx, out);
         }
+        if let Some(web) = ctx.child(s, "webgui") {
+            map_webgui(web, ctx, out);
+        }
 
         // Legacy global NAT reflection switches (Firewall › Settings › Advanced).
         if let Some(v) = ctx.text(s, "enablenatreflectionhelper") {
@@ -144,6 +147,22 @@ impl Mapper<Document> for SystemMapper {
             (
                 "system/ssh/noauto",
                 "install-media SSH autostart; not applicable",
+            ),
+            (
+                "system/webgui/ssl-ciphers",
+                "TLS cipher selection; sensr-api uses rustls' safe defaults (TLS 1.2+)",
+            ),
+            (
+                "system/webgui/compression",
+                "HTTP compression level; sensr-api compresses with its own defaults",
+            ),
+            (
+                "system/webgui/althostnames",
+                "alternate host names for the HTTP referer check, which sensr-api does not do",
+            ),
+            (
+                "system/webgui/*",
+                "lighttpd option (session, login, HSTS, referer check) not modelled; sensr-api uses its own defaults",
             ),
         ]
     }
@@ -284,6 +303,45 @@ fn map_group<'doc>(
     };
     out.system.groups.insert(id, group);
     true
+}
+
+/// `system/webgui`: protocol, port, listen interfaces and the HTTP
+/// redirect. `ssl-certref` names a certificate, which the trust mapper
+/// resolves once certificates are imported.
+fn map_webgui<'doc>(web: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Document) {
+    use sensr_schema::models::system::WebProtocol;
+    let cfg = &mut out.system.webgui;
+    if let Some(p) = ctx.text(web, "protocol") {
+        match p.trim() {
+            "http" => cfg.protocol = WebProtocol::Http,
+            "https" | "" => cfg.protocol = WebProtocol::Https,
+            other => {
+                if let Some(e) = web.child("protocol") {
+                    ctx.warn(
+                        e,
+                        Severity::Invalid,
+                        format!("unknown web GUI protocol {other:?}; HTTPS is used"),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(c) = web.child("port") {
+        ctx.consume(c);
+        let t = c.text();
+        if !t.trim().is_empty() {
+            cfg.port = parse_or_warn(ctx, c, t.trim(), "web GUI port");
+        }
+    }
+    if let Some(c) = web.child("interfaces") {
+        ctx.consume(c);
+        for i in list(&c.text(), &[',']) {
+            if let Some(id) = parse_or_warn(ctx, c, &i, "interface") {
+                cfg.interfaces.push(id);
+            }
+        }
+    }
+    cfg.http_redirect = !ctx.flag(web, "disablehttpredirect");
 }
 
 fn map_ssh<'doc>(ssh: &'doc Element, ctx: &mut MapContext<'doc>, out: &mut Document) {

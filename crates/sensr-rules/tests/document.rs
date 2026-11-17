@@ -62,3 +62,39 @@ fn home_router_document_compiles() {
 fn multiwan_document_compiles() {
     check("multiwan", &Runtime::default());
 }
+
+/// The anti-lockout rule admits the configured web GUI port (and the HTTP
+/// redirect port with HTTPS), as `filter_core_get_antilockout` does.
+#[test]
+fn anti_lockout_follows_the_webgui_port() {
+    use sensr_schema::models::system::WebProtocol;
+    let lockout = |doc: &sensr_schema::Document| -> String {
+        document::compile(doc, &Runtime::default())
+            .render_pf()
+            .lines()
+            .filter(|l| l.contains("anti-lockout"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let mut doc = sensr_schema::Document::factory();
+    let default = lockout(&doc);
+    assert!(
+        default.contains("443") && default.contains("80"),
+        "{default}"
+    );
+
+    doc.system.webgui.port = sensr_schema::fields::Port::new(8443);
+    let moved = lockout(&doc);
+    assert!(moved.contains("8443") && !moved.contains(" 443"), "{moved}");
+
+    doc.system.webgui.http_redirect = false;
+    let no_redirect = lockout(&doc);
+    assert!(
+        !no_redirect.contains("80 ") && !no_redirect.contains(", 80"),
+        "{no_redirect}"
+    );
+
+    doc.system.webgui.protocol = WebProtocol::Http;
+    doc.system.webgui.port = None;
+    assert!(lockout(&doc).contains("80"), "{}", lockout(&doc));
+}

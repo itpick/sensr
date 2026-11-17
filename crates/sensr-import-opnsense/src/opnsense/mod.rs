@@ -157,10 +157,6 @@ pub const EXPECTED_UNMAPPED: &[(&str, &str)] = &[
         "system/dnsallowoverride_exclude",
         "per-interface DNS override exclusion is not modelled yet",
     ),
-    (
-        "system/webgui",
-        "web GUI listener settings are not modelled yet",
-    ),
     ("sysctl", "FreeBSD sysctl tunables do not apply to Linux"),
     ("rrd", "RRD graphs are replaced by sensr-monitor"),
     (

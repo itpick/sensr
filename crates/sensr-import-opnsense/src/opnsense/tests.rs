@@ -1011,3 +1011,36 @@ fn ipv6_allowed_follows_interfaces_settings_over_legacy() {
         }
     }
 }
+
+#[test]
+fn webgui_listener_settings_are_imported() {
+    use sensr_schema::models::system::WebProtocol;
+    let doc = import("corpus/multiwan.xml").document;
+    let w = &doc.system.webgui;
+    assert_eq!((w.protocol, w.listen_port()), (WebProtocol::Https, 8443));
+    let cert = w.certificate.expect("ssl-certref resolved");
+    assert_eq!(
+        doc.trust.certificates.get(&cert.id()).unwrap().refid,
+        "6723f0a91b2c4"
+    );
+
+    let i = import_str(
+        "<opnsense><interfaces><lan><if>igc1</if><enable>1</enable></lan></interfaces>\
+         <system><webgui><protocol>http</protocol><port>8080</port>\
+         <interfaces>lan</interfaces><disablehttpredirect>1</disablehttpredirect>\
+         <ssl-certref>missing</ssl-certref></webgui></system></opnsense>",
+    );
+    let w = &i.document.system.webgui;
+    assert_eq!((w.protocol, w.listen_port()), (WebProtocol::Http, 8080));
+    assert_eq!(
+        w.interfaces.iter().map(|i| i.as_str()).collect::<Vec<_>>(),
+        ["lan"]
+    );
+    assert!(!w.http_redirect);
+    assert!(w.certificate.is_none());
+    assert!(
+        i.report.to_string().contains("not in the trust store"),
+        "{}",
+        i.report
+    );
+}

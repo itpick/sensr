@@ -19,7 +19,7 @@
 /opnsense/theme  (web GUI theme)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
 /opnsense/system/dnsallowoverride_exclude  (per-interface DNS override exclusion is not modelled yet)
-/opnsense/system/webgui  (web GUI listener settings are not modelled yet)
+/opnsense/system/webgui/noroot  (lighttpd option (session, login, HSTS, referer check) not modelled; sensr-api uses its own defaults)
 /opnsense/system/usevirtualterminal  (FreeBSD console setting)
 /opnsense/system/disableconsolemenu  (the sensr console menu has its own setting)
 /opnsense/system/powerd_ac_mode  (FreeBSD powerd; CPU frequency scaling is a NixOS concern)
