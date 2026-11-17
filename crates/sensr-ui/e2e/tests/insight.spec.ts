@@ -40,7 +40,10 @@ test("ids alerts: filter, page, suppress from source, staged in the rules tab", 
   await rows.first().getByRole("button", { name: /Source only: suppress sid 2001219 from 198\.51\.100\.23/ }).click();
   await expect(page.getByRole("status").filter({ hasText: "staged" })).toContainText("signature 2001219");
   await expect(page).toHaveURL(/text=2001219/);
-  await expect(page.getByRole("region", { name: "Pending changes" })).toContainText("Changed: ids.");
+  // The banner lists every staged section; another test may have staged dns too.
+  await expect(page.getByRole("region", { name: "Pending changes" })).toContainText(
+    /Changed: [^.]*\bids\b/,
+  );
   await expect(rows.first()).toContainText("suppressed");
   await page.screenshot({ path: `${shots}/interaction-ids-suppress.png`, fullPage: true });
 
