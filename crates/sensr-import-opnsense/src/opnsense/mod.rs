@@ -195,8 +195,16 @@ pub const EXPECTED_UNMAPPED: &[(&str, &str)] = &[
         "system/dnsallowoverride_exclude",
         "per-interface DNS override exclusion is not modelled yet",
     ),
+    (
+        "system/disablereplyto",
+        "pf's global reply-to switch; sensr decides reply-to per rule in the ruleset",
+    ),
     ("sysctl", "FreeBSD sysctl tunables do not apply to Linux"),
     ("rrd", "RRD graphs are replaced by sensr-monitor"),
+    (
+        "OPNsense/Hostwatch",
+        "host discovery plugin; the traffic insight and the neighbour tables cover it",
+    ),
     ("OPNsense/Syslog", "remote syslog is not modelled yet"),
     (
         "OPNsense/trust",
