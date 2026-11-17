@@ -26,7 +26,7 @@
 /opnsense/gateways/gateway_group[@uuid='2b2d395e-cfcf-4324-be48-7f65ebbc5323']  <- gateways
 /opnsense/gateways/gateway_group[@uuid='60d77f02-8d93-4fec-b523-cf0d0af7f5dc']  <- gateways
 
-## unmapped, expected (34)
+## unmapped, expected (35)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -38,7 +38,8 @@
 /opnsense/system/user[@uuid='03c6af4c-3057-47b1-bd5c-98545a86db16']/language  (web GUI language)
 /opnsense/system/user[@uuid='03c6af4c-3057-47b1-bd5c-98545a86db16']/dashboard  (web GUI dashboard layout)
 /opnsense/system/user[@uuid='03c6af4c-3057-47b1-bd5c-98545a86db16']/menu_favorites  (web GUI menu favourites)
-/opnsense/system/webgui  (web GUI listener settings are not modelled yet)
+/opnsense/system/webgui/ssl-ciphers  (TLS cipher selection; sensr-api uses rustls' safe defaults (TLS 1.2+))
+/opnsense/system/webgui/compression  (HTTP compression level; sensr-api compresses with its own defaults)
 /opnsense/system/usevirtualterminal  (FreeBSD console setting)
 /opnsense/system/disableconsolemenu  (the sensr console menu has its own setting)
 /opnsense/system/powerd_ac_mode  (FreeBSD powerd; CPU frequency scaling is a NixOS concern)

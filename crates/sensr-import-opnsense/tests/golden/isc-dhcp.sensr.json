@@ -16,6 +16,10 @@
       "interfaces": [],
       "permit_root_login": false,
       "password_auth": false
+    },
+    "webgui": {
+      "protocol": "https",
+      "http_redirect": true
     }
   },
   "interfaces": {
@@ -178,7 +182,10 @@
       "use_system_servers": false,
       "servers": {}
     },
-    "host_overrides": {}
+    "host_overrides": {},
+    "statistics": false,
+    "register_firewall_records": true,
+    "txt_descriptions": false
   },
   "wireguard": {
     "enabled": false,
