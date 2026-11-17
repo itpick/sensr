@@ -202,6 +202,7 @@ pkgs.testers.runNixOSTest {
 
         # first boot binds LAN to its card by MAC and names it after the role
         lan_dev = machine.succeed("sensr config get interfaces.lan.device --source applied").strip()
+        machine.wait_until_succeeds(f"ip -4 -o addr show dev {lan_dev} | grep -q 'inet 192.168.1.2/'", timeout=60)
         lan = machine.succeed(f"ip -4 -o addr show dev {lan_dev} | awk '{{print $4}}' | cut -d/ -f1").strip()
         probe = f"curl -sk -o /dev/null -w '%{{http_code}}' --connect-timeout 3 https://{lan}:8443/api/v1/status"
         client.wait_for_unit("multi-user.target")
