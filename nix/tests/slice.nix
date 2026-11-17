@@ -446,7 +446,7 @@ pkgs.testers.runNixOSTest {
         with subtest("URL table alias: a reload with the source down renders the last good list"):
             internet.succeed("systemctl stop feeds")
             router.succeed(
-                "sensr config set firewall.aliases.4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1b01.content.refresh.hours 1"
+                "sensr config set firewall.aliases.4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1b01.content.refresh.hours 1 --json"
                 " && sensr config commit -m 'slice: refresh hourly'"
             )
             router.sleep(15)
