@@ -1,0 +1,7 @@
+[
+  {"ifindex":2,"ifname":"wan0","flags":["BROADCAST","MULTICAST","UP","LOWER_UP"],"mtu":1500,"operstate":"UP","addr_info":[
+    {"family":"inet6","local":"fe80::2","prefixlen":64,"scope":"link","valid_life_time":4294967295,"preferred_life_time":4294967295}]},
+  {"ifindex":3,"ifname":"lan0","flags":["BROADCAST","MULTICAST","UP","LOWER_UP"],"mtu":1500,"operstate":"UP","addr_info":[
+    {"family":"inet6","local":"2001:db8:5:6::1","prefixlen":64,"scope":"global","dynamic":true,"valid_life_time":7190,"preferred_life_time":3590},
+    {"family":"inet6","local":"fe80::3","prefixlen":64,"scope":"link","valid_life_time":4294967295,"preferred_life_time":4294967295}]}
+]

@@ -1,0 +1,5 @@
+[
+  {"dst":"2001:db8:5:6::/64","dev":"lan0","protocol":"dhcp","metric":1024,"flags":[],"expires":7190,"pref":"medium"},
+  {"dst":"fe80::/64","dev":"lan0","protocol":"kernel","metric":256,"flags":[],"pref":"medium"},
+  {"dst":"default","gateway":"fe80::1","dev":"wan0","protocol":"ra","metric":1024,"flags":[],"expires":1795,"pref":"medium"}
+]
