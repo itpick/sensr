@@ -103,6 +103,6 @@ echo "   initrd failure: panicked and rebooted, journal on the FAT partition: ok
 deadline=${TRIAL_DEADLINE:-900}
 cp --no-preserve=mode "$img" "$disk"
 boot trial-deadline "sensr.trial=1 sensr.trial.deadline=$deadline" $((deadline + 600)) "reboot: Restarting system"
-grep -q "trial deadline armed: reboot $deadline s after boot" "$work/trial-deadline.log"
-grep -q "Started.*Trial deadline" "$work/trial-deadline.log" || grep -q "Trial deadline" "$work/trial-deadline.log"
+grep -aq "Started.*Trial deadline ($deadline s after boot)" "$work/trial-deadline.log"
+grep -aq "Trial deadline: reboot" "$work/trial-deadline.log"
 echo "   trial boot: deadline armed by PID 1 and the box rebooted by itself: ok"

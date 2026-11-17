@@ -63,6 +63,8 @@ pkgs.testers.runNixOSTest {
     virtualisation.qemu.options = [
       "-virtfs local,path=\${SENSR_TRIAL_IMAGE_DIR:-${imageDir}},mount_tag=trialimg,security_model=none,readonly=on"
     ];
+    virtualisation.diskSize = 4096;
+    virtualisation.memorySize = 2048;
     # Sparse; big enough for a real images.pi5 build (SENSR_TRIAL_IMAGE_DIR).
     virtualisation.emptyDiskImages = [
       512
