@@ -274,6 +274,10 @@ pub async fn assign(
 ) -> ApiResult {
     match call(&state, &caller, Op::InterfacesAssign { assignments }).await? {
         Response::Staged { dirty } => Ok(to_json(&serde_json::json!({ "dirty": dirty }))),
+        other => Err(unexpected(other)),
+    }
+}
+
 /// `GET /api/v1/status/{gateways|aliases|ipv6}`: run-time state.
 pub async fn runtime(
     State(state): State<Arc<AppState>>,

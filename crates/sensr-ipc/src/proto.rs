@@ -206,7 +206,6 @@ pub enum Op {
     /// The web GUI listener and its TLS material (trusted peers only: the
     /// reply carries a private key).
     WebListener,
-<<<<<<< HEAD
     /// The network cards on the host, with the interface each one carries.
     Nics,
     /// Bind interfaces to NICs by MAC in the candidate (Interfaces ›
@@ -216,6 +215,23 @@ pub enum Op {
         /// What goes where.
         assignments: Vec<Assignment>,
     },
+    /// Run-time state of a subsystem (never part of the configuration):
+    /// answered with [`Response::Value`].
+    Runtime {
+        /// Which subsystem.
+        section: RuntimeSection,
+    },
+}
+
+/// Subsystems with run-time state the UI shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeSection {
+    /// Gateway monitor: status, latency, loss, active group members.
+    Gateways,
+    /// Alias feeds: entries, last update, errors.
+    Aliases,
+    /// IPv6 prefix delegation: delegated prefix, lifetimes, per-LAN prefixes.
+    Ipv6,
 }
 
 /// One interface-to-NIC binding for [`Op::InterfacesAssign`].
@@ -266,25 +282,6 @@ impl Nic {
     pub fn pin_mac(&self) -> &str {
         self.permanent_mac.as_deref().unwrap_or(&self.mac)
     }
-=======
-    /// Run-time state of a subsystem (never part of the configuration):
-    /// answered with [`Response::Value`].
-    Runtime {
-        /// Which subsystem.
-        section: RuntimeSection,
-    },
-}
-
-/// Subsystems with run-time state the UI shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RuntimeSection {
-    /// Gateway monitor: status, latency, loss, active group members.
-    Gateways,
-    /// Alias feeds: entries, last update, errors.
-    Aliases,
-    /// IPv6 prefix delegation: delegated prefix, lifetimes, per-LAN prefixes.
-    Ipv6,
->>>>>>> f27927b (gateways: monitor every gateway, fail groups over by tier, switch the default route; status in the API)
 }
 
 impl Op {

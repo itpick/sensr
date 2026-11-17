@@ -332,7 +332,6 @@ impl Backend for MockBackend {
         ready(self.with(|s| Ok(simulated_status(&s.staged, (s.clock)()))))
     }
 
-<<<<<<< HEAD
     fn nics(&self) -> BoxFuture<'_, ApiResult<Vec<crate::api::NetworkCard>>> {
         let cards = crate::models::DEVICES
             .iter()
@@ -349,7 +348,8 @@ impl Backend for MockBackend {
             })
             .collect();
         ready(Ok(cards))
-=======
+    }
+
     fn runtime(&self, section: RuntimeSection) -> BoxFuture<'_, ApiResult<Value>> {
         ready(self.with(|s| {
             let t = (s.clock)();
@@ -359,7 +359,6 @@ impl Backend for MockBackend {
                 RuntimeSection::Ipv6 => simulated_pd(&s.staged, t),
             })
         }))
->>>>>>> 7870a26 (ui: run-time status pages (gateways, alias feeds, IPv6 prefix delegation))
     }
 
     fn dns_stats(&self) -> BoxFuture<'_, ApiResult<DnsStats>> {
