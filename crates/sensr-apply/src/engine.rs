@@ -538,7 +538,7 @@ impl Engine {
             let _ = std::fs::remove_file(path);
         }
         let mut cmds = p.interfaces.commands(&applied.interfaces);
-        if renamed
+        if !renamed.is_empty()
             && !cmds
                 .iter()
                 .any(|c| c.display().starts_with("networkctl 'reload'"))
@@ -548,6 +548,14 @@ impl Engine {
         }
         for c in cmds {
             self.run(&c, &mut report)?;
+        }
+        // a renamed card was taken down to rename it; networkd brings it
+        // up again only when told to look at it
+        for name in &renamed {
+            self.run(
+                &Cmd::new("networkctl").args(["reconfigure", name.as_str()]),
+                &mut report,
+            )?;
         }
         if self.opts.check && delta.files.keys().any(|f| f.ends_with("kea-dhcp4.conf")) {
             // networkd creates VLANs asynchronously after the reload
@@ -633,13 +641,13 @@ impl Engine {
     /// to `<root>/var/lib/sensr/links` (the boot unit copies that into
     /// `/run/systemd/network` before udev names the cards; `/run` is empty
     /// at boot), and renames cards that carry the wrong name now. Returns
-    /// whether anything was renamed.
+    /// the names of the cards that were renamed.
     fn pin_cards(
         &self,
         p: &Prepared,
         net_dir: &Path,
         report: &mut CommitReport,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<Vec<String>, EngineError> {
         let is_link = |path: &Path| {
             path.starts_with(net_dir)
                 && path.file_name().is_some_and(|n| {
@@ -692,14 +700,22 @@ impl Engine {
         }
         let pins = p.interfaces.pin_map();
         if pins.is_empty() {
-            return Ok(false);
+            return Ok(Vec::new());
         }
         let nics = crate::inventory::discover(&self.opts.root, self.runner.as_ref());
         let cmds = crate::inventory::renames(&pins, &nics);
         for c in &cmds {
             self.run(c, report)?;
         }
-        Ok(!cmds.is_empty())
+        // the cards that now carry a pinned name they did not have
+        Ok(pins
+            .iter()
+            .filter(|(mac, want)| {
+                nics.iter()
+                    .any(|n| n.pin_mac() == mac.as_str() && n.name != **want)
+            })
+            .map(|(_, want)| want.clone())
+            .collect())
     }
 
     /// Waits (up to 10 s) until every VLAN device of `m` exists.
@@ -930,6 +946,10 @@ mod tests {
         );
         assert!(
             pos("'sensrtmp0' 'name' 'igc1'") < pos("networkctl 'reload'"),
+            "{lines:#?}"
+        );
+        assert!(
+            pos("networkctl 'reload'") < pos("'reconfigure' 'igc0'"),
             "{lines:#?}"
         );
 
