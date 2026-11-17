@@ -41,7 +41,7 @@
 /opnsense/OPNsense/Gateways  <- gateways
 /opnsense/OPNsense/Gateways/gateway_item[@uuid='9df1d26a-e824-425b-95df-aaf0fe534a17']  <- gateways
 
-## unmapped, expected (70)
+## unmapped, expected (69)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -60,7 +60,9 @@
 /opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/language  (web GUI language)
 /opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/dashboard  (web GUI dashboard layout)
 /opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/menu_favorites  (web GUI menu favourites)
-/opnsense/system/webgui  (web GUI listener settings are not modelled yet)
+/opnsense/system/webgui/ssl-ciphers  (TLS cipher selection; sensr-api uses rustls' safe defaults (TLS 1.2+))
+/opnsense/system/webgui/compression  (HTTP compression level; sensr-api compresses with its own defaults)
+/opnsense/system/webgui/althostnames  (alternate host names for the HTTP referer check, which sensr-api does not do)
 /opnsense/system/usevirtualterminal  (FreeBSD console setting)
 /opnsense/system/disableconsolemenu  (the sensr console menu has its own setting)
 /opnsense/system/powerd_ac_mode  (FreeBSD powerd; CPU frequency scaling is a NixOS concern)
@@ -107,9 +109,6 @@
 /opnsense/OPNsense/wireguard/server/servers/server[@uuid='b0f47197-dacd-43c1-ad57-5dc0649126d3']/allowed_ips  (client-export defaults are not modelled yet)
 /opnsense/OPNsense/Kea/dhcp4/lexpire  (Kea lease expiry tuning is not modelled yet)
 /opnsense/OPNsense/Kea/dhcp4/ha  (Kea high availability is not modelled yet)
-/opnsense/OPNsense/unboundplus/advanced  (Unbound tuning options are not modelled yet)
-/opnsense/OPNsense/unboundplus/acls  (Unbound access lists are not modelled yet)
-/opnsense/OPNsense/unboundplus/dnsbl  (DNS blocklists are not modelled yet)
 /opnsense/OPNsense/Syslog  (remote syslog is not modelled yet)
 /opnsense/OPNsense/trust  (trust store settings are not modelled yet)
 
