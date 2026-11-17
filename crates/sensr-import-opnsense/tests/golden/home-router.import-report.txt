@@ -48,10 +48,14 @@
 /opnsense/OPNsense/Gateways/gateway_item[@uuid='9df1d26a-e824-425b-95df-aaf0fe534a17']  <- gateways
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 ## unmapped, expected (81)
 =======
 ## unmapped, expected (66)
 >>>>>>> dbb4b2b (aliases: URL tables, GeoIP, ASN, host and MAC feeds refreshed with last-good retention)
+=======
+## unmapped, expected (68)
+>>>>>>> cf72f38 (goldens after rebase onto main)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -71,6 +75,7 @@
 /opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/dashboard  (web GUI dashboard layout)
 /opnsense/system/user[@uuid='ad13b004-842d-4643-8b69-fb20e2e619dd']/menu_favorites  (web GUI menu favourites)
 <<<<<<< HEAD
+<<<<<<< HEAD
 /opnsense/system/nextuid  (OPNsense's next free user id; sensr allocates ids itself)
 /opnsense/system/nextgid  (OPNsense's next free group id; sensr allocates ids itself)
 /opnsense/system/thermal_hardware  (FreeBSD thermal sensor driver; Linux loads its own)
@@ -83,6 +88,11 @@
 =======
 /opnsense/system/webgui  (web GUI listener settings are not modelled yet)
 >>>>>>> dbb4b2b (aliases: URL tables, GeoIP, ASN, host and MAC feeds refreshed with last-good retention)
+=======
+/opnsense/system/webgui/ssl-ciphers  (TLS cipher selection; sensr-api uses rustls' safe defaults (TLS 1.2+))
+/opnsense/system/webgui/compression  (HTTP compression level; sensr-api compresses with its own defaults)
+/opnsense/system/webgui/althostnames  (alternate host names for the HTTP referer check, which sensr-api does not do)
+>>>>>>> cf72f38 (goldens after rebase onto main)
 /opnsense/system/usevirtualterminal  (FreeBSD console setting)
 /opnsense/system/disableconsolemenu  (the sensr console menu has its own setting)
 /opnsense/system/powerd_ac_mode  (FreeBSD powerd; CPU frequency scaling is a NixOS concern)
@@ -124,9 +134,6 @@
 /opnsense/OPNsense/wireguard/server/servers/server[@uuid='b0f47197-dacd-43c1-ad57-5dc0649126d3']/allowed_ips  (client-export defaults are not modelled yet)
 /opnsense/OPNsense/Kea/dhcp4/lexpire  (Kea lease expiry tuning is not modelled yet)
 /opnsense/OPNsense/Kea/dhcp4/ha  (Kea high availability is not modelled yet)
-/opnsense/OPNsense/unboundplus/advanced  (Unbound tuning options are not modelled yet)
-/opnsense/OPNsense/unboundplus/acls  (Unbound access lists are not modelled yet)
-/opnsense/OPNsense/unboundplus/dnsbl  (DNS blocklists are not modelled yet)
 /opnsense/OPNsense/Syslog  (remote syslog is not modelled yet)
 /opnsense/OPNsense/trust  (trust store settings are not modelled yet)
 /opnsense/OPNsense/IPsec  (IPsec is disabled (sensr has no IPsec yet))
