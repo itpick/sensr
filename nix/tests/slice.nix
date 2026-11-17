@@ -314,8 +314,9 @@ pkgs.testers.runNixOSTest {
                 # The fixture's time servers do not exist in a sealed test;
                 # the "internet" has one.
                 router.succeed(
-                    "sensr config set system.time_servers '[\"${net.internet.host}\"]' --json"
-                    " && sensr config set ntp.servers '[]' --json"
+                    # (the flags first: each set must leave a valid document)
+                    "sensr config set ntp.servers '[]' --json"
+                    " && sensr config set system.time_servers '[\"${net.internet.host}\"]' --json"
                     " && sensr config commit -m 'slice: the internet time server'"
                 )
         if PENDING["configGet"]:
