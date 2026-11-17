@@ -27,15 +27,7 @@
 /opnsense/gateways/gateway_group[@uuid='2b2d395e-cfcf-4324-be48-7f65ebbc5323']  <- gateways
 /opnsense/gateways/gateway_group[@uuid='60d77f02-8d93-4fec-b523-cf0d0af7f5dc']  <- gateways
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-## unmapped, expected (34)
-=======
-## unmapped, expected (36)
->>>>>>> dbb4b2b (aliases: URL tables, GeoIP, ASN, host and MAC feeds refreshed with last-good retention)
-=======
-## unmapped, expected (34)
->>>>>>> cf72f38 (goldens after rebase onto main)
+## unmapped, expected (33)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
