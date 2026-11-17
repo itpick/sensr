@@ -69,6 +69,11 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/ui/wireguard/peers") view=WireguardPeers/>
                     <Route path=path!("/ui/system/general") view=SystemGeneralPage/>
                     <Route path=path!("/ui/core/backup/history") view=History/>
+                    <Route path=path!("/ui/ids") view=IdsSettingsPage/>
+                    <Route path=path!("/ui/ids/rules") view=IdsRulesPage/>
+                    <Route path=path!("/ui/ids/userdefined") view=IdsUserRulesPage/>
+                    <Route path=path!("/ui/ids/alerts") view=IdsAlertsPage/>
+                    <Route path=path!("/ui/diagnostics/networkinsight") view=Insight/>
                     <Route path=path!("/*any") view=NotYet/>
                 </ParentRoute>
             </Routes>

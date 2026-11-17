@@ -213,6 +213,8 @@ pub fn store(grid: GridId, scope: &str, doc: &Value) -> Store {
         GridId::Blocklists => Store::Map("dns.blocklists".into()),
         GridId::WgInstances => Store::Map("wireguard.servers".into()),
         GridId::WgPeers => Store::Map("wireguard.peers".into()),
+        GridId::IdsSuppressions => Store::Map("ids.suppressions".into()),
+        GridId::IdsUserRules => Store::Map("ids.user_rules".into()),
     }
 }
 
@@ -436,6 +438,34 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
             "serverport": port_num(item, "endpoint_port"),
             "keepalive": get_path(item, "keepalive").cloned().unwrap_or(Value::Null),
             "servers": [],
+        }),
+        GridId::IdsSuppressions => {
+            let by = s(item, "track.by");
+            let net = s(item, "track.net");
+            let applies = match by.as_str() {
+                "" => "every address".to_owned(),
+                "src" => format!("source {net}"),
+                "dst" => format!("destination {net}"),
+                _ => format!("either {net}"),
+            };
+            json!({
+                "enabled": b(item, "enabled", true),
+                "sid": get_path(item, "sid").cloned().unwrap_or(Value::Null),
+                "gid": get_path(item, "gid").cloned().unwrap_or(json!(1)),
+                "track_by": by,
+                "track_net": net,
+                "description": s(item, "description"),
+                "applies": applies,
+            })
+        }
+        GridId::IdsUserRules => json!({
+            "enabled": b(item, "enabled", true),
+            "description": s(item, "description"),
+            "source": s(item, "source"),
+            "destination": s(item, "destination"),
+            "fingerprint": s(item, "fingerprint"),
+            "action": or_default(s(item, "action"), "alert"),
+            "bypass": b(item, "bypass", false),
         }),
     }
 }
@@ -803,6 +833,35 @@ pub fn from_view(
             put_port(o, "endpoint_port", view, "serverport");
             put_opt(o, "keepalive", view, "keepalive");
         }
+        GridId::IdsSuppressions => {
+            let by = s(view, "track_by");
+            let o = obj(&mut item);
+            put(o, "enabled", view, "enabled");
+            put(o, "sid", view, "sid");
+            match get_path(view, "gid") {
+                Some(Value::Number(n)) => drop(o.insert("gid".into(), Value::Number(n.clone()))),
+                _ => drop(o.insert("gid".into(), json!(1))),
+            }
+            if by.is_empty() {
+                o.remove("track");
+            } else {
+                o.insert(
+                    "track".into(),
+                    json!({"by": by, "net": s(view, "track_net")}),
+                );
+            }
+            put_opt(o, "description", view, "description");
+        }
+        GridId::IdsUserRules => {
+            let o = obj(&mut item);
+            put(o, "enabled", view, "enabled");
+            put(o, "description", view, "description");
+            put_opt(o, "source", view, "source");
+            put_opt(o, "destination", view, "destination");
+            put_opt(o, "fingerprint", view, "fingerprint");
+            put(o, "action", view, "action");
+            put(o, "bypass", view, "bypass");
+        }
     }
     item
 }
@@ -919,6 +978,21 @@ pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
             ("endpoint", "serveraddress"),
             ("name", "name"),
         ],
+        GridId::IdsSuppressions => &[
+            ("sid", "sid"),
+            ("gid", "gid"),
+            ("track.net", "track_net"),
+            ("track", "track_by"),
+            ("description", "description"),
+        ],
+        GridId::IdsUserRules => &[
+            ("source", "source"),
+            ("destination", "destination"),
+            ("fingerprint", "fingerprint"),
+            ("bypass", "bypass"),
+            ("action", "action"),
+            ("description", "description"),
+        ],
     };
     map.iter()
         .find(|(k, _)| {
@@ -994,7 +1068,27 @@ pub fn form_to_view(form: FormId, doc: &Value, scope: &str) -> Option<Value> {
             "use_system_servers": b(doc, "dns.forwarding.use_system_servers", false),
         }),
         f if f.is_tuning() => tuning_to_view(f, doc),
-        _ => return None,
+        FormId::IdsSettings => {
+            // The schema leaves defaults out of the document: parse the section to see them.
+            let raw = get_path(doc, "ids").cloned().unwrap_or_else(|| json!({}));
+            let ids = serde_json::from_value::<sensr_schema::models::ids::Ids>(raw.clone())
+                .ok()
+                .and_then(|i| serde_json::to_value(i).ok())
+                .unwrap_or(raw);
+            json!({
+                "enabled": b(&ids, "enabled", false),
+                "mode": or_default(s(&ids, "mode"), "detect"),
+                "interfaces": strings(&ids, "interfaces"),
+                "home_net": strings(&ids, "home_net"),
+                "home_net_auto": b(&ids, "home_net_auto", true),
+                "profile": or_default(s(&ids, "profile"), "home"),
+                "default_suppressions": b(&ids, "default_suppressions", true),
+                "updates_enabled": b(&ids, "updates.enabled", true),
+                "update_hour": get_path(&ids, "updates.hour").cloned().unwrap_or(Value::Null),
+                "update_minute": get_path(&ids, "updates.minute").cloned().unwrap_or(Value::Null),
+                "retention_days": get_path(&ids, "logging.retention_days").cloned().unwrap_or(Value::Null),
+            })
+        }
     })
 }
 
@@ -1111,6 +1205,27 @@ pub fn form_from_view(
             put_list(dns, "listen_interfaces", view, "interfaces");
             Ok(vec!["dns"])
         }
+        FormId::IdsSettings => {
+            let ids = obj(root.entry("ids").or_insert_with(|| json!({})));
+            for k in [
+                "enabled",
+                "mode",
+                "home_net_auto",
+                "profile",
+                "default_suppressions",
+            ] {
+                put(ids, k, view, k);
+            }
+            put_list(ids, "interfaces", view, "interfaces");
+            put_list(ids, "home_net", view, "home_net");
+            let updates = obj(ids.entry("updates").or_insert_with(|| json!({})));
+            put(updates, "enabled", view, "updates_enabled");
+            put_opt(updates, "hour", view, "update_hour");
+            put_opt(updates, "minute", view, "update_minute");
+            let logging = obj(ids.entry("logging").or_insert_with(|| json!({})));
+            put_opt(logging, "retention_days", view, "retention_days");
+            Ok(vec!["ids"])
+        }
         FormId::UnboundAclDefault => {
             let dns = obj(root.entry("dns").or_insert_with(|| json!({})));
             let acl = obj(dns.entry("access").or_insert_with(|| json!({})));
@@ -1206,6 +1321,16 @@ pub fn form_view_path(form: FormId, schema: &str) -> Option<&'static str> {
             ("dns.dns64_prefix", "dns64_prefix"),
             ("dns.dhcp_domain", "dhcp_domain"),
         ],
+        FormId::IdsSettings => &[
+            ("ids.interfaces", "interfaces"),
+            ("ids.home_net", "home_net"),
+            ("ids.mode", "mode"),
+            ("ids.profile", "profile"),
+            ("ids.rule_files", "profile"),
+            ("ids.updates.hour", "update_hour"),
+            ("ids.updates.minute", "update_minute"),
+            ("ids.logging.retention_days", "retention_days"),
+        ],
         FormId::UnboundAclDefault => &[("dns.access.default_action", "default_action")],
         FormId::UnboundForwarding => &[],
         f => {
@@ -1215,7 +1340,12 @@ pub fn form_view_path(form: FormId, schema: &str) -> Option<&'static str> {
         }
     };
     map.iter()
-        .find(|(k, _)| schema == *k || schema.starts_with(&format!("{k}.")) || schema.ends_with(k))
+        .find(|(k, _)| {
+            schema == *k
+                || schema.starts_with(&format!("{k}."))
+                || schema.starts_with(&format!("{k}["))
+                || schema.ends_with(k)
+        })
         .map(|(_, v)| *v)
 }
 

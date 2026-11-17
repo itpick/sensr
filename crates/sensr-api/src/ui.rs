@@ -285,6 +285,12 @@ impl Backend for UiBackend {
         }
         .boxed()
     }
+
+    fn may_access(&self, url: &str) -> bool {
+        self.state
+            .registry
+            .grants(self.caller.info.privileges.iter().map(String::as_str), url)
+    }
 }
 
 /// UI logins over the API's session table.

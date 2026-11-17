@@ -1883,6 +1883,273 @@ impl GridModel for WgPeer {
     }
 }
 
+// ---------------------------------------------------------------- Services › Intrusion Detection
+
+/// IDS capture modes.
+pub const IDS_MODES: &[(&str, &str)] = &[
+    ("detect", "Detect (IDS): alerts only"),
+    ("prevent", "Prevent (IPS): inline, drop rules block"),
+];
+
+/// Which rules files load.
+pub const IDS_PROFILES: &[(&str, &str)] = &[
+    ("home", "Home: curated ET Open subset"),
+    ("all", "All rules the sources ship"),
+    ("custom", "Custom: the configured rules files"),
+];
+
+/// Services › Intrusion Detection › Settings.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IdsSettings {
+    /// Run Suricata.
+    pub enabled: bool,
+    /// `detect` or `prevent`.
+    pub mode: String,
+    /// Interfaces to inspect.
+    pub interfaces: Vec<String>,
+    /// Extra home networks.
+    pub home_net: Vec<String>,
+    /// Add every interface's addresses to HOME_NET.
+    pub home_net_auto: bool,
+    /// Rules profile.
+    pub profile: String,
+    /// Include the default suppressions.
+    pub default_suppressions: bool,
+    /// Download rules daily.
+    pub updates_enabled: bool,
+    /// Download hour.
+    pub update_hour: Option<u32>,
+    /// Download minute.
+    pub update_minute: Option<u32>,
+    /// Days of alerts kept.
+    pub retention_days: Option<u32>,
+}
+
+impl FormModel for IdsSettings {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enabled", K::Checkbox).help("Enable intrusion detection system."),
+            F::new("mode", "Capture mode", K::Select(IDS_MODES)).help(
+                "Detect captures a copy of the traffic and only alerts. Prevent queues forwarded traffic to Suricata, so drop rules block; it fails open, letting traffic through while the engine is stopped or overloaded.",
+            ),
+            F::new("interfaces", "Interfaces", K::Lines)
+                .help("Interfaces to inspect (wan, lan, opt1), one per line."),
+            F::new("home_net", "Home networks", K::CidrLines)
+                .help("Networks to interpret as local, one per line."),
+            F::new("home_net_auto", "Add interface addresses", K::Checkbox).help(
+                "Also count every interface's addresses and subnets as home networks, following lease changes. This adds the WAN's current address, which is needed after NAT: outbound flows leave the WAN public-to-public, so without it most rules written for the home network never match.",
+            ),
+            F::new("profile", "Rules", K::Select(IDS_PROFILES)).help(
+                "The home profile loads exploits, malware, command-and-control, scans and phishing rules: about a third of ET Open, light enough for a small router at gigabit speed.",
+            ),
+            F::new("default_suppressions", "Default suppressions", K::Checkbox).help(
+                "Silence chatty informational signatures (STUN from video calls, stream-engine noise). They still run, and still drop in prevent mode.",
+            ),
+            F::new("updates_enabled", "Download rules daily", K::Checkbox),
+            F::new("update_hour", "Download hour", K::Number { min: 0, max: 23 })
+                .help("Local time; leave empty for 04."),
+            F::new("update_minute", "Download minute", K::Number { min: 0, max: 59 }),
+            F::new(
+                "retention_days",
+                "Keep alerts (days)",
+                K::Number { min: 1, max: 3650 },
+            )
+            .help("Leave empty for 30 days."),
+        ];
+        FIELDS
+    }
+
+    fn validate(&self) -> Vec<FieldError> {
+        let mut e = Vec::new();
+        if self.enabled && self.interfaces.is_empty() {
+            e.push(FieldError::new(
+                "interfaces",
+                "Select at least one interface to inspect.",
+            ));
+        }
+        e
+    }
+}
+
+/// Which address of an alert a suppression is limited to.
+pub const TRACK_BY: &[(&str, &str)] = &[
+    ("", "Every address"),
+    ("src", "Source address"),
+    ("dst", "Destination address"),
+    ("either", "Either address"),
+];
+
+/// A suppressed signature (`ids.suppressions`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IdsSuppression {
+    /// Object key.
+    pub uuid: String,
+    /// Enabled.
+    pub enabled: bool,
+    /// Signature id.
+    pub sid: Option<u32>,
+    /// Generator id.
+    pub gid: Option<u32>,
+    /// `src`, `dst`, `either`, or empty for every address.
+    pub track_by: String,
+    /// The addresses it is limited to.
+    pub track_net: String,
+    /// Why.
+    pub description: String,
+    /// Where it applies, for the grid (computed).
+    pub applies: String,
+}
+
+impl FormModel for IdsSuppression {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enabled", K::Checkbox),
+            F::new(
+                "sid",
+                "Signature id",
+                K::Number {
+                    min: 1,
+                    max: 4_294_967_295,
+                },
+            )
+            .required(),
+            F::new(
+                "gid",
+                "Generator id",
+                K::Number {
+                    min: 1,
+                    max: 4_294_967_295,
+                },
+            )
+            .help("1 for normal rules; leave empty for 1."),
+            F::new("track_by", "Limit to", K::Select(TRACK_BY)),
+            F::new("track_net", "Addresses", K::Cidr)
+                .help("A network or a single address with /32 (/128 for IPv6)."),
+            F::new("description", "Description", K::Text),
+        ];
+        FIELDS
+    }
+
+    fn validate(&self) -> Vec<FieldError> {
+        let mut e = Vec::new();
+        if !self.track_by.is_empty() && self.track_net.is_empty() {
+            e.push(FieldError::new(
+                "track_net",
+                "Enter the addresses to limit the suppression to.",
+            ));
+        }
+        if self.track_by.is_empty() && !self.track_net.is_empty() {
+            e.push(FieldError::new(
+                "track_by",
+                "Choose which address of the alert these are.",
+            ));
+        }
+        e
+    }
+}
+
+impl GridModel for IdsSuppression {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::bool("enabled", "Enabled"),
+            Column::text("sid", "Sid"),
+            Column::text("applies", "Applies to"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+}
+
+/// User-defined rule actions.
+pub const USER_RULE_ACTIONS: &[(&str, &str)] =
+    &[("alert", "Alert"), ("drop", "Drop"), ("pass", "Pass")];
+
+/// A user-defined rule (`ids.user_rules`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IdsUserRule {
+    /// Object key.
+    pub uuid: String,
+    /// Enabled.
+    pub enabled: bool,
+    /// Description, also the alert message.
+    pub description: String,
+    /// Source network; empty for any.
+    pub source: String,
+    /// Destination network; empty for any.
+    pub destination: String,
+    /// TLS certificate SHA-1 fingerprint.
+    pub fingerprint: String,
+    /// Alert, drop or pass.
+    pub action: String,
+    /// With pass: stop inspecting the flow.
+    pub bypass: bool,
+}
+
+impl FormModel for IdsUserRule {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enabled", K::Checkbox),
+            F::new("description", "Description", K::Text)
+                .required()
+                .help("Also the message of the alerts it raises."),
+            F::new("source", "Source", K::Cidr).help("A network or address/32; empty for any."),
+            F::new("destination", "Destination", K::Cidr)
+                .help("A network or address/32; empty for any."),
+            F::new("fingerprint", "SSL fingerprint", K::Text)
+                .help("SHA-1 fingerprint of a TLS certificate, as aa:bb:… (59 characters)."),
+            F::new("action", "Action", K::Select(USER_RULE_ACTIONS)),
+            F::new("bypass", "Bypass", K::Checkbox)
+                .help("With pass: stop inspecting the matching flow altogether."),
+        ];
+        FIELDS
+    }
+
+    fn validate(&self) -> Vec<FieldError> {
+        let mut e = Vec::new();
+        if self.source.is_empty() && self.destination.is_empty() && self.fingerprint.is_empty() {
+            e.push(FieldError::new(
+                "source",
+                "Set a source, a destination or a fingerprint.",
+            ));
+        }
+        let fp = &self.fingerprint;
+        if !fp.is_empty()
+            && !(fp.len() == 59
+                && fp
+                    .split(':')
+                    .all(|b| b.len() == 2 && b.chars().all(|c| c.is_ascii_hexdigit())))
+        {
+            e.push(FieldError::new(
+                "fingerprint",
+                "A SSL fingerprint should be a 59 character long hex value.",
+            ));
+        }
+        if self.bypass && self.action != "pass" {
+            e.push(FieldError::new(
+                "bypass",
+                "Bypass only applies to pass rules.",
+            ));
+        }
+        e
+    }
+}
+
+impl GridModel for IdsUserRule {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::bool("enabled", "Enabled"),
+            Column::text("description", "Description"),
+            Column::text("source", "Source"),
+            Column::text("destination", "Destination"),
+            Column::text("action", "Action"),
+        ];
+        C
+    }
+}
+
 // ---------------------------------------------------------------- registries
 
 /// Serializable stand-in for a settings form's model type.
@@ -1910,6 +2177,8 @@ pub enum FormId {
     UnboundAclDefault,
     /// [`UnboundForwarding`].
     UnboundForwarding,
+    /// [`IdsSettings`].
+    IdsSettings,
 }
 
 /// Serializable stand-in for a grid's row type.
@@ -1941,6 +2210,10 @@ pub enum GridId {
     WgInstances,
     /// VPN › WireGuard › Peers.
     WgPeers,
+    /// Services › Intrusion Detection › Rules (suppressions).
+    IdsSuppressions,
+    /// Services › Intrusion Detection › User defined.
+    IdsUserRules,
 }
 
 fn sanitize(scope: &Option<String>, default: &str) -> String {
@@ -1967,6 +2240,7 @@ impl FormId {
             Self::UnboundCache => UnboundCache::fields(),
             Self::UnboundAclDefault => UnboundAclDefault::fields(),
             Self::UnboundForwarding => UnboundForwarding::fields(),
+            Self::IdsSettings => IdsSettings::fields(),
         }
     }
 
@@ -2019,6 +2293,7 @@ impl FormId {
             Self::UnboundCache => go::<UnboundCache>(base, inputs),
             Self::UnboundAclDefault => go::<UnboundAclDefault>(base, inputs),
             Self::UnboundForwarding => go::<UnboundForwarding>(base, inputs),
+            Self::IdsSettings => go::<IdsSettings>(base, inputs),
         }
     }
 
@@ -2053,6 +2328,8 @@ impl GridId {
             Self::Blocklists => GridMeta::of::<Blocklist>(),
             Self::WgInstances => GridMeta::of::<WgInstance>(),
             Self::WgPeers => GridMeta::of::<WgPeer>(),
+            Self::IdsSuppressions => GridMeta::of::<IdsSuppression>(),
+            Self::IdsUserRules => GridMeta::of::<IdsUserRule>(),
         }
     }
 
@@ -2076,6 +2353,8 @@ impl GridId {
             Self::Blocklists => go::<Blocklist>(base, inputs),
             Self::WgInstances => go::<WgInstance>(base, inputs),
             Self::WgPeers => go::<WgPeer>(base, inputs),
+            Self::IdsSuppressions => go::<IdsSuppression>(base, inputs),
+            Self::IdsUserRules => go::<IdsUserRule>(base, inputs),
         }
     }
 
@@ -2122,6 +2401,7 @@ impl GridId {
                 ],
                 Self::SourceNat => &[("interface", "wan"), ("protocol", "any"), ("source", "any")],
                 Self::Assignments => &[("ipv4_type", "none"), ("ipv6_type", "none")],
+                Self::IdsUserRules => &[("action", "alert")],
                 _ => &[],
             };
             for (k, val) in defaults {
@@ -2188,7 +2468,8 @@ macro_rules! kinds {
 
 kinds! {
     forms: SystemGeneral, Interface, SourceNatMode, DhcpSettings, UnboundGeneral, UnboundAdvanced,
-        UnboundServeExpired, UnboundLogging, UnboundCache, UnboundAclDefault, UnboundForwarding;
+        UnboundServeExpired, UnboundLogging, UnboundCache, UnboundAclDefault, UnboundForwarding,
+        IdsSettings;
     grids: Interface => Assignments, "interface",
         Alias => Aliases, "alias",
         FilterRule => FilterRules, "rule",
@@ -2201,7 +2482,9 @@ kinds! {
         Forwarder => Forwarders, "forwarding server",
         Blocklist => Blocklists, "blocklist policy",
         WgInstance => WgInstances, "instance",
-        WgPeer => WgPeers, "peer"
+        WgPeer => WgPeers, "peer",
+        IdsSuppression => IdsSuppressions, "suppression",
+        IdsUserRule => IdsUserRules, "rule"
 }
 
 #[cfg(test)]
@@ -2249,6 +2532,8 @@ mod tests {
             GridId::Blocklists,
             GridId::WgInstances,
             GridId::WgPeers,
+            GridId::IdsSuppressions,
+            GridId::IdsUserRules,
         ] {
             let meta = g.meta();
             assert!(!meta.columns.is_empty());

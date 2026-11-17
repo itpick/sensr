@@ -234,6 +234,31 @@ meter { width: 100%; height: 14px; }
 .stats-policy { margin: 16px 0 6px; font-size: .95rem; }
 td.url { word-break: break-all; }
 
+.graph-head { display: flex; flex-wrap: wrap; gap: 8px 16px; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.graph-head .legend { margin: 0; }
+.seg { display: inline-flex; gap: 4px; }
+.seg .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+
+/* ------------------------------------------------------------ insight, alerts */
+.chart { display: block; width: 100%; height: 200px; background: var(--bg); border-radius: 3px; }
+.chart-in { fill: var(--spark-rx); }
+.chart-out { fill: var(--spark-tx); }
+.chart-axis { stroke: var(--line-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart-scale { display: flex; justify-content: space-between; gap: 8px; margin: 4px 0 0; flex-wrap: wrap; }
+.insight-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(440px, 100%), 1fr)); gap: 18px; }
+.insight-grid .card { margin: 0; }
+.bar { display: block; height: 4px; margin-top: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--spark-rx); }
+.pill-info { background: var(--info-bg); color: var(--info); }
+.notice { margin: 0 0 12px; padding: 8px 12px; border-radius: 4px; background: var(--info-bg); color: var(--info); }
+.filters { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; margin-bottom: 14px; }
+.filters .field-stack { margin: 0; flex: 1 1 200px; max-width: 320px; }
+.filters .field-stack input { min-height: 32px; }
+.filter-actions { display: flex; gap: 8px; }
+.row-actions { display: flex; flex-direction: column; gap: 4px; align-items: stretch; margin: 0; }
+td.sig { min-width: 16em; }
+span.btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
+
 /* ------------------------------------------------------------ history */
 .diff { margin: 0; padding: 10px; overflow-x: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; line-height: 1.45; }
 .diff-add { background: var(--diff-add-bg); color: var(--diff-add); display: block; }

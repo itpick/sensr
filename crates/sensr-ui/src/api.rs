@@ -235,6 +235,158 @@ pub struct SystemStatus {
     pub gateways: Vec<GatewayStatus>,
     /// Recent traffic per interface.
     pub traffic: Vec<TrafficSeries>,
+    /// All interfaces together from the traffic database (Reporting › Insight), when
+    /// sensr-insight has written one.
+    #[serde(default)]
+    pub history: Option<TrafficHistory>,
+}
+
+/// One bucket of a traffic series (bytes in the bucket, not a rate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrafficPoint {
+    /// Bucket start, seconds since the Unix epoch.
+    pub ts: i64,
+    /// Bucket length in seconds.
+    pub res: i64,
+    /// Bytes sent (out of the interface, or by the local host).
+    pub up: u64,
+    /// Bytes received.
+    pub down: u64,
+}
+
+impl TrafficPoint {
+    /// Average receive rate over the bucket, bits/s.
+    pub fn down_bps(&self) -> u64 {
+        self.down.saturating_mul(8) / self.res.max(1).unsigned_abs()
+    }
+    /// Average send rate over the bucket, bits/s.
+    pub fn up_bps(&self) -> u64 {
+        self.up.saturating_mul(8) / self.res.max(1).unsigned_abs()
+    }
+}
+
+/// The dashboard traffic graph: every interface summed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrafficHistory {
+    /// The last ten minutes of 10 s samples.
+    pub live: Vec<TrafficPoint>,
+    /// The last hour at one minute.
+    pub hour: Vec<TrafficPoint>,
+}
+
+/// A ranked row of Reporting › Insight (a host, service, remote or interface).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrafficRow {
+    /// Address, `proto/port`, or interface id.
+    pub key: String,
+    /// What to show (the interface's description, a service name); empty to show the key.
+    pub label: String,
+    /// Bytes sent.
+    pub up: u64,
+    /// Bytes received.
+    pub down: u64,
+    /// Packets sent.
+    pub up_packets: u64,
+    /// Packets received.
+    pub down_packets: u64,
+}
+
+impl TrafficRow {
+    /// Bytes both ways.
+    pub fn total(&self) -> u64 {
+        self.up.saturating_add(self.down)
+    }
+}
+
+/// Reporting › Insight for one time range (and optionally one local host).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InsightReport {
+    /// The traffic database exists.
+    pub available: bool,
+    /// Range start, seconds since the Unix epoch.
+    pub from: i64,
+    /// Range end.
+    pub to: i64,
+    /// Bucket length the range is shown at, seconds.
+    pub resolution: i64,
+    /// Top local hosts.
+    pub hosts: Vec<TrafficRow>,
+    /// Top services (of the selected host, or of every host).
+    pub apps: Vec<TrafficRow>,
+    /// Top remote addresses.
+    pub remotes: Vec<TrafficRow>,
+    /// Interface totals.
+    pub ifaces: Vec<TrafficRow>,
+    /// Traffic over time: the selected host's, or every interface's.
+    pub series: Vec<TrafficPoint>,
+}
+
+/// Reporting › Insight time ranges: query value, label, length in seconds.
+pub const INSIGHT_RANGES: &[(&str, &str, i64)] = &[
+    ("2h", "2 hours", 2 * 3_600),
+    ("24h", "24 hours", 86_400),
+    ("7d", "7 days", 7 * 86_400),
+    ("31d", "31 days", 31 * 86_400),
+    ("1y", "1 year", 365 * 86_400),
+];
+
+/// The range named `q`, or 24 hours.
+pub fn insight_range(q: &str) -> (&'static str, &'static str, i64) {
+    INSIGHT_RANGES
+        .iter()
+        .copied()
+        .find(|(k, _, _)| *k == q)
+        .unwrap_or(INSIGHT_RANGES[1])
+}
+
+/// One IDS alert (Services › Intrusion Detection › Alerts).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertRow {
+    /// Database id.
+    pub id: i64,
+    /// Time, milliseconds since the Unix epoch.
+    pub ts: i64,
+    /// Generator id.
+    pub gid: u32,
+    /// Signature id.
+    pub sid: u32,
+    /// Signature message.
+    pub signature: String,
+    /// Classification.
+    pub category: String,
+    /// Severity, 1 (high) to 4.
+    pub severity: u8,
+    /// `allowed` or `blocked`.
+    pub action: String,
+    /// Transport protocol.
+    pub proto: String,
+    /// Source address.
+    pub src_ip: String,
+    /// Source port.
+    pub src_port: Option<u16>,
+    /// Destination address.
+    pub dest_ip: String,
+    /// Destination port.
+    pub dest_port: Option<u16>,
+    /// Interface (kernel device).
+    pub iface: String,
+    /// An active (or staged) suppression already silences it.
+    pub suppressed: bool,
+}
+
+/// One page of alerts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertPage {
+    /// The alert database exists.
+    pub available: bool,
+    /// Alerts on this page, newest first.
+    pub rows: Vec<AlertRow>,
+    /// Alerts matching the filter.
+    pub total: u64,
+    /// Zero-based page.
+    pub page: u32,
+    /// Alerts per page.
+    pub per_page: u32,
 }
 
 /// One downloaded list of a blocklist policy, as of the last refresh.
@@ -356,6 +508,27 @@ mod server {
         /// stats timer write on this host (see [`crate::dnsstats`]).
         fn dns_stats(&self) -> BoxFuture<'_, ApiResult<DnsStats>> {
             Box::pin(async { Ok(crate::dnsstats::DnsStatsPaths::from_env().read()) })
+        }
+        /// Run-time state of one subsystem as the agent reports it (`null` when the
+        /// subsystem is not running). Parse with [`crate::runtime::parse`].
+        fn runtime(
+            &self,
+            section: crate::runtime::RuntimeSection,
+        ) -> BoxFuture<'_, ApiResult<Value>>;
+        /// Whether the caller's privileges cover `url` (an API path such as
+        /// `/api/v1/ids/alerts`). Data the UI reads itself (the traffic and alert databases)
+        /// is checked against the same ACL entries as the REST routes serving it.
+        fn may_access(&self, url: &str) -> bool {
+            let _ = url;
+            true
+        }
+        /// Directory holding sensr-insight's `flows.db` and `alerts.db`: `SENSR_INSIGHT_DIR`
+        /// when set (as for sensr-api), else the daemon's default.
+        fn insight_dir(&self) -> std::path::PathBuf {
+            std::env::var_os("SENSR_INSIGHT_DIR").map_or_else(
+                || std::path::PathBuf::from(sensr_flow::config::DB_DIR),
+                std::path::PathBuf::from,
+            )
         }
     }
 

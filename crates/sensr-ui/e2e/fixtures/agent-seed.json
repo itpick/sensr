@@ -454,5 +454,36 @@
         "keepalive": 25
       }
     }
+  },
+  "ids": {
+    "enabled": true,
+    "interfaces": [
+      "wan"
+    ],
+    "suppressions": {
+      "e1000000-0000-4000-a000-000000000001": {
+        "gid": 1,
+        "sid": 2013504,
+        "description": "APT updates from the NAS"
+      },
+      "e1000000-0000-4000-a000-000000000002": {
+        "enabled": false,
+        "gid": 1,
+        "sid": 2027757,
+        "track": {
+          "by": "src",
+          "net": "192.168.1.101/32"
+        },
+        "description": "Laptop .to lookups"
+      }
+    },
+    "user_rules": {
+      "e2000000-0000-4000-a000-000000000001": {
+        "source": "192.168.1.30/32",
+        "action": "pass",
+        "bypass": true,
+        "description": "Game server: no inspection"
+      }
+    }
   }
 }

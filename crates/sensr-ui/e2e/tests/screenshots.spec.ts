@@ -22,6 +22,12 @@ const pages: [string, string][] = [
   ["vpn-wireguard-peers", "/ui/wireguard/peers"],
   ["system-general", "/ui/system/general"],
   ["system-history", "/ui/core/backup/history"],
+  ["services-ids-settings", "/ui/ids"],
+  ["services-ids-rules", "/ui/ids/rules"],
+  ["services-ids-userdefined", "/ui/ids/userdefined"],
+  ["services-ids-alerts", "/ui/ids/alerts"],
+  ["reporting-insight", "/ui/diagnostics/networkinsight"],
+  ["reporting-insight-host", "/ui/diagnostics/networkinsight?range=7d&host=192.168.1.100"],
 ];
 
 const viewports = { desktop: { width: 1366, height: 860 }, phone: { width: 390, height: 844 } };
