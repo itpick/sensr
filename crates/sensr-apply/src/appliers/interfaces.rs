@@ -39,6 +39,10 @@ pub const MODULE: Module = Module {
             "interfaces.netdev",
             include_str!("../../templates/interfaces/interfaces.netdev"),
         ),
+        (
+            "interfaces.link",
+            include_str!("../../templates/interfaces/interfaces.link"),
+        ),
     ],
     targets: include_str!("../../templates/interfaces/TARGETS"),
 };
@@ -210,6 +214,17 @@ pub struct Vlan {
     pub egress_qos: Vec<String>,
 }
 
+/// A card bound to a device name by its permanent MAC (one `.link` file).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Pin {
+    /// device name the card gets
+    pub name: String,
+    /// permanent MAC, lowercase
+    pub mac: String,
+    /// the interface id, for the file's comment
+    pub interface: String,
+}
+
 /// Every link sensr configures.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct InterfacesModel {
@@ -217,6 +232,8 @@ pub struct InterfacesModel {
     pub links: Vec<Link>,
     /// `.netdev` files
     pub vlans: Vec<Vlan>,
+    /// `.link` files
+    pub pins: Vec<Pin>,
 }
 
 impl InterfacesModel {
@@ -366,7 +383,29 @@ impl InterfacesModel {
                 policy_rules: Vec::new(),
             });
         }
-        InterfacesModel { links, vlans }
+        // Disabled interfaces keep their pin: a card must not change name
+        // (and so network) because its interface is switched off.
+        let pins = doc
+            .interfaces
+            .iter()
+            .filter(|(_, i)| i.vlan.is_none())
+            .filter_map(|(id, i)| {
+                Some(Pin {
+                    name: i.device.as_str().to_owned(),
+                    mac: i.match_mac?.to_string().to_ascii_lowercase(),
+                    interface: id.as_str().to_owned(),
+                })
+            })
+            .collect();
+        InterfacesModel { links, vlans, pins }
+    }
+
+    /// MAC → device name of every pinned card.
+    pub fn pin_map(&self) -> BTreeMap<String, String> {
+        self.pins
+            .iter()
+            .map(|p| (p.mac.clone(), p.name.clone()))
+            .collect()
     }
 
     /// Adds the routing tables and rules policy-routed rules need
@@ -725,9 +764,55 @@ pub(crate) mod tests {
     /// The template context of the home-router corpus document.
     pub(crate) fn context() -> serde_json::Value {
         serde_json::to_value(Ctx {
-            networkd: &InterfacesModel::from_document(&home_router()),
+            networkd: &InterfacesModel::from_document(&pinned()),
         })
         .unwrap()
+    }
+
+    /// The home router with WAN and LAN bound to their cards by MAC.
+    fn pinned() -> Document {
+        use sensr_schema::PathAccess;
+        let mut doc = home_router();
+        doc.set_by_path(
+            "interfaces.wan.match_mac",
+            serde_json::json!("52:54:00:AA:00:01"),
+        )
+        .unwrap();
+        doc.set_by_path(
+            "interfaces.lan.match_mac",
+            serde_json::json!("52:54:00:aa:00:02"),
+        )
+        .unwrap();
+        doc
+    }
+
+    #[test]
+    fn pinned_cards_get_link_files() {
+        let m = InterfacesModel::from_document(&pinned());
+        assert_eq!(
+            m.pin_map(),
+            [
+                ("52:54:00:aa:00:01".to_owned(), "igc0".to_owned()),
+                ("52:54:00:aa:00:02".to_owned(), "igc1".to_owned()),
+            ]
+            .into()
+        );
+        let files = m.render(&Templates::builtin().unwrap()).unwrap();
+        let link = files
+            .iter()
+            .find(|f| f.dest.to_string_lossy().ends_with("10-sensr-igc0.link"))
+            .expect("igc0 link file");
+        insta::assert_snapshot!("interfaces__10-sensr-igc0.link", link.contents);
+        assert!(
+            link.contents
+                .contains("PermanentMACAddress=52:54:00:aa:00:01")
+        );
+        assert!(link.contents.contains("Name=igc0"));
+        assert!(
+            InterfacesModel::from_document(&home_router())
+                .pins
+                .is_empty()
+        );
     }
 
     fn home_router() -> Document {

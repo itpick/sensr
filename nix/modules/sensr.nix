@@ -409,6 +409,38 @@ in
     # networkd reads runtime config from here; the agent writes into it.
     systemd.tmpfiles.rules = [ "d /run/systemd/network 0755 root root -" ];
 
+    # MAC pins (docs/PLAN.md §6 L3): the agent renders one systemd.link file
+    # per card bound by MAC and keeps a copy in the state directory, because
+    # /run is empty at boot. This puts them back before udev names the cards,
+    # so a card that moved to another slot or USB port keeps its name, and
+    # with it its network.
+    systemd.services.sensr-ifnames = {
+      description = "Restore sensr's MAC-pinned NIC names before udev names cards";
+      wantedBy = [ "sysinit.target" ];
+      before = [
+        "systemd-udev-trigger.service"
+        "systemd-networkd.service"
+      ];
+      after = [ "local-fs.target" ];
+      unitConfig = {
+        DefaultDependencies = false;
+        RequiresMountsFor = stateDir;
+        ConditionDirectoryNotEmpty = "${stateDir}/links";
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = pkgs.writeShellScript "sensr-ifnames" ''
+          set -eu
+          mkdir -p /run/systemd/network
+          for f in ${stateDir}/links/10-sensr-*.link; do
+            [ -e "$f" ] || continue
+            cp "$f" /run/systemd/network/
+          done
+        '';
+      };
+    };
+
     systemd.targets.sensr-net = {
       description = "sensr has applied interfaces, addresses and routes";
       after = [ "sensr-agent.service" ];

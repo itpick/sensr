@@ -53,6 +53,10 @@ pkgs.testers.runNixOSTest {
       virtualisation.memorySize = 1024;
       users.users.root.hashedPassword = pkgs.lib.mkForce null;
       services.sensr.seedDir = "/boot/sensr";
+      # First boot binds the test VLAN's card by MAC and renames it eth1 ->
+      # lan; the test network's own address (192.168.1.2; the client is .1)
+      # follows it.
+      systemd.network.networks."40-eth1".matchConfig.Name = pkgs.lib.mkForce "eth1 lan";
       systemd.tmpfiles.rules = [ "d /boot 0755 root root -" ];
       environment.etc."sensr-test/users.json".text = users;
       environment.etc."sensr-test/groups.json".text = groups;
@@ -82,12 +86,14 @@ pkgs.testers.runNixOSTest {
         machine.succeed("sensr config diff | grep -q '+    \"hostname\": \"base\"'")
         machine.succeed("sensr config commit -m base")
         assert applied("system.hostname") == "base"
+        # first boot may have committed the MAC pins before this: count from here
+        base = json.loads(machine.succeed("sensr status --json"))["head"]["id"]
 
     with subtest("commit-confirm: confirmed in time"):
         machine.succeed("sensr config set system.hostname kept")
         machine.succeed("sensr config commit --confirm 60 | grep -q provisional")
-        machine.succeed("sensr status | grep -q 'rolls back to 2'")
-        machine.succeed("sensr config confirm | grep -q 'revision 3 confirmed'")
+        machine.succeed(f"sensr status | grep -q 'rolls back to {base}'")
+        machine.succeed(f"sensr config confirm | grep -q 'revision {base + 1} confirmed'")
         assert applied("system.hostname") == "kept"
 
     with subtest("commit-confirm: timeout rolls back"):
@@ -194,7 +200,10 @@ pkgs.testers.runNixOSTest {
         out = machine.succeed("curl -s -o /dev/null -w '%{redirect_url}' http://localhost/")
         assert out == "https://localhost:8443/", out
 
-        lan = machine.succeed("ip -4 -o addr show dev eth1 | awk '{print $4}' | cut -d/ -f1").strip()
+        # first boot binds LAN to its card by MAC and names it after the role
+        lan_dev = machine.succeed("sensr config get interfaces.lan.device --source applied").strip()
+        machine.wait_until_succeeds(f"ip -4 -o addr show dev {lan_dev} | grep -q 'inet 192.168.1.2/'", timeout=60)
+        lan = machine.succeed(f"ip -4 -o addr show dev {lan_dev} | awk '{{print $4}}' | cut -d/ -f1").strip()
         probe = f"curl -sk -o /dev/null -w '%{{http_code}}' --connect-timeout 3 https://{lan}:8443/api/v1/status"
         client.wait_for_unit("multi-user.target")
         client.succeed(f"{probe} | grep -qx 401")

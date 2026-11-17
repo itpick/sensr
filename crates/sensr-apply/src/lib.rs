@@ -8,6 +8,7 @@
 //! - [`templates`]: minijinja modules with `Targets`, staged into
 //!   `/run/sensr/<daemon>/.next/` and swapped atomically.
 //! - [`hooks`]: operator drop-ins per hook level.
+//! - [`inventory`]: the host's network cards and MAC-pinned renames.
 //! - [`confirm`]: the commit-confirm timer.
 //! - [`clock`]: injectable time.
 //! - [`appliers`]: nftables, sysctl, qdisc, interfaces (networkd), Kea,
@@ -21,5 +22,6 @@ pub mod cmd;
 pub mod confirm;
 pub mod engine;
 pub mod hooks;
+pub mod inventory;
 pub mod plan;
 pub mod templates;

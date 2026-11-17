@@ -19,6 +19,7 @@
 //!   validation problem is refused before anything is staged.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -51,6 +52,16 @@ pub struct Settings {
     /// Where the web GUI's local CA and certificate live; `None` keeps them
     /// in memory (tests).
     pub tls_dir: Option<std::path::PathBuf>,
+    /// Where `sys/class/net` is read for the NIC inventory (`/` on the box).
+    pub host_root: PathBuf,
+    /// At boot, bind interfaces without a MAC pin to their cards once
+    /// (needs `state_dir` for the "done" marker). Only meaningful when the
+    /// applier really applies.
+    pub pin_first_boot: bool,
+    /// The agent's state directory (markers), if persistent.
+    pub state_dir: Option<PathBuf>,
+    /// Where users' SSH keys are rendered for sshd (`None`: not at all).
+    pub ssh_keys_dir: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -61,6 +72,10 @@ impl Default for Settings {
             max_confirm: Duration::from_secs(24 * 3600),
             rollback_retry: Duration::from_secs(5),
             tls_dir: None,
+            host_root: PathBuf::from("/"),
+            pin_first_boot: false,
+            state_dir: None,
+            ssh_keys_dir: None,
         }
     }
 }
@@ -97,6 +112,7 @@ pub struct Agent<A> {
     started: Instant,
     settings: Settings,
     tls: crate::tls::LocalCa,
+    seed_error: std::sync::Mutex<Option<String>>,
 }
 
 fn internal(e: StoreError) -> IpcError {
@@ -243,6 +259,7 @@ impl<A: Applier> Agent<A> {
             started: Instant::now(),
             tls: crate::tls::LocalCa::new(settings.tls_dir.clone()),
             settings,
+            seed_error: std::sync::Mutex::new(None),
         }))
     }
 
@@ -259,8 +276,21 @@ impl<A: Applier> Agent<A> {
         }
         {
             let mut inner = self.inner.lock().await;
+            // SSH first, from what last ran (or head): if the boot apply
+            // fails, the operator still gets in to fix it.
+            let doc = inner
+                .applied
+                .as_ref()
+                .map_or(&inner.head.1, |(_, d)| d)
+                .clone();
+            self.render_ssh_keys(&doc);
             match inner.store.pending_confirm().map_err(internal)? {
-                None => return self.reconcile(&mut inner).await,
+                None => {
+                    if self.settings.pin_first_boot {
+                        self.pin_first_boot(&mut inner);
+                    }
+                    return self.reconcile(&mut inner).await;
+                }
                 Some(p) => tracing::warn!(
                     revision = %p.pending,
                     rollback_to = %p.rollback_to,
@@ -271,6 +301,93 @@ impl<A: Applier> Agent<A> {
         // A failed rollback stays pending and the timer retries it.
         self.expire_pending(true).await;
         Ok(())
+    }
+
+    /// The host's network cards and the interface each carries in the
+    /// candidate.
+    fn nics(&self, inner: &Inner<A>) -> Vec<sensr_ipc::Nic> {
+        let doc = inner.candidate.as_ref().unwrap_or(&inner.head.1);
+        crate::ifnames::host_nics(&self.settings.host_root)
+            .into_iter()
+            .map(|n| {
+                let assigned = doc
+                    .interfaces
+                    .iter()
+                    .find(|(_, i)| i.match_mac.is_some_and(|m| m.to_string() == n.pin_mac()))
+                    .or_else(|| {
+                        doc.interfaces
+                            .iter()
+                            .find(|(_, i)| i.match_mac.is_none() && i.device.as_str() == n.name)
+                    })
+                    .map(|(id, _)| id.to_string());
+                sensr_ipc::Nic {
+                    name: n.name,
+                    mac: n.mac,
+                    permanent_mac: n.permanent_mac,
+                    driver: n.driver,
+                    bus: n.bus,
+                    bus_path: n.bus_path,
+                    speed_mbps: n.speed_mbps,
+                    carrier: n.carrier,
+                    operstate: n.operstate,
+                    assigned,
+                }
+            })
+            .collect()
+    }
+
+    /// First boot (PLAN §6, L3): bind interfaces without a pin to their
+    /// cards by MAC, once. Failures are logged; booting goes on.
+    fn pin_first_boot(&self, inner: &mut Inner<A>) {
+        let Some(marker) = self
+            .settings
+            .state_dir
+            .as_ref()
+            .map(|d| d.join("interfaces-pinned"))
+        else {
+            return;
+        };
+        if marker.exists() {
+            return;
+        }
+        let nics = crate::ifnames::host_nics(&self.settings.host_root);
+        if nics.is_empty() {
+            // no cards visible (yet): try again next boot
+            return;
+        }
+        let factory = inner
+            .store
+            .history(2, None)
+            .map(|h| h.len() == 1)
+            .unwrap_or(false);
+        let mut doc = inner.head.1.clone();
+        let bound = crate::ifnames::first_boot(&mut doc, &nics, factory);
+        if !bound.is_empty() {
+            let what = bound
+                .iter()
+                .map(|(id, mac)| format!("{id}={mac}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let meta = CommitMeta::new(
+                system_principal().revision_username(),
+                format!("first boot: interfaces bound to their cards by MAC ({what})"),
+            );
+            match inner.store.commit(&doc, meta) {
+                Ok(StoreOutcome::Committed(m)) => {
+                    tracing::info!(revision = %m.id, %what, "interfaces pinned by MAC");
+                    inner.head_masked = redact::masked(&doc);
+                    inner.head = (to_ipc(m.id), doc);
+                }
+                Ok(StoreOutcome::Unchanged(_)) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "pinning interfaces at first boot");
+                    return;
+                }
+            }
+        }
+        if let Err(e) = crate::store::write_atomic(&marker, b"done\n") {
+            tracing::warn!(error = %e, "cannot record that interfaces were pinned");
+        }
     }
 
     /// Re-applies head from scratch (boot and `SIGHUP`).
@@ -311,8 +428,17 @@ impl<A: Applier> Agent<A> {
             .store
             .mark_applied(rev, confirm, "sensr-agent")
             .map_err(internal)?;
+        self.render_ssh_keys(&doc);
         inner.applied = Some((id, doc));
         Ok(())
+    }
+
+    fn render_ssh_keys(&self, doc: &Document) {
+        if let Some(dir) = &self.settings.ssh_keys_dir
+            && let Err(e) = crate::ssh::render(doc, dir)
+        {
+            tracing::error!(error = %e, dir = %dir.display(), "rendering SSH authorized keys");
+        }
     }
 
     /// Decides which principal a request really runs as.
@@ -439,7 +565,18 @@ impl<A: Applier> Agent<A> {
         if redact::drop_unbacked(&mut v, &doc) {
             doc = decode(&v)?;
         }
-        let before = problems(&base);
+        self.stage(inner, &base, doc)
+    }
+
+    /// Stages `doc` (derived from `base`) unless it introduces validation
+    /// problems `base` did not have.
+    fn stage(
+        &self,
+        inner: &mut Inner<A>,
+        base: &Document,
+        doc: Document,
+    ) -> Result<Response, IpcError> {
+        let before = problems(base);
         let introduced: Vec<ValidationIssue> = problems(&doc)
             .into_iter()
             .filter(|p| !before.contains(p))
@@ -654,6 +791,11 @@ impl<A: Applier> Agent<A> {
                         .map_err(internal)?
                         .map(ipc_pending),
                     last_apply_error: inner.last_apply_error.clone(),
+                    seed_error: self
+                        .seed_error
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
                 })))
             }
             Op::ConfigGet { path, source } => {
@@ -792,6 +934,28 @@ impl<A: Applier> Agent<A> {
                     .map(|l| Response::WebListener(Box::new(l)))
                     .map_err(|e| err(ErrorKind::Internal, e.to_string()))
             }
+            Op::Nics => Ok(Response::Nics(self.nics(inner))),
+            Op::InterfacesAssign { assignments } => {
+                let nics = crate::ifnames::host_nics(&self.settings.host_root);
+                let base = inner
+                    .candidate
+                    .clone()
+                    .unwrap_or_else(|| inner.head.1.clone());
+                let mut doc = base.clone();
+                let mut issues = Vec::new();
+                for a in &assignments {
+                    if let Err(e) = crate::ifnames::assign(&mut doc, &a.interface, &a.nic, &nics) {
+                        issues.push(ValidationIssue {
+                            path: format!("interfaces.{}", a.interface),
+                            message: format!("{e}."),
+                        });
+                    }
+                }
+                if !issues.is_empty() {
+                    return Err(validation(issues));
+                }
+                self.stage(inner, &base, doc)
+            }
         }
     }
 
@@ -855,6 +1019,14 @@ impl<A: Applier> Agent<A> {
             revision,
             pending_confirm: pending_confirm.map(ipc_pending),
         })))
+    }
+
+    /// Records a first-boot seed problem for `status` (and so the UI).
+    pub fn set_seed_error(&self, message: Option<String>) {
+        *self
+            .seed_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = message;
     }
 
     /// Completes once the agent state lock can be taken (watchdog probe).
@@ -959,6 +1131,8 @@ fn op_name(op: &Op) -> &'static str {
         Op::Authenticate { .. } => "authenticate",
         Op::Subscribe => "subscribe",
         Op::WebListener => "web_listener",
+        Op::Nics => "nics",
+        Op::InterfacesAssign { .. } => "interfaces.assign",
     }
 }
 

@@ -133,7 +133,7 @@ pub struct Interface {
     pub mtu: Option<u16>,
 }
 
-/// Kernel devices offered in the assignment dialog (mock inventory until the agent reports).
+/// The mock backend's network cards (the real ones come from the agent).
 pub const DEVICES: &[(&str, &str)] = &[
     ("eth0", "eth0 (52:54:00:12:34:01)"),
     ("eth1", "eth1 (52:54:00:12:34:02)"),
@@ -146,7 +146,9 @@ impl FormModel for Interface {
         const FIELDS: &[F] = &[
             F::new("enabled", "Enable", K::Checkbox),
             F::new("description", "Description", K::Text).required(),
-            F::new("device", "Device", K::Select(DEVICES)).required(),
+            F::new("device", "Device", K::Choice(ChoiceSet::Devices))
+                .required()
+                .help("Cards are bound by their MAC address: moving a card to another slot or USB port keeps its network."),
             F::new("block_private", "Block private networks", K::Checkbox)
                 .help("Block traffic from RFC 1918 and unique local addresses on this interface."),
             F::new("block_bogons", "Block bogon networks", K::Checkbox),

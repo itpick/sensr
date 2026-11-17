@@ -44,6 +44,11 @@ struct Args {
     /// store that holds only the factory revision.
     #[arg(long, env = "SENSR_SEED_DIR")]
     seed_dir: Option<PathBuf>,
+    /// A seed config.xml that does not validate: `strict` imports nothing
+    /// (factory config, report in the seed folder); `partial` drops the
+    /// items that fail and imports the rest.
+    #[arg(long, value_enum, default_value_t = SeedImport::Strict, env = "SENSR_SEED_IMPORT")]
+    seed_import: SeedImport,
     /// Peer uid allowed to act for the principals it authenticated (sensr-api).
     #[arg(long = "trust-uid")]
     trust_uids: Vec<u32>,
@@ -66,6 +71,15 @@ struct Args {
     /// sysctls, qdiscs).
     #[arg(long, value_enum, default_value_t = ApplierKind::Preview, env = "SENSR_APPLIER")]
     applier: ApplierKind,
+}
+
+/// How a seed config.xml that does not validate is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum SeedImport {
+    /// Import nothing.
+    Strict,
+    /// Import what validates.
+    Partial,
 }
 
 /// Which apply pipeline the agent runs.
@@ -128,13 +142,40 @@ fn open_store(args: &Args) -> anyhow::Result<Store> {
 async fn serve(args: Args) -> anyhow::Result<()> {
     let store = open_store(&args)?;
     seed_store(&store, args.seed.as_ref())?;
+    let mut seed_problems = Vec::new();
     if let (Some(seed_dir), Some(state_dir)) = (&args.seed_dir, &args.state_dir) {
-        match sensr_agent::seed::import_seed(&store, seed_dir, state_dir) {
+        let mode = match args.seed_import {
+            SeedImport::Strict => sensr_agent::seed::ImportMode::Strict,
+            SeedImport::Partial => sensr_agent::seed::ImportMode::Partial,
+        };
+        match sensr_agent::seed::import_seed(&store, seed_dir, state_dir, mode) {
             Ok(outcome) => {
+                if let sensr_agent::seed::SeedOutcome::Imported {
+                    dropped, report, ..
+                } = &outcome
+                    && !dropped.is_empty()
+                {
+                    seed_problems.push(format!(
+                        "config.xml partially imported: {} item(s) dropped, see {}",
+                        dropped.len(),
+                        report.display()
+                    ));
+                }
                 tracing::info!(?outcome, seed_dir = %seed_dir.display(), "seed folder checked")
             }
             // Keep booting on the factory config; the report says why.
-            Err(e) => tracing::error!(error = %e, "seed import failed"),
+            Err(e) => {
+                tracing::error!(error = %e, "seed import failed");
+                seed_problems.push(format!("config.xml not imported: {e}"));
+            }
+        }
+        let nics = sensr_agent::ifnames::host_nics(std::path::Path::new("/"));
+        match sensr_agent::seed::apply_seed_files(&store, seed_dir, state_dir, &nics) {
+            Ok(notes) => notes.iter().for_each(|n| tracing::info!("{n}")),
+            Err(e) => {
+                tracing::error!(error = %e, "seed.toml / ifnames / authorized_keys not applied");
+                seed_problems.push(format!("seed files not applied: {e}"));
+            }
         }
     }
     let mut trusted_gids = args.trust_gids.clone();
@@ -149,13 +190,23 @@ async fn serve(args: Args) -> anyhow::Result<()> {
         trusted_gids,
         max_confirm: Duration::from_secs(args.max_confirm_secs),
         tls_dir: args.state_dir.as_ref().map(|d| d.join("tls")),
+        // binding cards is only worth doing when the config is really applied
+        pin_first_boot: args.applier == ApplierKind::Slice,
+        state_dir: args.state_dir.clone(),
+        // a persistent agent is the box's agent: sshd reads these files
+        ssh_keys_dir: args
+            .state_dir
+            .as_ref()
+            .map(|_| PathBuf::from(sensr_agent::ssh::KEYS_DIR)),
         ..Settings::default()
     };
     match args.applier {
-        ApplierKind::Preview => run_agent(args, store, PreviewApplier, settings).await,
+        ApplierKind::Preview => {
+            run_agent(args, store, PreviewApplier, settings, seed_problems).await
+        }
         ApplierKind::Slice => {
             let applier = SliceApplier::system().context("starting the apply engine")?;
-            run_agent(args, store, applier, settings).await
+            run_agent(args, store, applier, settings, seed_problems).await
         }
     }
 }
@@ -165,8 +216,12 @@ async fn run_agent<A: Applier>(
     store: Store,
     applier: A,
     settings: Settings,
+    seed_problems: Vec<String>,
 ) -> anyhow::Result<()> {
     let agent = Agent::new(store, applier, settings).map_err(|e| anyhow::anyhow!(e))?;
+    if !seed_problems.is_empty() {
+        agent.set_seed_error(Some(seed_problems.join("\n")));
+    }
     if let Err(e) = agent.boot().await {
         // Keep serving: the operator needs the socket to fix the config.
         tracing::error!(error = %e, "boot apply failed");

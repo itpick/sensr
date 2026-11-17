@@ -206,6 +206,65 @@ pub enum Op {
     /// The web GUI listener and its TLS material (trusted peers only: the
     /// reply carries a private key).
     WebListener,
+    /// The network cards on the host, with the interface each one carries.
+    Nics,
+    /// Bind interfaces to NICs by MAC in the candidate (Interfaces ›
+    /// Assignments): each interface gets `match_mac` and, when its device
+    /// name is one the kernel or udev could also hand out, a stable name.
+    InterfacesAssign {
+        /// What goes where.
+        assignments: Vec<Assignment>,
+    },
+}
+
+/// One interface-to-NIC binding for [`Op::InterfacesAssign`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Assignment {
+    /// Interface id (`wan`, `lan`, `opt1`); created when missing.
+    pub interface: String,
+    /// The NIC: its MAC address or its current kernel name.
+    pub nic: String,
+}
+
+/// A network card found on the host (sysfs), for assignment pages and
+/// `sensr interfaces`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Nic {
+    /// Current kernel name.
+    pub name: String,
+    /// Current MAC address.
+    pub mac: String,
+    /// Burnt-in MAC when it differs from `mac` (spoofed); what pins match.
+    #[serde(default)]
+    pub permanent_mac: Option<String>,
+    /// Kernel driver (`igc`, `r8152`, `virtio_net`).
+    #[serde(default)]
+    pub driver: Option<String>,
+    /// Bus the card sits on (`pci`, `usb`, `platform`, ...).
+    #[serde(default)]
+    pub bus: Option<String>,
+    /// Where on that bus (`0000:01:00.0`, `2-1:1.0`): changes when the card
+    /// moves, which is exactly what pins must not depend on.
+    #[serde(default)]
+    pub bus_path: Option<String>,
+    /// Negotiated speed in Mbit/s while the link is up.
+    #[serde(default)]
+    pub speed_mbps: Option<u32>,
+    /// Carrier detected.
+    #[serde(default)]
+    pub carrier: Option<bool>,
+    /// Kernel operational state (`up`, `down`, `dormant`, ...).
+    pub operstate: String,
+    /// The interface id this card carries, if assigned.
+    #[serde(default)]
+    pub assigned: Option<String>,
+}
+
+impl Nic {
+    /// The MAC a pin matches: the permanent one when known.
+    pub fn pin_mac(&self) -> &str {
+        self.permanent_mac.as_deref().unwrap_or(&self.mac)
+    }
 }
 
 impl Op {
@@ -221,6 +280,7 @@ impl Op {
                 | Op::ConfigCommit { .. }
                 | Op::ConfigConfirm
                 | Op::ConfigRollback { .. }
+                | Op::InterfacesAssign { .. }
         )
     }
 }
@@ -345,6 +405,10 @@ pub struct Status {
     pub pending_confirm: Option<PendingConfirm>,
     /// Message of the last failed apply, cleared by the next success.
     pub last_apply_error: Option<String>,
+    /// What went wrong with the first-boot seed folder (an import that did
+    /// not validate, a partial import), so the UI can say so.
+    #[serde(default)]
+    pub seed_error: Option<String>,
 }
 
 /// Outcome of a commit.
@@ -473,6 +537,8 @@ pub enum Response {
     StreamOpened,
     /// Reply to [`Op::WebListener`].
     WebListener(Box<WebListener>),
+    /// Reply to [`Op::Nics`].
+    Nics(Vec<Nic>),
     /// The request failed.
     Error(IpcError),
 }

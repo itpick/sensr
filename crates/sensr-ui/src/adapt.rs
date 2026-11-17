@@ -382,11 +382,30 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
     }
 }
 
+/// True for device names the kernel or udev could also give a card
+/// (`eth0`, `enp1s0`, `end0`): a card bound by MAC must not keep one, or
+/// another card appearing first could take it.
+fn kernel_name(name: &str) -> bool {
+    ["eth", "en", "wl", "ww", "ib", "sl", "usb", "wlan"]
+        .iter()
+        .any(|p| name.strip_prefix(p).is_some_and(|rest| !rest.is_empty()))
+}
+
+fn is_mac(s: &str) -> bool {
+    let parts: Vec<&str> = s.split(':').collect();
+    parts.len() == 6
+        && parts
+            .iter()
+            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 fn interface_to_view(item: &Value) -> Value {
     let v4 = s(item, "ipv4.mode");
     let v6 = s(item, "ipv6.mode");
+    // a card bound by MAC is chosen by its MAC in the device list
+    let pinned = s(item, "match_mac");
     json!({
-        "device": s(item, "device"),
+        "device": if pinned.is_empty() { s(item, "device") } else { pinned },
         "description": s(item, "description"),
         "enabled": b(item, "enabled", true),
         "block_private": b(item, "block_private", false),
@@ -405,7 +424,27 @@ fn interface_from_view(base: Option<&Value>, view: &Value) -> Value {
     let o = obj(&mut item);
     put(o, "enabled", view, "enabled");
     put_opt(o, "description", view, "description");
-    put(o, "device", view, "device");
+    let chosen = s(view, "device");
+    if is_mac(&chosen) {
+        // bound by MAC: keep a sensr-only name, replace a kernel one
+        let current = s(&Value::Object(o.clone()), "device");
+        let id = s(view, "id");
+        let name = if !current.is_empty() && !kernel_name(&current) {
+            current
+        } else if !id.is_empty() {
+            id
+        } else {
+            format!("nic{}", chosen.replace(':', "")[6..].to_ascii_lowercase())
+        };
+        o.insert("device".into(), Value::String(name));
+        o.insert(
+            "match_mac".into(),
+            Value::String(chosen.to_ascii_lowercase()),
+        );
+    } else if !chosen.is_empty() {
+        o.insert("device".into(), Value::String(chosen));
+        o.remove("match_mac");
+    }
     put(o, "block_private", view, "block_private");
     put(o, "block_bogons", view, "block_bogons");
     put_opt(o, "mtu", view, "mtu");

@@ -171,6 +171,11 @@ impl Registry {
             &["api/v1/config/*", "api/v1/apply/*"],
         );
         r.insert(
+            "page-interfaces-assignnetworkports",
+            "Interfaces: Assign network ports",
+            &["ui/interfaces/assignment", "api/v1/interfaces/*"],
+        );
+        r.insert(
             "page-sensr-status",
             "sensr: Status (native API)",
             &["api/v1/status"],

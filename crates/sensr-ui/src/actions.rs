@@ -612,7 +612,8 @@ pub async fn revision_diff(
 pub async fn field_choices() -> Result<crate::form::Choices, ServerFnError> {
     use crate::form::ChoiceSet;
     use serde_json::Value;
-    let ifs = imp::backend()?.get("interfaces").await.map_err(imp::err)?;
+    let backend = imp::backend()?;
+    let ifs = backend.get("interfaces").await.map_err(imp::err)?;
     let list: Vec<(String, String)> = ifs
         .as_object()
         .into_iter()
@@ -634,9 +635,31 @@ pub async fn field_choices() -> Result<crate::form::Choices, ServerFnError> {
         .collect();
     let mut rules = vec![("floating".to_owned(), "Floating".to_owned())];
     rules.extend(list.iter().cloned());
+    // cards by MAC, then devices that are not cards (VLANs, WireGuard)
+    let cards = backend.nics().await.unwrap_or_default();
+    let mut devices: Vec<(String, String)> =
+        cards.iter().map(|c| (c.mac.clone(), c.label())).collect();
+    for i in ifs.as_object().into_iter().flatten().map(|(_, i)| i) {
+        let dev = i.get("device").and_then(Value::as_str).unwrap_or_default();
+        let pinned = i.get("match_mac").and_then(Value::as_str);
+        if dev.is_empty()
+            || devices
+                .iter()
+                .any(|(v, _)| Some(v.as_str()) == pinned || v == dev)
+        {
+            continue;
+        }
+        match pinned {
+            // bound to a card that is not plugged in right now
+            Some(mac) => devices.push((mac.to_owned(), format!("{dev} ({mac}, not present)"))),
+            None if cards.iter().any(|c| c.name == dev) => {}
+            None => devices.push((dev.to_owned(), dev.to_owned())),
+        }
+    }
     Ok([
         (ChoiceSet::Interfaces, list),
         (ChoiceSet::RuleInterfaces, rules),
+        (ChoiceSet::Devices, devices),
     ]
     .into_iter()
     .collect())

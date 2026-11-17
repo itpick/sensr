@@ -80,6 +80,10 @@ pub struct Pending {
     pub confirm: Option<ConfirmWindow>,
     /// Server time when this was produced, so the browser can count down without clock skew.
     pub now: u64,
+    /// A problem the operator must know about on every page (a first-boot
+    /// seed that did not import).
+    #[serde(default)]
+    pub alert: Option<String>,
 }
 
 impl Pending {
@@ -128,6 +132,41 @@ pub struct InterfaceStatus {
     pub rx_bps: u64,
     /// Transmit rate, bits/s.
     pub tx_bps: u64,
+}
+
+/// A network card on the host (Interfaces › Assignments).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkCard {
+    /// Current kernel name.
+    pub name: String,
+    /// The MAC an assignment binds to.
+    pub mac: String,
+    /// Kernel driver.
+    pub driver: Option<String>,
+    /// Bus and position (`pci 0000:01:00.0`, `usb 2-1:1.0`).
+    pub bus: Option<String>,
+    /// Link up, with speed in Mbit/s when known.
+    pub link: Option<(bool, Option<u32>)>,
+    /// Interface the card carries.
+    pub assigned: Option<String>,
+}
+
+impl NetworkCard {
+    /// The label in the device list: `enp1s0 (52:54:00:aa:00:01, igc, up 1000M)`.
+    pub fn label(&self) -> String {
+        let mut parts = vec![self.mac.clone()];
+        parts.extend(self.driver.clone());
+        match self.link {
+            Some((true, Some(s))) => parts.push(format!("up {s}M")),
+            Some((true, None)) => parts.push("up".into()),
+            Some((false, _)) => parts.push("no carrier".into()),
+            None => {}
+        }
+        if let Some(b) = &self.bus {
+            parts.push(b.clone());
+        }
+        format!("{} ({})", self.name, parts.join(", "))
+    }
 }
 
 /// Gateway health as monitored by the routing layer.
@@ -239,6 +278,8 @@ mod server {
         fn diff(&self, from: u64, to: Option<u64>) -> BoxFuture<'_, ApiResult<Vec<DiffLine>>>;
         /// Live status for the dashboard.
         fn status(&self) -> BoxFuture<'_, ApiResult<SystemStatus>>;
+        /// The host's network cards.
+        fn nics(&self) -> BoxFuture<'_, ApiResult<Vec<NetworkCard>>>;
     }
 
     /// A backend bound to one signed-in user (their identity and privileges travel with

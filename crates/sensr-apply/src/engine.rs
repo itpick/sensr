@@ -3,7 +3,9 @@
 //! sequence is tested without root). OPNsense counterpart: configd's
 //! reconfigure actions plus `rc.filter_configure`.
 //!
-//! Order of a commit: secrets → sysctls → interface files + networkd →
+//! Order of a commit: secrets → sysctls → MAC pins (`.link` files, kept
+//! for the next boot, and renames of cards that carry the wrong name) →
+//! interface files + networkd →
 //! qdiscs → nft ruleset (one atomic transaction) → service files → WireGuard
 //! links → unit reloads → `config` hooks. Only what the delta against the
 //! last committed plan touches runs, so an unchanged document is a no-op.
@@ -522,6 +524,7 @@ impl Engine {
 
         // links first: everything else refers to devices and addresses
         let net_dir = self.staging.live_dir("run/systemd/network");
+        let renamed = self.pin_cards(p, &net_dir, &mut report)?;
         let is_iface_file = |path: &Path| {
             path.starts_with(&net_dir)
                 && path
@@ -534,8 +537,25 @@ impl Engine {
         for path in delta.remove_files.iter().filter(|p| is_iface_file(p)) {
             let _ = std::fs::remove_file(path);
         }
-        for c in p.interfaces.commands(&applied.interfaces) {
+        let mut cmds = p.interfaces.commands(&applied.interfaces);
+        if !renamed.is_empty()
+            && !cmds
+                .iter()
+                .any(|c| c.display().starts_with("networkctl 'reload'"))
+        {
+            // the renamed cards now match their .network files
+            cmds.insert(0, Cmd::new("networkctl").arg("reload"));
+        }
+        for c in cmds {
             self.run(&c, &mut report)?;
+        }
+        // a renamed card was taken down to rename it; networkd brings it
+        // up again only when told to look at it
+        for name in &renamed {
+            self.run(
+                &Cmd::new("networkctl").args(["reconfigure", name.as_str()]),
+                &mut report,
+            )?;
         }
         if self.opts.check && delta.files.keys().any(|f| f.ends_with("kea-dhcp4.conf")) {
             // networkd creates VLANs asynchronously after the reload
@@ -615,6 +635,87 @@ impl Engine {
             }
         }
         Ok(report)
+    }
+
+    /// Writes the `.link` files of MAC-pinned cards for udev, mirrors them
+    /// to `<root>/var/lib/sensr/links` (the boot unit copies that into
+    /// `/run/systemd/network` before udev names the cards; `/run` is empty
+    /// at boot), and renames cards that carry the wrong name now. Returns
+    /// the names of the cards that were renamed.
+    fn pin_cards(
+        &self,
+        p: &Prepared,
+        net_dir: &Path,
+        report: &mut CommitReport,
+    ) -> Result<Vec<String>, EngineError> {
+        let is_link = |path: &Path| {
+            path.starts_with(net_dir)
+                && path.file_name().is_some_and(|n| {
+                    let n = n.to_string_lossy();
+                    n.starts_with("10-sensr-") && n.ends_with(".link")
+                })
+        };
+        let keep = self.rooted(Path::new("/var/lib/sensr/links"));
+        let io = |path: &Path| {
+            let path = path.to_owned();
+            move |source| EngineError::Io { path, source }
+        };
+        let wanted: BTreeMap<&Path, &FileSpec> = p
+            .plan
+            .files
+            .iter()
+            .filter(|(path, _)| is_link(path))
+            .map(|(path, spec)| (path.as_path(), spec))
+            .collect();
+        if !wanted.is_empty() || keep.exists() {
+            std::fs::create_dir_all(&keep).map_err(io(&keep))?;
+            std::fs::create_dir_all(net_dir).map_err(io(net_dir))?;
+        }
+        for (path, spec) in &wanted {
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            for dest in [path.to_path_buf(), keep.join(name)] {
+                if std::fs::read(&dest).ok().as_deref() != Some(&spec.contents[..]) {
+                    self.write(&dest, spec, report)?;
+                }
+            }
+        }
+        // pins that went away
+        for dir in [net_dir.to_path_buf(), keep] {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.filter_map(Result::ok) {
+                let path = e.path();
+                let ours = path.file_name().is_some_and(|n| {
+                    let n = n.to_string_lossy();
+                    n.starts_with("10-sensr-") && n.ends_with(".link")
+                });
+                let live = net_dir.join(e.file_name());
+                if ours && !wanted.contains_key(live.as_path()) {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        let pins = p.interfaces.pin_map();
+        if pins.is_empty() {
+            return Ok(Vec::new());
+        }
+        let nics = crate::inventory::discover(&self.opts.root, self.runner.as_ref());
+        let cmds = crate::inventory::renames(&pins, &nics);
+        for c in &cmds {
+            self.run(c, report)?;
+        }
+        // the cards that now carry a pinned name they did not have
+        Ok(pins
+            .iter()
+            .filter(|(mac, want)| {
+                nics.iter()
+                    .any(|n| n.pin_mac() == mac.as_str() && n.name != **want)
+            })
+            .map(|(_, want)| want.clone())
+            .collect())
     }
 
     /// Waits (up to 10 s) until every VLAN device of `m` exists.
@@ -788,6 +889,79 @@ mod tests {
         )
         .unwrap();
         (e, runner)
+    }
+
+    #[test]
+    fn pinned_cards_get_link_files_for_boot_and_are_renamed_now() {
+        use sensr_schema::PathAccess;
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let (mut e, runner) = engine(r);
+        // WAN's card enumerated as eth2, LAN's sits on igc0 (WAN's name)
+        crate::inventory::tests::card(
+            r,
+            "eth2",
+            "52:54:00:aa:00:01",
+            "pci",
+            &["pci0000:00", "0000:00:11.0"],
+            "igc",
+        );
+        crate::inventory::tests::card(
+            r,
+            "igc0",
+            "52:54:00:aa:00:02",
+            "usb",
+            &["usb2", "2-1:1.0"],
+            "r8152",
+        );
+        let mut doc = home_router();
+        doc.set_by_path(
+            "interfaces.wan.match_mac",
+            serde_json::json!("52:54:00:aa:00:01"),
+        )
+        .unwrap();
+        doc.set_by_path(
+            "interfaces.lan.match_mac",
+            serde_json::json!("52:54:00:aa:00:02"),
+        )
+        .unwrap();
+        let p = e.prepare(&doc, &Runtime::default()).unwrap();
+        e.commit(p).unwrap();
+        for dir in ["run/systemd/network", "var/lib/sensr/links"] {
+            let f = std::fs::read_to_string(r.join(dir).join("10-sensr-igc0.link")).unwrap();
+            assert!(f.contains("PermanentMACAddress=52:54:00:aa:00:01"), "{f}");
+            assert!(r.join(dir).join("10-sensr-igc1.link").exists());
+        }
+        let lines = runner.call_lines();
+        let pos = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} not run: {lines:#?}"))
+        };
+        // LAN's card frees igc0 through a temporary name, then both move
+        assert!(
+            pos("'igc0' 'name' 'sensrtmp0'") < pos("'eth2' 'name' 'igc0'"),
+            "{lines:#?}"
+        );
+        assert!(
+            pos("'sensrtmp0' 'name' 'igc1'") < pos("networkctl 'reload'"),
+            "{lines:#?}"
+        );
+        assert!(
+            pos("networkctl 'reload'") < pos("'reconfigure' 'igc0'"),
+            "{lines:#?}"
+        );
+
+        // dropping a pin removes its files
+        doc.set_by_path("interfaces.lan.match_mac", serde_json::Value::Null)
+            .unwrap();
+        let p = e.prepare(&doc, &Runtime::default()).unwrap();
+        e.commit(p).unwrap();
+        for dir in ["run/systemd/network", "var/lib/sensr/links"] {
+            assert!(r.join(dir).join("10-sensr-igc0.link").exists());
+            assert!(!r.join(dir).join("10-sensr-igc1.link").exists(), "{dir}");
+        }
     }
 
     #[test]
