@@ -21,6 +21,9 @@ pub struct Imported {
     pub report: String,
     /// True when nothing unexpected was left unmapped.
     pub clean: bool,
+    /// Why the imported document would not commit (`path: message`), empty
+    /// when it validates.
+    pub invalid: Vec<String>,
 }
 
 /// Turns a foreign config file into a sensr document.
@@ -60,9 +63,11 @@ impl ConfigImporter for OpnsenseImporter {
             devices: self.devices.clone(),
         };
         let imported = import_config(text, &options).context("not a readable config.xml")?;
+        let invalid = imported.document.validate().to_lines();
         let document =
             serde_json::to_value(&imported.document).context("encoding the imported document")?;
         Ok(Imported {
+            invalid,
             document,
             clean: imported.report.is_clean(),
             report: imported.report.to_string(),
@@ -85,6 +90,7 @@ mod tests {
         let out = OpnsenseImporter::default().import(&bytes).unwrap();
         let doc: sensr_schema::Document = serde_json::from_value(out.document.clone()).unwrap();
         assert!(doc.interfaces.get(&"lan".parse().unwrap()).is_some());
+        assert!(out.invalid.is_empty(), "{:?}", out.invalid);
         assert!(
             out.report.starts_with("# sensr import report"),
             "{}",

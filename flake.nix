@@ -131,6 +131,12 @@
             inherit pkgs;
             sensrModules = testModules;
           };
+          # The house acceptance scorecard (synthetic defaults; private runs
+          # go through nix/tests/house/run.sh).
+          house = import ./nix/tests/house.nix {
+            inherit pkgs;
+            sensrModules = testModules;
+          };
           agent-api = import ./nix/tests/agent-api.nix {
             inherit pkgs;
             sensrModules = testModules;

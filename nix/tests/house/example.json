@@ -1,0 +1,145 @@
+{
+  "_comment": "Synthetic parameters for nix/tests/house.nix, matching house.xml. A private run passes its own file in SENSR_HOUSE_PARAMS (nix/tests/house/run.sh); nothing from it enters the nix store.",
+  "router": {
+    "wan": {
+      "device": "igc0",
+      "mac": "02:00:5e:00:00:01"
+    },
+    "lan": {
+      "device": "igc1",
+      "mac": "02:00:5e:00:00:02",
+      "ip": "192.168.10.1",
+      "prefix": 24
+    },
+    "lan2": {
+      "device": "igc2",
+      "mac": "02:00:5e:00:00:03",
+      "ip": "192.168.20.1",
+      "prefix": 24
+    },
+    "hostname": "house-gw",
+    "domain": "house.example",
+    "harness_names_nics": true
+  },
+  "overlay": [
+    [
+      "interfaces.wan.spoof_mac",
+      "02:00:5e:00:00:f1"
+    ]
+  ],
+  "upstream": {
+    "gateway": "11.0.0.1",
+    "prefix": 24,
+    "pool": [
+      "11.0.0.100",
+      "11.0.0.200"
+    ],
+    "spoof_mac": "02:00:5e:00:00:f1",
+    "public_ip": "11.0.0.50",
+    "v6": {
+      "address": "2001:db8:ffff::1/64",
+      "na_pool": "2001:db8:ffff::100-2001:db8:ffff::1ff",
+      "pd_prefix": "2001:db8:aa00::",
+      "pd_prefix_len": 56,
+      "pd_delegated_len": 64
+    }
+  },
+  "internet": {
+    "ip": "11.0.1.10",
+    "upstream": "11.0.1.1",
+    "prefix": 24,
+    "extra_addresses": [
+      "11.0.9.1",
+      "11.0.8.2"
+    ],
+    "blocklist": [
+      "11.0.8.0/24"
+    ],
+    "dnsbl": [
+      "ads.blocked.test"
+    ]
+  },
+  "clients": {
+    "lan": {
+      "mac": "02:00:5e:10:00:0a",
+      "ip": "192.168.10.10",
+      "name": "nas"
+    },
+    "lan2_untrusted": {
+      "mac": "02:00:5e:20:00:01"
+    },
+    "lan2_trusted": {
+      "mac": "02:00:5e:20:00:aa"
+    },
+    "lan2_printer": {
+      "mac": "02:00:5e:20:01:33",
+      "ip": "192.168.20.133"
+    },
+    "lan2_static_allowed": {
+      "ip": "192.168.20.23"
+    }
+  },
+  "dns": {
+    "names": [
+      {
+        "name": "nas.house.example",
+        "want": "192.168.10.10"
+      },
+      {
+        "name": "printer.house.example",
+        "want": "192.168.20.133"
+      },
+      {
+        "name": "svc.internal.house.example",
+        "want": "192.168.10.10"
+      },
+      {
+        "name": "house-gw.house.example",
+        "want": "192.168.10.1"
+      }
+    ],
+    "ptr": [
+      {
+        "ip": "192.168.10.10",
+        "want": "nas.house.example."
+      }
+    ],
+    "blocked": [
+      "ads.blocked.test"
+    ],
+    "recursive": "example.com"
+  },
+  "firewall": {
+    "blocked_destinations": [
+      {
+        "ip": "11.0.9.1",
+        "alias": "BadNets",
+        "fetched": false
+      },
+      {
+        "ip": "11.0.8.2",
+        "alias": "BlockTable",
+        "fetched": true
+      }
+    ],
+    "wan_closed_tcp": [
+      22,
+      53,
+      80,
+      443
+    ]
+  },
+  "wireguard": {
+    "peer_uuid": "fb481886-6b1e-5f92-a73d-55477090e89d",
+    "peer_address": "10.10.10.2",
+    "server_address": "10.10.10.1",
+    "port": 51820,
+    "tunnel_net": "10.10.10.0/24"
+  },
+  "ui": {
+    "https_port": 443
+  },
+  "ids": {
+    "interface": "wan"
+  }
+}
