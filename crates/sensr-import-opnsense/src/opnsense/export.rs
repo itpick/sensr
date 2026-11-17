@@ -16,6 +16,7 @@ use sensr_schema::models::firewall::{
 };
 use sensr_schema::models::interfaces::{DhcpOptionValue, Ipv4Config, Ipv6Config, VlanProtocol};
 use sensr_schema::models::nat::{ForwardFilter, OutboundNatMode, ReflectionMode};
+use sensr_schema::models::ntp::NtpServerOptions;
 
 use super::common::stable_uuid;
 use crate::tree::{Document as XmlDocument, Element};
@@ -65,6 +66,9 @@ pub fn export_document(doc: &Document) -> XmlDocument {
     }
     root.push_element(nat(doc));
     root.push_element(gateway_groups(doc));
+    if let Some(n) = ntpd(doc) {
+        root.push_element(n);
+    }
     trust(doc, &mut root);
     let mut opn = Element::new("OPNsense");
     let mut fw = Element::new("Firewall");
@@ -80,6 +84,44 @@ pub fn export_document(doc: &Document) -> XmlDocument {
     opn.push_element(interface_settings(doc));
     root.push_element(opn);
     XmlDocument { root }
+}
+
+/// `ntpd`, when time is served or anything differs from the defaults.
+fn ntpd(doc: &Document) -> Option<Element> {
+    let n = &doc.ntp;
+    if n.is_empty() && doc.system.time_servers.is_empty() {
+        return None;
+    }
+    let mut e = Element::new("ntpd");
+    type Flag = fn(&NtpServerOptions) -> bool;
+    let flags: [(&str, Flag); 4] = [
+        ("prefer", |o| o.prefer),
+        ("noselect", |o| o.no_select),
+        ("iburst", |o| o.iburst),
+        ("ispool", |o| o.pool),
+    ];
+    for (name, f) in flags {
+        let hosts: Vec<String> = n
+            .servers
+            .iter()
+            .filter(|o| f(o))
+            .map(|o| o.host.to_string())
+            .collect();
+        if !hosts.is_empty() {
+            e.put(leaf(name, hosts.join(" ")));
+        }
+    }
+    if !n.listen_interfaces.is_empty() {
+        e.put(leaf("interface", join(&n.listen_interfaces, ",")));
+    }
+    e.put_opt("orphan", n.orphan_stratum);
+    if !n.serve {
+        e.put(leaf("noserve", "1"));
+    }
+    if n.allow_query {
+        e.put(leaf("query", "1"));
+    }
+    Some(e)
 }
 
 fn system(doc: &Document) -> Element {

@@ -1,6 +1,6 @@
 # sensr import report
 
-## mapped (36)
+## mapped (37)
 /opnsense/system  <- system
 /opnsense/vlans  <- interfaces
 /opnsense/interfaces  <- interfaces
@@ -33,12 +33,13 @@
 /opnsense/OPNsense/Kea/dhcp4  <- kea
 /opnsense/OPNsense/unboundplus  <- unbound
 /opnsense/OPNsense/wireguard  <- wireguard
+/opnsense/ntpd  <- ntpd
 /opnsense/ca[@uuid='9a7d8f90-ce35-4ce7-ae7f-952ebd95d44d']  <- trust
 /opnsense/cert[@uuid='93927b01-1517-45dd-8864-cb9cd2f776c6']  <- trust
 /opnsense/OPNsense/Gateways  <- gateways
 /opnsense/OPNsense/Gateways/gateway_item[@uuid='9df1d26a-e824-425b-95df-aaf0fe534a17']  <- gateways
 
-## unmapped, expected (82)
+## unmapped, expected (81)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -88,7 +89,6 @@
 /opnsense/filter/rule[@uuid='3f71ffc8-0a4b-4596-b1ff-22382acc4598']/updated  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/filter/rule[@uuid='3f71ffc8-0a4b-4596-b1ff-22382acc4598']/created  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/rrd  (RRD graphs are replaced by sensr-monitor)
-/opnsense/ntpd  (NTP server preferences are not modelled yet (system.time_servers is imported))
 /opnsense/revision  (OPNsense revision metadata; sensr keeps its own revision history)
 /opnsense/OPNsense/Firewall/Alias/geoip  (GeoIP database source is not modelled yet)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='2064ba71-29e9-4ca4-a655-3069cd2fb19e']/audit  (OPNsense change metadata; sensr keeps its own audit log)

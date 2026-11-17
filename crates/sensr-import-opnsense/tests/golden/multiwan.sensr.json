@@ -463,5 +463,19 @@
         "issuer": "7959b528-c70f-44b4-93e4-259c92e55107"
       }
     }
+  },
+  "ntp": {
+    "serve": true,
+    "servers": [
+      {
+        "host": "ntp1.example.net",
+        "prefer": true,
+        "no_select": false,
+        "iburst": false,
+        "pool": false,
+        "nts": false
+      }
+    ],
+    "allow_query": false
   }
 }

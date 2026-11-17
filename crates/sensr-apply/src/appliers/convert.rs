@@ -6,7 +6,7 @@
 //! options and resolver bindings, and secrets as files the daemons read.
 
 use std::collections::BTreeSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 use sensr_schema::Document;
@@ -17,6 +17,7 @@ use sensr_schema::models::interfaces::{Interface, InterfaceRole, Ipv4Config, Ipv
 use super::SliceModels;
 use super::dns_runtime::{self, BlocklistRuntime, DnsRuntime, LeaseRuntime, PolicyRuntime};
 use super::kea::{self, Dhcp4Model, KeaSubnet};
+use super::ntp::{self as ntp_applier, NtpModel, Source, SourceMode};
 use super::qdisc::{Diffserv, QdiscModel, Shaper};
 use super::sysctl::SysctlModel;
 use super::unbound::{Acl, DomainForward, StaticHost, UnboundModel, Upstream};
@@ -445,6 +446,80 @@ pub fn wireguard(doc: &Document, secrets: &SecretsDir) -> Result<WireguardModel,
     Ok(WireguardModel { interfaces })
 }
 
+/// The time service (`None` without time servers: OPNsense then runs no
+/// ntpd either).
+pub fn ntp(doc: &Document) -> Result<Option<NtpModel>, ConvertError> {
+    let servers = &doc.system.time_servers;
+    if servers.is_empty() {
+        return Ok(None);
+    }
+    let n = &doc.ntp;
+    let sources = servers
+        .iter()
+        .filter_map(|host| {
+            let o = n.options(host);
+            if o.is_some_and(|o| o.no_select) {
+                return None;
+            }
+            // ntpd.inc: a name under pool.ntp.org is always a pool.
+            let pool = o.is_some_and(|o| o.pool)
+                || matches!(host, Host::Name(d) if d.as_str().ends_with(".pool.ntp.org"));
+            let nts = o.is_some_and(|o| o.nts);
+            let mode = match (nts, pool) {
+                (false, false) => SourceMode::Server,
+                (false, true) => SourceMode::Pool,
+                (true, false) => SourceMode::Nts,
+                (true, true) => SourceMode::NtsPool,
+            };
+            Some(Source {
+                host: host.clone(),
+                mode,
+            })
+        })
+        .collect();
+    let listen = if n.serve {
+        ntp_listen(doc, &n.listen_interfaces)?
+    } else {
+        Vec::new()
+    };
+    Ok(Some(NtpModel {
+        sources,
+        listen,
+        local_stratum: n.orphan_stratum,
+        observation_path: ntp_applier::OBSERVATION_SOCKET.into(),
+    }))
+}
+
+/// Bind the selected interfaces' static addresses plus loopback, as OPNsense
+/// does; no selection, or a selected interface without a static address,
+/// means the wildcard, which the firewall then guards.
+fn ntp_listen(doc: &Document, ids: &[InterfaceId]) -> Result<Vec<SocketAddr>, ConvertError> {
+    let mut addrs = vec![
+        IpAddr::from([127, 0, 0, 1]),
+        IpAddr::from(Ipv6Addr::LOCALHOST),
+    ];
+    for id in ids {
+        let i = iface(doc, id, "ntp.listen_interfaces")?;
+        let before = addrs.len();
+        addrs.extend(static_v4(i).map(|a| IpAddr::V4(a.addr())));
+        addrs.extend(static_v6(i).map(|a| IpAddr::V6(a.addr())));
+        if addrs.len() == before {
+            return Ok(vec![ntp_applier::wildcard()]);
+        }
+    }
+    if ids.is_empty() {
+        return Ok(vec![ntp_applier::wildcard()]);
+    }
+    let mut out: Vec<SocketAddr> = Vec::new();
+    for a in addrs {
+        let s = SocketAddr::new(a, ntp_applier::NTP_PORT);
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    Ok(out)
+}
+
 /// Queueing: CAKE shapers from interface settings (fq_codel elsewhere).
 pub fn qdisc(doc: &Document) -> QdiscModel {
     QdiscModel {
@@ -476,6 +551,7 @@ impl SliceModels {
             kea: kea(doc)?,
             unbound: unbound(doc)?,
             wireguard: wireguard(doc, secrets)?,
+            ntp: ntp(doc)?,
         })
     }
 }

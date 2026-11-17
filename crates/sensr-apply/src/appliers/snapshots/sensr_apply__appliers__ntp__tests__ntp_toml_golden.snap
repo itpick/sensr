@@ -1,0 +1,40 @@
+---
+source: crates/sensr-apply/src/appliers/ntp.rs
+expression: out
+---
+# Rendered by sensr; changes are overwritten.
+[observability]
+log-level = "warn"
+observation-path = "/run/ntpd-rs/observe"
+
+[[source]]
+mode = "pool"
+address = "0.pool.ntp.org"
+count = 4
+
+[[source]]
+mode = "server"
+address = "192.0.2.123"
+
+[[server]]
+listen = "127.0.0.1:123"
+rate-limiting-cache-size = 4096
+rate-limiting-cutoff-ms = 1000
+
+[[server]]
+listen = "[::1]:123"
+rate-limiting-cache-size = 4096
+rate-limiting-cutoff-ms = 1000
+
+[[server]]
+listen = "192.168.1.1:123"
+rate-limiting-cache-size = 4096
+rate-limiting-cutoff-ms = 1000
+
+[synchronization]
+minimum-agreeing-sources = 1
+single-step-panic-threshold = "inf"
+
+[synchronization.startup-step-panic-threshold]
+forward = "inf"
+backward = "inf"

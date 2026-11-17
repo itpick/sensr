@@ -1128,3 +1128,63 @@ fn stale_port_forward_link_is_expected_only_without_its_forward() {
         linked.report
     );
 }
+
+fn ntp_import(timeservers: &str, ntpd: &str) -> Imported<SensrDocument> {
+    import_str(&format!(
+        "<opnsense><system><hostname>gw</hostname><domain>example.net</domain>\
+         <timeservers>{timeservers}</timeservers></system>{IFACES}{ntpd}</opnsense>"
+    ))
+}
+
+#[test]
+fn ntpd_serves_by_default_when_time_servers_are_set() {
+    // ntpd.inc: ntpd runs whenever timeservers is set, with or without a section.
+    let i = ntp_import("0.opnsense.pool.ntp.org", "");
+    assert!(i.document.ntp.serve);
+    let i = ntp_import(
+        "0.opnsense.pool.ntp.org",
+        "<ntpd><prefer>0.opnsense.pool.ntp.org</prefer></ntpd>",
+    );
+    assert!(i.document.ntp.serve);
+    assert!(i.document.ntp.servers[0].prefer);
+    assert!(i.report.unmapped_unexpected.is_empty(), "{}", i.report);
+    assert!(i.document.validate().is_empty());
+    // Without time servers there is no ntpd and nothing is served.
+    let i = ntp_import("", "");
+    assert!(!i.document.ntp.serve);
+}
+
+#[test]
+fn ntpd_flags_interfaces_and_noserve() {
+    let i = ntp_import(
+        "a.example.net b.example.net",
+        "<ntpd><iburst>b.example.net a.example.net</iburst><noselect>b.example.net</noselect>\
+         <ispool>a.example.net</ispool><prefer>c.example.net</prefer>\
+         <interface>lan,wan_vip1</interface><orphan>10</orphan><noserve>1</noserve>\
+         <kod/><maxclock>10</maxclock></ntpd>",
+    );
+    let n = &i.document.ntp;
+    assert!(!n.serve);
+    assert_eq!(n.orphan_stratum, Some(10));
+    assert_eq!(n.listen_interfaces.len(), 1);
+    // In time-server order; c.example.net is not configured and is dropped.
+    let hosts: Vec<String> = n.servers.iter().map(|o| o.host.to_string()).collect();
+    assert_eq!(hosts, ["a.example.net", "b.example.net"]);
+    assert!(n.servers[0].iburst && n.servers[0].pool && !n.servers[0].no_select);
+    assert!(n.servers[1].iburst && n.servers[1].no_select);
+    assert!(i.report.unmapped_unexpected.is_empty(), "{}", i.report);
+    assert!(
+        i.document.validate().is_empty(),
+        "{:?}",
+        i.document.validate()
+    );
+    // A weakened access restriction has no equivalent and stays reported.
+    let i = ntp_import("a.example.net", "<ntpd><limited>1</limited></ntpd>");
+    assert_eq!(unexpected(&i), ["/opnsense/ntpd/limited"]);
+}
+
+#[test]
+fn ntpd_client_mode_serves_nobody() {
+    let i = ntp_import("a.example.net", "<ntpd><clientmode>1</clientmode></ntpd>");
+    assert!(!i.document.ntp.serve);
+}

@@ -19,6 +19,7 @@ mod inert;
 mod interfaces;
 mod kea;
 mod nat;
+mod ntpd;
 mod system;
 mod trust;
 mod unbound;
@@ -85,6 +86,7 @@ pub fn importer(options: &ImportOptions) -> Importer<SensrDocument> {
         .with_mapper(kea::KeaMapper::new(dhcp))
         .with_mapper(unbound::UnboundMapper)
         .with_mapper(wireguard::WireGuardMapper)
+        .with_mapper(ntpd::NtpdMapper)
         .with_mapper(trust::TrustMapper)
         .with_mapper(ids::IdsMapper)
         .with_mapper(ids::NetflowMapper)
@@ -195,10 +197,6 @@ pub const EXPECTED_UNMAPPED: &[(&str, &str)] = &[
     ),
     ("sysctl", "FreeBSD sysctl tunables do not apply to Linux"),
     ("rrd", "RRD graphs are replaced by sensr-monitor"),
-    (
-        "ntpd",
-        "NTP server preferences are not modelled yet (system.time_servers is imported)",
-    ),
     ("OPNsense/Syslog", "remote syslog is not modelled yet"),
     (
         "OPNsense/trust",
