@@ -33,7 +33,7 @@
 /opnsense/OPNsense/Firewall/Filter/snatrules/rule[@uuid='7d2b8cc7-2217-4d32-b029-3ba292c7751e']  <- nat
 /opnsense/OPNsense/Firewall/Filter/onetoone/rule[@uuid='7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e40']  <- nat
 /opnsense/OPNsense/Firewall/Filter/onetoone/rule[@uuid='7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e41']  <- nat
-/opnsense/OPNsense/Kea/dhcp4  <- kea-dhcp4
+/opnsense/OPNsense/Kea/dhcp4  <- kea
 /opnsense/OPNsense/unboundplus  <- unbound
 /opnsense/OPNsense/wireguard  <- wireguard
 /opnsense/ca[@uuid='9a7d8f90-ce35-4ce7-ae7f-952ebd95d44d']  <- trust

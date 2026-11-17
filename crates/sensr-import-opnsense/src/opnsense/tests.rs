@@ -1010,6 +1010,7 @@ fn ipv6_allowed_follows_interfaces_settings_over_legacy() {
             assert_eq!(again.document.system.ipv6_allow, allowed);
         }
     }
+}
 
 #[test]
 fn legacy_one_to_one_maps_like_the_mfp1_0_4_migration() {
