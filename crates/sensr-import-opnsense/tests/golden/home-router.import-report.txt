@@ -70,6 +70,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 ## unmapped, expected (81)
 =======
 ## unmapped, expected (66)
@@ -80,6 +81,9 @@
 =======
 ## unmapped, expected (70)
 >>>>>>> f1a61dd (goldens after rebase)
+=======
+## unmapped, expected (69)
+>>>>>>> 2ce0b0e (goldens after rebase onto main)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
