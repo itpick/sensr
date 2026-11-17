@@ -14,8 +14,9 @@
 # Environment: SENSR_HOUSE_REAL_INTERNET=1 gives the upstream a NAT to the
 # real internet (recursion, real blocklists, IDS rule downloads);
 # SENSR_HOUSE_STRICT=1 fails on any failed check. The VMs' disks live in a
-# temporary directory under OUT_DIR and are removed afterwards; delete
-# OUT_DIR yourself when its results hold private data.
+# temporary directory under OUT_DIR (XDG_RUNTIME_DIR and TMPDIR point there)
+# and are removed afterwards; delete OUT_DIR yourself when its results hold
+# private data.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/../../.." && pwd)
 params=$(realpath "$1") seed=$(realpath "$2") out=$(realpath -m "${3:-./house-out}")
@@ -39,4 +40,6 @@ SENSR_HOUSE_MAC_LAN=$(jq -r .router.lan.mac "$params")
 SENSR_HOUSE_MAC_LAN2=$(jq -r .router.lan2.mac "$params")
 export SENSR_HOUSE_MAC_WAN SENSR_HOUSE_MAC_LAN SENSR_HOUSE_MAC_LAN2
 cd "$tmp"
-PYTHONUNBUFFERED=1 TMPDIR=$tmp "$driver/bin/nixos-test-driver" --output_directory "$out" 2>&1 | tee "$out/house.log"
+# The driver keeps VM disks in XDG_RUNTIME_DIR (else TMPDIR): keep them in
+# $tmp, which the trap removes; the router's disk holds the seeded config.
+PYTHONUNBUFFERED=1 XDG_RUNTIME_DIR=$tmp TMPDIR=$tmp "$driver/bin/nixos-test-driver" --output_directory "$out" 2>&1 | tee "$out/house.log"
