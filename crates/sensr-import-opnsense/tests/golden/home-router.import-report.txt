@@ -1,6 +1,6 @@
 # sensr import report
 
-## mapped (37)
+## mapped (40)
 /opnsense/system  <- system
 /opnsense/vlans  <- interfaces
 /opnsense/interfaces  <- interfaces
@@ -9,6 +9,7 @@
 /opnsense/filter/rule[@uuid='7fdf1e38-9c02-4739-9175-2108029af84a']  <- filter
 /opnsense/filter/rule[@uuid='3f71ffc8-0a4b-4596-b1ff-22382acc4598']  <- filter
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='2064ba71-29e9-4ca4-a655-3069cd2fb19e']  <- filter
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='5a7e0c21-3f4b-4d1e-9c2a-6b8d0e1f4a40']  <- filter
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='8c3dc3ee-b23e-4170-af5a-5f23b2321d58']  <- filter
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='1aac7ca4-2950-47cf-af32-f24f076f55a2']  <- filter
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a01']  <- filter
@@ -31,7 +32,9 @@
 /opnsense/nat/outbound  <- nat
 /opnsense/nat/rule[@uuid='fc2c1c65-ad69-489b-967c-8ff95e8f2f80']  <- nat
 /opnsense/OPNsense/Firewall/Filter/snatrules/rule[@uuid='7d2b8cc7-2217-4d32-b029-3ba292c7751e']  <- nat
-/opnsense/OPNsense/Kea/dhcp4  <- kea-dhcp4
+/opnsense/OPNsense/Firewall/Filter/onetoone/rule[@uuid='7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e40']  <- nat
+/opnsense/OPNsense/Firewall/Filter/onetoone/rule[@uuid='7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e41']  <- nat
+/opnsense/OPNsense/Kea/dhcp4  <- kea
 /opnsense/OPNsense/unboundplus  <- unbound
 /opnsense/OPNsense/wireguard  <- wireguard
 /opnsense/ca[@uuid='9a7d8f90-ce35-4ce7-ae7f-952ebd95d44d']  <- trust
@@ -39,7 +42,7 @@
 /opnsense/OPNsense/Gateways  <- gateways
 /opnsense/OPNsense/Gateways/gateway_item[@uuid='9df1d26a-e824-425b-95df-aaf0fe534a17']  <- gateways
 
-## unmapped, expected (68)
+## unmapped, expected (70)
 /opnsense/theme  (web GUI theme)
 /opnsense/sysctl  (FreeBSD sysctl tunables do not apply to Linux)
 /opnsense/system/optimization  (pf state-timeout profile; nftables conntrack uses kernel defaults)
@@ -85,8 +88,8 @@
 /opnsense/rrd  (RRD graphs are replaced by sensr-monitor)
 /opnsense/ntpd  (NTP server preferences are not modelled yet (system.time_servers is imported))
 /opnsense/revision  (OPNsense revision metadata; sensr keeps its own revision history)
-/opnsense/OPNsense/Firewall/Alias/geoip  (GeoIP database source is not modelled yet)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='2064ba71-29e9-4ca4-a655-3069cd2fb19e']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='5a7e0c21-3f4b-4d1e-9c2a-6b8d0e1f4a40']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='8c3dc3ee-b23e-4170-af5a-5f23b2321d58']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='1aac7ca4-2950-47cf-af32-f24f076f55a2']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='4b0d1c55-9e1a-4f7e-8a51-0c1f2f6f1a01']/audit  (OPNsense change metadata; sensr keeps its own audit log)
@@ -101,6 +104,8 @@
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='ebd5ccfb-e396-4732-bc44-0f87bb45f5f7']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/rules/rule[@uuid='cf87b7c6-ccf9-4131-ac97-f2497b1370c2']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/Firewall/Filter/snatrules/rule[@uuid='7d2b8cc7-2217-4d32-b029-3ba292c7751e']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/onetoone/rule[@uuid='7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e40']/audit  (OPNsense change metadata; sensr keeps its own audit log)
+/opnsense/OPNsense/Firewall/Filter/onetoone/rule[@uuid='7b1f3c2d-8e4a-4f6b-9d0c-1a2b3c4d5e41']/audit  (OPNsense change metadata; sensr keeps its own audit log)
 /opnsense/OPNsense/wireguard/server/servers/server[@uuid='b0f47197-dacd-43c1-ad57-5dc0649126d3']/endpoint  (client-export defaults are not modelled yet)
 /opnsense/OPNsense/wireguard/server/servers/server[@uuid='b0f47197-dacd-43c1-ad57-5dc0649126d3']/allowed_ips  (client-export defaults are not modelled yet)
 /opnsense/OPNsense/Kea/dhcp4/lexpire  (Kea lease expiry tuning is not modelled yet)
