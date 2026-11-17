@@ -267,9 +267,14 @@ pkgs.testers.runNixOSTest {
             "suricatasc -c ruleset-stats /run/suricata/suricata-command.socket | jq -e '.message[0].rules_loaded >= 4'",
             timeout=120,
         )
-        # blocked: the response carrying uid=0(root) never arrives
-        rc, out = lan.execute(f"curl -s --max-time 8 http://{INTERNET}/uid")
-        assert "uid=0(root)" not in out, f"probe got through: {rc} {out!r}"
+        # blocked: the response carrying uid=0(root) never arrives. The rule
+        # download and the reload it triggers run in the background, and
+        # ruleset-stats reports the rule set the engine has, not the one it is
+        # about to load: retry until the new drop rule is in effect.
+        lan.wait_until_succeeds(
+            f"! curl -s --max-time 8 http://{INTERNET}/uid | grep -q 'uid=0(root)'",
+            timeout=60,
+        )
         # other traffic flows, also in bulk
         assert lan.succeed(f"curl -sf --max-time 5 http://{INTERNET}/").strip() == wan_ip
         t0 = time.time()
