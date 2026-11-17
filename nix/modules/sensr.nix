@@ -817,6 +817,9 @@ in
             ${pkgs.coreutils}/bin/install -m 0644 ${cfg.seedDir}/authorized_keys "$d/root"
           fi
         '';
+      };
+    };
+
     # Time: ntpd-rs owns the clock (OPNsense runs ntpd whenever time servers
     # are set); a second NTP client would fight it.
     services.timesyncd.enable = false;
