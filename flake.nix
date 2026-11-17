@@ -92,6 +92,15 @@
         pi5 = self.nixosConfigurations.pi5.config.system.build.sdImage;
       };
 
+      # Boot-time benchmark images (nix/bench/boot-times.py): the qcow
+      # router with the factory config or home-router.xml seeded, and the
+      # endpoints.
+      bench.x86_64-linux = {
+        router-factory = (mkSystem "x86_64-linux" [ (import ./nix/bench/router.nix { variant = "factory"; }) ]).config.system.build.image;
+        router-home = (mkSystem "x86_64-linux" [ (import ./nix/bench/router.nix { variant = "home"; }) ]).config.system.build.image;
+        endpoint = (lib.nixosSystem { system = "x86_64-linux"; modules = [ ./nix/bench/endpoint.nix ]; }).config.system.build.image;
+      };
+
       packages = forAll (pkgs: {
         default = pkgs.sensr;
         sensr = pkgs.sensr;

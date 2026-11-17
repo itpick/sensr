@@ -28,7 +28,9 @@
     bootCounting.tries = 3;
   };
   boot.loader.efi.canTouchEfiVariables = false;
-  boot.loader.timeout = 1;
+  # No menu wait: boot counting picks the entry, and holding a key (space)
+  # at power-on still shows the menu. Saves a second of every boot.
+  boot.loader.timeout = 0;
 
   # The ESP holds the bootloader and the seed folder, but the system must
   # come up without it: a slow or missing ESP made the benchmark's NixOS

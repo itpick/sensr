@@ -244,6 +244,18 @@ in
       '';
     };
 
+    ssh.enable = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Run sshd, key-only. Keys come from /run/sensr/ssh/authorized_keys/<user>
+        (rendered by the agent from the config's users) and, until the agent
+        imports it, from the seed folder's authorized_keys (for root). The
+        WAN never reaches it: sensr's rules drop WAN traffic to the box
+        unless a rule passes it.
+      '';
+    };
+
     seedDir = mkOption {
       type = types.str;
       default = "/boot/sensr";
@@ -462,10 +474,10 @@ in
     systemd.services.sensr-api = mkIf cfg.api.enable {
       description = "sensr API and web UI";
       wantedBy = [ "multi-user.target" ];
-      after = [
-        "sensr-agent.service"
-        "sensr-net.target"
-      ];
+      # Not ordered after the agent: the API connects to the agent socket
+      # per request, so the management UI answers while the agent is still
+      # running its boot apply (and reports the agent as unavailable for
+      # the second or so before its socket exists).
       wants = [ "sensr-agent.service" ];
       environment = {
         SENSR_AGENT_SOCKET = socket;
@@ -541,10 +553,16 @@ in
       unitConfig.ConditionPathExists = "${runtimeDir}/unbound/unbound.conf";
       serviceConfig = commonHardening // {
         ExecStartPre = [
-          # the DNSSEC root anchor lives in the state directory; seed it from
-          # unbound's built-in anchor (no network needed), "-": exit 1 means
-          # "used the built-in anchor"
-          "-${pkgs.unbound}/bin/unbound-anchor -a /var/lib/unbound/root.key"
+          # The DNSSEC root anchor lives in the state directory. Seed it from
+          # the closure's copy (dns-root-data) when missing; Unbound keeps it
+          # current itself (RFC 5011). Not unbound-anchor: without a route
+          # to the internet it waits for its fetch to time out, about 5 s
+          # of every first boot, and the agent's boot apply waits with it.
+          "${pkgs.writeShellScript "sensr-unbound-anchor" ''
+            if [ ! -s /var/lib/unbound/root.key ]; then
+              ${pkgs.coreutils}/bin/install -m 0644 ${pkgs.dns-root-data}/root.key /var/lib/unbound/root.key
+            fi
+          ''}"
           "${pkgs.unbound}/bin/unbound-checkconf ${runtimeDir}/unbound/unbound.conf"
         ];
         ExecStart = "${pkgs.unbound}/bin/unbound -d -p -c ${runtimeDir}/unbound/unbound.conf";
@@ -667,6 +685,42 @@ in
       timerConfig = {
         OnCalendar = "*-*-* 04:00:00";
         Persistent = true;
+      };
+    };
+
+    services.openssh = mkIf cfg.ssh.enable {
+      enable = true;
+      # sensr owns the packet filter (and networking.firewall is off).
+      openFirewall = false;
+      settings = {
+        PasswordAuthentication = false;
+        KbdInteractiveAuthentication = false;
+        PermitRootLogin = "prohibit-password";
+      };
+      authorizedKeysFiles = [ "/run/sensr/ssh/authorized_keys/%u" ];
+    };
+    # Stopgap until the agent imports the seed's authorized_keys into the
+    # config: give root the seed's keys at boot, unless the agent has
+    # already rendered keys for root.
+    systemd.services.sensr-seed-ssh-keys = mkIf cfg.ssh.enable {
+      description = "SSH keys for root from the seed folder";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "sshd.service" ];
+      after = [ "local-fs.target" ];
+      unitConfig = {
+        RequiresMountsFor = cfg.seedDir;
+        ConditionPathExists = "${cfg.seedDir}/authorized_keys";
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = pkgs.writeShellScript "sensr-seed-ssh-keys" ''
+          set -eu
+          d=/run/sensr/ssh/authorized_keys
+          mkdir -p -m 0755 /run/sensr/ssh "$d"
+          if [ ! -s "$d/root" ]; then
+            ${pkgs.coreutils}/bin/install -m 0644 ${cfg.seedDir}/authorized_keys "$d/root"
+          fi
+        '';
       };
     };
 

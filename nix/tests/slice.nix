@@ -326,6 +326,8 @@ pkgs.testers.runNixOSTest {
         with subtest("firewall: the WAN is closed by default"):
             blocked(internet, f"curl http://{wan_ip}:8080/")
             blocked(internet, f"curl http://{wan_ip}:80/")
+            # sshd runs on the router, but never for the WAN.
+            blocked(internet, f"curl telnet://{wan_ip}:22")
 
         with subtest("port forward: WAN 443 reaches the NAS"):
             out = internet.succeed(f"curl -sf --max-time 5 http://{wan_ip}:443/").strip()
