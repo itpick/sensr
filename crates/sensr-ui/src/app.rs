@@ -53,6 +53,8 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/ui/core/dashboard") view=Dashboard/>
                     <Route path=path!("/ui/interfaces/assignment") view=Assignments/>
                     <Route path=path!("/ui/interfaces/if/:id") view=InterfacePage/>
+                    <Route path=path!("/ui/interfaces/overview") view=InterfacesOverview/>
+                    <Route path=path!("/ui/routing/status") view=GatewayStatusPage/>
                     <Route path=path!("/ui/firewall/alias") view=Aliases/>
                     <Route path=path!("/ui/firewall/filter") view=Rules/>
                     <Route path=path!("/ui/firewall/filter/:if") view=Rules/>

@@ -4,10 +4,11 @@
 //! through [`bump`] without either knowing about the other.
 
 use crate::actions::*;
-use crate::api::{DiffKind, FieldError, GatewayHealth, Pending, SystemStatus};
+use crate::api::{DiffKind, FieldError, Pending, SystemStatus};
 use crate::form::{Choices, FieldKind, FieldSpec, Inputs, to_inputs};
 use crate::grid::{ColumnKind, GridPage, GridQuery, SortDir, cell_text};
 use crate::models::{FormId, GridId};
+use crate::runtime::{GatewayRow, GatewayState, GatewaysView, ms, pct};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde_json::Value;
@@ -713,6 +714,19 @@ pub fn GridIsland(
                         let on = txt == "yes";
                         view! { <td><span class=if on { "pill pill-on" } else { "pill pill-off" }>{if on { "on" } else { "off" }}</span></td> }.into_any()
                     }
+                    ColumnKind::Status => {
+                        let cell = crate::form::get_path(&row, c.path);
+                        let field = |k: &str| cell.and_then(|v| v.get(k)).and_then(Value::as_str).map(str::to_owned);
+                        let badge = (field("tone").as_deref() == Some("bad")).then(|| {
+                            let title = field("title").unwrap_or_default();
+                            let word = field("badge").unwrap_or_else(|| "error".to_owned());
+                            view! {
+                                " "<span class="pill pill-off" title=title.clone()>{word}</span>
+                                <span class="sr-only">{format!(": {title}")}</span>
+                            }
+                        });
+                        view! { <td>{txt}{badge}</td> }.into_any()
+                    }
                     _ => view! { <td>{txt}</td> }.into_any(),
                 }
             }).collect_view();
@@ -920,6 +934,149 @@ fn sparkline(rx: &[u64], tx: &[u64]) -> impl IntoView + use<> {
     }
 }
 
+/// Status badge of a gateway, in the OPNsense colours.
+pub fn gateway_badge(state: GatewayState) -> impl IntoView {
+    view! { <span class=state.tone().pill()>{state.label()}</span> }
+}
+
+/// One compact entry of the dashboard Gateways widget.
+fn gateway_item(g: &GatewayRow) -> impl IntoView + use<> {
+    view! {
+        <li class="gw-item">
+            <div class="gw-name">
+                <strong>{g.name.clone()}</strong>
+                {g.active_default.then(|| view! { <span class="muted">" (active)"</span> })}
+                <br/><span class="muted">{g.next_hop.clone().unwrap_or_else(|| "~".to_owned())}</span>
+            </div>
+            <dl class="gw-stats">
+                <dt>"RTT"</dt><dd>{ms(g.latency_ms)}</dd>
+                <dt>"RTTd"</dt><dd>{ms(g.stddev_ms)}</dd>
+                <dt>"Loss"</dt><dd>{pct(g.loss_pct)}</dd>
+            </dl>
+            {gateway_badge(g.status)}
+        </li>
+    }
+}
+
+/// System › Gateways › Status: every gateway with its monitor figures, and the gateway
+/// groups with their active members; refreshed every 5 s.
+#[island]
+pub fn GatewaysLive(initial: GatewaysView) -> impl IntoView {
+    mark_hydrated();
+    let st = RwSignal::new(initial);
+    let error = RwSignal::new(None::<String>);
+    Effect::new(move |_| {
+        set_interval(
+            move || {
+                spawn_local(async move {
+                    match gateways_status().await {
+                        Ok(v) => {
+                            error.set(None);
+                            st.set(v);
+                        }
+                        Err(e) => error.set(Some(format!("Could not refresh: {e}"))),
+                    }
+                });
+            },
+            std::time::Duration::from_secs(5),
+        );
+    });
+    let rows = move || {
+        st.with(|v| {
+            if v.gateways.is_empty() {
+                return view! { <tr><td class="empty" colspan="9">"No gateways are monitored."</td></tr> }.into_any();
+            }
+            v.gateways
+                .iter()
+                .map(|g| {
+                    let fam = g.family_label();
+                    view! {
+                        <tr>
+                            <td>
+                                <strong>{g.name.clone()}</strong>
+                                {g.active_default.then(|| view! {
+                                    " "<span class="pill pill-info" title=format!("Default {fam} gateway")>"active"</span>
+                                })}
+                                {g.dynamic.then(|| view! { <br/><span class="muted small">"automatic"</span> })}
+                            </td>
+                            <td>{g.interface.to_uppercase()}<span class="muted">{format!(" {fam}")}</span></td>
+                            <td>{g.next_hop.clone().unwrap_or_else(|| "~".to_owned())}</td>
+                            <td>{g.monitor_address.clone().or_else(|| g.next_hop.clone()).unwrap_or_else(|| "~".to_owned())}</td>
+                            <td class="num">{g.priority}</td>
+                            <td class="num">{ms(g.latency_ms)}</td>
+                            <td class="num">{ms(g.stddev_ms)}</td>
+                            <td class="num">{pct(g.loss_pct)}</td>
+                            <td>
+                                {gateway_badge(g.status)}
+                                {g.error.clone().map(|e| view! { <br/><span class="field-error small">{e}</span> })}
+                            </td>
+                        </tr>
+                    }
+                })
+                .collect_view()
+                .into_any()
+        })
+    };
+    let groups = move || {
+        st.with(|v| {
+            if v.groups.is_empty() {
+                return view! { <p class="muted">"No gateway groups."</p> }.into_any();
+            }
+            view! {
+                <div class="table-wrap">
+                <table>
+                    <thead><tr><th scope="col">"Group"</th><th scope="col">"Active members"</th></tr></thead>
+                    <tbody>
+                        {v.groups.iter().map(|(name, members)| {
+                            let members = if members.is_empty() {
+                                view! { <span class="pill pill-off">"none"</span> }.into_any()
+                            } else {
+                                members.iter().map(|m| {
+                                    let state = v.gateways.iter().find(|g| &g.name == m).map(|g| g.status);
+                                    view! {
+                                        <span class="gw-member">{m.clone()}" "{state.map(gateway_badge)}</span>
+                                    }
+                                }).collect_view().into_any()
+                            };
+                            view! { <tr><td><strong>{name.clone()}</strong></td><td>{members}</td></tr> }
+                        }).collect_view()}
+                    </tbody>
+                </table>
+                </div>
+            }
+            .into_any()
+        })
+    };
+    view! {
+        <section class="card" aria-labelledby="gw-status">
+            <h2 id="gw-status">"Gateways"</h2>
+            <div class="table-wrap">
+            <table class="gw-table">
+                <thead><tr>
+                    <th scope="col">"Name"</th><th scope="col">"Interface"</th>
+                    <th scope="col">"Gateway"</th><th scope="col">"Monitor IP"</th>
+                    <th scope="col">"Priority"</th><th scope="col">"RTT"</th>
+                    <th scope="col">"RTTd"</th><th scope="col">"Loss"</th><th scope="col">"Status"</th>
+                </tr></thead>
+                <tbody aria-live="polite">{rows}</tbody>
+            </table>
+            </div>
+            <p class="muted small">
+                {move || st.with(|v| if v.switch_default {
+                    "Default gateway switching is on: the default route follows the highest-priority gateway that is up."
+                } else {
+                    "Default gateway switching is off."
+                })}
+            </p>
+            {move || error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
+        </section>
+        <section class="card" aria-labelledby="gw-groups">
+            <h2 id="gw-groups">"Gateway groups"</h2>
+            {groups}
+        </section>
+    }
+}
+
 /// The dashboard widgets, refreshed every few seconds.
 #[island]
 pub fn DashboardLive(initial: SystemStatus) -> impl IntoView {
@@ -986,27 +1143,12 @@ pub fn DashboardLive(initial: SystemStatus) -> impl IntoView {
                 </div>
             </section>
             <section class="card" aria-labelledby="w-gw">
-                <h2 id="w-gw">"Gateways"</h2>
-                <table>
-                    <thead><tr><th scope="col">"Name"</th><th scope="col">"RTT"</th><th scope="col">"Loss"</th><th scope="col">"Status"</th></tr></thead>
-                    <tbody>
-                        {move || st.with(|s| s.gateways.iter().map(|g| {
-                            let (class, text) = match g.health {
-                                GatewayHealth::Online => ("pill pill-on", "Online"),
-                                GatewayHealth::Degraded => ("pill pill-warn", "Latency"),
-                                GatewayHealth::Down => ("pill pill-off", "Offline"),
-                            };
-                            view! {
-                                <tr>
-                                    <td>{g.name.clone()}<br/><span class="muted">{g.address.clone()}</span></td>
-                                    <td class="num">{format!("{:.1} ms", g.rtt_ms)}</td>
-                                    <td class="num">{format!("{:.0} %", g.loss_pct)}</td>
-                                    <td><span class=class>{text}</span></td>
-                                </tr>
-                            }
-                        }).collect_view())}
-                    </tbody>
-                </table>
+                <h2 id="w-gw"><a href="/ui/routing/status">"Gateways"</a></h2>
+                {move || st.with(|s| if s.gateways.is_empty() {
+                    view! { <p class="muted">"No gateway data."</p> }.into_any()
+                } else {
+                    view! { <ul class="gw-list">{s.gateways.iter().map(gateway_item).collect_view()}</ul> }.into_any()
+                })}
             </section>
             <section class="card card-wide" aria-labelledby="w-tr">
                 <h2 id="w-tr">"Traffic"</h2>

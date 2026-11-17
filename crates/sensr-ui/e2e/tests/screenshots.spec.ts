@@ -7,6 +7,7 @@ const pages: [string, string][] = [
   ["dashboard", "/"],
   ["interfaces-assignments", "/ui/interfaces/assignment"],
   ["interfaces-wan", "/ui/interfaces/if/wan"],
+  ["interfaces-overview", "/ui/interfaces/overview"],
   ["firewall-aliases", "/ui/firewall/alias"],
   ["firewall-rules-lan", "/ui/firewall/filter/lan"],
   ["firewall-source-nat", "/ui/firewall/source_nat"],
@@ -18,6 +19,7 @@ const pages: [string, string][] = [
   ["vpn-wireguard-peers", "/ui/wireguard/peers"],
   ["system-general", "/ui/system/general"],
   ["system-history", "/ui/core/backup/history"],
+  ["system-gateways-status", "/ui/routing/status"],
 ];
 
 const viewports = { desktop: { width: 1366, height: 860 }, phone: { width: 390, height: 844 } };

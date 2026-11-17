@@ -127,6 +127,8 @@ const CORE: &[Node] = &[
             n("Configuration")
                 .order(10)
                 .url("/ui/routing/configuration"),
+            // sensr addition: OPNsense shows the monitor state as a column of Configuration.
+            n("Status").order(15).url("/ui/routing/status"),
             n("Group").order(20).url("/ui/routing/gateway_groups"),
             n("LogFile")
                 .order(30)
@@ -733,6 +735,23 @@ mod tests {
             build(&ifs[..1])
                 .iter()
                 .all(|s| s.children.iter().all(|c| c.id != "DHCPv4"))
+        );
+    }
+
+    #[test]
+    fn gateway_status_sits_between_configuration_and_group() {
+        let m = build(&[]);
+        assert_eq!(
+            labels(&find(&m, &["System", "Gateways"]).children),
+            ["Configuration", "Status", "Group", "Log File"]
+        );
+        assert_eq!(
+            breadcrumb(&m, "/ui/routing/status"),
+            ["System", "Gateways", "Status"]
+        );
+        assert_eq!(
+            breadcrumb(&m, "/ui/interfaces/overview"),
+            ["Interfaces", "Overview"]
         );
     }
 

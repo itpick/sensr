@@ -1,9 +1,9 @@
 //! The UI's view of the sensr API: wire types shared with the browser, and (server side) the
 //! [`Backend`] trait the pages are written against.
 //!
-//! The trait mirrors the sensr-api REST surface (config get/set/commit/history/diff plus status
-//! and sessions) so the mock in [`crate::mock`] and the HTTP client can be swapped without the
-//! pages noticing.
+//! The trait mirrors the sensr-api REST surface (config get/set/commit/history/diff plus status,
+//! run-time views and sessions) so the mock in [`crate::mock`] and the HTTP client can be
+//! swapped without the pages noticing.
 
 use serde::{Deserialize, Serialize};
 
@@ -130,34 +130,6 @@ pub struct InterfaceStatus {
     pub tx_bps: u64,
 }
 
-/// Gateway health as monitored by the routing layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GatewayHealth {
-    /// Probes answer within thresholds.
-    Online,
-    /// Latency or loss above the warning threshold.
-    Degraded,
-    /// No answers.
-    Down,
-}
-
-/// One monitored gateway.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GatewayStatus {
-    /// Gateway name, e.g. `WAN_DHCP`.
-    pub name: String,
-    /// Interface it belongs to.
-    pub interface: String,
-    /// Gateway address.
-    pub address: String,
-    /// Round-trip time in milliseconds.
-    pub rtt_ms: f32,
-    /// Packet loss in percent.
-    pub loss_pct: f32,
-    /// Health classification.
-    pub health: GatewayHealth,
-}
-
 /// A traffic sample for one interface.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrafficSeries {
@@ -192,8 +164,10 @@ pub struct SystemStatus {
     pub mem_total: u64,
     /// Interfaces, in assignment order.
     pub interfaces: Vec<InterfaceStatus>,
-    /// Gateways.
-    pub gateways: Vec<GatewayStatus>,
+    /// Gateways, from the gateway monitor's run-time view (filled by the dashboard's
+    /// server function, so backends leave it empty).
+    #[serde(default)]
+    pub gateways: Vec<crate::runtime::GatewayRow>,
     /// Recent traffic per interface.
     pub traffic: Vec<TrafficSeries>,
 }
@@ -239,6 +213,12 @@ mod server {
         fn diff(&self, from: u64, to: Option<u64>) -> BoxFuture<'_, ApiResult<Vec<DiffLine>>>;
         /// Live status for the dashboard.
         fn status(&self) -> BoxFuture<'_, ApiResult<SystemStatus>>;
+        /// Run-time state of one subsystem as the agent reports it (`null` when the
+        /// subsystem is not running). Parse with [`crate::runtime::parse`].
+        fn runtime(
+            &self,
+            section: crate::runtime::RuntimeSection,
+        ) -> BoxFuture<'_, ApiResult<Value>>;
     }
 
     /// A backend bound to one signed-in user (their identity and privileges travel with
