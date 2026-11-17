@@ -68,6 +68,9 @@ impl HttpFetcher {
     pub fn new(opts: HttpOptions) -> HttpFetcher {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(opts.timeout))
+            // name resolution and connect: a dead host fails fast
+            .timeout_resolve(Some(std::time::Duration::from_secs(10)))
+            .timeout_connect(Some(std::time::Duration::from_secs(10)))
             .http_status_as_error(false)
             .user_agent(concat!("sensr/", env!("CARGO_PKG_VERSION")))
             .build()

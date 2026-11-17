@@ -49,6 +49,8 @@ pub const DB_INTERVAL: u64 = 86_400;
 pub const RETRY_AFTER: u64 = 300;
 /// Longest retry interval.
 pub const MAX_BACKOFF: u64 = 3_600;
+/// URL sources fetched at once.
+const PARALLEL_FETCHES: usize = 8;
 /// Largest decompressed database accepted.
 const MAX_DB_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -409,8 +411,10 @@ impl Feeds {
         let mut fetches = Vec::new();
         let mut changed = false;
 
-        // URL and URL-table aliases
+        // URL and URL-table aliases, fetched in parallel: one slow or
+        // unreachable host must not hold up the others
         let mut seen = BTreeSet::new();
+        let mut due: Vec<(&str, &Auth)> = Vec::new();
         for d in &enabled {
             let ttl = url_ttl(&d.kind);
             for (url, auth) in urls(&d.kind) {
@@ -418,9 +422,28 @@ impl Feeds {
                     continue;
                 }
                 let m = self.cache.meta(url);
-                if next_due(&m, ttl).is_some_and(|due| now >= due) {
-                    changed |= self.fetch_url(url, auth, now, &mut fetches);
+                if next_due(&m, ttl).is_some_and(|d| now >= d) {
+                    due.push((url, auth));
                 }
+            }
+        }
+        for batch in due.chunks(PARALLEL_FETCHES) {
+            let results: Vec<(bool, Vec<FetchReport>)> = std::thread::scope(|sc| {
+                let handles: Vec<_> = batch
+                    .iter()
+                    .map(|(url, auth)| {
+                        sc.spawn(move || {
+                            let mut r = Vec::new();
+                            let c = self.fetch_url(url, auth, now, &mut r);
+                            (c, r)
+                        })
+                    })
+                    .collect();
+                handles.into_iter().filter_map(|h| h.join().ok()).collect()
+            });
+            for (c, r) in results {
+                changed |= c;
+                fetches.extend(r);
             }
         }
 
