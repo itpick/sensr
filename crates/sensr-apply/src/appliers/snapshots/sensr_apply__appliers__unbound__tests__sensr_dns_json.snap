@@ -1,0 +1,88 @@
+---
+source: crates/sensr-apply/src/appliers/unbound.rs
+expression: json
+---
+{
+  "control_conf": "/run/sensr/unbound/control.conf",
+  "state_dir": "/var/lib/sensr-dns",
+  "statistics": true,
+  "blocklist": {
+    "policies": [
+      {
+        "id": "00000000-0000-0000-0000-00005e450050",
+        "policy": {
+          "enabled": true,
+          "description": "Ads and trackers",
+          "lists": [
+            "hagezi-pro"
+          ],
+          "block": [
+            "tracker.example.net"
+          ],
+          "block_subtrees": [
+            "ads.example.net"
+          ],
+          "allow": [
+            "ok.ads.example.net"
+          ],
+          "answer": {
+            "mode": "address",
+            "address": "0.0.0.0"
+          },
+          "refresh_seconds": 72000
+        }
+      },
+      {
+        "id": "00000000-0000-0000-0000-00005e450051",
+        "policy": {
+          "enabled": true,
+          "description": "IoT threat intel",
+          "lists": [
+            "hagezi-tif"
+          ],
+          "source_nets": [
+            "192.168.20.0/24"
+          ],
+          "answer": {
+            "mode": "nxdomain"
+          },
+          "refresh_seconds": 72000
+        }
+      }
+    ],
+    "protected": [
+      "home.arpa",
+      "nas.home.arpa",
+      "files.home.arpa",
+      "cluster.internal.example.org",
+      "corp.example",
+      "1.168.192.in-addr.arpa"
+    ],
+    "default_action": "allow",
+    "acls": [
+      [
+        "192.168.30.0/24",
+        "refuse_non_local"
+      ]
+    ]
+  },
+  "leases": {
+    "lease_file": "/var/lib/kea/dhcp4.leases",
+    "default_domain": "home.arpa",
+    "subnets": [],
+    "static_names": [
+      "_info.home.arpa",
+      "cluster.internal.example.org",
+      "files.home.arpa",
+      "home.arpa",
+      "nas.home.arpa",
+      "printer.home.arpa",
+      "sensr.home.arpa"
+    ],
+    "static_addresses": [
+      "192.168.1.1",
+      "192.168.1.10",
+      "192.168.1.11"
+    ]
+  }
+}

@@ -1,2 +1,3 @@
 unbound.conf:unbound.conf
-dhcp-leases.conf:dhcp-leases.conf
+control.conf:control.conf
+sensr-dns.json:sensr-dns.json

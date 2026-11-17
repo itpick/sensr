@@ -5,19 +5,21 @@
 //! devices, Kea's numeric subnet ids, interface addresses for automatic DHCP
 //! options and resolver bindings, and secrets as files the daemons read.
 
+use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
 use sensr_schema::Document;
 use sensr_schema::array::Uuid;
-use sensr_schema::fields::{DeviceName, Host, InterfaceId};
+use sensr_schema::fields::{DeviceName, DomainName, Host, HostOverrideName, InterfaceId};
 use sensr_schema::models::interfaces::{Interface, InterfaceRole, Ipv4Config, Ipv6Config, Qdisc};
 
 use super::SliceModels;
+use super::dns_runtime::{self, BlocklistRuntime, DnsRuntime, LeaseRuntime, PolicyRuntime};
 use super::kea::{self, Dhcp4Model, KeaSubnet};
 use super::qdisc::{Diffserv, QdiscModel, Shaper};
 use super::sysctl::SysctlModel;
-use super::unbound::{AclAction, DomainForward, UnboundModel, Upstream};
+use super::unbound::{Acl, DomainForward, StaticHost, UnboundModel, Upstream};
 use super::wireguard::{Endpoint, WgInterface, WgPeer, WireguardModel};
 
 /// Conversion failures (references the schema's validation already checks,
@@ -227,39 +229,174 @@ pub fn unbound(doc: &Document) -> Result<Option<UnboundModel>, ConvertError> {
             },
         }
     }
-    let self_addresses = doc
-        .interfaces
-        .iter()
-        .filter(|(_, i)| i.enabled && i.role != InterfaceRole::Wan)
-        .flat_map(|(_, i)| {
-            static_v4(i)
-                .map(|a| IpAddr::V4(a.addr()))
-                .into_iter()
-                .chain(static_v6(i).map(|a| IpAddr::V6(a.addr())))
+    let self_addresses: Vec<IpAddr> = if d.register_firewall_records {
+        doc.interfaces
+            .iter()
+            .filter(|(_, i)| i.enabled && i.role != InterfaceRole::Wan)
+            .flat_map(|(_, i)| {
+                static_v4(i)
+                    .map(|a| IpAddr::V4(a.addr()))
+                    .into_iter()
+                    .chain(static_v6(i).map(|a| IpAddr::V6(a.addr())))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut outgoing = Vec::new();
+    for id in &d.outgoing_interfaces {
+        let i = iface(doc, id, "dns.outgoing_interfaces")?;
+        outgoing.extend(static_v4(i).map(|a| IpAddr::V4(a.addr())));
+        outgoing.extend(static_v6(i).map(|a| IpAddr::V6(a.addr())));
+    }
+    let acls: Vec<Acl> = d
+        .access
+        .lists
+        .values()
+        .filter(|l| l.enabled)
+        .flat_map(|l| {
+            l.networks.iter().map(|n| Acl {
+                network: *n,
+                action: l.action.into(),
+                name: Some(l.name.to_string()),
+            })
         })
         .collect();
+    let host_overrides: Vec<_> = d
+        .host_overrides
+        .values()
+        .filter(|h| h.enabled)
+        .cloned()
+        .collect();
+
+    // Reservations by name (OPNsense `regdhcpstatic`), in the subnet's
+    // domain or the system domain, only while the DHCP server runs (Kea's
+    // static-mapping hook returns nothing when it is disabled).
+    let subnet_domain = |uuid: &Uuid| {
+        doc.dhcpv4
+            .subnets
+            .get(uuid)
+            .and_then(|s| s.options.domain_name.clone())
+    };
+    let static_hosts: Vec<StaticHost> = if d.register_dhcp_static && doc.dhcpv4.enabled {
+        doc.dhcpv4
+            .reservations
+            .values()
+            .filter_map(|r| {
+                Some(StaticHost {
+                    hostname: r.hostname.clone()?,
+                    domain: subnet_domain(&r.subnet.id())
+                        .unwrap_or_else(|| doc.system.domain.clone()),
+                    address: IpAddr::V4(r.ip_address?),
+                    description: r.description.clone(),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let leases = (d.register_dhcp_leases && doc.dhcpv4.enabled).then(|| LeaseRuntime {
+        lease_file: kea::LEASE_FILE.into(),
+        default_domain: d
+            .dhcp_domain
+            .clone()
+            .unwrap_or_else(|| doc.system.domain.clone()),
+        subnets: doc
+            .dhcpv4
+            .subnets
+            .iter()
+            .filter_map(|(id, s)| Some((kea_subnet_id(id), s.options.domain_name.clone()?)))
+            .collect(),
+        static_names: host_overrides
+            .iter()
+            .filter(|h| !matches!(h.hostname, HostOverrideName::Wildcard))
+            .map(|h| h.fqdn().to_ascii_lowercase())
+            .chain(static_hosts.iter().map(|h| h.fqdn().to_ascii_lowercase()))
+            .chain([format!("{}.{}", doc.system.hostname, doc.system.domain).to_ascii_lowercase()])
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        static_addresses: static_hosts
+            .iter()
+            .map(|h| h.address)
+            .chain(self_addresses.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+    });
+
+    let policies: Vec<PolicyRuntime> = d
+        .blocklists
+        .iter()
+        .filter(|(_, b)| b.enabled)
+        .map(|(id, b)| PolicyRuntime {
+            id: *id,
+            policy: b.clone(),
+        })
+        .collect();
+    let blocklist = (!policies.is_empty()).then(|| {
+        let mut protected = vec![doc.system.domain.clone()];
+        let mut add = |n: DomainName| {
+            if !protected.contains(&n) {
+                protected.push(n);
+            }
+        };
+        for h in &host_overrides {
+            if let Ok(n) = h.fqdn().parse() {
+                add(n);
+            }
+        }
+        for f in &domain_forwards {
+            add(f.domain.clone());
+        }
+        for s in &static_hosts {
+            add(s.domain.clone());
+        }
+        if let Some(l) = &leases {
+            add(l.default_domain.clone());
+            for (_, dom) in &l.subnets {
+                add(dom.clone());
+            }
+        }
+        BlocklistRuntime {
+            policies,
+            protected,
+            default_action: d.access.default_action.into(),
+            acls: acls.iter().map(|a| (a.network, a.action)).collect(),
+        }
+    });
+
     Ok(Some(UnboundModel {
         port: d.port.get(),
         listen,
+        outgoing,
         ipv6: true,
         // OPNsense's default; the firewall keeps WAN clients out.
-        default_action: AclAction::Allow,
-        acls: Vec::new(),
+        default_action: d.access.default_action.into(),
+        acls,
         dnssec: d.dnssec,
+        dns64: d.dns64.then_some(d.dns64_prefix),
         forwarders,
         domain_forwards,
-        host_overrides: d
-            .host_overrides
-            .values()
-            .filter(|h| h.enabled)
-            .cloned()
-            .collect(),
+        host_overrides,
+        static_hosts,
+        txt_descriptions: d.txt_descriptions,
         local_zone_type: d.local_zone_type,
         hostname: doc.system.hostname.clone(),
         domain: doc.system.domain.clone(),
         self_addresses,
         rebind_protection: true,
-        register_dhcp_leases: d.register_dhcp_leases,
+        tuning: d.tuning.clone(),
+        register_dhcp_leases: leases.is_some(),
+        blocklist: blocklist.is_some(),
+        runtime: DnsRuntime {
+            control_conf: dns_runtime::CONTROL_CONF.into(),
+            state_dir: dns_runtime::STATE_DIR.into(),
+            statistics: d.statistics,
+            blocklist,
+            leases,
+        },
         directory: "/var/lib/unbound".into(),
         tls_cert_bundle: "/etc/ssl/certs/ca-certificates.crt".into(),
         control_socket: "/run/unbound/unbound.ctl".into(),

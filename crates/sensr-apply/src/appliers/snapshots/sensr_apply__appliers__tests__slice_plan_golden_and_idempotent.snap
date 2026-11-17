@@ -2,7 +2,7 @@
 source: crates/sensr-apply/src/appliers/mod.rs
 expression: "p.diff(&Plan::default()).dry_run(&Plan::default())"
 ---
-16 change(s):
+17 change(s):
   [Firewall] load ruleset 634317eaecf0 (0 rules)
   [Sysctl] net.core.default_qdisc = fq_codel (new)
   [Sysctl] net.ipv4.conf.all.rp_filter = 2 (new)
@@ -12,8 +12,9 @@ expression: "p.diff(&Plan::default()).dry_run(&Plan::default())"
   [Sysctl] net.ipv6.conf.default.accept_ra = 2 (new)
   [Qdisc] eth0: cake bandwidth 95000kbit besteffort nat (new)
   [Files] create /run/sensr/kea/kea-dhcp4.conf (2258 bytes)
-  [Files] create /run/sensr/unbound/dhcp-leases.conf (64 bytes)
-  [Files] create /run/sensr/unbound/unbound.conf (2006 bytes)
+  [Files] create /run/sensr/unbound/control.conf (277 bytes)
+  [Files] create /run/sensr/unbound/sensr-dns.json (1869 bytes)
+  [Files] create /run/sensr/unbound/unbound.conf (3497 bytes)
   [Files] create /run/systemd/network/50-sensr-wg0.netdev (550 bytes)
   [Files] create /run/systemd/network/50-sensr-wg0.network (103 bytes)
   [Services] reload sensr-kea-dhcp4.service
