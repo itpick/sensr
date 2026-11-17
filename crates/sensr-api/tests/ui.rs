@@ -5,7 +5,6 @@
 use std::os::unix::fs::MetadataExt;
 
 use sensr_agent::applier::FakeApplier;
-use sensr_agent::store::MemStore;
 use sensr_agent::{Agent, Running, Settings};
 use sensr_auth::password::hash_password;
 use sensr_ipc::{Client, Op, Principal};
@@ -26,26 +25,45 @@ async fn start() -> Fx {
         trusted_uids: vec![me],
         ..Settings::default()
     };
-    let agent = Agent::new(MemStore::new(), FakeApplier::default(), settings).unwrap();
+    let agent = Agent::new(
+        sensr_agent::store::in_memory(),
+        FakeApplier::default(),
+        settings,
+    )
+    .unwrap();
+    agent.boot().await.unwrap();
     let socket = dir.path().join("agent.sock");
     let running = sensr_agent::start(agent, &socket, 0o600, None).unwrap();
-    let doc = json!({
-        "system": {
-            "hostname": "fw",
-            "domain": "example.org",
-            "user": [{"name": "admin", "uid": "0", "password": hash_password("adminpw").unwrap()}],
-            "group": [{"name": "admins", "member": "0", "priv": "page-all"}],
-        },
-        "interfaces": {"lan": {"device": "eth1", "description": "LAN",
-                               "ipv4": {"mode": "static", "address": "192.168.1.1/24"}}},
-        "firewall": {"aliases": {"0c5e2a3e-0000-4000-a000-000000000001": {
-            "enabled": true, "name": "nas", "content": {"type": "host", "entries": ["192.168.1.10"]},
-            "description": "File server"}}},
-    });
     let mut c = Client::connect(&socket, Principal::unix("seed", 0))
         .await
         .unwrap();
-    c.call(Op::ConfigLoad { document: doc }).await.unwrap();
+    for (path, value) in [
+        ("system.hostname", json!("fw")),
+        ("system.domain", json!("example.org")),
+        ("interfaces.lan.description", json!("LAN")),
+        (
+            "system.groups.6f0c6f9e-0000-4000-8000-000000000101",
+            json!({"name": "admins", "gid": 1999, "privileges": ["page-all"]}),
+        ),
+        (
+            "system.users.6f0c6f9e-0000-4000-8000-000000000001",
+            json!({"name": "admin", "uid": 0, "groups": ["admins"],
+                   "password_hash": hash_password("adminpw").unwrap()}),
+        ),
+        (
+            "firewall.aliases.0c5e2a3e-0000-4000-a000-000000000001",
+            json!({"enabled": true, "name": "nas",
+                   "content": {"type": "host", "entries": ["192.168.1.10"]},
+                   "description": "File server"}),
+        ),
+    ] {
+        c.call(Op::ConfigSet {
+            path: path.parse().unwrap(),
+            value,
+        })
+        .await
+        .unwrap();
+    }
     c.call(Op::ConfigCommit {
         description: Some("seed".into()),
         confirm_secs: None,

@@ -54,6 +54,7 @@ pkgs.testers.runNixOSTest {
       environment.systemPackages = [
         pkgs.curl
         pkgs.jq
+        pkgs.sqlite
       ];
     };
 
@@ -105,18 +106,30 @@ pkgs.testers.runNixOSTest {
         # Revision 1 is the factory document.
         assert len(out) >= 7, out
 
+    with subtest("one store: applied revision and confirm state live in config.db"):
+        machine.fail("test -e /var/lib/sensr/agent-state.json")
+        machine.fail("test -e /var/lib/sensr/revisions")
+        machine.succeed("sqlite3 /var/lib/sensr/config.db \"select value from state where key = 'applied'\" | grep -qx '[0-9]*'")
+
     with subtest("users for the API; the password hash is never returned"):
-        machine.succeed('sensr config set system.users --json "$(cat /etc/sensr-test/users.json)"')
+        # A user may only join groups that exist: groups first.
+        machine.fail('sensr config set system.users --json "$(cat /etc/sensr-test/users.json)"')
         machine.succeed('sensr config set system.groups --json "$(cat /etc/sensr-test/groups.json)"')
+        machine.succeed('sensr config set system.users --json "$(cat /etc/sensr-test/users.json)"')
         machine.succeed("sensr config commit -m users")
         machine.fail("sensr config get system.users | grep -q YRVoF4")
         machine.fail("grep -q YRVoF4 /var/lib/sensr/config.json")
 
-    with subtest("schema violations are rejected and store nothing"):
-        machine.succeed("sensr config set system.hostname 'not a hostname'")
-        out = machine.fail("sensr config commit 2>&1")
+    with subtest("secrets are encrypted at rest under a root-only key"):
+        machine.succeed("stat -c '%a %U' /var/lib/sensr/secrets.key | grep -qx '600 root'")
+        rows = machine.succeed("sqlite3 /var/lib/sensr/config.db 'select value from secrets'").split()
+        assert rows and all(r.startswith("enc1:") for r in rows), rows
+        machine.fail("sqlite3 /var/lib/sensr/config.db .dump | grep -q YRVoF4")
+
+    with subtest("schema violations are rejected on write and store nothing"):
+        out = machine.fail("sensr config set system.hostname 'not a hostname' 2>&1")
         print(out)
-        machine.succeed("sensr config discard")
+        machine.succeed("sensr status --json | jq -e '.candidate_dirty == false'")
 
     api = "http://127.0.0.1:8080"
     with subtest("API authenticates and enforces ACLs"):
@@ -136,6 +149,22 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"curl -sf -u root:opnsense {api}/api/core/firmware/info | jq -e '.product.product_name == \"sensr\"'")
         machine.succeed(f"curl -sf -u root:opnsense {api}/api/interfaces/overview/interfaces_info | jq -e '.rows | type == \"array\"'")
         machine.succeed(f"curl -sf -u root:opnsense {api}/api/firewall/alias/search_item | jq -e '.total == 0'")
+
+    with subtest("duplicate alias names are rejected on the real stack"):
+        alias = lambda name: json.dumps({"name": name, "content": {"type": "port", "entries": ["443"]}})
+        a = "firewall.aliases.0b5e0000-0000-4000-8000-00000000000a"
+        b = "0b5e0000-0000-4000-8000-00000000000b"
+        web = alias("web")
+        machine.succeed(f"sensr config set {a} --json '{web}'")
+        machine.succeed("sensr config commit -m alias")
+        code = machine.succeed(
+            f"curl -s -o /tmp/dup.json -w '%{{http_code}}' -u root:opnsense -X PUT -H 'Content-Type: application/json'"
+            f" -d '{web}' {api}/api/v1/config/doc/firewall/aliases/{b}"
+        )
+        print(machine.succeed("cat /tmp/dup.json"))
+        assert code == "422", code
+        machine.succeed("jq -e '.validations | keys | any(contains(\"firewall.aliases\"))' /tmp/dup.json")
+        machine.succeed(f"curl -sf -u root:opnsense {api}/api/firewall/alias/search_item | jq -e '.total == 1'")
 
     with subtest("latency"):
         # 200 CLI round trips (process start included).

@@ -7,8 +7,8 @@ use anyhow::Context;
 use clap::Parser;
 use sensr_agent::applier::{Applier, PreviewApplier};
 use sensr_agent::slice_applier::SliceApplier;
-use sensr_agent::store::{ConfigStore, JsonDirStore, MemStore, NewRevision, SqliteStore};
 use sensr_agent::{Agent, Settings};
+use sensr_config::{CommitMeta, Store};
 
 /// The privileged sensr daemon.
 #[derive(Debug, Parser)]
@@ -23,15 +23,21 @@ struct Args {
     /// Group owning the socket (numeric gid).
     #[arg(long)]
     socket_gid: Option<u32>,
-    /// State directory (revisions, agent state). Omit for an in-memory store.
+    /// State directory: the sensr-config store (`config.db`, head exported
+    /// redacted to `config.json`) and the secrets key. Omit for an
+    /// in-memory store.
     #[arg(long, env = "SENSR_STATE_DIR")]
     state_dir: Option<PathBuf>,
-    /// Store backend under --state-dir: `sqlite` (typed sensr-config
-    /// revisions in config.db, head exported to config.json; the default)
-    /// or `json-dir` (untyped stopgap, one JSON file per revision).
-    #[arg(long, value_enum, default_value_t = StoreKind::Sqlite)]
-    store: StoreKind,
-    /// Seed document committed as revision 1 when the store is empty.
+    /// Key file sealing the store's secrets table (created 0600 if
+    /// missing). Defaults to `<state-dir>/secrets.key`.
+    #[arg(long, env = "SENSR_SECRETS_KEY")]
+    secrets_key: Option<PathBuf>,
+    /// Store secrets without encryption at rest (they still live in their
+    /// own table, never in the revision documents).
+    #[arg(long)]
+    no_secrets_encryption: bool,
+    /// Declarative mode: a sensr document (JSON) that is the source of
+    /// truth. At startup it is committed whenever head differs from it.
     #[arg(long)]
     seed: Option<PathBuf>,
     /// First-boot seed folder: a `config.xml` here is imported once onto a
@@ -62,15 +68,6 @@ struct Args {
     applier: ApplierKind,
 }
 
-/// Which config store backend the agent runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum StoreKind {
-    /// sensr-config SQLite (typed documents).
-    Sqlite,
-    /// One JSON file per revision (any document shape).
-    JsonDir,
-}
-
 /// Which apply pipeline the agent runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum ApplierKind {
@@ -84,28 +81,55 @@ fn parse_mode(s: &str) -> Result<u32, String> {
     u32::from_str_radix(s, 8).map_err(|e| format!("not an octal mode: {e}"))
 }
 
-fn seed_store(store: &mut dyn ConfigStore, seed: Option<&PathBuf>) -> anyhow::Result<()> {
+fn seed_store(store: &Store, seed: Option<&PathBuf>) -> anyhow::Result<()> {
     let Some(path) = seed else { return Ok(()) };
-    if store.head()?.is_some() {
-        return Ok(());
-    }
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading seed {}", path.display()))?;
-    let document: serde_json::Value = serde_json::from_str(&text).context("seed is not JSON")?;
-    anyhow::ensure!(document.is_object(), "seed must be a JSON object");
-    store.commit(NewRevision {
-        document,
-        username: "sensr-agent@system".into(),
-        description: format!("initial seed from {}", path.display()),
-        impersonated_by: None,
+    let value: serde_json::Value = serde_json::from_str(&text).context("seed is not JSON")?;
+    let document = sensr_agent::agent::decode(&value).map_err(|e| {
+        let issues: Vec<String> = e
+            .validations
+            .iter()
+            .map(|v| format!("{}: {}", v.path, v.message))
+            .collect();
+        anyhow::anyhow!(
+            "seed {} does not fit the schema: {}",
+            path.display(),
+            issues.join("; ")
+        )
     })?;
+    store.import(
+        &document,
+        CommitMeta::new(
+            "sensr-agent@system",
+            format!("declarative config {}", path.display()),
+        ),
+    )?;
     Ok(())
 }
 
-async fn serve<S: ConfigStore>(args: Args, mut store: S) -> anyhow::Result<()> {
-    seed_store(&mut store, args.seed.as_ref())?;
+fn open_store(args: &Args) -> anyhow::Result<Store> {
+    let Some(dir) = &args.state_dir else {
+        return Ok(sensr_agent::store::in_memory());
+    };
+    let key = (!args.no_secrets_encryption).then(|| {
+        args.secrets_key
+            .clone()
+            .unwrap_or_else(|| dir.join("secrets.key"))
+    });
+    sensr_agent::store::open(
+        &dir.join("config.db"),
+        Some(dir.join("config.json")),
+        key.as_deref(),
+    )
+    .with_context(|| format!("opening the config store in {}", dir.display()))
+}
+
+async fn serve(args: Args) -> anyhow::Result<()> {
+    let store = open_store(&args)?;
+    seed_store(&store, args.seed.as_ref())?;
     if let (Some(seed_dir), Some(state_dir)) = (&args.seed_dir, &args.state_dir) {
-        match sensr_agent::seed::import_seed(&mut store, seed_dir, state_dir) {
+        match sensr_agent::seed::import_seed(&store, seed_dir, state_dir) {
             Ok(outcome) => {
                 tracing::info!(?outcome, seed_dir = %seed_dir.display(), "seed folder checked")
             }
@@ -123,7 +147,6 @@ async fn serve<S: ConfigStore>(args: Args, mut store: S) -> anyhow::Result<()> {
     let settings = Settings {
         trusted_uids: args.trust_uids.clone(),
         trusted_gids,
-        state_file: args.state_dir.as_ref().map(|d| d.join("agent-state.json")),
         max_confirm: Duration::from_secs(args.max_confirm_secs),
         ..Settings::default()
     };
@@ -136,9 +159,9 @@ async fn serve<S: ConfigStore>(args: Args, mut store: S) -> anyhow::Result<()> {
     }
 }
 
-async fn run_agent<S: ConfigStore, A: Applier>(
+async fn run_agent<A: Applier>(
     args: Args,
-    store: S,
+    store: Store,
     applier: A,
     settings: Settings,
 ) -> anyhow::Result<()> {
@@ -166,16 +189,5 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
-    let args = Args::parse();
-    match (&args.state_dir, args.store) {
-        (Some(dir), StoreKind::Sqlite) => {
-            let store = SqliteStore::open(&dir.join("config.db"), Some(dir.join("config.json")))?;
-            serve(args, store).await
-        }
-        (Some(dir), StoreKind::JsonDir) => {
-            let store = JsonDirStore::open(&dir.join("revisions"))?;
-            serve(args, store).await
-        }
-        (None, _) => serve(args, MemStore::new()).await,
-    }
+    serve(Args::parse()).await
 }

@@ -1,12 +1,11 @@
-//! End to end: a real `sensr-agent` (in-memory store, fake applier) on a temp
-//! socket, driven by the real `sensr` binary.
+//! End to end: a real `sensr-agent` (in-memory `sensr-config` store, fake
+//! applier) on a temp socket, driven by the real `sensr` binary.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sensr_agent::applier::FakeApplier;
-use sensr_agent::store::MemStore;
 use sensr_agent::{Agent, Running, Settings};
 use serde_json::{Value, json};
 
@@ -31,7 +30,7 @@ impl Fx {
             trusted_uids: vec![me],
             ..Settings::default()
         };
-        let agent = Agent::new(MemStore::new(), applier.clone(), settings).unwrap();
+        let agent = Agent::new(sensr_agent::store::in_memory(), applier.clone(), settings).unwrap();
         agent.boot().await.unwrap();
         let socket = dir.path().join("agent.sock");
         let running = sensr_agent::start(agent, &socket, 0o600, None).unwrap();
@@ -44,7 +43,14 @@ impl Fx {
     }
 
     fn applied(&self) -> Vec<Value> {
-        self.applier.state.lock().unwrap().applied.clone()
+        self.applier
+            .state
+            .lock()
+            .unwrap()
+            .applied
+            .iter()
+            .map(|d| serde_json::to_value(d).unwrap())
+            .collect()
     }
 }
 
@@ -86,7 +92,7 @@ async fn set_commit_confirm_then_timeout_rolls_back() {
     let fx = Fx::start().await;
     let s = fx.socket.as_path();
 
-    // T-0401 shape: the root of an empty store is an object.
+    // T-0401 shape: the root of a fresh (factory) store is an object.
     let root: Value =
         serde_json::from_str(&ok(s, &["config", "get", "/", "--json"]).await).unwrap();
     assert!(root.is_object());
@@ -97,18 +103,18 @@ async fn set_commit_confirm_then_timeout_rolls_back() {
     let diff = ok(s, &["config", "diff"]).await;
     assert!(diff.contains("+    \"hostname\": \"fw1\""), "{diff}");
     let out = ok(s, &["config", "commit", "-m", "initial"]).await;
-    assert!(out.contains("revision 1"), "{out}");
+    assert!(out.contains("revision 2"), "{out}");
 
     // Provisional commit, confirmed in time.
     ok(s, &["config", "set", "system.hostname", "fw2"]).await;
     let out = ok(s, &["config", "commit", "--confirm", "60"]).await;
     assert!(out.contains("provisional"), "{out}");
     let st = ok(s, &["status"]).await;
-    assert!(st.contains("rolls back to 1"), "{st}");
+    assert!(st.contains("rolls back to 2"), "{st}");
     assert!(
         ok(s, &["config", "confirm"])
             .await
-            .contains("revision 2 confirmed")
+            .contains("revision 3 confirmed")
     );
     assert!(!ok(s, &["status"]).await.contains("confirm:"));
 
@@ -126,7 +132,7 @@ async fn set_commit_confirm_then_timeout_rolls_back() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let st: Value = serde_json::from_str(&ok(s, &["status", "--json"]).await).unwrap();
-        if st["pending_confirm"].is_null() && st["applied"] == json!(4) {
+        if st["pending_confirm"].is_null() && st["applied"] == json!(5) {
             break;
         }
         assert!(Instant::now() < deadline, "no rollback: {st}");
@@ -145,6 +151,7 @@ async fn set_commit_confirm_then_timeout_rolls_back() {
     let hosts: Vec<Value> = fx
         .applied()
         .iter()
+        .skip(1) // the factory document, applied at boot
         .map(|d| d["system"]["hostname"].clone())
         .collect();
     assert_eq!(
@@ -152,11 +159,11 @@ async fn set_commit_confirm_then_timeout_rolls_back() {
         [json!("fw1"), json!("fw2"), json!("lockout"), json!("fw2")]
     );
 
-    // Explicit rollback to revision 1.
+    // Explicit rollback to revision 2.
     assert!(
-        ok(s, &["config", "rollback", "1"])
+        ok(s, &["config", "rollback", "2"])
             .await
-            .contains("revision 5")
+            .contains("revision 6")
     );
     assert_eq!(
         ok(s, &["config", "get", "system.hostname", "--source", "head"]).await,
@@ -181,16 +188,16 @@ async fn import_dry_run_commit() {
 
     let plan = ok(s, &["apply", "--dry-run"]).await;
     assert!(plan.contains("# network"), "{plan}");
-    assert!(plan.contains("add interface lan"), "{plan}");
+    assert!(plan.contains("reconfigure interface lan"), "{plan}");
     assert!(plan.contains("# nftables ruleset"), "{plan}");
-    assert!(fx.applied().is_empty(), "dry run applied something");
+    assert_eq!(fx.applied().len(), 1, "dry run applied something");
 
     ok(s, &["config", "commit", "-m", "import home-router"]).await;
     assert_eq!(
         ok(s, &["config", "get", "interfaces.lan.ipv4.address"]).await,
         "192.168.1.1/24\n"
     );
-    assert_eq!(fx.applied().len(), 1);
+    assert_eq!(fx.applied().len(), 2);
     assert!(
         ok(s, &["apply", "--dry-run"])
             .await

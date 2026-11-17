@@ -14,6 +14,7 @@ use sensr_schema::migrate::{self, Migration};
 use sensr_schema::{Document, SCHEMA_VERSION, SchemaVersion, Section, Validations};
 
 use crate::canonical::{ContentHash, canonical_json};
+use crate::crypt::{SecretsKey, is_sealed};
 use crate::diff::{RevisionDiff, json_diff, unified};
 use crate::export::write_atomic;
 use crate::schema;
@@ -257,6 +258,9 @@ pub struct StoreOptions {
     pub migrations: Option<Vec<&'static dyn Migration>>,
     /// The schema version documents are migrated to (tests use older ones).
     pub target_version: SchemaVersion,
+    /// Seals the secrets table at rest; `None` stores secret values in
+    /// plain JSON (still out of the revision documents).
+    pub secrets_key: Option<SecretsKey>,
 }
 
 impl Default for StoreOptions {
@@ -265,6 +269,7 @@ impl Default for StoreOptions {
             export_path: None,
             migrations: None,
             target_version: SCHEMA_VERSION,
+            secrets_key: None,
         }
     }
 }
@@ -282,6 +287,7 @@ pub struct Store {
     migrations: Vec<&'static dyn Migration>,
     target: SchemaVersion,
     events: broadcast::Sender<RevisionCommitted>,
+    key: Option<SecretsKey>,
 }
 
 impl fmt::Debug for Store {
@@ -354,7 +360,9 @@ impl Store {
             migrations: options.migrations.unwrap_or_else(migrate::registered),
             target: options.target_version,
             events: broadcast::channel(EVENT_CAPACITY).0,
+            key: options.secrets_key,
         };
+        store.seal_plain_secrets()?;
         let empty = store
             .lock()
             .query_row("SELECT COUNT(*) FROM revisions", [], |r| r.get::<_, i64>(0))?
@@ -608,11 +616,19 @@ impl Store {
         let Some(p) = self.pending_confirm()? else {
             return Ok(None);
         };
-        let old = self.get(p.rollback_to)?;
-        let meta = CommitMeta::new(
+        self.rollback_with(CommitMeta::new(
             username,
             format!("Rollback: revision {} was not confirmed", p.pending),
-        );
+        ))
+    }
+
+    /// [`Store::rollback`] with the caller's revision metadata (the agent
+    /// says *why* it rolled back: timeout or restart).
+    pub fn rollback_with(&self, meta: CommitMeta) -> Result<Option<CommitOutcome>, StoreError> {
+        let Some(p) = self.pending_confirm()? else {
+            return Ok(None);
+        };
+        let old = self.get(p.rollback_to)?;
         let out = self.write(
             &old.document,
             meta,
@@ -624,6 +640,81 @@ impl Store {
         let conn = self.lock();
         conn.execute("DELETE FROM state WHERE key = ?1", [KEY_CONFIRM])?;
         Ok(Some(out))
+    }
+
+    fn seal(&self, id: RevisionId, pointer: &str, value: &str) -> Result<String, StoreError> {
+        match &self.key {
+            Some(k) => k
+                .seal(id.0, pointer, value)
+                .map_err(|reason| StoreError::Corrupt {
+                    id,
+                    reason: format!("sealing the secret at {pointer}: {reason}"),
+                }),
+            None => Ok(value.to_owned()),
+        }
+    }
+
+    fn load_secrets(
+        &self,
+        conn: &Connection,
+        id: RevisionId,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        let mut stmt = conn.prepare_cached(
+            "SELECT pointer, value FROM secrets WHERE revision = ?1 ORDER BY pointer",
+        )?;
+        let rows = stmt.query_map([id.0], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (pointer, value) = row?;
+            let plain = if is_sealed(&value) {
+                let key = self.key.as_ref().ok_or_else(|| StoreError::Corrupt {
+                    id,
+                    reason: "secrets are encrypted but the store was opened without a key".into(),
+                })?;
+                key.open(id.0, &pointer, &value)
+                    .map_err(|reason| StoreError::Corrupt { id, reason })?
+            } else {
+                value
+            };
+            out.push((pointer, plain));
+        }
+        Ok(out)
+    }
+
+    /// With a key, seals secret rows still stored in plain JSON (written
+    /// before encryption was configured). One transaction: either every
+    /// row is sealed or none.
+    fn seal_plain_secrets(&self) -> Result<(), StoreError> {
+        if self.key.is_none() {
+            return Ok(());
+        }
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let plain: Vec<(i64, String, String)> = {
+            let mut stmt = tx.prepare("SELECT revision, pointer, value FROM secrets")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|(_, _, v): &(i64, String, String)| !is_sealed(v))
+                .collect()
+        };
+        for (rev, pointer, value) in &plain {
+            let sealed = self.seal(RevisionId(*rev), pointer, value)?;
+            tx.execute(
+                "UPDATE secrets SET value = ?1 WHERE revision = ?2 AND pointer = ?3",
+                params![sealed, rev, pointer],
+            )?;
+        }
+        tx.commit()?;
+        if !plain.is_empty() {
+            tracing::info!(
+                rows = plain.len(),
+                "sealed secrets stored before encryption was enabled"
+            );
+        }
+        Ok(())
     }
 
     fn migrate_head(&self) -> Result<(), StoreError> {
@@ -717,7 +808,7 @@ impl Store {
             .optional()?;
         let head = match head {
             Some((h, head_hash, red)) => {
-                let plain = crate::secrets::join(&red, &load_secrets(&tx, RevisionId(h))?)
+                let plain = crate::secrets::join(&red, &self.load_secrets(&tx, RevisionId(h))?)
                     .map_err(|reason| StoreError::Corrupt {
                         id: RevisionId(h),
                         reason,
@@ -770,9 +861,10 @@ impl Store {
         )?;
         let id = RevisionId(tx.last_insert_rowid());
         for (pointer, value) in &split.secrets {
+            let stored = self.seal(id, pointer, value)?;
             tx.execute(
                 "INSERT INTO secrets (revision, pointer, value) VALUES (?1, ?2, ?3)",
-                params![id.0, pointer, value],
+                params![id.0, pointer, stored],
             )?;
         }
         let detail = match restored_from {
@@ -836,7 +928,7 @@ impl Store {
             .ok_or(StoreError::NotFound(id))?;
         let (meta, red) = row;
         let meta = meta?;
-        let json = crate::secrets::join(&red, &load_secrets(conn, id)?)
+        let json = crate::secrets::join(&red, &self.load_secrets(conn, id)?)
             .map_err(|reason| StoreError::Corrupt { id, reason })?;
         if ContentHash::of(&json).to_hex() != meta.hash {
             return Err(StoreError::Corrupt {
@@ -906,14 +998,6 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
 
 fn redacted_value(doc: &Document) -> Result<Value, serde_json::Error> {
     sensr_schema::fields::redacted(|| serde_json::to_value(doc))
-}
-
-fn load_secrets(conn: &Connection, id: RevisionId) -> rusqlite::Result<Vec<(String, String)>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT pointer, value FROM secrets WHERE revision = ?1 ORDER BY pointer",
-    )?;
-    let rows = stmt.query_map([id.0], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    rows.collect()
 }
 
 fn head_id(conn: &Connection) -> Result<RevisionId, StoreError> {

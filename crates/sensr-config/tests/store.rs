@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use pretty_assertions::assert_eq;
 use sensr_config::{
-    CommitKind, CommitMeta, CommitOutcome, ConfirmState, PatchOp, RevisionId, Store, StoreError,
-    StoreOptions,
+    CommitKind, CommitMeta, CommitOutcome, ConfirmState, PatchOp, RevisionId, SecretsKey, Store,
+    StoreError, StoreOptions,
 };
 use sensr_schema::migrate::Migration;
 use sensr_schema::models::firewall::Alias;
@@ -369,6 +369,86 @@ fn secrets_are_stored_outside_the_documents() {
         ),
         "{err}"
     );
+}
+
+#[test]
+fn secrets_are_encrypted_at_rest_with_a_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.db");
+    let key_file = dir.path().join("secrets.key");
+    let wg = "wireguard.servers.00000000-0000-0000-0000-000000000001";
+    let private = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
+    let with_key = || StoreOptions {
+        secrets_key: Some(SecretsKey::load_or_create(&key_file).unwrap()),
+        ..StoreOptions::default()
+    };
+
+    // Written before encryption was configured: plain JSON in the table.
+    let store = Store::open(&path, Document::factory).unwrap();
+    let mut d = store.head().unwrap().document;
+    d.set_by_path(
+        wg,
+        json!({"name": "wg0", "instance": 0, "private_key": private}),
+    )
+    .unwrap();
+    store.commit(&d, meta("wg")).unwrap();
+    drop(store);
+    let raw = |path: &std::path::Path| -> Vec<String> {
+        rusqlite_conn(path)
+            .prepare("SELECT value FROM secrets")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert!(raw(&path).iter().any(|v| v.contains(private)));
+
+    // Opening with a key seals the old rows; new ones are sealed on write.
+    let store = Store::open_with(&path, Document::default, with_key()).unwrap();
+    let mut d2 = d.clone();
+    d2.set_by_path(
+        &format!("{wg}.private_key"),
+        json!("xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg="),
+    )
+    .unwrap();
+    store.commit(&d2, meta("rotate")).unwrap();
+    assert_eq!(store.get(RevisionId(2)).unwrap().document, d);
+    assert_eq!(store.head().unwrap().document, d2);
+    drop(store);
+    let rows = raw(&path);
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|v| v.starts_with("enc1:") && !v.contains(private) && !v.contains("xTIBA5")),
+        "{rows:?}"
+    );
+
+    // Without the key the store refuses to read the secrets rather than
+    // handing out a document with holes.
+    assert!(matches!(
+        Store::open(&path, Document::default),
+        Err(StoreError::Corrupt { .. })
+    ));
+    // A sealed value moved to another slot does not open.
+    let conn = rusqlite_conn(&path);
+    let r3: String = conn
+        .query_row("SELECT value FROM secrets WHERE revision = 3", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    conn.execute("UPDATE secrets SET value = ?1 WHERE revision = 2", [r3])
+        .unwrap();
+    drop(conn);
+    let store = Store::open_with(&path, Document::default, with_key()).unwrap();
+    assert!(matches!(
+        store.get(RevisionId(2)),
+        Err(StoreError::Corrupt {
+            id: RevisionId(2),
+            ..
+        })
+    ));
+    assert_eq!(store.head().unwrap().document, d2);
 }
 
 #[test]

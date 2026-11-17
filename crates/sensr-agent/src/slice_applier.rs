@@ -122,10 +122,10 @@ fn issue(path: &str, message: impl Into<String>) -> ValidationIssue {
     }
 }
 
-/// Parses and validates a stored document.
-fn document(v: &Value) -> Result<Document, ApplyError> {
-    let doc: Document = serde_json::from_value(v.clone())
-        .map_err(|e| ApplyError::Invalid(vec![issue("", format!("not a sensr document: {e}"))]))?;
+/// Validates a document before it reaches the engine (the store validated
+/// it on commit; this guards boot applies of revisions written by an older
+/// build).
+fn document(doc: &Document) -> Result<&Document, ApplyError> {
     let v = doc.validate();
     if !v.is_empty() {
         tracing::warn!(issues = ?v, "document does not validate");
@@ -168,14 +168,14 @@ fn rejected(e: EngineError) -> ApplyError {
 }
 
 impl Applier for SliceApplier {
-    fn plan(&self, running: Option<&Value>, next: &Value) -> Result<PlanView, ApplyError> {
+    fn plan(&self, running: Option<&Document>, next: &Document) -> Result<PlanView, ApplyError> {
         let doc = document(next)?;
         let engine = self.engine();
-        let (p, _) = prepare(&engine, &doc).map_err(rejected)?;
+        let (p, _) = prepare(&engine, doc).map_err(rejected)?;
         engine.check(&p).map_err(rejected)?;
         let delta = engine.delta(&p);
         let old_ruleset = match running.map(document) {
-            Some(Ok(old)) => prepare(&engine, &old)
+            Some(Ok(old)) => prepare(&engine, old)
                 .map(|(o, _)| String::from_utf8_lossy(&o.ruleset).into_owned())
                 .unwrap_or_default(),
             _ => String::new(),
@@ -233,8 +233,8 @@ impl Applier for SliceApplier {
         Ok(PlanView { nft, net, services })
     }
 
-    fn apply(&mut self, _running: Option<&Value>, next: &Value) -> Result<(), ApplyError> {
-        let doc = document(next)?;
+    fn apply(&mut self, _running: Option<&Document>, next: &Document) -> Result<(), ApplyError> {
+        let doc = document(next)?.clone();
         let mut engine = self.engine();
         let (p, addrs) = prepare(&engine, &doc).map_err(rejected)?;
         for w in &p.warnings {
@@ -278,7 +278,7 @@ mod tests {
     use super::*;
     use sensr_apply::cmd::FakeRunner;
 
-    fn home_router() -> Value {
+    fn home_router() -> Document {
         serde_json::from_str(include_str!(
             "../../sensr-import-opnsense/tests/golden/home-router.sensr.json"
         ))
@@ -329,10 +329,14 @@ mod tests {
 
     #[test]
     fn invalid_documents_are_rejected_with_paths() {
+        use sensr_schema::PathAccess;
         let a = SliceApplier::new(EngineOptions::default(), Arc::new(FakeRunner::new())).unwrap();
-        let err = a
-            .plan(None, &serde_json::json!({"nonsense": 1}))
-            .unwrap_err();
+        let mut doc = Document::factory();
+        // DHCP on an interface that is not assigned
+        doc.set_by_path("dhcpv4.interfaces", serde_json::json!(["opt9"]))
+            .unwrap();
+        assert!(!doc.validate().is_empty());
+        let err = a.plan(None, &doc).unwrap_err();
         assert!(matches!(err, ApplyError::Invalid(_)), "{err:?}");
     }
 }
