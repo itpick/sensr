@@ -510,7 +510,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    const FIXTURE: &str = include_str!("../tests/fixtures/etpro-telemetry-eve.json");
+    const FIXTURE: &str = include_str!("../tests/fixtures/etpro-telemetry-eve.jsonl");
 
     #[test]
     fn timestamps() {
