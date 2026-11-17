@@ -28,6 +28,7 @@ sensr-feeds.workspace = true
 sensr-import-opnsense.workspace = true
 sensr-ipc.workspace = true
 sensr-monitor.workspace = true
+sensr-net.workspace = true
 sensr-rules.workspace = true
 sensr-schema.workspace = true
 serde.workspace = true

@@ -34,6 +34,7 @@ pub struct SliceApplier {
     feeds: Option<Arc<Feeds>>,
     refreshing: bool,
     gateways: Option<Arc<crate::gateways::GatewayService>>,
+    pd: Option<Arc<crate::pd::PdService>>,
 }
 
 /// How often link addresses are compared with the ruleset's sets.
@@ -60,6 +61,11 @@ impl SliceApplier {
     /// `feeds_dir` when given.
     pub fn system_with_feeds(feeds_dir: Option<PathBuf>) -> Result<SliceApplier, EngineError> {
         let mut a = Self::system()?;
+        if let Some(state) = feeds_dir.as_ref().and_then(|d| d.parent()) {
+            let pd = crate::pd::PdService::new(Arc::new(SystemRunner), "/", state.join("pd"));
+            pd.start();
+            a.pd = Some(pd);
+        }
         if let Some(dir) = feeds_dir {
             let runner: Arc<dyn Runner> = Arc::new(SystemRunner);
             let neighbours = move || {
@@ -116,6 +122,7 @@ impl SliceApplier {
             feeds: None,
             refreshing: false,
             gateways: None,
+            pd: None,
         })
     }
 
@@ -349,7 +356,10 @@ impl Applier for SliceApplier {
         match section {
             sensr_ipc::RuntimeSection::Gateways => self.gateways_view(),
             sensr_ipc::RuntimeSection::Aliases => serde_json::to_value(self.alias_status()).ok(),
-            _ => None,
+            sensr_ipc::RuntimeSection::Ipv6 => self
+                .pd
+                .as_ref()
+                .and_then(|p| serde_json::to_value(p.view(unix_now())).ok()),
         }
     }
 
@@ -377,6 +387,9 @@ impl Applier for SliceApplier {
         }
         if let Some(g) = &self.gateways {
             g.applied(&doc);
+        }
+        if let Some(p) = &self.pd {
+            p.applied(&doc);
         }
         *lock(&self.applied) = Some((doc, addrs));
         self.start_watcher();

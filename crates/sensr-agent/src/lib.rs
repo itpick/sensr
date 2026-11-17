@@ -13,6 +13,7 @@ pub mod auth;
 pub mod diff;
 pub mod ifnames;
 pub mod gateways;
+pub mod pd;
 pub mod redact;
 pub mod seed;
 pub mod slice_applier;

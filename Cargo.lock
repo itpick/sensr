@@ -3069,6 +3069,7 @@ dependencies = [
  "sensr-import-opnsense",
  "sensr-ipc",
  "sensr-monitor",
+ "sensr-net",
  "sensr-rules",
  "sensr-schema",
  "serde",
