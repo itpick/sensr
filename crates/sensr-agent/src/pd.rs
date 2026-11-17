@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use sensr_apply::cmd::{Cmd, Runner};
 use sensr_net::ipv6::pd::{
-    AdvertisedPrefix, Consumer, PdState, PdStore, observe::observation_from_kernel,
+    AdvertisedPrefix, Consumer, Observation, PdState, PdStore,
+    observe::{observation_from_kernel, parse_addr_lifetimes},
 };
 use sensr_schema::Document;
 use sensr_schema::models::interfaces::Ipv6Config;
@@ -65,6 +66,63 @@ pub fn uplinks(doc: &Document) -> Vec<Uplink> {
         }
     }
     out
+}
+
+/// The delegated prefixes networkd reports for a link
+/// (`networkctl status <link> --json=short`, `DHCPv6Client.Prefixes`).
+/// Current systemd installs no unreachable route for the delegation, so
+/// this is the primary source; `Prefix` is 16 bytes or text.
+pub fn networkd_prefixes(json: &[u8]) -> Vec<ipnet::Ipv6Net> {
+    let v: serde_json::Value = serde_json::from_slice(json).unwrap_or_default();
+    let list = v
+        .pointer("/DHCPv6Client/Prefixes")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    list.iter()
+        .filter_map(|p| {
+            let len = u8::try_from(p.get("PrefixLength")?.as_u64()?).ok()?;
+            let addr = match p.get("Prefix")? {
+                serde_json::Value::Array(b) if b.len() == 16 => {
+                    let mut o = [0u8; 16];
+                    for (i, x) in b.iter().enumerate() {
+                        o[i] = u8::try_from(x.as_u64()?).ok()?;
+                    }
+                    std::net::Ipv6Addr::from(o)
+                }
+                serde_json::Value::String(t) => t.split('/').next()?.parse().ok()?,
+                _ => return None,
+            };
+            ipnet::Ipv6Net::new(addr, len).ok().map(|n| n.trunc())
+        })
+        .collect()
+}
+
+/// An observation from networkd's prefix plus the lifetimes of the LAN
+/// addresses inside it (the longest ones: they renew with the lease).
+fn observation_from_networkd(
+    prefix: ipnet::Ipv6Net,
+    addrs: &[u8],
+    lans: &[&str],
+) -> Option<Observation> {
+    let lan: Vec<_> = parse_addr_lifetimes(addrs)
+        .ok()?
+        .into_iter()
+        .filter(|a| a.dynamic && lans.contains(&a.ifname.as_str()) && prefix.contains(&a.address))
+        .collect();
+    let valid = lan.iter().map(|a| a.valid_lifetime).max()?;
+    let preferred = lan
+        .iter()
+        .map(|a| a.preferred_lifetime)
+        .max()
+        .unwrap_or(valid)
+        .min(valid);
+    Some(Observation {
+        prefix,
+        preferred_lifetime: preferred,
+        valid_lifetime: valid,
+        iaid: None,
+    })
 }
 
 /// The drop-in text for deprecated prefixes (empty list: none).
@@ -208,17 +266,34 @@ impl PdService {
                 .iter()
                 .map(|(_, d, _)| d.as_str())
                 .collect();
-            let obs = match observation_from_kernel(&routes, &addrs, &lans) {
-                Ok(k) => {
-                    for m in &k.mismatches {
-                        tracing::debug!(?m, "PD lifetime mismatch");
+            let from_networkd = self
+                .runner
+                .run(
+                    &Cmd::new("networkctl").args([
+                        "status",
+                        x.uplink.device.as_str(),
+                        "--json=short",
+                    ]),
+                    None,
+                )
+                .ok()
+                .filter(|o| o.success())
+                .and_then(|o| networkd_prefixes(&o.stdout).into_iter().next())
+                .and_then(|p| observation_from_networkd(p, &addrs, &lans));
+            let obs = match from_networkd {
+                Some(o) => Some(o),
+                None => match observation_from_kernel(&routes, &addrs, &lans) {
+                    Ok(k) => {
+                        for m in &k.mismatches {
+                            tracing::debug!(?m, "PD lifetime mismatch");
+                        }
+                        k.observation
                     }
-                    k.observation
-                }
-                Err(e) => {
-                    tracing::warn!(uplink = %x.uplink.interface, error = %e, "PD observation");
-                    continue;
-                }
+                    Err(e) => {
+                        tracing::warn!(uplink = %x.uplink.interface, error = %e, "PD observation");
+                        continue;
+                    }
+                },
             };
             let mut events = x.state.observe(now, obs);
             events.extend(x.state.expire(now));
@@ -358,6 +433,15 @@ mod tests {
             })
         });
         r
+    }
+
+    #[test]
+    fn networkd_prefix_bytes_or_text() {
+        let j = br#"{"Name":"igc0","DHCPv6Client":{"Prefixes":[{"Prefix":[32,1,13,184,1,0,0,0,0,0,0,0,0,0,0,0],"PrefixLength":56}]}}"#;
+        assert_eq!(networkd_prefixes(j)[0].to_string(), "2001:db8:100::/56");
+        let t = br#"{"DHCPv6Client":{"Prefixes":[{"Prefix":"2001:db8:200::","PrefixLength":60}]}}"#;
+        assert_eq!(networkd_prefixes(t)[0].to_string(), "2001:db8:200::/60");
+        assert!(networkd_prefixes(b"{}").is_empty());
     }
 
     #[test]
