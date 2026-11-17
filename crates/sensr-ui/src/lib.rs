@@ -24,6 +24,8 @@ pub mod dnsstats;
 #[cfg(feature = "ssr")]
 pub mod hoststats;
 #[cfg(feature = "ssr")]
+pub mod insight;
+#[cfg(feature = "ssr")]
 pub mod mock;
 #[cfg(feature = "ssr")]
 pub mod server;

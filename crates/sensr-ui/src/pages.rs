@@ -3,11 +3,14 @@
 //! Pages are server-rendered; only the form, grid, banner and dashboard islands hydrate.
 
 use crate::actions::{
-    dns_stats, field_choices, form_load, grid_fetch, live_status, revision_diff, revisions,
+    dns_stats, field_choices, form_load, grid_fetch, ids_alerts, insight_data, live_status,
+    revision_diff, revisions,
 };
-use crate::api::{DiffLine, DnsStats};
+use crate::api::{
+    AlertPage, DiffLine, DnsStats, INSIGHT_RANGES, InsightReport, TrafficPoint, TrafficRow,
+};
 use crate::grid::GridQuery;
-use crate::islands::{DashboardLive, GridIsland, SettingsFormIsland, diff_class};
+use crate::islands::{DashboardLive, GridIsland, SettingsFormIsland, bps, diff_class};
 use crate::models::*;
 use leptos::prelude::*;
 use leptos_router::hooks::{use_params_map, use_query_map};
@@ -532,6 +535,456 @@ pub fn History() -> impl IntoView {
     view! { <Suspense fallback=|| ()>{load}</Suspense> }
 }
 
+/// Percent-encodes a query parameter value.
+pub fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Bytes in decimal units, as traffic is usually counted.
+pub fn fmt_bytes(v: u64) -> String {
+    let f = v as f64;
+    if f >= 1e12 {
+        format!("{:.2} TB", f / 1e12)
+    } else if f >= 1e9 {
+        format!("{:.2} GB", f / 1e9)
+    } else if f >= 1e6 {
+        format!("{:.1} MB", f / 1e6)
+    } else if f >= 1e3 {
+        format!("{:.0} kB", f / 1e3)
+    } else {
+        format!("{v} B")
+    }
+}
+
+// ------------------------------------------------------------ Services › Intrusion Detection
+
+const IDS_TABS: &[(&str, &str)] = &[
+    ("/ui/ids", "Settings"),
+    ("/ui/ids/rules", "Rules"),
+    ("/ui/ids/userdefined", "User defined"),
+    ("/ui/ids/alerts", "Alerts"),
+];
+
+/// The OPNsense tab strip of Services › Intrusion Detection › Administration.
+#[component]
+fn IdsTabs(current: &'static str) -> impl IntoView {
+    view! {
+        <nav class="tabs" aria-label="Intrusion detection">
+            {IDS_TABS.iter().map(|(url, label)| {
+                let active = *url == current;
+                view! { <a class="tab" class:active=active aria-current=active.then_some("page") href=*url>{*label}</a> }
+            }).collect_view()}
+        </nav>
+    }
+}
+
+/// Services › Intrusion Detection › Administration › Settings.
+#[component]
+pub fn IdsSettingsPage() -> impl IntoView {
+    view! {
+        <IdsTabs current="/ui/ids"/>
+        <p class="intro">"Suricata inspects the selected interfaces. Detect mode only raises alerts; prevent mode also blocks what drop rules match."</p>
+        <SettingsForm<IdsSettings> title="General settings"/>
+    }
+}
+
+/// Services › Intrusion Detection › Administration › Rules: suppressions.
+#[component]
+pub fn IdsRulesPage() -> impl IntoView {
+    view! {
+        <IdsTabs current="/ui/ids/rules"/>
+        <p class="intro">"A suppression silences a signature's alerts, everywhere or for some addresses. The rule keeps running and still drops in prevent mode. The default suppressions for chatty informational signatures are switched under Settings."</p>
+        <Grid<IdsSuppression> title="Suppressions"/>
+    }
+}
+
+/// Services › Intrusion Detection › Administration › User defined.
+#[component]
+pub fn IdsUserRulesPage() -> impl IntoView {
+    view! {
+        <IdsTabs current="/ui/ids/userdefined"/>
+        <p class="intro">"Your own rules: alert on, drop, or pass traffic by address or by TLS certificate fingerprint."</p>
+        <Grid<IdsUserRule> title="User defined rules"/>
+    }
+}
+
+fn severity(sev: u8) -> AnyView {
+    let (class, text) = match sev {
+        1 => ("pill pill-off", "high"),
+        2 => ("pill pill-warn", "medium"),
+        _ => ("pill pill-info", "low"),
+    };
+    view! { <span class=class>{text}</span> }.into_any()
+}
+
+fn endpoint(ip: &str, port: Option<u16>) -> String {
+    match port {
+        Some(p) if ip.contains(':') => format!("[{ip}]:{p}"),
+        Some(p) => format!("{ip}:{p}"),
+        None => ip.to_owned(),
+    }
+}
+
+fn alerts_url(text: &str, host: &str, page: u32) -> String {
+    let mut q = Vec::new();
+    if !text.is_empty() {
+        q.push(format!("text={}", url_encode(text)));
+    }
+    if !host.is_empty() {
+        q.push(format!("host={}", url_encode(host)));
+    }
+    if page > 0 {
+        q.push(format!("page={page}"));
+    }
+    if q.is_empty() {
+        "/ui/ids/alerts".to_owned()
+    } else {
+        format!("/ui/ids/alerts?{}", q.join("&"))
+    }
+}
+
+fn alerts_table(p: AlertPage, text: &str, host: &str) -> AnyView {
+    let back = alerts_url(text, host, p.page);
+    if p.rows.is_empty() {
+        return view! { <p class="muted">"No alerts match."</p> }.into_any();
+    }
+    let rows = p
+        .rows
+        .into_iter()
+        .map(|a| {
+            let sid = a.sid.to_string();
+            let src = a.src_ip.clone();
+            let actions = if a.suppressed {
+                view! { <span class="pill pill-info">"suppressed"</span> }.into_any()
+            } else {
+                view! {
+                    <form method="post" action="/ui/fn/ids_suppress" class="row-actions">
+                        <input type="hidden" name="sid" value=sid.clone()/>
+                        <input type="hidden" name="gid" value=a.gid.to_string()/>
+                        <input type="hidden" name="signature" value=a.signature.clone()/>
+                        <input type="hidden" name="back" value=back.clone()/>
+                        <button type="submit" class="btn btn-sm" aria-label=format!("Suppress sid {sid}")>"Suppress"</button>
+                        <button type="submit" class="btn btn-sm" name="src" value=src.clone()
+                            aria-label=format!("Source only: suppress sid {sid} from {src}")>"Source only"</button>
+                    </form>
+                }
+                .into_any()
+            };
+            view! {
+                <tr>
+                    <td class="num">{fmt_time(u64::try_from(a.ts / 1000).unwrap_or(0)).trim_end_matches(" UTC").to_owned()}</td>
+                    <td class="num">{a.sid}</td>
+                    <td class="sig">{a.signature}<br/><span class="muted small">{a.category}</span></td>
+                    <td>{severity(a.severity)}</td>
+                    <td class="num">{endpoint(&a.src_ip, a.src_port)}<br/>{format!("→ {}", endpoint(&a.dest_ip, a.dest_port))}<br/>
+                        <span class="muted small">{format!("{} on {}", a.proto, a.iface)}</span></td>
+                    <td class="col-actions">{actions}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    let pages = p.total.div_ceil(u64::from(p.per_page.max(1))).max(1);
+    let first = u64::from(p.page) * u64::from(p.per_page) + 1;
+    let last = (first - 1 + u64::from(p.per_page)).min(p.total);
+    let prev = (p.page > 0).then(|| alerts_url(text, host, p.page - 1));
+    let next = (u64::from(p.page) + 1 < pages).then(|| alerts_url(text, host, p.page + 1));
+    let link = |href: Option<String>, label: &'static str, sym: &'static str| match href {
+        Some(h) => view! { <a class="btn btn-sm" href=h aria-label=label>{sym}</a> }.into_any(),
+        None => {
+            view! { <span class="btn btn-sm" aria-disabled="true" aria-label=label>{sym}</span> }
+                .into_any()
+        }
+    };
+    view! {
+        <div class="table-wrap">
+            <table>
+                <thead><tr>
+                    <th scope="col">"Time (UTC)"</th><th scope="col">"Sid"</th><th scope="col">"Signature"</th>
+                    <th scope="col">"Severity"</th><th scope="col">"Source → destination"</th>
+                    <th scope="col" class="col-actions"><span class="sr-only">"Actions"</span></th>
+                </tr></thead>
+                <tbody>{rows}</tbody>
+            </table>
+        </div>
+        <nav class="pager" aria-label="Alert pages">
+            <span class="muted">{format!("Showing {first} to {last} of {} alerts", p.total)}</span>
+            <div class="pager-buttons">
+                {link(prev, "Previous page", "‹")}
+                <span aria-current="page">{format!("{} / {pages}", p.page + 1)}</span>
+                {link(next, "Next page", "›")}
+            </div>
+        </nav>
+    }
+    .into_any()
+}
+
+/// Services › Intrusion Detection › Administration › Alerts: what Suricata raised, newest
+/// first. Plain forms: filtering, paging and suppressing work without JavaScript.
+#[component]
+pub fn IdsAlertsPage() -> impl IntoView {
+    let q = use_query_map().get_untracked();
+    let text = q.get("text").unwrap_or_default().trim().to_owned();
+    let host = q.get("host").unwrap_or_default().trim().to_owned();
+    let page: u32 = q.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
+    let staged = q.get("staged");
+    let error = q.get("error");
+    let load = move || {
+        let (text, host) = (text.clone(), host.clone());
+        let (staged, error) = (staged.clone(), error.clone());
+        Suspend::new(async move {
+            let p = match ids_alerts(text.clone(), host.clone(), page).await {
+                Ok(p) => p,
+                Err(e) => return load_error(e),
+            };
+            let filtered = !text.is_empty() || !host.is_empty();
+            let available = p.available;
+            view! {
+                <section class="card">
+                    <h2>"Alerts"</h2>
+                    {staged.map(|sid| view! {
+                        <p class="notice" role="status">{format!("A suppression for signature {sid} is staged. Apply the changes to activate it.")}</p>
+                    })}
+                    {error.map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
+                    <form method="get" action="/ui/ids/alerts" class="filters" role="search" aria-label="Filter alerts">
+                        <div class="field-stack">
+                            <label for="alert-text">"Signature or sid"</label>
+                            <input id="alert-text" name="text" type="search" value=text.clone() spellcheck="false"/>
+                        </div>
+                        <div class="field-stack">
+                            <label for="alert-host">"Host address"</label>
+                            <input id="alert-host" name="host" type="search" value=host.clone() spellcheck="false"/>
+                        </div>
+                        <div class="filter-actions">
+                            <button type="submit" class="btn btn-primary">"Filter"</button>
+                            {filtered.then(|| view! { <a class="btn" href="/ui/ids/alerts">"Clear"</a> })}
+                        </div>
+                    </form>
+                    {if available {
+                        alerts_table(p, &text, &host)
+                    } else {
+                        view! {
+                            <p class="muted">"No alert database yet. It appears once intrusion detection is enabled and Suricata has raised its first alert."</p>
+                        }.into_any()
+                    }}
+                </section>
+            }
+            .into_any()
+        })
+    };
+    view! {
+        <IdsTabs current="/ui/ids/alerts"/>
+        <Suspense fallback=|| ()>{load}</Suspense>
+    }
+}
+
+// ------------------------------------------------------------ Reporting › Insight
+
+fn insight_url(range: &str, host: Option<&str>) -> String {
+    match host {
+        Some(h) => format!(
+            "/ui/diagnostics/networkinsight?range={range}&host={}",
+            url_encode(h)
+        ),
+        None => format!("/ui/diagnostics/networkinsight?range={range}"),
+    }
+}
+
+/// Received (above the axis) and sent (below) per bucket, as average rates.
+fn traffic_chart(points: &[TrafficPoint], from: i64, to: i64, what: &str) -> AnyView {
+    const W: f64 = 720.0;
+    const MID: f64 = 92.0;
+    const HALF: f64 = 80.0;
+    let span = (to - from).max(1) as f64;
+    let max = points
+        .iter()
+        .map(|p| p.down_bps().max(p.up_bps()))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let bars = |sent: bool| {
+        points
+            .iter()
+            .map(|p| {
+                let v = if sent { p.up_bps() } else { p.down_bps() };
+                let h = v as f64 / max as f64 * HALF;
+                let x = (p.ts - from) as f64 / span * W;
+                let w = (p.res as f64 / span * W).max(0.6);
+                let y = if sent { MID } else { MID - h };
+                format!("M{x:.1} {y:.1}h{w:.2}v{h:.1}h-{w:.2}z")
+            })
+            .collect::<String>()
+    };
+    let label = format!(
+        "{what}: received above the line, sent below; peak {}",
+        bps(max)
+    );
+    let t0 = fmt_time(u64::try_from(from).unwrap_or(0));
+    let t1 = fmt_time(u64::try_from(to).unwrap_or(0));
+    view! {
+        <svg class="chart" viewBox="0 0 720 200" preserveAspectRatio="none" role="img" aria-label=label>
+            <path class="chart-in" d=bars(false)/>
+            <path class="chart-out" d=bars(true)/>
+            <line class="chart-axis" x1="0" y1="92" x2="720" y2="92"/>
+        </svg>
+        <p class="chart-scale muted small">
+            <span>{t0}</span><span>{format!("peak {}", bps(max))}</span><span>{t1}</span>
+        </p>
+    }
+    .into_any()
+}
+
+fn top_table(
+    caption: &'static str,
+    key_head: &'static str,
+    rows: Vec<TrafficRow>,
+    link: impl Fn(&TrafficRow) -> Option<String>,
+) -> AnyView {
+    if rows.is_empty() {
+        return view! {
+            <section class="card"><h2>{caption}</h2><p class="muted">"No traffic in this range."</p></section>
+        }
+        .into_any();
+    }
+    let max = rows.iter().map(TrafficRow::total).max().unwrap_or(1).max(1);
+    let body = rows
+        .iter()
+        .map(|r| {
+            let name = if r.label.is_empty() {
+                r.key.clone()
+            } else {
+                format!("{} ({})", r.label, r.key)
+            };
+            let cell = match link(r) {
+                Some(href) => view! { <a href=href>{name}</a> }.into_any(),
+                None => view! { <span>{name}</span> }.into_any(),
+            };
+            let pct = r.total() as f64 / max as f64 * 100.0;
+            view! {
+                <tr>
+                    <td>{cell}<span class="bar" aria-hidden="true"><span style=format!("width:{pct:.1}%")></span></span></td>
+                    <td class="num">{fmt_bytes(r.down)}</td>
+                    <td class="num">{fmt_bytes(r.up)}</td>
+                    <td class="num">{fmt_bytes(r.total())}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    view! {
+        <section class="card">
+            <h2>{caption}</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr>
+                        <th scope="col">{key_head}</th><th scope="col">"In"</th>
+                        <th scope="col">"Out"</th><th scope="col">"Total"</th>
+                    </tr></thead>
+                    <tbody>{body}</tbody>
+                </table>
+            </div>
+        </section>
+    }
+    .into_any()
+}
+
+fn insight_body(r: InsightReport, range: &'static str, host: Option<String>) -> AnyView {
+    if !r.available {
+        return view! {
+            <section class="card">
+                <h2>"No traffic database yet"</h2>
+                <p>"Traffic accounting has not written any data. Enable it with " <code>"insight.enabled"</code>
+                    "; the first figures appear within a minute."</p>
+            </section>
+        }
+        .into_any();
+    }
+    let per = match r.resolution {
+        60 => "minute",
+        3600 => "hour",
+        _ => "day",
+    };
+    let total_in: u64 = r.series.iter().map(|p| p.down).sum();
+    let total_out: u64 = r.series.iter().map(|p| p.up).sum();
+    let chart = traffic_chart(&r.series, r.from, r.to, "Traffic");
+    let host_link = move |row: &TrafficRow| Some(insight_url(range, Some(&row.key)));
+    match host {
+        Some(h) => view! {
+            <p><a href=insight_url(range, None)>"← All hosts"</a></p>
+            <section class="card">
+                <h2>{format!("Host {h}")}</h2>
+                <p class="legend"><span class="key key-rx"></span>{format!("In {}", fmt_bytes(total_in))}
+                    <span class="key key-tx"></span>{format!("Out {}", fmt_bytes(total_out))}
+                    <span class="muted">{format!(" · per {per}")}</span></p>
+                {chart}
+            </section>
+            {top_table("Top services", "Service", r.apps, |_| None)}
+        }
+        .into_any(),
+        None => view! {
+            <section class="card">
+                <h2>"All local hosts"</h2>
+                <p class="legend"><span class="key key-rx"></span>{format!("In {}", fmt_bytes(total_in))}
+                    <span class="key key-tx"></span>{format!("Out {}", fmt_bytes(total_out))}
+                    <span class="muted">{format!(" · per {per}")}</span></p>
+                {chart}
+            </section>
+            <div class="insight-grid">
+                {top_table("Top hosts", "Local host", r.hosts, host_link)}
+                {top_table("Top services", "Service", r.apps, |_| None)}
+                {top_table("Top remotes", "Remote address", r.remotes, |_| None)}
+                {top_table("Interfaces", "Interface", r.ifaces, |_| None)}
+            </div>
+        }
+        .into_any(),
+    }
+}
+
+/// Reporting › Insight: who used the line, for what, and with whom. Server-rendered,
+/// with links for the range and the per-host view.
+#[component]
+pub fn Insight() -> impl IntoView {
+    let q = use_query_map().get_untracked();
+    let (range, _, _) = crate::api::insight_range(&q.get("range").unwrap_or_default());
+    let host = q
+        .get("host")
+        .map(|h| h.trim().to_owned())
+        .filter(|h| h.parse::<std::net::IpAddr>().is_ok());
+    let tabs = {
+        let host = host.clone();
+        INSIGHT_RANGES
+            .iter()
+            .map(|(k, label, _)| {
+                let active = *k == range;
+                view! {
+                    <a class="tab" class:active=active aria-current=active.then_some("page")
+                        href=insight_url(k, host.as_deref())>{*label}</a>
+                }
+            })
+            .collect_view()
+    };
+    let load = move || {
+        let host = host.clone();
+        Suspend::new(async move {
+            match insight_data(range.to_owned(), host.clone()).await {
+                Ok(r) => insight_body(r, range, host),
+                Err(e) => load_error(e),
+            }
+        })
+    };
+    view! {
+        <nav class="tabs" aria-label="Time range">{tabs}</nav>
+        <Suspense fallback=|| ()>{load}</Suspense>
+    }
+}
+
 /// Menu entries sensr does not implement yet.
 #[component]
 pub fn NotYet() -> impl IntoView {
@@ -550,7 +1003,108 @@ pub fn NotYet() -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use super::fmt_time;
+    use super::{fmt_bytes, fmt_time, url_encode};
+
+    #[test]
+    fn encodes_and_formats() {
+        assert_eq!(url_encode("a b/c:1"), "a%20b%2Fc%3A1");
+        assert_eq!(fmt_bytes(999), "999 B");
+        assert_eq!(fmt_bytes(1_500_000), "1.5 MB");
+    }
+
+    fn render(f: impl FnOnce() -> leptos::prelude::AnyView) -> String {
+        use leptos::prelude::*;
+        Owner::new().with(|| f().to_html())
+    }
+
+    fn alert(sid: u32, suppressed: bool) -> crate::api::AlertRow {
+        crate::api::AlertRow {
+            id: 1,
+            ts: 1_794_787_200_000,
+            gid: 1,
+            sid,
+            signature: "ET SCAN Potential SSH Scan".into(),
+            category: "Attempted Information Leak".into(),
+            severity: 2,
+            action: "allowed".into(),
+            proto: "TCP".into(),
+            src_ip: "2001:db8::7".into(),
+            src_port: Some(40_000),
+            dest_ip: "203.0.113.24".into(),
+            dest_port: Some(22),
+            iface: "eth0".into(),
+            suppressed,
+        }
+    }
+
+    #[test]
+    fn alert_rows_carry_suppress_forms_and_page_links() {
+        let page = crate::api::AlertPage {
+            available: true,
+            rows: vec![alert(2001219, false), alert(2013504, true)],
+            total: 60,
+            page: 1,
+            per_page: 25,
+        };
+        let html = render(|| super::alerts_table(page, "ssh scan", ""));
+        assert!(html.contains("Showing 26 to 50 of 60 alerts"), "{html}");
+        assert!(html.contains("[2001:db8::7]:40000"));
+        assert_eq!(html.matches("action=\"/ui/fn/ids_suppress\"").count(), 1);
+        assert!(html.contains("aria-label=\"Source only: suppress sid 2001219 from 2001:db8::7\""));
+        assert!(html.contains("value=\"/ui/ids/alerts?text=ssh%20scan&amp;page=1\""));
+        assert!(
+            html.contains("href=\"/ui/ids/alerts?text=ssh%20scan\""),
+            "previous page"
+        );
+        assert!(
+            html.contains("href=\"/ui/ids/alerts?text=ssh%20scan&amp;page=2\""),
+            "next page"
+        );
+        assert!(html.contains(">suppressed<"));
+    }
+
+    #[test]
+    fn insight_without_a_database_says_so() {
+        let html = render(|| super::insight_body(Default::default(), "24h", None));
+        assert!(html.contains("No traffic database yet"));
+    }
+
+    #[test]
+    fn insight_chart_and_tables() {
+        use crate::api::{InsightReport, TrafficPoint, TrafficRow};
+        let row = |key: &str, label: &str, up, down| TrafficRow {
+            key: key.into(),
+            label: label.into(),
+            up,
+            down,
+            up_packets: 1,
+            down_packets: 1,
+        };
+        let r = InsightReport {
+            available: true,
+            from: 0,
+            to: 7200,
+            resolution: 60,
+            hosts: vec![row("192.168.1.20", "", 10, 1_000_000)],
+            apps: vec![row("tcp/443", "HTTPS", 5, 500)],
+            remotes: vec![],
+            ifaces: vec![row("wan", "WAN", 1, 1)],
+            series: vec![TrafficPoint {
+                ts: 60,
+                res: 60,
+                up: 750,
+                down: 7_500_000,
+            }],
+        };
+        let html = render(|| super::insight_body(r, "2h", None));
+        assert!(html.contains("peak 1.0 Mbit/s"), "{html}");
+        assert!(
+            html.contains("href=\"/ui/diagnostics/networkinsight?range=2h&amp;host=192.168.1.20\"")
+        );
+        assert!(html.contains("HTTPS (tcp/443)"));
+        assert!(html.contains("No traffic in this range."), "empty remotes");
+        assert!(html.contains("per minute"));
+    }
 
     #[test]
     fn formats_numbers_and_rfc3339() {

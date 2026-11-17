@@ -95,6 +95,8 @@ pub struct MockBackend {
     state: Mutex<State>,
     /// Accepted credentials.
     users: Vec<(String, String)>,
+    /// Where the traffic and alert databases are (see [`seed_insight`]).
+    insight_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for MockBackend {
@@ -148,7 +150,15 @@ impl MockBackend {
                 clock,
             }),
             users: vec![("root".into(), "sensr".into())],
+            insight_dir: None,
         }
+    }
+
+    /// Reads the traffic and alert databases from `dir` instead of the daemon's directory.
+    #[must_use]
+    pub fn with_insight_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.insight_dir = Some(dir.into());
+        self
     }
 
     fn with<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
@@ -341,6 +351,14 @@ impl Backend for MockBackend {
 
     fn dns_stats(&self) -> BoxFuture<'_, ApiResult<DnsStats>> {
         ready(Ok(simulated_dns_stats()))
+    }
+    fn insight_dir(&self) -> std::path::PathBuf {
+        self.insight_dir.clone().unwrap_or_else(|| {
+            std::env::var_os("SENSR_INSIGHT_DIR").map_or_else(
+                || std::path::PathBuf::from(sensr_flow::config::DB_DIR),
+                std::path::PathBuf::from,
+            )
+        })
     }
 }
 
@@ -541,7 +559,294 @@ fn simulated_status(doc: &Value, t: u64) -> SystemStatus {
             },
         ],
         traffic,
+        history: None,
     }
+}
+
+/// Writes a small traffic database (`flows.db`: hosts, services, remotes and interfaces over
+/// the last year, live interface samples for the last hour) and alert database (`alerts.db`)
+/// into `dir`, through the same store code sensr-insight writes with. Deterministic for a
+/// given `now` (Unix seconds).
+pub fn seed_insight(dir: &std::path::Path, now: i64) -> sensr_flow::store::Result<()> {
+    use sensr_flow::config::{ALERTS_DB, FLOWS_DB};
+    use sensr_flow::eve::{Alert, AlertStore, Event};
+    use sensr_flow::store::{Batch, DAY, FlowStore, HOUR, MINUTE, RowKind, SAMPLE, Totals};
+
+    let _ = std::fs::remove_file(dir.join(FLOWS_DB));
+    let _ = std::fs::remove_file(dir.join(ALERTS_DB));
+    // (local host, share of the traffic, its services as (key, share)).
+    type HostSpec = (&'static str, f64, &'static [(&'static str, f64)]);
+    const HOSTS: &[HostSpec] = &[
+        (
+            "192.168.1.20",
+            0.38,
+            &[("tcp/443", 0.7), ("tcp/22", 0.05), ("udp/51820", 0.25)],
+        ),
+        (
+            "192.168.1.100",
+            0.27,
+            &[
+                ("tcp/443", 0.55),
+                ("udp/443", 0.35),
+                ("udp/53", 0.02),
+                ("udp/3478", 0.08),
+            ],
+        ),
+        (
+            "192.168.1.101",
+            0.18,
+            &[("tcp/443", 0.6), ("udp/443", 0.3), ("tcp/993", 0.1)],
+        ),
+        ("10.10.0.2", 0.09, &[("tcp/443", 0.8), ("udp/53", 0.2)]),
+        (
+            "192.168.1.30",
+            0.05,
+            &[("tcp/25565", 0.9), ("udp/123", 0.1)],
+        ),
+        ("192.168.1.21", 0.03, &[("tcp/80", 0.4), ("tcp/443", 0.6)]),
+    ];
+    const REMOTES: &[(&str, f64)] = &[
+        ("203.0.113.80", 0.31),
+        ("198.51.100.7", 0.22),
+        ("2001:db8:cafe::443", 0.14),
+        ("192.0.2.44", 0.11),
+        ("198.51.100.200", 0.08),
+        ("203.0.113.9", 0.06),
+        ("192.0.2.180", 0.05),
+        ("198.51.100.53", 0.03),
+    ];
+    // Bytes per second at the busiest hour of the day.
+    const PEAK: f64 = 6.0e6;
+    let wave = |t: i64, period: i64, phase: i64| {
+        let x = (t + phase).rem_euclid(period) as f64 / period as f64 * std::f64::consts::TAU;
+        (x.sin() + 1.0) / 2.0
+    };
+    // Daily rhythm plus slower weekly swing, never quite idle.
+    let level = |t: i64| PEAK * (0.12 + 0.6 * wave(t, DAY, -6 * HOUR) + 0.28 * wave(t, 7 * DAY, 0));
+    let tot = |bytes: f64, up_share: f64| {
+        let down = (bytes * (1.0 - up_share)) as u64;
+        let up = (bytes * up_share) as u64;
+        Totals {
+            up,
+            down,
+            up_packets: up / 900 + 1,
+            down_packets: down / 1300 + 1,
+        }
+    };
+    let batch = |t: i64, secs: i64| {
+        let total = level(t) * secs as f64;
+        let mut b = Batch::default();
+        for (i, (host, share, apps)) in HOSTS.iter().enumerate() {
+            let jitter = 0.75 + 0.5 * wave(t, 5 * HOUR + i as i64 * 1_337, i as i64 * 977);
+            let bytes = total * share * jitter;
+            b.rows.insert(
+                (RowKind::Host, (*host).into(), String::new()),
+                tot(bytes, 0.18),
+            );
+            for (app, s) in *apps {
+                b.rows.insert(
+                    (RowKind::App, (*app).into(), (*host).into()),
+                    tot(bytes * s, 0.18),
+                );
+            }
+        }
+        for (remote, share) in REMOTES {
+            b.rows.insert(
+                (RowKind::Remote, (*remote).into(), String::new()),
+                tot(total * share, 0.18),
+            );
+        }
+        // Forwarded traffic crosses the WAN and one inside interface.
+        for (iface, share) in [("wan", 1.0), ("lan", 0.88), ("opt1", 0.12)] {
+            b.add_iface(
+                iface,
+                (total * share * 0.82) as u64,
+                (total * share * 0.18) as u64,
+            );
+        }
+        b
+    };
+
+    let mut flows = FlowStore::open(&dir.join(FLOWS_DB))?;
+    let floor = |t: i64, r: i64| t - t.rem_euclid(r);
+    // Each write lands in the minute, hour and day buckets, so the oldest data goes in
+    // a day at a time, then an hour at a time, and the last two hours a minute at a time:
+    // every range sees complete buckets at its own resolution.
+    let recent_hours = floor(now, HOUR) - 2 * HOUR;
+    let hourly_from = floor(now, DAY) - 31 * DAY;
+    let mut t = floor(now, DAY) - 365 * DAY;
+    while t < hourly_from {
+        flows.write_minute(t, &batch(t, DAY))?;
+        t += DAY;
+    }
+    while t < recent_hours {
+        flows.write_minute(t, &batch(t, HOUR))?;
+        t += HOUR;
+    }
+    while t < floor(now, MINUTE) {
+        flows.write_minute(t, &batch(t, MINUTE))?;
+        t += MINUTE;
+    }
+    let mut t = floor(now, SAMPLE) - HOUR;
+    while t < now {
+        let live = (0.6 + 0.4 * wave(t, 120, 0)) * level(t) * SAMPLE as f64;
+        let mut b = Batch::default();
+        for (iface, share) in [("wan", 1.0), ("lan", 0.88), ("opt1", 0.12)] {
+            b.add_iface(
+                iface,
+                (live * share * 0.82) as u64,
+                (live * share * 0.18) as u64,
+            );
+        }
+        flows.write_samples(t, &b)?;
+        t += SAMPLE;
+    }
+
+    // (sid, signature, category, severity, proto, src, src port, dst, dst port, how many).
+    type Spec = (
+        u32,
+        &'static str,
+        &'static str,
+        u8,
+        &'static str,
+        &'static str,
+        u16,
+        &'static str,
+        u16,
+        u32,
+    );
+    const ALERTS: &[Spec] = &[
+        (
+            2001219,
+            "ET SCAN Potential SSH Scan",
+            "Attempted Information Leak",
+            2,
+            "TCP",
+            "198.51.100.23",
+            51544,
+            "203.0.113.24",
+            22,
+            14,
+        ),
+        (
+            2402000,
+            "ET DROP Dshield Block Listed Source group 1",
+            "Misc Attack",
+            2,
+            "TCP",
+            "192.0.2.77",
+            40112,
+            "203.0.113.24",
+            443,
+            11,
+        ),
+        (
+            2027757,
+            "ET DNS Query for .to TLD",
+            "Potentially Bad Traffic",
+            2,
+            "UDP",
+            "192.168.1.101",
+            53211,
+            "192.168.1.1",
+            53,
+            9,
+        ),
+        (
+            2013504,
+            "ET POLICY GNU/Linux APT User-Agent Outbound likely related to package management",
+            "Not Suspicious Traffic",
+            3,
+            "TCP",
+            "192.168.1.20",
+            38812,
+            "198.51.100.7",
+            80,
+            8,
+        ),
+        (
+            2028371,
+            "ET JA3 Hash - Possible Malware - Fake Firefox Font Update",
+            "Unknown Traffic",
+            3,
+            "TCP",
+            "192.168.1.100",
+            50433,
+            "203.0.113.80",
+            443,
+            6,
+        ),
+        (
+            2047122,
+            "ET INFO Observed DNS Query to .cloud TLD",
+            "Potentially Bad Traffic",
+            2,
+            "UDP",
+            "192.168.1.100",
+            61552,
+            "192.168.1.1",
+            53,
+            5,
+        ),
+        (
+            2210045,
+            "SURICATA STREAM Packet with invalid ack",
+            "Generic Protocol Command Decode",
+            3,
+            "TCP",
+            "203.0.113.80",
+            443,
+            "192.168.1.101",
+            50122,
+            4,
+        ),
+        (
+            2019401,
+            "ET POLICY Vulnerable Java Version 1.8.x Detected",
+            "Potential Corporate Privacy Violation",
+            1,
+            "TCP",
+            "192.168.1.30",
+            44210,
+            "192.0.2.44",
+            80,
+            3,
+        ),
+    ];
+    let mut events = Vec::new();
+    let mut n = 0i64;
+    for (sid, sig, cat, sev, proto, src, sport, dst, dport, count) in ALERTS {
+        for k in 0..*count {
+            n += 1;
+            // Spread over the last day, newest a minute ago.
+            let ts = (now - 60 - (n * 7_919 + i64::from(k) * 3_331) % DAY) * 1000;
+            events.push(Event::Alert(Box::new(Alert {
+                id: 0,
+                ts,
+                gid: 1,
+                sid: *sid,
+                rev: 3,
+                signature: (*sig).into(),
+                category: (*cat).into(),
+                severity: *sev,
+                action: "allowed".into(),
+                proto: (*proto).into(),
+                src_ip: (*src).into(),
+                src_port: Some(*sport + k as u16),
+                dest_ip: (*dst).into(),
+                dest_port: Some(*dport),
+                iface: if dst.starts_with("192.168.") || src.starts_with("192.168.") {
+                    "eth1".into()
+                } else {
+                    "eth0".into()
+                },
+                app_proto: String::new(),
+                raw: "{}".into(),
+            })));
+        }
+    }
+    let mut alerts = AlertStore::open(&dir.join(ALERTS_DB))?;
+    alerts.write(&events, None)
 }
 
 /// The seeded document (sensr-schema shape): the factory default plus aliases, rules, NAT,
@@ -693,6 +998,20 @@ pub fn seed() -> Value {
                 "91000000-0000-4000-a000-000000000002": {"name": "phone",
                     "public_key": "QI/cUp+b5XkhrNjwkflNQD3lZZ1tzY6kr9E3dj+KyDw=",
                     "allowed_ips": ["10.10.0.3/32"], "keepalive": 25}
+            }
+        },
+        "ids": {
+            "enabled": true,
+            "interfaces": ["wan"],
+            "suppressions": {
+                "e1000000-0000-4000-a000-000000000001": {"gid": 1, "sid": 2013504,
+                    "description": "APT updates from the NAS"},
+                "e1000000-0000-4000-a000-000000000002": {"enabled": false, "gid": 1, "sid": 2027757,
+                    "track": {"by": "src", "net": "192.168.1.101/32"}, "description": "Laptop .to lookups"}
+            },
+            "user_rules": {
+                "e2000000-0000-4000-a000-000000000001": {"source": "192.168.1.30/32",
+                    "action": "pass", "bypass": true, "description": "Game server: no inspection"}
             }
         }
     })
@@ -916,6 +1235,8 @@ mod tests {
             GridId::Blocklists,
             GridId::WgInstances,
             GridId::WgPeers,
+            GridId::IdsSuppressions,
+            GridId::IdsUserRules,
         ] {
             let scope = g.scope(&None);
             let store = crate::adapt::store(g, &scope, &doc);
@@ -957,6 +1278,7 @@ mod tests {
             FormId::UnboundCache,
             FormId::UnboundAclDefault,
             FormId::UnboundForwarding,
+            FormId::IdsSettings,
         ] {
             let scope = f.scope(&None);
             let view = crate::adapt::form_to_view(f, &doc, &scope).unwrap();

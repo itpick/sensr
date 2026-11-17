@@ -37,7 +37,7 @@ fn assert_all_labelled(doc: &Html, what: &str) {
     }
 }
 
-const FORMS: [FormId; 11] = [
+const FORMS: [FormId; 12] = [
     FormId::SystemGeneral,
     FormId::Interface,
     FormId::SourceNatMode,
@@ -49,9 +49,10 @@ const FORMS: [FormId; 11] = [
     FormId::UnboundCache,
     FormId::UnboundAclDefault,
     FormId::UnboundForwarding,
+    FormId::IdsSettings,
 ];
 
-const GRIDS: [GridId; 13] = [
+const GRIDS: [GridId; 15] = [
     GridId::Assignments,
     GridId::Aliases,
     GridId::FilterRules,
@@ -65,6 +66,8 @@ const GRIDS: [GridId; 13] = [
     GridId::Blocklists,
     GridId::WgInstances,
     GridId::WgPeers,
+    GridId::IdsSuppressions,
+    GridId::IdsUserRules,
 ];
 
 #[test]

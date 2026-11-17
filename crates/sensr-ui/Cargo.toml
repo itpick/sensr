@@ -22,6 +22,7 @@ default = ["ssr"]
 ssr = [
   "dep:anyhow",
   "dep:axum",
+  "dep:sensr-flow",
   "dep:sensr-schema",
   "dep:serde_path_to_error",
   "dep:leptos_axum",
@@ -51,7 +52,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
-# ssr
+# ssr (sensr-flow brings rusqlite: never in the wasm build)
+sensr-flow = { workspace = true, optional = true, features = ["store"] }
 sensr-schema = { workspace = true, optional = true }
 serde_path_to_error = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }

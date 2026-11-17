@@ -929,7 +929,8 @@ pub fn GridIsland(
 
 // ------------------------------------------------------------------ dashboard
 
-fn bps(v: u64) -> String {
+/// A rate in bits per second, scaled.
+pub fn bps(v: u64) -> String {
     let v = v as f64;
     if v >= 1e9 {
         format!("{:.2} Gbit/s", v / 1e9)
@@ -956,7 +957,7 @@ fn uptime(s: u64) -> String {
     )
 }
 
-fn sparkline(rx: &[u64], tx: &[u64]) -> impl IntoView + use<> {
+fn sparkline(rx: &[u64], tx: &[u64], label: &'static str) -> impl IntoView + use<> {
     let max = rx.iter().chain(tx).copied().max().unwrap_or(1).max(1) as f64;
     let pts = |s: &[u64]| {
         let n = s.len().max(2) - 1;
@@ -974,7 +975,7 @@ fn sparkline(rx: &[u64], tx: &[u64]) -> impl IntoView + use<> {
     };
     let (rx_pts, tx_pts) = (pts(rx), pts(tx));
     view! {
-        <svg class="spark" viewBox="0 0 300 60" preserveAspectRatio="none" role="img" aria-label="Traffic over the last two minutes">
+        <svg class="spark" viewBox="0 0 300 60" preserveAspectRatio="none" role="img" aria-label=label>
             <polyline points=rx_pts class="spark-rx" fill="none"/>
             <polyline points=tx_pts class="spark-tx" fill="none"/>
         </svg>
@@ -986,6 +987,8 @@ fn sparkline(rx: &[u64], tx: &[u64]) -> impl IntoView + use<> {
 pub fn DashboardLive(initial: SystemStatus) -> impl IntoView {
     mark_hydrated();
     let st = RwSignal::new(initial);
+    // Traffic graph: 10 s samples of the last ten minutes, or the last hour per minute.
+    let live = RwSignal::new(true);
     Effect::new(move |_| {
         set_interval(
             move || {
@@ -1078,10 +1081,39 @@ pub fn DashboardLive(initial: SystemStatus) -> impl IntoView {
                             <figcaption>{t.name.clone()}
                                 <span class="muted">{format!(" in {} · out {}", bps(*t.rx.last().unwrap_or(&0)), bps(*t.tx.last().unwrap_or(&0)))}</span>
                             </figcaption>
-                            {sparkline(&t.rx, &t.tx)}
+                            {sparkline(&t.rx, &t.tx, "Traffic over the last two minutes")}
                         </figure>
                     }).collect_view())}
                 </div>
+            </section>
+            <section class="card card-wide" aria-labelledby="w-tg">
+                <h2 id="w-tg">"Traffic graph"</h2>
+                {move || st.with(|s| match &s.history {
+                    None => view! {
+                        <p class="muted">"The traffic graph appears once traffic accounting (Reporting › Insight) has collected data."</p>
+                    }.into_any(),
+                    Some(h) => {
+                        let is_live = live.get();
+                        let pts = if is_live { &h.live } else { &h.hour };
+                        let rx: Vec<u64> = pts.iter().map(|p| p.down_bps()).collect();
+                        let tx: Vec<u64> = pts.iter().map(|p| p.up_bps()).collect();
+                        let (now_rx, now_tx) = (rx.last().copied().unwrap_or(0), tx.last().copied().unwrap_or(0));
+                        view! {
+                            <div class="graph-head">
+                                <p class="legend"><span class="key key-rx"></span>{format!("In {}", bps(now_rx))}
+                                    <span class="key key-tx"></span>{format!("Out {}", bps(now_tx))}
+                                    <span class="muted">" · all interfaces"</span></p>
+                                <div class="seg" role="group" aria-label="Graph period">
+                                    <button type="button" class="btn btn-sm" aria-pressed=is_live.to_string()
+                                        on:click=move |_| live.set(true)>"Live (10 s)"</button>
+                                    <button type="button" class="btn btn-sm" aria-pressed=(!is_live).to_string()
+                                        on:click=move |_| live.set(false)>"Last hour"</button>
+                                </div>
+                            </div>
+                            {sparkline(&rx, &tx, if is_live { "Traffic, all interfaces, last ten minutes" } else { "Traffic, all interfaces, last hour" })}
+                        }.into_any()
+                    }
+                })}
             </section>
         </div>
     }

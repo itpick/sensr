@@ -3308,6 +3308,7 @@ dependencies = [
  "leptos_meta",
  "leptos_router",
  "scraper",
+ "sensr-flow",
  "sensr-schema",
  "serde",
  "serde_json",

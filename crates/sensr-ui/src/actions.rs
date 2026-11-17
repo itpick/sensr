@@ -7,7 +7,7 @@
 //! [`crate::adapt`], and write back the touched section; validation errors from the backend
 //! come back with schema paths and are mapped to the view's field paths.
 
-use crate::api::{FieldError, Pending, SystemStatus};
+use crate::api::{AlertPage, FieldError, InsightReport, Pending, SystemStatus};
 use crate::form::Inputs;
 use crate::grid::{GridPage, GridQuery};
 use crate::models::{FormId, GridId};
@@ -162,6 +162,50 @@ mod imp {
             *cur = empty;
         }
         cur
+    }
+
+    /// Seconds since the Unix epoch.
+    pub fn now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
+    }
+
+    /// The suppressions in force for the (staged) `ids` section: the defaults unless turned
+    /// off, then the user's enabled ones.
+    pub fn suppressions(ids: &Value) -> Vec<sensr_schema::models::ids::Suppression> {
+        let ids = if ids.is_null() {
+            Value::Object(Map::new())
+        } else {
+            ids.clone()
+        };
+        serde_json::from_value::<sensr_schema::models::ids::Ids>(ids)
+            .map(|i| i.active_suppressions())
+            .unwrap_or_default()
+    }
+
+    /// Whether one of `active` silences `alert`.
+    pub fn is_suppressed(
+        active: &[sensr_schema::models::ids::Suppression],
+        alert: &crate::api::AlertRow,
+    ) -> bool {
+        use sensr_schema::models::ids::TrackBy;
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().ok();
+        active.iter().any(|s| {
+            s.gid == alert.gid
+                && s.sid == alert.sid
+                && match &s.track {
+                    None => true,
+                    Some(t) => {
+                        let hit = |a: &str| ip(a).is_some_and(|a| t.net.contains(&a));
+                        match t.by {
+                            TrackBy::Src => hit(&alert.src_ip),
+                            TrackBy::Dst => hit(&alert.dest_ip),
+                            TrackBy::Either => hit(&alert.src_ip) || hit(&alert.dest_ip),
+                        }
+                    }
+                }
+        })
     }
 
     pub fn store_path(store: &Store) -> &str {
@@ -492,10 +536,172 @@ pub async fn rollback_to(revision: u64) -> Result<(), ServerFnError> {
     Ok(())
 }
 
-/// Live dashboard data.
+/// Live dashboard data, with the traffic graph from the insight database when the caller
+/// may see it.
 #[server(prefix = "/ui/fn", input = Json)]
 pub async fn live_status() -> Result<SystemStatus, ServerFnError> {
-    imp::backend()?.status().await.map_err(imp::err)
+    let b = imp::backend()?;
+    let mut status = b.status().await.map_err(imp::err)?;
+    if b.may_access("/api/v1/insight/series") {
+        let dir = b.insight_dir();
+        let now = imp::now();
+        status.history = tokio::task::spawn_blocking(move || crate::insight::history(&dir, now))
+            .await
+            .ok()
+            .flatten();
+    }
+    Ok(status)
+}
+
+/// Reporting › Insight: top talkers and traffic over `range` (`2h`, `24h`, `7d`, `31d`,
+/// `1y`), for every local host or for `host`.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn insight_data(
+    range: String,
+    host: Option<String>,
+) -> Result<InsightReport, ServerFnError> {
+    use serde_json::Value;
+    let b = imp::backend()?;
+    if !b.may_access("/api/v1/insight/top") {
+        return Err(ServerFnError::new("you may not view traffic reports"));
+    }
+    let (_, _, span) = crate::api::insight_range(&range);
+    let host = host
+        .filter(|h| h.parse::<std::net::IpAddr>().is_ok())
+        .map(|h| h.trim().to_owned());
+    let ifs = b.get("interfaces").await.map_err(imp::err)?;
+    let labels: std::collections::HashMap<String, String> = ifs
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, i)| {
+            let d = i
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            (
+                id.clone(),
+                if d.is_empty() {
+                    id.to_uppercase()
+                } else {
+                    d.to_owned()
+                },
+            )
+        })
+        .collect();
+    let dir = b.insight_dir();
+    let now = imp::now();
+    tokio::task::spawn_blocking(move || {
+        crate::insight::report(&dir, span, now, host.as_deref(), |id| {
+            labels.get(id).cloned().unwrap_or_else(|| id.to_uppercase())
+        })
+    })
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?
+    .map_err(ServerFnError::new)
+}
+
+/// Services › Intrusion Detection › Alerts: one page, newest first. `text` is a signature id
+/// or part of the message; `host` an address on either side.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn ids_alerts(text: String, host: String, page: u32) -> Result<AlertPage, ServerFnError> {
+    let b = imp::backend()?;
+    if !b.may_access("/api/v1/ids/alerts") {
+        return Err(ServerFnError::new("you may not view IDS alerts"));
+    }
+    let doc = b.get("ids").await.map_err(imp::err)?;
+    let active = imp::suppressions(&doc);
+    let dir = b.insight_dir();
+    let mut p =
+        tokio::task::spawn_blocking(move || crate::insight::alerts(&dir, &text, &host, page))
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .map_err(ServerFnError::new)?;
+    for a in &mut p.rows {
+        a.suppressed = imp::is_suppressed(&active, a);
+    }
+    Ok(p)
+}
+
+/// Suppresses an alert's signature (everywhere, or only from `src`) by staging a new
+/// `ids.suppressions` item. A plain form post from the alerts tab; redirects back to `back`.
+#[server(prefix = "/ui/fn", endpoint = "ids_suppress")]
+pub async fn ids_suppress(
+    sid: u32,
+    gid: u32,
+    signature: String,
+    src: Option<String>,
+    back: String,
+) -> Result<(), ServerFnError> {
+    use crate::adapt::Store;
+    use serde_json::{Value, json};
+    // Only ever back to the alerts tab, keeping its filter but not an old notice.
+    let (path, query) = back.split_once('?').unwrap_or((&back, ""));
+    let path = if path == "/ui/ids/alerts" {
+        path
+    } else {
+        "/ui/ids/alerts"
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|kv| !kv.is_empty() && !kv.starts_with("staged=") && !kv.starts_with("error="))
+        .collect();
+    let to = |notice: String| {
+        let mut q = kept.clone();
+        q.push(&notice);
+        leptos_axum::redirect(&format!("{path}?{}", q.join("&")));
+    };
+    let net = match src.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => None,
+        Some(ip) => match ip.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(a)) => Some(format!("{a}/32")),
+            Ok(std::net::IpAddr::V6(a)) => Some(format!("{a}/128")),
+            Err(_) => {
+                to(format!(
+                    "error={}",
+                    crate::pages::url_encode("Not an address.")
+                ));
+                return Ok(());
+            }
+        },
+    };
+    let mut doc = imp::doc().await?;
+    let mut item = json!({"enabled": true, "gid": gid.max(1), "sid": sid});
+    if let Some(net) = &net {
+        item["track"] = json!({"by": "src", "net": net});
+    }
+    let why: String = signature
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(255)
+        .collect();
+    if !why.trim().is_empty() {
+        item["description"] = Value::String(why.trim().to_owned());
+    }
+    let store = Store::Map("ids.suppressions".into());
+    if let Value::Object(m) = imp::collection(&mut doc, &store) {
+        let dup = m.values().any(|s| {
+            s.get("sid") == item.get("sid")
+                && s.get("gid").and_then(Value::as_u64).unwrap_or(1) == u64::from(gid.max(1))
+                && s.get("track") == item.get("track")
+        });
+        if dup {
+            to(format!(
+                "error={}",
+                crate::pages::url_encode(
+                    "This signature is already suppressed for these addresses."
+                )
+            ));
+            return Ok(());
+        }
+        m.insert(crate::models::new_uuid(), item);
+    }
+    let errors = imp::store(&doc, &["ids"], |_| None).await?;
+    match errors.first() {
+        None => to(format!("staged={sid}")),
+        Some(e) => to(format!("error={}", crate::pages::url_encode(&e.message))),
+    }
+    Ok(())
 }
 
 /// Blocklist and resolver statistics for Services › Unbound DNS › Blocklist.
@@ -669,4 +875,55 @@ pub async fn field_choices() -> Result<crate::form::Choices, ServerFnError> {
     ]
     .into_iter()
     .collect())
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::imp::{is_suppressed, suppressions};
+    use serde_json::json;
+
+    fn alert(sid: u32, src: &str) -> crate::api::AlertRow {
+        crate::api::AlertRow {
+            id: 1,
+            ts: 0,
+            gid: 1,
+            sid,
+            signature: String::new(),
+            category: String::new(),
+            severity: 3,
+            action: String::new(),
+            proto: "TCP".into(),
+            src_ip: src.into(),
+            src_port: None,
+            dest_ip: "203.0.113.24".into(),
+            dest_port: None,
+            iface: String::new(),
+            suppressed: false,
+        }
+    }
+
+    #[test]
+    fn suppressions_match_by_sid_and_tracked_address() {
+        let ids = json!({"suppressions": {
+            "e1000000-0000-4000-a000-000000000001": {"sid": 7, "track": {"by": "src", "net": "192.168.1.0/24"}},
+            "e1000000-0000-4000-a000-000000000002": {"sid": 8, "enabled": false},
+        }});
+        let active = suppressions(&ids);
+        assert!(is_suppressed(&active, &alert(7, "192.168.1.9")));
+        assert!(
+            !is_suppressed(&active, &alert(7, "10.0.0.1")),
+            "other source"
+        );
+        assert!(!is_suppressed(&active, &alert(8, "10.0.0.1")), "disabled");
+        // The defaults apply unless turned off; a missing section is all defaults.
+        assert!(is_suppressed(
+            &suppressions(&serde_json::Value::Null),
+            &alert(2016149, "10.0.0.1")
+        ));
+        let off = json!({"default_suppressions": false});
+        assert!(!is_suppressed(
+            &suppressions(&off),
+            &alert(2016149, "10.0.0.1")
+        ));
+    }
 }

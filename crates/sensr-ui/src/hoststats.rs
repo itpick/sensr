@@ -202,6 +202,7 @@ impl Sampler {
             interfaces,
             gateways: Vec::new(),
             traffic,
+            history: None,
         }
     }
 }
