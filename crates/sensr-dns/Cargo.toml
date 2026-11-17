@@ -1,0 +1,35 @@
+[package]
+name = "sensr-dns"
+description = "DNS blocklists compiled to Unbound local zones, DHCP lease registration and resolver statistics (OPNsense counterpart: unbound-dnsbl, unbound_watcher.py, stats.py)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sensr-dns"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+clap.workspace = true
+fancy-regex.workspace = true
+ipnet.workspace = true
+sensr-apply.workspace = true
+sensr-schema.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
