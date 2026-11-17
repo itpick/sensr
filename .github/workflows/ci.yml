@@ -83,7 +83,7 @@ jobs:
           target/release/sensr-agent --socket "$sock" --socket-mode 600 --trust-uid "$(id -u)" \
             --seed crates/sensr-ui/e2e/fixtures/agent-seed.json --applier preview &
           for i in $(seq 50); do [ -S "$sock" ] && break; sleep 0.2; done
-          target/release/sensr-api --listen 127.0.0.1:3400 --socket "$sock" --ui-root target/site &
+          target/release/sensr-api --listen 127.0.0.1:3400 --insecure-http --socket "$sock" --ui-root target/site &
           for i in $(seq 50); do curl -sf http://127.0.0.1:3400/healthz >/dev/null && break; sleep 0.2; done
           cd crates/sensr-ui/e2e
           # schema.spec.ts needs sensr-schema validation in the agent, which is not wired yet.
