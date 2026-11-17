@@ -127,6 +127,10 @@
             sensrModules = testModules;
             mode = "reference";
           };
+          insight = import ./nix/tests/insight.nix {
+            inherit pkgs;
+            sensrModules = testModules;
+          };
           ids = import ./nix/tests/ids.nix {
             inherit pkgs;
             sensrModules = testModules;

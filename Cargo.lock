@@ -3077,6 +3077,7 @@ dependencies = [
  "rustls-pki-types",
  "sensr-agent",
  "sensr-auth",
+ "sensr-flow",
  "sensr-ipc",
  "sensr-ui",
  "serde",
@@ -3099,6 +3100,7 @@ dependencies = [
  "ipnet",
  "minijinja",
  "proptest",
+ "sensr-flow",
  "sensr-rules",
  "sensr-schema",
  "serde",
@@ -3179,6 +3181,20 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+]
+
+[[package]]
+name = "sensr-flow"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

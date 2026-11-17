@@ -26,6 +26,7 @@ sensr-ui = { path = "crates/sensr-ui" }
 sensr-monitor = { path = "crates/sensr-monitor" }
 sensr-net = { path = "crates/sensr-net" }
 sensr-dns = { path = "crates/sensr-dns" }
+sensr-flow = { path = "crates/sensr-flow", default-features = false }
 
 anyhow = "1.0.104"
 argon2 = "0.6.0"

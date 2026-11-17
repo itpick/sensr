@@ -157,6 +157,7 @@ pkgs.testers.runNixOSTest {
       environment.systemPackages = with pkgs; [
         jq
         nftables
+        sqlite
       ];
     };
 
@@ -233,6 +234,13 @@ pkgs.testers.runNixOSTest {
         router.wait_until_succeeds("grep -q '\"signature_id\":9000001' /var/log/suricata/eve.json", timeout=30)
         a = json.loads(alerts(9000001)[0])
         assert a["dest_ip"] == wan_ip, a
+        # sensr-insight stores them for the alerts view
+        router.wait_for_unit("sensr-insight.service")
+        router.wait_until_succeeds(
+            "sqlite3 -readonly -cmd '.timeout 5000' /var/lib/sensr-insight/alerts.db"
+            " 'SELECT COUNT(*) FROM alerts WHERE sid=2100498' | grep -qv '^0$'",
+            timeout=30,
+        )
 
     with subtest("suppressions: STUN is silent by default, the control alerts"):
         stun(3478)
@@ -259,9 +267,14 @@ pkgs.testers.runNixOSTest {
             "suricatasc -c ruleset-stats /run/suricata/suricata-command.socket | jq -e '.message[0].rules_loaded >= 4'",
             timeout=120,
         )
-        # blocked: the response carrying uid=0(root) never arrives
-        rc, out = lan.execute(f"curl -s --max-time 8 http://{INTERNET}/uid")
-        assert "uid=0(root)" not in out, f"probe got through: {rc} {out!r}"
+        # blocked: the response carrying uid=0(root) never arrives. The rule
+        # download and the reload it triggers run in the background, and
+        # ruleset-stats reports the rule set the engine has, not the one it is
+        # about to load: retry until the new drop rule is in effect.
+        lan.wait_until_succeeds(
+            f"! curl -s --max-time 8 http://{INTERNET}/uid | grep -q 'uid=0(root)'",
+            timeout=60,
+        )
         # other traffic flows, also in bulk
         assert lan.succeed(f"curl -sf --max-time 5 http://{INTERNET}/").strip() == wan_ip
         t0 = time.time()

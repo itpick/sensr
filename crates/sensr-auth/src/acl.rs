@@ -176,6 +176,20 @@ impl Registry {
             &["ui/interfaces/assignment", "api/v1/interfaces/*"],
         );
         r.insert(
+            "page-services-ids",
+            "Services: Intrusion Detection",
+            &["ui/ids/*", "api/ids/*", "api/v1/ids/*"],
+        );
+        r.insert(
+            "page-diagnostics-networkinsight",
+            "Diagnostics: Network Insight",
+            &[
+                "ui/diagnostics/networkinsight/*",
+                "api/diagnostics/networkinsight/*",
+                "api/v1/insight/*",
+            ],
+        );
+        r.insert(
             "page-sensr-status",
             "sensr: Status (native API)",
             &["api/v1/status"],

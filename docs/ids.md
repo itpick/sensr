@@ -49,7 +49,11 @@ addresses anyway.
 - `profile`:
   - `home` (default): a curated ET Open subset (exploits, malware, C2,
     compromised hosts, attack responses, scans, coin miners, DNS, phishing,
-    worms, the IP reputation lists). Roughly a third of ET Open.
+    worms, the IP reputation lists). Measured with ET Open for Suricata
+    8.0.7 on 2026-11-16: **29,624 of the 53,492 enabled rules** (55 %). It
+    leaves out ET INFO (4,553 rules, the chatty ones), DYN_DNS (6,106),
+    WEB_SPECIFIC_APPS (6,101, attacks on servers a home router does not
+    host), HUNTING (1,399) and the rest of the policy-style files.
   - `all`: every file the sources ship.
   - `custom`: exactly `rule_files` (an OPNsense import lands here, with the
     files that were enabled).
