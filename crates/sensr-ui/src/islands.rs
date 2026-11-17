@@ -337,7 +337,59 @@ pub fn FormFields(
                     }
                     .into_any()
                 }
-                FieldKind::Lines | FieldKind::CidrLines | FieldKind::IpLines | FieldKind::TextArea => view! {
+                FieldKind::MultiSelect(groups) => {
+                    let label_id = format!("{id}-label");
+                    let groups_view = groups
+                        .iter()
+                        .map(|(group, opts)| {
+                            let boxes = opts
+                                .iter()
+                                .map(|(v, l)| {
+                                    let v: &'static str = v;
+                                    let has = move || get().lines().any(|x| x.trim() == v);
+                                    let toggle = move |ev| {
+                                        let on = event_target_checked(&ev);
+                                        let mut cur: Vec<String> = get()
+                                            .lines()
+                                            .map(str::trim)
+                                            .filter(|x| !x.is_empty() && *x != v)
+                                            .map(str::to_owned)
+                                            .collect();
+                                        if on {
+                                            cur.push(v.to_owned());
+                                        }
+                                        set(cur.join("\n"));
+                                    };
+                                    view! {
+                                        <label class="multi-opt">
+                                            <input type="checkbox" value=v prop:checked=has checked=has() on:change=toggle/>
+                                            <span>{*l}</span>
+                                        </label>
+                                    }
+                                })
+                                .collect_view();
+                            view! {
+                                <fieldset class="multi-group">
+                                    <legend>{*group}</legend>
+                                    {boxes}
+                                </fieldset>
+                            }
+                        })
+                        .collect_view();
+                    view! {
+                        <div class="multi" id=id.clone() role="group" aria-labelledby=label_id
+                            aria-describedby=described aria-invalid=invalid>
+                            {groups_view}
+                        </div>
+                    }
+                    .into_any()
+                }
+                FieldKind::Lines
+                | FieldKind::CidrLines
+                | FieldKind::IpLines
+                | FieldKind::HostnameLines
+                | FieldKind::ListedNameLines
+                | FieldKind::TextArea => view! {
                     <textarea id=id.clone() rows="3" aria-describedby=described aria-invalid=invalid required=required
                         prop:value=get
                         on:input=move |ev| set(event_target_value(&ev))>{get()}</textarea>
@@ -364,12 +416,16 @@ pub fn FormFields(
                 }
             };
             let check = matches!(f.kind, FieldKind::Checkbox);
+            let req_mark = required.then(|| view! { <span class="req" aria-hidden="true">" *"</span> });
+            // A group of checkboxes has no single control to point a <label for> at.
+            let label = if matches!(f.kind, FieldKind::MultiSelect(_)) {
+                view! { <span class="field-label" id=format!("{id}-label")>{f.label}{req_mark}</span> }.into_any()
+            } else {
+                view! { <label for=id.clone()>{f.label}{req_mark}</label> }.into_any()
+            };
             view! {
                 <div class="field" class:field-check=check class:has-error=move || err().is_some()>
-                    <label for=id.clone()>
-                        {f.label}
-                        {required.then(|| view! { <span class="req" aria-hidden="true">" *"</span> })}
-                    </label>
+                    {label}
                     <div class="control">
                         {input}
                         {(!f.help.is_empty()).then(|| view! { <p class="help" id=help_id.clone()>{f.help}</p> })}

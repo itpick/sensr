@@ -338,6 +338,62 @@ impl Backend for MockBackend {
             .collect();
         ready(Ok(cards))
     }
+
+    fn dns_stats(&self) -> BoxFuture<'_, ApiResult<DnsStats>> {
+        ready(Ok(simulated_dns_stats()))
+    }
+}
+
+/// What sensr-dns would report for the seeded blocklist policies.
+pub fn simulated_dns_stats() -> DnsStats {
+    let src = |url: &str, entries: u64, from_cache: bool, error: Option<&str>| DnsblSource {
+        url: url.into(),
+        entries,
+        fetched: Some("2026-11-16T03:00:12Z".into()),
+        from_cache,
+        error: error.map(str::to_owned),
+    };
+    let hagezi = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/";
+    DnsStats {
+        blocklists: Some(DnsblStatus {
+            updated: "2026-11-16T03:00:15Z".into(),
+            duration_ms: 3_412,
+            names: 412_731,
+            policies: vec![
+                DnsblPolicy {
+                    id: "e2000000-0000-4000-a000-000000000001".into(),
+                    description: "Default".into(),
+                    names: 238_904,
+                    sources: vec![
+                        src(&format!("{hagezi}pro.txt"), 189_377, false, None),
+                        src("https://small.oisd.nl/domainswild", 56_120, true, None),
+                    ],
+                },
+                DnsblPolicy {
+                    id: "e2000000-0000-4000-a000-000000000002".into(),
+                    description: "Kids".into(),
+                    names: 173_828,
+                    sources: vec![
+                        src(&format!("{hagezi}gambling.txt"), 173_827, false, None),
+                        src(
+                            "https://nsfw.oisd.nl/domainswild",
+                            0,
+                            true,
+                            Some("HTTP 503 Service Unavailable; kept the cached copy"),
+                        ),
+                    ],
+                },
+            ],
+        }),
+        unbound: Some(UnboundCounters {
+            at: "2026-11-16T09:41:00Z".into(),
+            queries: 1_284_377,
+            cache_hits: 1_002_115,
+            nxdomain: 58_230,
+            uptime_seconds: 86_400.0 * 3.0 + 7_260.0,
+        }),
+        problems: vec![],
+    }
 }
 
 /// Sessions over a shared [`MockBackend`]; every session edits the same document.
@@ -589,7 +645,36 @@ pub fn seed() -> Value {
                 "b0000000-0000-4000-a000-000000000001": {"hostname": "nas", "domain": "home.arpa",
                     "record": {"rr": "A", "address": "192.168.1.20"}, "description": "NAS"},
                 "b0000000-0000-4000-a000-000000000002": {"hostname": "*", "domain": "lab.home.arpa",
-                    "record": {"rr": "A", "address": "192.168.1.40"}, "description": "Lab wildcard"}
+                    "record": {"rr": "A", "address": "192.168.1.40"}, "ttl": 300, "ptr": false,
+                    "description": "Lab wildcard"}
+            },
+            "statistics": true,
+            "forwarding": {
+                "servers": {
+                    "e0000000-0000-4000-a000-000000000001": {"domain": "corp.example", "address": "10.20.0.53",
+                        "description": "Office DNS"},
+                    "e0000000-0000-4000-a000-000000000002": {"address": "9.9.9.9", "port": "853",
+                        "tls_name": "dns.quad9.net", "description": "Quad9 over TLS"}
+                }
+            },
+            "access": {
+                "default_action": "allow",
+                "lists": {
+                    "e1000000-0000-4000-a000-000000000001": {"name": "road_warriors", "action": "allow",
+                        "networks": ["10.10.0.0/24"], "description": "WireGuard clients"},
+                    "e1000000-0000-4000-a000-000000000002": {"enabled": false, "name": "lab", "action": "refuse",
+                        "networks": ["192.168.50.0/24"]}
+                }
+            },
+            "tuning": {"prefetch": true, "msg_cache_size": "8m", "log_verbosity": 2},
+            "blocklists": {
+                "e2000000-0000-4000-a000-000000000001": {"description": "Default",
+                    "lists": ["hagezi-pro", "oisd-small"], "allow": ["*.microsoft.com"],
+                    "refresh_seconds": 72000},
+                "e2000000-0000-4000-a000-000000000002": {"description": "Kids",
+                    "lists": ["hagezi-gambling", "oisd-nsfw"], "block_subtrees": ["tiktok.com"],
+                    "source_nets": ["192.168.1.128/25"], "answer": {"mode": "nxdomain"},
+                    "refresh_seconds": 86400}
             }
         },
         "wireguard": {
@@ -826,6 +911,9 @@ mod tests {
             GridId::DhcpRanges,
             GridId::StaticMaps,
             GridId::HostOverrides,
+            GridId::AccessLists,
+            GridId::Forwarders,
+            GridId::Blocklists,
             GridId::WgInstances,
             GridId::WgPeers,
         ] {
@@ -863,6 +951,12 @@ mod tests {
             FormId::SourceNatMode,
             FormId::DhcpSettings,
             FormId::UnboundGeneral,
+            FormId::UnboundAdvanced,
+            FormId::UnboundServeExpired,
+            FormId::UnboundLogging,
+            FormId::UnboundCache,
+            FormId::UnboundAclDefault,
+            FormId::UnboundForwarding,
         ] {
             let scope = f.scope(&None);
             let view = crate::adapt::form_to_view(f, &doc, &scope).unwrap();
@@ -884,6 +978,7 @@ mod tests {
             ("log", json!(false)),
             ("no_nat", json!(false)),
             ("disable_routes", json!(false)),
+            ("ptr", json!(true)),
             ("block_private", json!(false)),
             ("block_bogons", json!(false)),
             ("tunnel_addresses", json!([])),

@@ -762,12 +762,25 @@ pub struct UnboundGeneral {
     pub interfaces: Vec<String>,
     /// DNSSEC validation.
     pub dnssec: bool,
+    /// Synthesize AAAA records (DNS64).
+    pub dns64: bool,
+    /// DNS64 prefix; empty for `64:ff9b::/96`.
+    pub dns64_prefix: String,
     /// Register DHCP leases.
     pub register_dhcp_leases: bool,
+    /// Domain for registered leases; empty for the system domain.
+    pub dhcp_domain: String,
     /// Register DHCP static mappings.
     pub register_dhcp_static: bool,
+    /// Do not publish the firewall's own A/AAAA records (inverse of the schema's
+    /// `register_firewall_records`, as OPNsense words it).
+    pub no_register_records: bool,
+    /// Publish descriptions as TXT records.
+    pub txt_descriptions: bool,
     /// Local zone type.
     pub local_zone_type: String,
+    /// Keep query statistics.
+    pub statistics: bool,
 }
 
 const ZONE_TYPES: &[(&str, &str)] = &[
@@ -785,23 +798,789 @@ const ZONE_TYPES: &[(&str, &str)] = &[
     ("always_nxdomain", "always_nxdomain"),
 ];
 
+fn is_v6_cidr(s: &str) -> bool {
+    s.split_once('/').is_some_and(|(a, l)| {
+        a.parse::<std::net::Ipv6Addr>().is_ok() && l.parse::<u8>().is_ok_and(|l| l <= 128)
+    })
+}
+
 impl FormModel for UnboundGeneral {
     fn fields() -> &'static [F] {
         const FIELDS: &[F] = &[
             F::new("enabled", "Enable Unbound", K::Checkbox),
-            F::new("port", "Listen Port", K::Number { min: 1, max: 65535 }),
+            F::new("port", "Listen Port", K::Number { min: 1, max: 65535 })
+                .help("The TCP/UDP port used for responding to DNS queries."),
             F::new("interfaces", "Network Interfaces", K::Lines)
                 .help("Interface names, one per line. Empty listens on all."),
             F::new("dnssec", "Enable DNSSEC Support", K::Checkbox),
-            F::new("register_dhcp_leases", "Register DHCP Leases", K::Checkbox),
+            F::new("dns64", "Enable DNS64 Support", K::Checkbox).help(
+                "Synthesize AAAA records from A records if no actual AAAA records are present.",
+            ),
+            F::new("dns64_prefix", "DNS64 Prefix", K::Cidr)
+                .help("Leave empty for the well-known prefix 64:ff9b::/96."),
+            F::new("register_dhcp_leases", "Register DHCP Leases", K::Checkbox).help(
+                "Machines that send their hostname when requesting a DHCP lease are registered, so that their name can be resolved.",
+            ),
+            F::new("dhcp_domain", "DHCP Domain Override", K::Hostname).help(
+                "The domain name to use for DHCP lease registration. If empty, the system domain is used.",
+            ),
             F::new(
                 "register_dhcp_static",
                 "Register DHCP Static Mappings",
                 K::Checkbox,
             ),
-            F::new("local_zone_type", "Local Zone Type", K::Select(ZONE_TYPES)),
+            F::new(
+                "no_register_records",
+                "Do not register system A/AAAA records",
+                K::Checkbox,
+            )
+            .help(
+                "No A/AAAA records for the listen interfaces are generated for the firewall's own name. Add them as host overrides if desired.",
+            ),
+            F::new("txt_descriptions", "TXT Comment Support", K::Checkbox).help(
+                "Descriptions of host overrides and DHCP static mappings create a corresponding TXT record.",
+            ),
+            F::new("local_zone_type", "Local Zone Type", K::Select(ZONE_TYPES))
+                .help("The local zone type used for the system domain. The default is 'transparent'."),
+            F::new("statistics", "Enable Statistics", K::Checkbox)
+                .help("Keep Unbound query statistics (shown under Statistics and on the Blocklist page)."),
         ];
         FIELDS
+    }
+
+    fn validate(&self) -> Vec<FieldError> {
+        if !self.dns64_prefix.is_empty() && !is_v6_cidr(&self.dns64_prefix) {
+            return vec![FieldError::new(
+                "dns64_prefix",
+                "Enter an IPv6 prefix, e.g. 64:ff9b::/96.",
+            )];
+        }
+        vec![]
+    }
+}
+
+// Unbound › Advanced, one form per OPNsense section. View field names are the schema's
+// `dns.tuning` field names, so one adapter serves all four.
+
+const U32: K = K::Number {
+    min: 0,
+    max: u32::MAX as i64,
+};
+
+/// Unbound log verbosity levels.
+pub const LOG_VERBOSITY: &[(&str, &str)] = &[
+    ("0", "Level 0"),
+    ("1", "Level 1 (Default)"),
+    ("2", "Level 2"),
+    ("3", "Level 3"),
+    ("4", "Level 4"),
+    ("5", "Level 5"),
+];
+
+/// DNSSEC validation log levels; empty for Unbound's default.
+pub const VAL_LOG_LEVEL: &[(&str, &str)] = &[
+    ("", "Default"),
+    ("0", "Level 0"),
+    ("1", "Level 1"),
+    ("2", "Level 2"),
+];
+
+/// Unbound › Advanced › General Settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UnboundAdvanced {
+    /// Refuse `id.server` queries.
+    pub hide_identity: bool,
+    /// Refuse `version.server` queries.
+    pub hide_version: bool,
+    /// Fetch DNSKEYs early.
+    pub prefetch_key: bool,
+    /// Harden DNSSEC-stripped zones.
+    pub harden_dnssec_stripped: bool,
+    /// RFC 8020.
+    pub harden_below_nxdomain: bool,
+    /// RFC 8198.
+    pub aggressive_nsec: bool,
+    /// Strict QNAME minimisation.
+    pub qname_minimisation_strict: bool,
+    /// Outgoing TCP buffers.
+    pub outgoing_num_tcp: Option<u32>,
+    /// Incoming TCP buffers.
+    pub incoming_num_tcp: Option<u32>,
+    /// Queries per thread.
+    pub num_queries_per_thread: Option<u32>,
+    /// Outgoing ports per thread.
+    pub outgoing_range: Option<u32>,
+    /// Jostle timeout, ms.
+    pub jostle_timeout: Option<u32>,
+    /// Discard timeout, ms.
+    pub discard_timeout: Option<u32>,
+    /// Domains allowed to answer with private addresses.
+    pub private_domains: Vec<String>,
+    /// Rebinding protection ranges.
+    pub private_addresses: Vec<String>,
+    /// Domains not DNSSEC-validated.
+    pub insecure_domains: Vec<String>,
+}
+
+impl Default for UnboundAdvanced {
+    fn default() -> Self {
+        Self {
+            hide_identity: false,
+            hide_version: false,
+            prefetch_key: false,
+            harden_dnssec_stripped: false,
+            harden_below_nxdomain: true,
+            aggressive_nsec: true,
+            qname_minimisation_strict: false,
+            outgoing_num_tcp: None,
+            incoming_num_tcp: None,
+            num_queries_per_thread: None,
+            outgoing_range: None,
+            jostle_timeout: None,
+            discard_timeout: None,
+            private_domains: vec![],
+            private_addresses: vec![],
+            insecure_domains: vec![],
+        }
+    }
+}
+
+impl FormModel for UnboundAdvanced {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("hide_identity", "Hide Identity", K::Checkbox)
+                .help("If enabled, id.server and hostname.bind queries are refused."),
+            F::new("hide_version", "Hide Version", K::Checkbox)
+                .help("If enabled, version.server and version.bind queries are refused."),
+            F::new("prefetch_key", "Prefetch DNS Key Support", K::Checkbox).help(
+                "DNSKEYs are fetched earlier in the validation process when a delegation signer is encountered. Lowers latency at a little more CPU.",
+            ),
+            F::new("harden_dnssec_stripped", "Harden DNSSEC Data", K::Checkbox).help(
+                "DNSSEC data is required for trust-anchored zones; if it is absent, the zone becomes bogus. If disabled, such a zone is made insecure.",
+            ),
+            F::new("harden_below_nxdomain", "Harden Below NXDOMAIN", K::Checkbox).help(
+                "Stops queries for names under a known NXDOMAIN. May cause issues with very old software or non-DNSSEC reverse lookups.",
+            ),
+            F::new("aggressive_nsec", "Aggressive NSEC", K::Checkbox).help(
+                "Use the DNSSEC-validated cache aggressively (RFC 8198) to reduce queries towards authorities.",
+            ),
+            F::new(
+                "qname_minimisation_strict",
+                "Strict QNAME Minimisation",
+                K::Checkbox,
+            )
+            .help(
+                "Never fall back to sending the full QNAME to broken name servers. Many domains will not resolve; only use if you know what you are doing.",
+            ),
+            F::new("outgoing_num_tcp", "Outgoing TCP Buffers", U32).help(
+                "Outgoing TCP buffers per thread. 0 means no TCP queries to authoritative servers. Leave empty for the default.",
+            ),
+            F::new("incoming_num_tcp", "Incoming TCP Buffers", U32).help(
+                "Incoming TCP buffers per thread. 0 means no TCP queries from clients are accepted.",
+            ),
+            F::new("num_queries_per_thread", "Number of queries per thread", U32).help(
+                "Queries every thread services simultaneously; more are dropped unless older ones can be jostled out.",
+            ),
+            F::new("outgoing_range", "Outgoing Range", U32).help(
+                "Ports opened per thread. Usually double the number of queries per thread.",
+            ),
+            F::new("jostle_timeout", "Jostle Timeout", U32)
+                .help("Milliseconds after which a long-running query may be replaced when busy."),
+            F::new("discard_timeout", "Discard Timeout", U32).help(
+                "Milliseconds after which recursion requests are dropped. Keep it above the Client Expired Response Timeout.",
+            ),
+            F::new("private_domains", "Private Domains", K::HostnameLines).help(
+                "One domain per line. These domains and their subdomains may contain private addresses.",
+            ),
+            F::new("private_addresses", "Rebind protection networks", K::CidrLines).help(
+                "Addresses on your private network that may not be returned for public internet names (DNS rebinding protection). Empty turns the protection off.",
+            ),
+            F::new("insecure_domains", "Insecure Domains", K::HostnameLines)
+                .help("One domain per line. The DNSSEC chain of trust is ignored towards these domains."),
+        ];
+        FIELDS
+    }
+}
+
+/// Unbound › Advanced › Serve Expired Settings.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UnboundServeExpired {
+    /// Serve expired records.
+    pub serve_expired: bool,
+    /// TTL of expired answers.
+    pub serve_expired_reply_ttl: Option<u32>,
+    /// Serving window past expiry, seconds.
+    pub serve_expired_ttl: Option<u32>,
+    /// Reset the window on refresh.
+    pub serve_expired_ttl_reset: bool,
+    /// Wait before serving expired, ms.
+    pub serve_expired_client_timeout: Option<u32>,
+}
+
+impl FormModel for UnboundServeExpired {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("serve_expired", "Serve Expired Responses", K::Checkbox).help(
+                "Serve expired responses from the cache with a TTL of 0 without waiting for the actual resolution to finish.",
+            ),
+            F::new("serve_expired_reply_ttl", "Expired Record Reply TTL value", U32).help(
+                "TTL to use when replying with expired data. With a client timeout, 30 is recommended (RFC 8767).",
+            ),
+            F::new("serve_expired_ttl", "TTL for Expired Responses", U32).help(
+                "Seconds after expiration during which expired records may be served. 0 disables the limit; RFC 8767 suggests 86400 to 259200.",
+            ),
+            F::new("serve_expired_ttl_reset", "Reset Expired Record TTL", K::Checkbox).help(
+                "Reset the TTL of expired records after a failed refresh, so they keep being served while queried.",
+            ),
+            F::new(
+                "serve_expired_client_timeout",
+                "Client Expired Response Timeout",
+                U32,
+            )
+            .help(
+                "Milliseconds to try resolving before replying with expired data. RFC 8767 recommends 1800; 0 disables this.",
+            ),
+        ];
+        FIELDS
+    }
+}
+
+/// Unbound › Advanced › Logging Settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UnboundLogging {
+    /// Extended statistics.
+    pub extended_statistics: bool,
+    /// Log queries.
+    pub log_queries: bool,
+    /// Log replies.
+    pub log_replies: bool,
+    /// Tag queries and replies.
+    pub log_tag_query_reply: bool,
+    /// Log local zone actions.
+    pub log_local_actions: bool,
+    /// Log SERVFAIL reasons.
+    pub log_servfail: bool,
+    /// Verbosity, `"0"`..`"5"`.
+    pub log_verbosity: String,
+    /// Validation log level; empty for the default.
+    pub val_log_level: String,
+}
+
+impl Default for UnboundLogging {
+    fn default() -> Self {
+        Self {
+            extended_statistics: false,
+            log_queries: false,
+            log_replies: false,
+            log_tag_query_reply: false,
+            log_local_actions: false,
+            log_servfail: false,
+            log_verbosity: "1".into(),
+            val_log_level: String::new(),
+        }
+    }
+}
+
+impl FormModel for UnboundLogging {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("extended_statistics", "Extended Statistics", K::Checkbox)
+                .help("If enabled, extended statistics are printed."),
+            F::new("log_queries", "Log Queries", K::Checkbox).help(
+                "Print one line per query to the log. This makes the server (significantly) slower.",
+            ),
+            F::new("log_replies", "Log Replies", K::Checkbox).help(
+                "Print one line per reply to the log. This makes the server (significantly) slower.",
+            ),
+            F::new("log_tag_query_reply", "Tag Queries and Replies", K::Checkbox)
+                .help("Prefix logged queries and replies with 'query: ' and 'reply: '."),
+            F::new("log_local_actions", "Log local actions", K::Checkbox)
+                .help("Log lines about local zone actions, for all local zone types."),
+            F::new("log_servfail", "Log SERVFAIL", K::Checkbox)
+                .help("Log why queries return SERVFAIL to clients, at the error level."),
+            F::new("log_verbosity", "Log Level Verbosity", K::Select(LOG_VERBOSITY)).help(
+                "Level 0 logs errors only, 1 operational information, 2 detailed operational information, 3 per query, 4 algorithm level, 5 client identification for cache misses.",
+            ),
+            F::new("val_log_level", "Log validation level", K::Select(VAL_LOG_LEVEL)).help(
+                "Print validation failures to the log regardless of verbosity: 1 one line per failed query, 2 also the reason and bad server.",
+            ),
+        ];
+        FIELDS
+    }
+}
+
+/// Unbound › Advanced › Cache Settings.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UnboundCache {
+    /// Prefetch popular entries.
+    pub prefetch: bool,
+    /// Unwanted reply threshold.
+    pub unwanted_reply_threshold: Option<u32>,
+    /// Message cache size (`4m`).
+    pub msg_cache_size: String,
+    /// RRset cache size.
+    pub rrset_cache_size: String,
+    /// Max TTL.
+    pub cache_max_ttl: Option<u32>,
+    /// Max negative TTL.
+    pub cache_max_negative_ttl: Option<u32>,
+    /// Min TTL.
+    pub cache_min_ttl: Option<u32>,
+    /// Host cache TTL.
+    pub infra_host_ttl: Option<u32>,
+    /// Keep probing down hosts.
+    pub infra_keep_probing: bool,
+    /// Hosts kept in the infrastructure cache.
+    pub infra_cache_numhosts: Option<u32>,
+}
+
+/// `4m`, `512k`, `1g` or plain bytes.
+fn is_cache_size(s: &str) -> bool {
+    let num = s.strip_suffix(['k', 'K', 'm', 'M', 'g', 'G']).unwrap_or(s);
+    num.parse::<u64>().is_ok_and(|n| n > 0)
+}
+
+impl FormModel for UnboundCache {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("prefetch", "Prefetch Support", K::Checkbox).help(
+                "Prefetch message cache elements before they expire. Around 10% more DNS traffic, but popular names do not expire from the cache.",
+            ),
+            F::new("unwanted_reply_threshold", "Unwanted Reply Threshold", U32).help(
+                "After this many unwanted replies the caches are cleared as a defence against poisoning. Leave empty to disable.",
+            ),
+            F::new("msg_cache_size", "Message Cache Size", K::Text).help(
+                "Size of the message cache: plain bytes, or a number followed by k, m or g.",
+            ),
+            F::new("rrset_cache_size", "RRset Cache Size", K::Text).help(
+                "Size of the RRset cache: plain bytes, or a number followed by k, m or g.",
+            ),
+            F::new("cache_max_ttl", "Maximum TTL for RRsets and messages", U32)
+                .help("Seconds; caps very large TTLs so data is queried more often."),
+            F::new(
+                "cache_max_negative_ttl",
+                "Maximum Negative TTL for RRsets and messages",
+                U32,
+            )
+            .help("Seconds; caps how long negative answers are cached."),
+            F::new("cache_min_ttl", "Minimum TTL for RRsets and messages", U32).help(
+                "Seconds; data is cached at least this long, longer than the domain owner may intend. 0 keeps their TTLs.",
+            ),
+            F::new("infra_host_ttl", "TTL for Host Cache entries", U32)
+                .help("Seconds to keep round-trip, lameness and EDNS data about upstream servers."),
+            F::new("infra_keep_probing", "Keep probing down hosts", K::Checkbox)
+                .help("Keep probing servers that are down, about every 120 seconds with backoff."),
+            F::new("infra_cache_numhosts", "Number of Hosts to cache", U32)
+                .help("Number of upstream servers whose information is cached."),
+        ];
+        FIELDS
+    }
+
+    fn validate(&self) -> Vec<FieldError> {
+        [
+            ("msg_cache_size", &self.msg_cache_size),
+            ("rrset_cache_size", &self.rrset_cache_size),
+        ]
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty() && !is_cache_size(v))
+        .map(|(p, _)| FieldError::new(p, "Enter a size such as 4m, 512k or 1g."))
+        .collect()
+    }
+}
+
+// Unbound › Access Lists.
+
+/// Actions for clients no list matches.
+pub const ACL_DEFAULT_ACTIONS: &[(&str, &str)] =
+    &[("allow", "Allow"), ("deny", "Deny"), ("refuse", "Refuse")];
+
+/// Actions of an access list.
+pub const ACL_ACTIONS: &[(&str, &str)] = &[
+    ("allow", "Allow"),
+    ("deny", "Deny"),
+    ("refuse", "Refuse"),
+    ("allow_snoop", "Allow Snoop"),
+    ("deny_non_local", "Deny Non-local"),
+    ("refuse_non_local", "Refuse Non-local"),
+];
+
+/// Unbound › Access Lists: the default action.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UnboundAclDefault {
+    /// One of [`ACL_DEFAULT_ACTIONS`].
+    pub default_action: String,
+}
+
+impl FormModel for UnboundAclDefault {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[F::new(
+            "default_action",
+            "Default Action",
+            K::Select(ACL_DEFAULT_ACTIONS),
+        )
+        .help(
+            "By default Unbound allows queries from all networks. The most specific network wins, so the access lists below override this for their networks.",
+        )];
+        FIELDS
+    }
+}
+
+/// One Unbound access list.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AccessList {
+    /// Object key.
+    pub uuid: String,
+    /// Enabled.
+    pub enabled: bool,
+    /// Name.
+    pub name: String,
+    /// One of [`ACL_ACTIONS`].
+    pub action: String,
+    /// Networks in CIDR notation.
+    pub networks: Vec<String>,
+    /// Description.
+    pub description: String,
+}
+
+impl FormModel for AccessList {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enabled", K::Checkbox).help("Enable or disable this ACL."),
+            F::new("name", "Access List Name", K::Text)
+                .required()
+                .help("Provide an access list name."),
+            F::new("action", "Action", K::Select(ACL_ACTIONS)).required().help(
+                "Deny drops queries; Refuse answers REFUSED; Allow answers; Allow Snoop also answers non-recursive queries (cache snooping, admin hosts only); Deny/Refuse Non-local only answer local data.",
+            ),
+            F::new("networks", "Networks", K::CidrLines)
+                .required()
+                .help("Networks in CIDR notation, one per line, for example 192.168.1.0/24."),
+            F::new("description", "Description", K::Text)
+                .help("You may enter a description here for your reference."),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for AccessList {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::bool("enabled", "Enabled"),
+            Column::text("name", "Name"),
+            Column::text("action", "Action"),
+            Column::list("networks", "Networks"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+}
+
+// Unbound › Query Forwarding.
+
+/// Unbound › Query Forwarding: the system-nameserver switch.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UnboundForwarding {
+    /// Forward everything to the system DNS servers.
+    pub use_system_servers: bool,
+}
+
+impl FormModel for UnboundForwarding {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[F::new("use_system_servers", "Use System Nameservers", K::Checkbox)
+            .help(
+                "Forward queries to the system nameservers (System › Settings › General). This overrides the entries below, except those for a specific domain.",
+            )];
+        FIELDS
+    }
+}
+
+/// A forwarding server without TLS, optionally for one domain (a "domain override").
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Forwarder {
+    /// Object key.
+    pub uuid: String,
+    /// Enabled.
+    pub enabled: bool,
+    /// Only for names under this domain; empty for everything.
+    pub domain: String,
+    /// Server address.
+    pub server: String,
+    /// Server port; empty for 53.
+    pub port: Option<u16>,
+    /// Description.
+    pub description: String,
+}
+
+impl FormModel for Forwarder {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enabled", K::Checkbox).help("Enable or disable this server."),
+            F::new("domain", "Domain", K::Hostname).help(
+                "Queries for this domain are forwarded to this server. Leave blank to forward all queries.",
+            ),
+            F::new("server", "Server IP", K::Ip)
+                .required()
+                .help("IP address of the DNS server to forward requests to."),
+            F::new("port", "Server Port", K::Number { min: 1, max: 65535 })
+                .help("Leave empty for 53."),
+            F::new("description", "Description", K::Text)
+                .help("You may enter a description here for your reference (not parsed)."),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for Forwarder {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::bool("enabled", "Enabled"),
+            Column::text("domain", "Domain"),
+            Column::text("server", "Server IP"),
+            Column::text("port", "Port"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+}
+
+// Unbound › Blocklist.
+
+/// The curated lists, grouped as OPNsense groups them. Values are sensr-schema's `KnownList`
+/// names and labels its `label()`; a test keeps the two in step.
+pub const KNOWN_LISTS: &[crate::form::OptGroup] = &[
+    (
+        "General Blocklists",
+        &[
+            ("adguard", "AdGuard List"),
+            ("easylist", "EasyList"),
+            ("easyprivacy", "EasyPrivacy"),
+            ("steven-black", "Steven Black List"),
+            ("yoyo", "YoYo List"),
+        ],
+    ),
+    (
+        "HaGeZi Multi - Clean the Internet",
+        &[
+            ("hagezi-light", "HaGeZi LIGHT - Relaxed Blocking"),
+            ("hagezi-normal", "HaGeZi NORMAL - Relaxed/Balanced Blocking"),
+            ("hagezi-pro", "HaGeZi PRO - Balanced Blocking"),
+            (
+                "hagezi-pro-plus",
+                "HaGeZi PRO++ - Balanced/Aggressive Blocking",
+            ),
+            ("hagezi-ultimate", "HaGeZi ULTIMATE - Aggressive Blocking"),
+        ],
+    ),
+    (
+        "OISD Blocklists",
+        &[
+            ("oisd-small", "OISD Ads Blocklist"),
+            ("oisd-big", "OISD Big Blocklist (incl. Ads)"),
+            ("oisd-nsfw", "OISD NSFW Blocklist"),
+        ],
+    ),
+    (
+        "HaGeZi Targeted Lists",
+        &[
+            ("hagezi-tif", "HaGeZi Threat Intelligence Feeds"),
+            ("hagezi-fake", "HaGeZi Fake - scams / fakes"),
+            ("hagezi-popup-ads", "HaGeZi Pop-Up Ads"),
+            ("hagezi-bypass", "HaGeZi DoH/VPN/TOR/Proxy Bypass"),
+            ("hagezi-no-safesearch", "HaGeZi Safesearch not supported"),
+            ("hagezi-dyndns", "HaGeZi Dynamic DNS blocking"),
+            ("hagezi-hoster", "HaGeZi Badware Hoster blocking"),
+            ("hagezi-anti-piracy", "HaGeZi Anti Piracy"),
+            ("hagezi-gambling", "HaGeZi Gambling"),
+            ("hagezi-social", "HaGeZi Social Networks"),
+        ],
+    ),
+    (
+        "Minimal Hardware Requirements",
+        &[
+            ("hagezi-pro-mini", "HaGeZi Multi PRO - Mini"),
+            ("hagezi-pro-plus-mini", "HaGeZi Multi PRO++ - Mini"),
+            ("hagezi-ultimate-mini", "HaGeZi Multi ULTIMATE - Mini"),
+            (
+                "hagezi-tif-medium",
+                "HaGeZi Threat Intelligence Feeds - Medium",
+            ),
+            ("hagezi-tif-mini", "HaGeZi Threat Intelligence Feeds - Mini"),
+            ("hagezi-gambling-medium", "HaGeZi Gambling - Medium"),
+            ("hagezi-gambling-mini", "HaGeZi Gambling - Mini"),
+        ],
+    ),
+];
+
+/// The label of a curated list value, or the value itself if unknown.
+pub fn known_list_label(value: &str) -> &str {
+    KNOWN_LISTS
+        .iter()
+        .flat_map(|(_, opts)| opts.iter())
+        .find(|(v, _)| *v == value)
+        .map_or(value, |(_, l)| l)
+}
+
+/// How blocked names are answered.
+pub const BLOCK_ANSWERS: &[(&str, &str)] = &[
+    ("address", "Destination address"),
+    ("nxdomain", "Return NXDOMAIN"),
+];
+
+/// A DNS blocklist policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Blocklist {
+    /// Object key.
+    pub uuid: String,
+    /// Enabled.
+    pub enabled: bool,
+    /// What the policy is for.
+    pub description: String,
+    /// Curated lists ([`KNOWN_LISTS`] values).
+    pub lists: Vec<String>,
+    /// Curated list labels (computed for the grid; not edited).
+    pub list_names: Vec<String>,
+    /// Further list URLs.
+    pub urls: Vec<String>,
+    /// Allowed names: `name`, `*.name` or `/regex/`.
+    pub allow: Vec<String>,
+    /// Names blocked exactly.
+    pub block: Vec<String>,
+    /// Names blocked with their subdomains.
+    pub block_subtrees: Vec<String>,
+    /// Clients the policy applies to; empty for all.
+    pub source_nets: Vec<String>,
+    /// `address` or `nxdomain`.
+    pub answer: String,
+    /// Answer address; empty for 0.0.0.0.
+    pub address: String,
+    /// Seconds a downloaded list is reused.
+    pub refresh_seconds: Option<u32>,
+}
+
+impl Default for Blocklist {
+    fn default() -> Self {
+        Self {
+            uuid: String::new(),
+            enabled: false,
+            description: String::new(),
+            lists: vec![],
+            list_names: vec![],
+            urls: vec![],
+            allow: vec![],
+            block: vec![],
+            block_subtrees: vec![],
+            source_nets: vec![],
+            answer: "address".into(),
+            address: String::new(),
+            refresh_seconds: Some(72_000),
+        }
+    }
+}
+
+fn allow_entry_ok(e: &str) -> bool {
+    if let Some(p) = e.strip_prefix('/') {
+        // The pattern itself is checked by sensr-schema (it has the regex engine).
+        return p.len() > 1 && p.ends_with('/');
+    }
+    crate::form::is_listed_name(e.strip_prefix("*.").unwrap_or(e))
+}
+
+impl FormModel for Blocklist {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enable", K::Checkbox).help("Enable the usage of this blocklist policy."),
+            F::new("description", "Description", K::Text).required().help(
+                "To keep track of which policies apply to which source networks, a description is required.",
+            ),
+            F::new("lists", "Type of DNSBL", K::MultiSelect(KNOWN_LISTS))
+                .help("Select which curated lists to use."),
+            F::new("urls", "URLs of Blocklists", K::Lines).help(
+                "One URL per line. Hosts files, domain lists, *.domain wildcard lists and AdBlock-style ||domain^ lines are understood.",
+            ),
+            F::new("allow", "Allowlist Domains", K::Lines).help(
+                "Names never blocked by this policy, one per line: name, *.name for a name and its subdomains, or /regex/. Applies only to this policy's lists.",
+            ),
+            F::new("block", "Blocklist Domains", K::ListedNameLines)
+                .help("Names to block, one per line. Only exact matches."),
+            F::new("block_subtrees", "Wildcard Domains", K::ListedNameLines).help(
+                "Names to block with all their subdomains, one per line. Blocking first-level domains is not supported.",
+            ),
+            F::new("source_nets", "Source Net(s)", K::CidrLines).help(
+                "Client networks this policy applies to, for example 192.168.1.0/24. Leave empty to apply to everything. Use one address family and equally sized networks to avoid priority issues.",
+            ),
+            F::new("answer", "Answer", K::Select(BLOCK_ANSWERS))
+                .help("Answer blocked names with an address, or with the response code NXDOMAIN."),
+            F::new("address", "Destination Address", K::Ipv4).help(
+                "Address returned for blocked names; leave empty for 0.0.0.0. Not used with NXDOMAIN.",
+            ),
+            F::new(
+                "refresh_seconds",
+                "Refresh interval (seconds)",
+                K::Number {
+                    min: 60,
+                    max: 31_536_000,
+                },
+            )
+            .required()
+            .help(
+                "Downloaded lists are cached and reused this long before they are fetched again. Remote lists rarely change more than once a day; the default is 72000 (20 hours).",
+            ),
+        ];
+        FIELDS
+    }
+
+    fn validate(&self) -> Vec<FieldError> {
+        let mut e = Vec::new();
+        if self.enabled
+            && self.lists.is_empty()
+            && self.urls.is_empty()
+            && self.block.is_empty()
+            && self.block_subtrees.is_empty()
+        {
+            e.push(FieldError::new(
+                "lists",
+                "Select a list, add a URL or name a domain to block.",
+            ));
+        }
+        if let Some(u) = self
+            .urls
+            .iter()
+            .find(|u| !(u.starts_with("http://") || u.starts_with("https://")))
+        {
+            e.push(FieldError::new(
+                "urls",
+                format!("\u{201c}{u}\u{201d} is not an http(s) URL."),
+            ));
+        }
+        if let Some(a) = self.allow.iter().find(|a| !allow_entry_ok(a)) {
+            e.push(FieldError::new(
+                "allow",
+                format!("\u{201c}{a}\u{201d} is not a name, *.name or /regex/."),
+            ));
+        }
+        e
+    }
+}
+
+impl GridModel for Blocklist {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::bool("enabled", "Enabled"),
+            Column::text("description", "Description"),
+            Column::list("list_names", "Type of DNSBL"),
+            Column::list("urls", "URLs"),
+            Column::list("source_nets", "Source Net(s)"),
+        ];
+        C
     }
 }
 
@@ -832,6 +1611,10 @@ pub struct HostOverride {
     pub mx: String,
     /// MX priority.
     pub mxprio: Option<u16>,
+    /// TTL in seconds; empty for the resolver default.
+    pub ttl: Option<u32>,
+    /// Also answer reverse lookups (A/AAAA).
+    pub ptr: bool,
     /// Description.
     pub description: String,
 }
@@ -848,6 +1631,18 @@ impl FormModel for HostOverride {
             F::new("server", "IP address", K::Text).help("For TXT records: the text."),
             F::new("mx", "MX Host", K::Text),
             F::new("mxprio", "MX Priority", K::Number { min: 0, max: 65535 }),
+            F::new(
+                "ttl",
+                "TTL (seconds)",
+                K::Number {
+                    min: 0,
+                    max: 2_147_483_647,
+                },
+            )
+            .help("TTL of the record, e.g. 3600. Leave empty for the resolver default."),
+            F::new("ptr", "Add PTR record", K::Checkbox).help(
+                "Add a PTR record for this host. There can only be a single active PTR record per target address.",
+            ),
             F::new("description", "Description", K::Text),
         ];
         FIELDS
@@ -1103,6 +1898,18 @@ pub enum FormId {
     DhcpSettings,
     /// [`UnboundGeneral`].
     UnboundGeneral,
+    /// [`UnboundAdvanced`].
+    UnboundAdvanced,
+    /// [`UnboundServeExpired`].
+    UnboundServeExpired,
+    /// [`UnboundLogging`].
+    UnboundLogging,
+    /// [`UnboundCache`].
+    UnboundCache,
+    /// [`UnboundAclDefault`].
+    UnboundAclDefault,
+    /// [`UnboundForwarding`].
+    UnboundForwarding,
 }
 
 /// Serializable stand-in for a grid's row type.
@@ -1124,6 +1931,12 @@ pub enum GridId {
     StaticMaps,
     /// Services › Unbound DNS › Overrides.
     HostOverrides,
+    /// Services › Unbound DNS › Access Lists.
+    AccessLists,
+    /// Services › Unbound DNS › Query Forwarding (servers without TLS).
+    Forwarders,
+    /// Services › Unbound DNS › Blocklist.
+    Blocklists,
     /// VPN › WireGuard › Instances.
     WgInstances,
     /// VPN › WireGuard › Peers.
@@ -1148,7 +1961,44 @@ impl FormId {
             Self::SourceNatMode => SourceNatMode::fields(),
             Self::DhcpSettings => DhcpSettings::fields(),
             Self::UnboundGeneral => UnboundGeneral::fields(),
+            Self::UnboundAdvanced => UnboundAdvanced::fields(),
+            Self::UnboundServeExpired => UnboundServeExpired::fields(),
+            Self::UnboundLogging => UnboundLogging::fields(),
+            Self::UnboundCache => UnboundCache::fields(),
+            Self::UnboundAclDefault => UnboundAclDefault::fields(),
+            Self::UnboundForwarding => UnboundForwarding::fields(),
         }
+    }
+
+    /// The model's default value as JSON.
+    pub fn default_value(self) -> Value {
+        fn go<T: FormModel>() -> Value {
+            serde_json::to_value(T::default()).unwrap_or(Value::Null)
+        }
+        match self {
+            Self::SystemGeneral => go::<SystemGeneral>(),
+            Self::Interface => go::<Interface>(),
+            Self::SourceNatMode => go::<SourceNatMode>(),
+            Self::DhcpSettings => go::<DhcpSettings>(),
+            Self::UnboundGeneral => go::<UnboundGeneral>(),
+            Self::UnboundAdvanced => go::<UnboundAdvanced>(),
+            Self::UnboundServeExpired => go::<UnboundServeExpired>(),
+            Self::UnboundLogging => go::<UnboundLogging>(),
+            Self::UnboundCache => go::<UnboundCache>(),
+            Self::UnboundAclDefault => go::<UnboundAclDefault>(),
+            Self::UnboundForwarding => go::<UnboundForwarding>(),
+        }
+    }
+
+    /// Forms over `dns.tuning`, whose view fields are the schema's field names.
+    pub fn is_tuning(self) -> bool {
+        matches!(
+            self,
+            Self::UnboundAdvanced
+                | Self::UnboundServeExpired
+                | Self::UnboundLogging
+                | Self::UnboundCache
+        )
     }
 
     /// Parses and validates inputs over `base`, returning the model as JSON.
@@ -1163,6 +2013,12 @@ impl FormId {
             Self::SourceNatMode => go::<SourceNatMode>(base, inputs),
             Self::DhcpSettings => go::<DhcpSettings>(base, inputs),
             Self::UnboundGeneral => go::<UnboundGeneral>(base, inputs),
+            Self::UnboundAdvanced => go::<UnboundAdvanced>(base, inputs),
+            Self::UnboundServeExpired => go::<UnboundServeExpired>(base, inputs),
+            Self::UnboundLogging => go::<UnboundLogging>(base, inputs),
+            Self::UnboundCache => go::<UnboundCache>(base, inputs),
+            Self::UnboundAclDefault => go::<UnboundAclDefault>(base, inputs),
+            Self::UnboundForwarding => go::<UnboundForwarding>(base, inputs),
         }
     }
 
@@ -1192,6 +2048,9 @@ impl GridId {
             Self::DhcpRanges => GridMeta::of::<DhcpRange>(),
             Self::StaticMaps => GridMeta::of::<StaticMap>(),
             Self::HostOverrides => GridMeta::of::<HostOverride>(),
+            Self::AccessLists => GridMeta::of::<AccessList>(),
+            Self::Forwarders => GridMeta::of::<Forwarder>(),
+            Self::Blocklists => GridMeta::of::<Blocklist>(),
             Self::WgInstances => GridMeta::of::<WgInstance>(),
             Self::WgPeers => GridMeta::of::<WgPeer>(),
         }
@@ -1212,6 +2071,9 @@ impl GridId {
             Self::DhcpRanges => go::<DhcpRange>(base, inputs),
             Self::StaticMaps => go::<StaticMap>(base, inputs),
             Self::HostOverrides => go::<HostOverride>(base, inputs),
+            Self::AccessLists => go::<AccessList>(base, inputs),
+            Self::Forwarders => go::<Forwarder>(base, inputs),
+            Self::Blocklists => go::<Blocklist>(base, inputs),
             Self::WgInstances => go::<WgInstance>(base, inputs),
             Self::WgPeers => go::<WgPeer>(base, inputs),
         }
@@ -1252,6 +2114,7 @@ impl GridId {
                 ],
                 Self::Aliases => &[("type", "host")],
                 Self::HostOverrides => &[("rr", "A")],
+                Self::AccessLists => &[("action", "allow")],
                 Self::PortForwards => &[
                     ("interface", "wan"),
                     ("protocol", "tcp"),
@@ -1263,6 +2126,9 @@ impl GridId {
             };
             for (k, val) in defaults {
                 obj.insert((*k).into(), Value::String((*val).into()));
+            }
+            if self == Self::HostOverrides {
+                obj.insert("ptr".into(), Value::Bool(true));
             }
         }
         v
@@ -1321,7 +2187,8 @@ macro_rules! kinds {
 }
 
 kinds! {
-    forms: SystemGeneral, Interface, SourceNatMode, DhcpSettings, UnboundGeneral;
+    forms: SystemGeneral, Interface, SourceNatMode, DhcpSettings, UnboundGeneral, UnboundAdvanced,
+        UnboundServeExpired, UnboundLogging, UnboundCache, UnboundAclDefault, UnboundForwarding;
     grids: Interface => Assignments, "interface",
         Alias => Aliases, "alias",
         FilterRule => FilterRules, "rule",
@@ -1330,6 +2197,9 @@ kinds! {
         DhcpRange => DhcpRanges, "range",
         StaticMap => StaticMaps, "static mapping",
         HostOverride => HostOverrides, "host override",
+        AccessList => AccessLists, "access list",
+        Forwarder => Forwarders, "forwarding server",
+        Blocklist => Blocklists, "blocklist policy",
         WgInstance => WgInstances, "instance",
         WgPeer => WgPeers, "peer"
 }
@@ -1374,6 +2244,9 @@ mod tests {
             GridId::DhcpRanges,
             GridId::StaticMaps,
             GridId::HostOverrides,
+            GridId::AccessLists,
+            GridId::Forwarders,
+            GridId::Blocklists,
             GridId::WgInstances,
             GridId::WgPeers,
         ] {
@@ -1395,6 +2268,59 @@ mod tests {
             }
             assert!(g.new_row().is_object());
         }
+    }
+
+    #[test]
+    fn blocklist_needs_a_source_and_valid_entries() {
+        let inputs: Inputs = [
+            ("enabled", "true"),
+            ("description", "Kids"),
+            (
+                "allow",
+                "ok.example\n*._tcp.example\n/^ads[0-9]+\\./\nbad name",
+            ),
+            ("refresh_seconds", "72000"),
+        ]
+        .iter()
+        .map(|(a, b)| ((*a).into(), (*b).into()))
+        .collect();
+        let errs = GridId::Blocklists
+            .apply(&GridId::Blocklists.new_row(), &inputs)
+            .unwrap_err();
+        let paths: Vec<_> = errs.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["lists", "allow"], "{errs:?}");
+        assert!(errs[1].message.contains("bad name"));
+        let mut ftp = inputs.clone();
+        ftp.insert("urls".into(), "ftp://x".into());
+        let errs = GridId::Blocklists
+            .apply(&GridId::Blocklists.new_row(), &ftp)
+            .unwrap_err();
+        let paths: Vec<_> = errs.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["urls", "allow"], "a URL counts as a source");
+        let mut ok = inputs.clone();
+        ok.insert(
+            "allow".into(),
+            "ok.example\n*._tcp.example\n/^ads[0-9]+\\./".into(),
+        );
+        ok.insert("urls".into(), "".into());
+        ok.insert("lists".into(), "hagezi-pro\noisd-small".into());
+        let v = GridId::Blocklists
+            .apply(&GridId::Blocklists.new_row(), &ok)
+            .unwrap();
+        assert_eq!(v["lists"], json!(["hagezi-pro", "oisd-small"]));
+        assert_eq!(known_list_label("oisd-small"), "OISD Ads Blocklist");
+    }
+
+    #[test]
+    fn known_lists_are_listed_once() {
+        let mut all: Vec<&str> = KNOWN_LISTS
+            .iter()
+            .flat_map(|(_, o)| o.iter().map(|(v, _)| *v))
+            .collect();
+        let n = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), n);
     }
 
     #[test]

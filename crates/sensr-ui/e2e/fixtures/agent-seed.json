@@ -339,7 +339,81 @@
           "rr": "A",
           "address": "192.168.1.40"
         },
+        "ttl": 300,
+        "ptr": false,
         "description": "Lab wildcard"
+      }
+    },
+    "statistics": true,
+    "forwarding": {
+      "servers": {
+        "e0000000-0000-4000-a000-000000000001": {
+          "domain": "corp.example",
+          "address": "10.20.0.53",
+          "description": "Office DNS"
+        },
+        "e0000000-0000-4000-a000-000000000002": {
+          "address": "9.9.9.9",
+          "port": "853",
+          "tls_name": "dns.quad9.net",
+          "description": "Quad9 over TLS"
+        }
+      }
+    },
+    "access": {
+      "default_action": "allow",
+      "lists": {
+        "e1000000-0000-4000-a000-000000000001": {
+          "name": "road_warriors",
+          "action": "allow",
+          "networks": [
+            "10.10.0.0/24"
+          ],
+          "description": "WireGuard clients"
+        },
+        "e1000000-0000-4000-a000-000000000002": {
+          "enabled": false,
+          "name": "lab",
+          "action": "refuse",
+          "networks": [
+            "192.168.50.0/24"
+          ]
+        }
+      }
+    },
+    "tuning": {
+      "prefetch": true,
+      "msg_cache_size": "8m",
+      "log_verbosity": 2
+    },
+    "blocklists": {
+      "e2000000-0000-4000-a000-000000000001": {
+        "description": "Default",
+        "lists": [
+          "hagezi-pro",
+          "oisd-small"
+        ],
+        "allow": [
+          "*.microsoft.com"
+        ],
+        "refresh_seconds": 72000
+      },
+      "e2000000-0000-4000-a000-000000000002": {
+        "description": "Kids",
+        "lists": [
+          "hagezi-gambling",
+          "oisd-nsfw"
+        ],
+        "block_subtrees": [
+          "tiktok.com"
+        ],
+        "source_nets": [
+          "192.168.1.128/25"
+        ],
+        "answer": {
+          "mode": "nxdomain"
+        },
+        "refresh_seconds": 86400
       }
     }
   },
