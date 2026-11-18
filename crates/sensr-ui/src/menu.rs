@@ -85,7 +85,8 @@ impl Node {
 const CORE: &[Node] = &[
     n("Lobby").order(10).icon(Icon::Lobby).kids(&[
         n("Dashboard").order(0).url("/ui/core/dashboard"),
-        n("License").order(1).url("/ui/core/license"),
+        // no License item: sensr has no license page (and the OPNsense URL
+        // only landed on "not yet available")
         n("Password").order(2).url("/ui/core/password"),
         n("Logout").order(3).url("/logout"),
     ]),
