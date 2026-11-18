@@ -478,6 +478,97 @@ in
       };
     };
 
+    # A USB Ethernet adapter can wedge after an xHCI reset (seen on the Pi 5:
+    # "r8152-cfgselector 4-1: reset SuperSpeed USB device", then the carrier
+    # never returns). The netdev stays in /sys/class/net but every ioctl
+    # answers ENODEV - "ip link set up" and ethtool both fail with "No such
+    # device" - so neither a config apply nor a link bounce can revive it, and
+    # the only cure was a reboot. Re-authorising the USB device makes the
+    # firmware re-enumerate it: the pinned name comes back, and networkd
+    # applies the interface's .network (addresses, routes) again by itself.
+    systemd.services.sensr-nic-recover = {
+      description = "Prevent and recover USB Ethernet adapter wedges";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = pkgs.writeShellScript "sensr-nic-recover" ''
+          set -u
+          ethtool=${pkgs.ethtool}/bin/ethtool
+          ip=${pkgs.iproute2}/bin/ip
+          log() { echo "sensr-nic-recover: $*"; }
+          for devlink in /sys/class/net/*/device; do
+            [ -e "$devlink" ] || continue
+            name=$(basename "$(dirname "$devlink")")
+            path=$(readlink -f "$devlink") || continue
+            # USB adapters only: the USB bus is in the resolved device path.
+            case $path in */usb[0-9]*/*) ;; *) continue ;; esac
+            usb=$(basename "$(dirname "$path")")
+            # Prevention, before the cure: USB autosuspend and EEE are the
+            # states the r8152 resets out of. Both are cheap, idempotent and
+            # must be re-applied after a re-enumeration, which starts the
+            # device in 'auto' again.
+            control=/sys/bus/usb/devices/$usb/power/control
+            if [ "$(cat "$control" 2>/dev/null)" != on ]; then
+              echo on > "$control" 2>/dev/null && log "$name ($usb): USB autosuspend off"
+            fi
+            # U1/U2 link states are the xHCI side of the same problem; the
+            # per-port knob is 0 (neither) on this kernel.
+            bus=''${usb%%-*}
+            for lpm in /sys/bus/usb/devices/usb$bus/*/usb$bus-port*/usb3_lpm_permit; do
+              [ -e "$lpm" ] || continue
+              if [ "$(cat "$lpm" 2>/dev/null)" != 0 ]; then
+                echo 0 > "$lpm" 2>/dev/null && log "$name ($usb): USB3 LPM off"
+              fi
+            done
+            if "$ethtool" --show-eee "$name" 2>/dev/null | grep -q 'EEE status: enabled'; then
+              "$ethtool" --set-eee "$name" eee off 2>/dev/null && log "$name: EEE off"
+            fi
+            # ethtool works on a healthy link whether it is up or down; it is
+            # the ioctl that answers ENODEV once the driver has lost the device.
+            "$ethtool" "$name" >/dev/null 2>&1 && continue
+            authorized=/sys/bus/usb/devices/$usb/authorized
+            [ -e "$authorized" ] || continue
+            stamp=/run/sensr/nic-recover/$usb
+            mkdir -p "''${stamp%/*}"
+            now=$(date +%s)
+            # One attempt every two minutes: re-enumeration is not free, and a
+            # port that is simply unplugged must not be cycled forever.
+            if [ -e "$stamp" ] && [ $((now - $(cat "$stamp"))) -lt 120 ]; then
+              continue
+            fi
+            echo "$now" > "$stamp"
+            log "$name ($usb) is wedged (ethtool: ENODEV); re-enumerating the USB device"
+            echo 0 > "$authorized"
+            sleep 2
+            echo 1 > "$authorized"
+            # Wait for it to come back, then make sure the link is up;
+            # networkd applies the address configuration as soon as the netdev
+            # exists under its pinned name.
+            for _ in $(seq 1 30); do
+              sleep 1
+              new=$(cd /sys/bus/usb/devices/"$usb" 2>/dev/null &&
+                ls -d */net/* 2>/dev/null | head -n1)
+              [ -n "$new" ] || continue
+              new=$(basename "$new")
+              "$ip" link set dev "$new" up 2>/dev/null || continue
+              log "$name came back as $new and is up"
+              break
+            done
+          done
+        '';
+      };
+    };
+
+    systemd.timers.sensr-nic-recover = {
+      description = "Check for wedged USB Ethernet adapters";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "90s";
+        OnUnitActiveSec = "30s";
+        AccuracySec = "5s";
+        Unit = "sensr-nic-recover.service";
+      };
+    };
+
     systemd.targets.sensr-net = {
       description = "sensr has applied interfaces, addresses and routes";
       after = [ "sensr-agent.service" ];

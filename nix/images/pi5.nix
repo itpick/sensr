@@ -115,6 +115,19 @@ in
   ];
   boot.kernelModules = [ "bcm2835_wdt" ];
 
+  # The 2.5 GbE USB dongles (Realtek RTL8156, 0bda:8156) that carry LAN and
+  # LAN2 on a Pi 5 reset under the r8152 driver: one reset left eth1 with a
+  # dead TX path, another left a zombie netdev that only a reboot cleared.
+  # Both start at USB power management, so no USB device may autosuspend
+  # (a negative delay disables it for all of them) and the RTL8156 gets
+  # USB_QUIRK_NO_LPM (`k`), i.e. no U1/U2 link states. The runtime watchdog
+  # (sensr-nic-recover) enforces the same per device for adapters that
+  # enumerate later, and re-enumerates one that has wedged anyway.
+  boot.kernelParams = [
+    "usbcore.autosuspend=-1"
+    "usbcore.quirks=0bda:8156:k"
+  ];
+
   boot.loader.grub.enable = false;
   boot.loader.generic-extlinux-compatible.enable = false;
   boot.loader.external = {
