@@ -786,6 +786,52 @@ pub async fn login(username: String, password: String) -> Result<(), ServerFnErr
     Ok(())
 }
 
+/// Change the signed-in user's password. A plain form post: works without
+/// JavaScript, like the login form.
+#[server(prefix = "/ui/fn", endpoint = "password")]
+pub async fn change_password(
+    new_password: String,
+    confirm_password: String,
+) -> Result<(), ServerFnError> {
+    if new_password != confirm_password {
+        leptos_axum::redirect("/ui/core/password?error=mismatch");
+        return Ok(());
+    }
+    if new_password.chars().count() < 8 {
+        leptos_axum::redirect("/ui/core/password?error=short");
+        return Ok(());
+    }
+    let name = imp::user();
+    let b = imp::backend()?;
+    let system = b.get("system").await.map_err(imp::err)?;
+    let Some(uuid) = system
+        .get("users")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|users| {
+            users.iter().find_map(|(uuid, user)| {
+                (user.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str()))
+                    .then(|| uuid.clone())
+            })
+        })
+    else {
+        leptos_axum::redirect("/ui/core/password?error=nouser");
+        return Ok(());
+    };
+    let hash = sensr_auth::password::hash_password(&new_password)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    b.set(
+        &format!("system.users.{uuid}.password_hash"),
+        serde_json::Value::String(hash),
+    )
+    .await
+    .map_err(imp::err)?;
+    b.commit(&name, "change password", None)
+        .await
+        .map_err(imp::err)?;
+    leptos_axum::redirect("/ui/core/password?changed=1");
+    Ok(())
+}
+
 /// Logout form target.
 #[server(prefix = "/ui/fn", endpoint = "logout")]
 pub async fn logout() -> Result<(), ServerFnError> {

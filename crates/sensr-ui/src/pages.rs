@@ -565,6 +565,44 @@ pub fn SystemGeneralPage() -> impl IntoView {
     view! { <SettingsForm<SystemGeneral> title="System"/> }
 }
 
+/// Lobby › Password: change the signed-in account's password.
+#[component]
+pub fn PasswordPage() -> impl IntoView {
+    let q = use_query_map().get_untracked();
+    let changed = q.get("changed").is_some();
+    let error = match q.get("error").as_deref() {
+        Some("mismatch") => Some("The two new passwords do not match."),
+        Some("short") => Some("The new password must be at least 8 characters."),
+        Some("nouser") => Some("Could not find your account in the configuration."),
+        _ => None,
+    };
+    view! {
+        <section class="card">
+            <h2>"Change password"</h2>
+            {changed.then(|| view! {
+                <p class="notice" role="status">"Password changed. Use it the next time you sign in."</p>
+            })}
+            {error.map(|e| view! {
+                <p class="field-error" role="alert">{e}</p>
+            })}
+            <form method="post" action="/ui/fn/password">
+                <div class="field-stack">
+                    <label for="new_password">"New password"</label>
+                    <input id="new_password" name="new_password" type="password"
+                        autocomplete="new-password" minlength="8" required/>
+                    <p class="muted small">"At least 8 characters."</p>
+                </div>
+                <div class="field-stack">
+                    <label for="confirm_password">"Confirm new password"</label>
+                    <input id="confirm_password" name="confirm_password" type="password"
+                        autocomplete="new-password" minlength="8" required/>
+                </div>
+                <button type="submit" class="btn btn-primary">"Change password"</button>
+            </form>
+        </section>
+    }
+}
+
 /// System › Configuration › History: revisions, diff between any two, rollback.
 #[component]
 pub fn History() -> impl IntoView {

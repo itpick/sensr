@@ -16,6 +16,8 @@ let
   # std targets for developers, which a native package build does not need.
   toolchain = final.rust-bin.stable.${channel}.minimal.override {
     extensions = [ "clippy" ];
+    # sensr-ui's islands are a wasm bundle, built below with the same compiler.
+    targets = [ "wasm32-unknown-unknown" ];
   };
   craneLib = (crane.mkLib final).overrideToolchain (_: toolchain);
 
@@ -75,6 +77,7 @@ in
     commonArgs
     // {
       inherit cargoArtifacts;
+      nativeBuildInputs = [ final.wasm-bindgen-cli ];
       # cargo test runs in CI's rust job (and in checks.cargo-test); some
       # tests drive nft and other daemons, which the package sandbox lacks.
       doCheck = false;
@@ -85,10 +88,18 @@ in
         if [ ! -e $out/bin/sensr ] && [ -e $out/bin/sensr-cli ]; then
           ln -s sensr-cli $out/bin/sensr
         fi
-        # services.sensr.api.uiRoot: the place for `cargo leptos build`
-        # output. Empty until the UI assets are packaged, so the
-        # server-rendered pages still answer on their own.
-        mkdir -p $out/share/sensr/ui
+        # services.sensr.api.uiRoot: `cargo leptos build` output, done here by
+        # hand so the image does not need cargo-leptos in its build closure.
+        # The wasm bundle is the islands' hydrate build; the CSS is the one
+        # plain stylesheet cargo-leptos would install from style-file.
+        mkdir -p $out/share/sensr/ui/pkg
+        cp crates/sensr-ui/public/favicon.svg $out/share/sensr/ui/
+        cp crates/sensr-ui/style/main.css $out/share/sensr/ui/pkg/sensr-ui.css
+        cargo build --locked --release --target wasm32-unknown-unknown \
+          -p sensr-ui --lib --no-default-features --features hydrate
+        wasm-bindgen --target web --out-name sensr-ui \
+          --out-dir $out/share/sensr/ui/pkg \
+          target/wasm32-unknown-unknown/release/sensr_ui.wasm
       '';
       passthru = {
         inherit craneLib cargoArtifacts toolchain;

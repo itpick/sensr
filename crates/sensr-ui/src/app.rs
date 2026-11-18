@@ -51,6 +51,7 @@ pub fn App() -> impl IntoView {
                 <ParentRoute path=path!("") view=Layout ssr=SsrMode::Async>
                     <Route path=path!("") view=Dashboard/>
                     <Route path=path!("/ui/core/dashboard") view=Dashboard/>
+                    <Route path=path!("/ui/core/password") view=PasswordPage/>
                     <Route path=path!("/ui/interfaces/assignment") view=Assignments/>
                     <Route path=path!("/ui/interfaces/if/:id") view=InterfacePage/>
                     <Route path=path!("/ui/interfaces/overview") view=InterfacesOverview/>
@@ -281,7 +282,6 @@ pub fn Login() -> impl IntoView {
                     <input id="password" name="password" type="password" autocomplete="current-password" required/>
                 </div>
                 <button type="submit" class="btn btn-primary btn-block">"Login"</button>
-                <p class="muted small">"Default credentials on a new install: root / sensr"</p>
             </form>
         </main>
     }
