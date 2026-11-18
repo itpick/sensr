@@ -378,6 +378,11 @@ impl SuricataModel {
             "--no-merge".to_owned(),
             "--no-reload".to_owned(),
             "--no-test".to_owned(),
+            // Without this a failed download exits 0 and keeps the store's
+            // distribution rules, so a fetch that raced the WAN at boot
+            // would go unnoticed until the next day. The unit's
+            // Restart=on-failure retries instead.
+            "--fail".to_owned(),
             "--enable-conf".to_owned(),
             format!("/{DIR}/enable.conf"),
             "--disable-conf".to_owned(),
