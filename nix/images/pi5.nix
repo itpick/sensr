@@ -93,6 +93,14 @@ in
   boot.kernelPackages = kernelPackages;
   # sd-image pulls in all-hardware.nix; a Pi needs only its own drivers.
   hardware.enableAllHardware = lib.mkForce false;
+  # ...but hardware.firmware defaults to the same switch, and turning it off
+  # also dropped linux-firmware from the image. The r8152 driver then ran the
+  # USB NICs on their ROM defaults ("Direct firmware load for
+  # rtl_nic/rtl8156b-2.fw failed with error -2", "unable to load firmware
+  # patch") — those two adapters carry LAN and LAN2. Enabling the
+  # redistributable set brings the rtl_nic blobs (and brcmfmac's, for the
+  # onboard WiFi) without the whole unfree firmware list.
+  hardware.enableRedistributableFirmware = true;
   boot.initrd.availableKernelModules = [
     # SD card (sdhci-brcmstb is built in) and NVMe behind the BCM2712 PCIe
     "mmc_block"

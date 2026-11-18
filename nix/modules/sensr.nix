@@ -613,6 +613,16 @@ in
         "network.target"
         "sensr-net.target"
       ];
+      # The seed is on the image's FAT partition, which the Pi image mounts
+      # with `nofail`: local-fs.target does not wait for it, so ordering on
+      # local-fs.target alone let the agent read the seed folder before the
+      # mount was up, get ENOENT, log `NoSeed` and never retry — every trial
+      # boot came up on factory defaults instead of the seeded config.
+      # WantsMountsFor adds the mount to this transaction and orders after it
+      # without making the agent's start depend on it: a missing seed is a
+      # factory-default boot, not a reason for no router. (RequiresMountsFor,
+      # as the boot-log writers use, would fail the agent with the mount.)
+      unitConfig.WantsMountsFor = cfg.seedDir;
       path = appliedPackages ++ [ config.systemd.package ];
       environment = {
         SENSR_AGENT_SOCKET = socket;
