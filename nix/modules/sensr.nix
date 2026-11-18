@@ -69,7 +69,12 @@ let
     # brings the sources' own
     for f in classification.config reference.config; do
       # the engine and the updater may both get here first
-      [ -e /var/lib/suricata/rules/$f ] || cp ${suricata}/etc/suricata/$f /var/lib/suricata/rules/$f || true
+      if [ ! -e /var/lib/suricata/rules/$f ]; then
+        # cp keeps the store file's 0444 mode, and suricata-update rewrites
+        # these files in place, so give the owner write access back
+        cp ${suricata}/etc/suricata/$f /var/lib/suricata/rules/$f && \
+          chmod 0644 /var/lib/suricata/rules/$f || true
+      fi
     done
   '';
   appliedPackages = with pkgs; [
