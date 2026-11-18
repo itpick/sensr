@@ -1,5 +1,7 @@
 <p align="center"><img src="docs/logo.svg" alt="sensr" width="220"></p>
 
+<p align="center"><img src="docs/ui-dashboard.png" alt="sensr web UI: dashboard with system information, CPU and memory, interfaces, gateways and traffic graphs" width="880"></p>
+
 A firewall and router OS written in Rust on NixOS. The goal is feature parity with
 [OPNsense](https://opnsense.org/), including its Business Edition features, plus
 atomic upgrades, rollback and a typed, tested configuration model.
