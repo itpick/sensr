@@ -61,15 +61,15 @@ kernel=Image
 initramfs initrd followkernel
 cmdline=cmdline.txt
 # A mainline device tree: the firmware's downstream-kernel check does not
-# apply. On D0 boards it still applies overlays/bcm2712d0.dtbo.
+# apply. (On a Pi 5 D0 board the firmware still applies overlays/bcm2712d0.dtbo.)
 os_check=0
-# Debug UART (3-pin header between the HDMI ports), 115200 8N1: firmware log,
-# then the kernel from its first instruction (earlycon in cmdline.txt).
+# Debug UART on the board's header, 115200 8N1: firmware log, then the kernel
+# from its first instruction (earlycon in cmdline.txt).
 enable_uart=1
 uart_2ndstage=1
-# The firmware starts the hardware watchdog before the kernel; a boot that
-# hangs anywhere resets the board after this many seconds (needs a 2025 or
-# later bootloader EEPROM; older ones ignore it).
+# Where the firmware supports it (Pi 5 with a 2025 or later bootloader EEPROM)
+# it starts the hardware watchdog before the kernel; a boot that hangs
+# anywhere then resets the board after this many seconds. Others ignore it.
 kernel_watchdog_timeout=@watchdogTimeout@
 
 [all]
@@ -82,7 +82,10 @@ mkdir -p "$tmp/overlays"
 cp "$toplevel/kernel" "$tmp/Image"
 cp "$toplevel/initrd" "$tmp/initrd"
 cp @bootFiles@/*.dtb "$tmp/"
-cp @bootFiles@/overlays/*.dtbo "$tmp/overlays/"
+# Boards whose trees need no overlays (the Pi 4) ship none.
+if [ -d @bootFiles@/overlays ]; then
+  cp @bootFiles@/overlays/*.dtbo "$tmp/overlays/"
+fi
 echo "init=$toplevel/init $(cat "$toplevel/kernel-params") @extraCmdline@" > "$tmp/cmdline.txt"
 readlink -f "$toplevel" > "$tmp/system"
 sync -f "$tmp/system"
