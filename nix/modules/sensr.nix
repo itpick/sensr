@@ -922,6 +922,10 @@ in
       serviceConfig = commonHardening // {
         Type = "oneshot";
         ExecStart = "${cfg.package}/bin/sensr-dns blocklist-update";
+        # A first download that fails (typically racing the WAN at boot)
+        # exits non-zero: retry instead of waiting for the hourly timer.
+        Restart = "on-failure";
+        RestartSec = "2min";
         StateDirectory = "sensr-dns";
         StateDirectoryMode = "0755";
         UMask = "0022";
