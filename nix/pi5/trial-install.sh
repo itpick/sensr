@@ -214,7 +214,11 @@ install() {
   local fat
   fat=$(mktemp -d)
   mount_target_fat "$dev" "$fat"
-  trap 'umount "$fat" 2>/dev/null; rmdir "$fat" 2>/dev/null' EXIT
+  # The trap runs after this function's scope is gone, so it must not name the
+  # local: with set -u a failure otherwise reports "fat: unbound variable"
+  # instead of the error that stopped the install.
+  trial_fat=$fat
+  trap 'umount "${trial_fat:-}" 2>/dev/null; rmdir "${trial_fat:-}" 2>/dev/null' EXIT
   [ -e "$fat/current/system" ] || die "$image is not a sensr Pi 5 image (no current/ on its FAT partition)"
   mkdir -p "$fat/sensr"
   if [ -n "$seed" ]; then
