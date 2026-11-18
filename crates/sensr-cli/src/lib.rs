@@ -2,7 +2,6 @@
 //! `opnsense-shell`). Talks to `sensr-agent` over `sensr-ipc`.
 
 pub mod import;
-pub mod insight;
 pub mod output;
 
 use std::io::Write;
@@ -42,12 +41,12 @@ pub enum Command {
         /// Which subsystem.
         section: RuntimeArg,
     },
-    /// Traffic the router has recorded (Insight: per-host and per-flow).
-    #[command(subcommand)]
-    Insight(InsightCmd),
     /// Read and change the configuration.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Traffic insight (Reporting › Insight) from the local flow database.
+    #[command(subcommand)]
+    Insight(InsightCmd),
     /// Import a foreign configuration into the candidate.
     #[command(subcommand)]
     Import(ImportCmd),
@@ -82,14 +81,17 @@ pub enum RuntimeArg {
 /// `sensr insight …`
 #[derive(Debug, Subcommand)]
 pub enum InsightCmd {
-    /// Hosts ranked by traffic, newest window first.
+    /// The local hosts with the most traffic in a time window.
     Hosts {
-        /// Seconds to look back.
-        #[arg(long, default_value_t = 3600)]
-        since: i64,
+        /// Window into the past, e.g. `1h`, `24h`, `7d` or a number of minutes.
+        #[arg(long, default_value = "1h")]
+        since: String,
         /// How many rows.
-        #[arg(long, default_value_t = 25)]
+        #[arg(long, default_value_t = 50)]
         limit: u32,
+        /// Flow database directory.
+        #[arg(long, default_value = sensr_flow::config::DB_DIR)]
+        db_dir: PathBuf,
         /// Print JSON.
         #[arg(long)]
         json: bool,
@@ -345,6 +347,16 @@ pub async fn run_with_input(
         }
         return Ok(());
     }
+    if let Command::Insight(InsightCmd::Hosts {
+        since,
+        limit,
+        db_dir,
+        json,
+    }) = &cli.command
+    {
+        insight_hosts(since, *limit, db_dir, *json, out)?;
+        return Ok(());
+    }
     let mut c = Client::connect(&cli.socket, principal())
         .await
         .map_err(|e| anyhow::anyhow!(describe(&e)))?;
@@ -374,16 +386,8 @@ pub async fn run_with_input(
                 output::json(&v.unwrap_or(serde_json::Value::Null))
             )?;
         }
-        Command::Insight(cmd) => match cmd {
-            InsightCmd::Hosts { since, limit, json } => {
-                let v = insight::hosts(since, limit)?;
-                if json {
-                    writeln!(out, "{}", output::json(&v))?;
-                } else {
-                    insight::print_hosts(out, &v)?;
-                }
-            }
-        },
+        // Handled before the agent connection: insight reads the local database.
+        Command::Insight(_) => {}
         Command::Config(cmd) => config(&mut c, cmd, out).await?,
         Command::Interfaces(cmd) => interfaces(&mut c, cmd, input, out).await?,
         Command::Import(ImportCmd::Opnsense {
@@ -442,6 +446,85 @@ pub async fn run_with_input(
         }
     }
     Ok(())
+}
+
+/// Parse a `--since` window (`30s`, `15m`, `24h`, `7d`; a bare number is minutes)
+/// into seconds, at least one minute.
+fn window_seconds(s: &str) -> anyhow::Result<i64> {
+    let s = s.trim();
+    let (digits, unit) = match s.char_indices().last() {
+        Some((i, c)) if c.is_ascii_alphabetic() => (&s[..i], Some(c.to_ascii_lowercase())),
+        _ => (s, None),
+    };
+    let n: i64 = digits
+        .parse()
+        .with_context(|| format!("`{s}` is not a time window (e.g. 1h, 24h, 7d)"))?;
+    let secs = match unit {
+        Some('s') => n,
+        None | Some('m') => n * 60,
+        Some('h') => n * 3_600,
+        Some('d') => n * 86_400,
+        Some(c) => bail!("unknown unit `{c}` in `{s}` (s, m, h or d)"),
+    };
+    Ok(secs.max(60))
+}
+
+/// `sensr insight hosts`: the local hosts with the most traffic, read from the
+/// flow database the insight daemon writes.
+fn insight_hosts(
+    since: &str,
+    limit: u32,
+    db_dir: &std::path::Path,
+    json: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+    let path = db_dir.join(sensr_flow::config::FLOWS_DB);
+    let store = sensr_flow::store::FlowStore::open_read_only(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let rows = store
+        .top(
+            sensr_flow::store::RowKind::Host,
+            None,
+            now - window_seconds(since)?,
+            now,
+            limit,
+        )
+        .with_context(|| format!("reading {}", path.display()))?;
+    if json {
+        let rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "host": r.key,
+                    "up": r.up,
+                    "down": r.down,
+                    "up_packets": r.up_packets,
+                    "down_packets": r.down_packets,
+                })
+            })
+            .collect();
+        writeln!(out, "{}", output::json(&rows))?;
+    } else {
+        for r in &rows {
+            writeln!(out, "{}  up {}  down {}", r.key, bytes(r.up), bytes(r.down))?;
+        }
+    }
+    Ok(())
+}
+
+/// A byte count for humans.
+fn bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    format!("{v:.1} {}", UNITS[u])
 }
 
 async fn nics(c: &mut Client) -> anyhow::Result<Vec<sensr_ipc::Nic>> {
@@ -730,6 +813,17 @@ async fn config(c: &mut Client, cmd: ConfigCmd, out: &mut dyn Write) -> anyhow::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn since_windows() {
+        assert_eq!(window_seconds("1h").unwrap(), 3_600);
+        assert_eq!(window_seconds("7d").unwrap(), 604_800);
+        assert_eq!(window_seconds("30m").unwrap(), 1_800);
+        assert_eq!(window_seconds("15").unwrap(), 900);
+        assert_eq!(window_seconds("5s").unwrap(), 60, "clamped to a minute");
+        assert!(window_seconds("7w").is_err());
+        assert!(window_seconds("soon").is_err());
+    }
 
     const HOME_ROUTER: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
