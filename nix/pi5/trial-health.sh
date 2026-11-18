@@ -150,24 +150,58 @@ run() {
 # installed OS, whether or not the gate ever gets to reboot. The image keeps
 # config.txt.sensr-dormant next to it, so a committed install (where the
 # dormant file is gone) is left alone.
+is_our_config() { # FILE
+  # The trial's own config, whether written by trial-install (the marker) or
+  # by the same layout by hand (os_prefix=sensr-trial/, which no other OS uses).
+  grep -q "^# sensr-pi5-trial-install" "$1" 2>/dev/null ||
+    grep -q "^os_prefix=sensr-trial/" "$1" 2>/dev/null
+}
+
+config_backup() { # DIR -> the previous OS's config on that FAT, if any
+  # Two layouts exist. When the trial's disk comes first in BOOT_ORDER, its
+  # config.txt is renamed config.txt.sensr-dormant while the trial runs. When
+  # the running OS's disk (NVMe here) comes first, the config it boots by is
+  # kept as config.<name>.txt (config.vyos.txt, ...) and config.txt is the
+  # trial's. Restore whichever is there; never our own.
+  local dir=$1 f
+  if [ -f "$dir/config.txt.sensr-dormant" ]; then
+    echo "$dir/config.txt.sensr-dormant"
+    return
+  fi
+  for f in "$dir"/config.*.txt; do
+    [ -e "$f" ] || continue
+    is_our_config "$f" && continue
+    echo "$f"
+    return
+  done
+}
+
 revert() {
   is_trial || { log "not a trial boot"; exit 0; }
-  local dev mnt left
-  # This runs at sysinit, before udev has finished: give the card's nodes a
+  local dev mnt left backup done=
+  # This runs at sysinit, before udev has finished: give the disks' nodes a
   # moment rather than skip the revert on a boot that is merely fast.
   udevadm settle --timeout=15 2>/dev/null || true
-  dev=$(blkid -c /dev/null -L FIRMWARE 2>/dev/null | head -n1)
-  if [ -z "$dev" ]; then
-    log "no FAT labelled FIRMWARE: leaving the boot config alone"
-    exit 0
-  fi
   mnt=$(mktemp -d)
-  if ! mount -o rw "$dev" "$mnt" 2>/dev/null; then
-    log "cannot mount $dev: leaving the boot config alone"
-    rmdir "$mnt"
-    exit 0
-  fi
-  if [ -f "$mnt/config.txt" ] && [ -f "$mnt/config.txt.sensr-dormant" ]; then
+  # The boot partition can be the SD card's (FIRMWARE) or, on this board, the
+  # NVMe's EFI partition: try every FAT rather than only the label the image
+  # happens to use, or a trial armed on another one could never disarm itself.
+  for dev in $(blkid -c /dev/null -t TYPE=vfat -o device 2>/dev/null); do
+    [ -f "$mnt/config.txt" ] && umount "$mnt" 2>/dev/null
+    if ! mount -o rw "$dev" "$mnt" 2>/dev/null; then
+      log "cannot mount $dev: leaving its boot config alone"
+      continue
+    fi
+    if [ ! -f "$mnt/config.txt" ] || ! is_our_config "$mnt/config.txt"; then
+      umount "$mnt"
+      continue
+    fi
+    backup=$(config_backup "$mnt")
+    if [ -z "$backup" ]; then
+      log "$dev has the trial's config but no previous one: leaving it"
+      umount "$mnt"
+      continue
+    fi
     left=2
     if [ -r "$mnt/sensr/trial-boots-left" ]; then
       read -r left < "$mnt/sensr/trial-boots-left" || true
@@ -178,13 +212,18 @@ revert() {
       echo "$left" > "$mnt/sensr/trial-boots-left"
       log "$left more trial boot(s) allowed"
     else
-      rm -f "$mnt/config.txt" "$mnt/sensr/trial-boots-left"
-      log "removed $dev/config.txt: the next reset boots the installed OS"
+      cp -f "$backup" "$mnt/config.txt.new"
+      mv -f "$mnt/config.txt.new" "$mnt/config.txt"
+      rm -f "$mnt/sensr/trial-boots-left"
+      log "restored $dev/config.txt from $(basename "$backup"): the next reset boots the installed OS"
     fi
     sync
-  fi
-  umount "$mnt"
-  rmdir "$mnt"
+    umount "$mnt"
+    done=1
+    break
+  done
+  rmdir "$mnt" 2>/dev/null || true
+  [ -n "$done" ] || log "no FAT with the trial's config.txt: leaving the boot config alone"
 }
 
 confirm() {
