@@ -41,8 +41,8 @@ let
     runtimeInputs = [ pkgs.coreutils ];
     text =
       builtins.replaceStrings
-        [ "@bootFiles@" "@extraCmdline@" "@tryboot@" "@watchdogTimeout@" ]
-        [ "${bootFiles}" extraCmdline "1" "300" ]
+        [ "@bootFiles@" "@extraCmdline@" "@tryboot@" "@watchdogTimeout@" "@section@" "@board@" ]
+        [ "${bootFiles}" extraCmdline "1" "300" "pi5" "Raspberry Pi 5" ]
         (builtins.readFile ../pi5/install-boot.sh);
   };
 

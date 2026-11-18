@@ -80,6 +80,7 @@
       nixosConfigurations = {
         qcow = mkSystem "x86_64-linux" [ ./nix/images/qcow.nix ];
         qcow-aarch64 = mkSystem "aarch64-linux" [ ./nix/images/qcow.nix ];
+        pi4 = mkSystem "aarch64-linux" [ ./nix/images/pi4.nix ];
         pi5 = mkSystem "aarch64-linux" [ ./nix/images/pi5.nix ];
       };
 
@@ -87,6 +88,8 @@
       images = {
         qcow = self.nixosConfigurations.qcow.config.system.build.image;
         qcow-aarch64 = self.nixosConfigurations.qcow-aarch64.config.system.build.image;
+        # Raspberry Pi 4 SD/USB image (aarch64-linux)
+        pi4 = self.nixosConfigurations.pi4.config.system.build.sdImage;
         # Raspberry Pi 5 SD/USB/NVMe image (aarch64-linux; boot-tested with
         # nix/tests/pi5-qemu.sh)
         pi5 = self.nixosConfigurations.pi5.config.system.build.sdImage;
