@@ -494,7 +494,21 @@ in
           set -u
           ethtool=${pkgs.ethtool}/bin/ethtool
           ip=${pkgs.iproute2}/bin/ip
+          systemctl=${config.systemd.package}/bin/systemctl
           log() { echo "sensr-nic-recover: $*"; }
+          # Kea's per-subnet sockets remember the interface index they were
+          # bound to (SO_BINDTODEVICE). A re-enumerated NIC keeps its pinned
+          # name but gets a new index, so such a socket stays listed by `ss`
+          # while the kernel no longer delivers to it: the link looks perfect
+          # and no DHCP client gets a lease. Track the index and rebind Kea
+          # when it changes.
+          idxdir=/run/sensr/nic-recover
+          mkdir -p "$idxdir"
+          rebind_dhcp() {
+            log "$1 re-enumerated; restarting sensr-kea-dhcp4 to rebind its sockets"
+            "$systemctl" restart sensr-kea-dhcp4.service ||
+              log "WARNING: sensr-kea-dhcp4 restart failed"
+          }
           for devlink in /sys/class/net/*/device; do
             [ -e "$devlink" ] || continue
             name=$(basename "$(dirname "$devlink")")
@@ -521,6 +535,14 @@ in
             done
             if "$ethtool" --show-eee "$name" 2>/dev/null | grep -q 'EEE status: enabled'; then
               "$ethtool" --set-eee "$name" eee off 2>/dev/null && log "$name: EEE off"
+            fi
+            idxf=$idxdir/ifindex.$name
+            idx=$(cat /sys/class/net/"$name"/ifindex 2>/dev/null)
+            if [ -n "$idx" ]; then
+              if [ -e "$idxf" ] && [ "$(cat "$idxf")" != "$idx" ]; then
+                rebind_dhcp "$name"
+              fi
+              echo "$idx" > "$idxf"
             fi
             # ethtool works on a healthy link whether it is up or down; it is
             # the ioctl that answers ENODEV once the driver has lost the device.
@@ -551,6 +573,10 @@ in
               new=$(basename "$new")
               "$ip" link set dev "$new" up 2>/dev/null || continue
               log "$name came back as $new and is up"
+              # Record the new index before restarting Kea, so the next tick
+              # does not see a change and restart it a second time.
+              cat /sys/class/net/"$new"/ifindex > "$idxf" 2>/dev/null || true
+              rebind_dhcp "$name"
               break
             done
           done
