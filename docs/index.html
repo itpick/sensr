@@ -33,6 +33,7 @@
   .card h2 { margin: 0 0 4px; font-size: 1.2rem; }
   .tag { align-self: flex-start; font-size: .78rem; font-weight: 600; padding: 2px 8px; border-radius: 99px; margin-bottom: 10px; }
   .plan { background: var(--plan-bg); color: var(--plan); }
+  .ok { background: var(--ok-bg); color: var(--ok); }
   .card ul { margin: 0 0 16px; padding-left: 18px; color: var(--muted); font-size: .92rem; flex: 1; }
   .btn { display: block; text-align: center; background: var(--accent); color: var(--accent-fg);
     text-decoration: none; font-weight: 600; padding: 12px 16px; border-radius: 8px; }
@@ -79,7 +80,7 @@
       <li><a href="https://itpick.github.io/vyos-pi/">vyos-pi</a>: VyOS images for Raspberry Pi 4/5</li>
       <li><a href="https://github.com/itpick/vyos-pi/blob/main/docs/comparison/pi5-iperf-vyos-vs-opnsense.md">OPNsense vs VyOS on the Pi 5</a>: side-by-side speed and boot-time results</li>
     </ul>
-    <p>Benchmark: the <a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md">performance evaluation</a> measured OPNsense, VyOS and a NixOS + Rust prototype in x86 VMs. Over virtio with 8 TCP streams, Linux forwarded 25&ndash;26&nbsp;Gbit/s and OPNsense 3.1. With 50 rules loaded, the prototype applied a one-rule change in 16&nbsp;ms, OPNsense in 0.36&nbsp;s and VyOS in 2.2&nbsp;s. See also the <a href="#startup">startup comparison</a> below: time until traffic flows on a real Pi 5 for opnsense-pi and vyos-pi (sensr's comes with its on-device trial).</p>
+    <p>Benchmark: the <a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md">performance evaluation</a> measured OPNsense, VyOS and a NixOS + Rust prototype in x86 VMs. Over virtio with 8 TCP streams, Linux forwarded 25&ndash;26&nbsp;Gbit/s and OPNsense 3.1. With 50 rules loaded, the prototype applied a one-rule change in 16&nbsp;ms, OPNsense in 0.36&nbsp;s and VyOS in 2.2&nbsp;s. See also the <a href="#startup">startup comparison</a> below: time until traffic flows on a real Pi 5 for all three, including this development build's on-device trial.</p>
   </aside>
 
   <div class="boards">
@@ -95,7 +96,7 @@
       <div class="small">sha256 published alongside</div>
     </div>
     <div class="card">
-      <span class="tag plan">Planned</span>
+      <span class="tag ok">Runs on a real Pi 5</span>
       <h2>Raspberry Pi 5</h2>
       <ul>
         <li>Onboard RP1 Ethernet with the mainline driver, no out-of-tree modules</li>
@@ -133,13 +134,14 @@
 
   <h3 id="startup">Startup on a real Pi 5: time until traffic flows</h3>
   <div class="scroll"><table class="startup">
-    <tr><th>Real Pi 5 (16&nbsp;GB), from the reboot command</th><th>opnsense-pi</th><th>vyos-pi</th><th><a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md">sensr</a> <span class="fine">(in development)</span></th></tr>
-    <tr><td>Kernel starts</td><td class="num">36&ndash;38 s</td><td class="num">14 s</td><td class="num">not yet on real hardware</td></tr>
-    <tr><td><strong>Traffic flowing</strong> <span class="fine">(network up)</span></td><td class="num"><strong>64&ndash;67 s</strong></td><td class="num"><strong>48 s</strong></td><td class="num">not yet on real hardware<br><span class="fine">on-device trial planned</span></td></tr>
-    <tr><td>SSH / UI ready</td><td class="num">65&ndash;68 s<br><span class="fine">web GUI</span></td><td class="num">47&ndash;48 s<br><span class="fine">SSH</span></td><td class="num">&mdash;</td></tr>
-    <tr><td>Fully ready</td><td class="num">81&ndash;85 s</td><td class="num">48&ndash;49 s</td><td class="num">&mdash;</td></tr>
+    <tr><th>Real Pi 5 (16&nbsp;GB), from the reboot command</th><th>opnsense-pi</th><th>vyos-pi</th><th><a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md">sensr</a> <span class="fine">(development build, ran on a Pi 5)</span></th></tr>
+    <tr><td>Kernel starts</td><td class="num">36&ndash;38 s</td><td class="num">23&ndash;24 s</td><td class="num">&asymp;19 s <span class="fine">(derived)</span></td></tr>
+    <tr><td><strong>Traffic flowing</strong> <span class="fine">(network up)</span></td><td class="num"><strong>64&ndash;67 s</strong></td><td class="num"><strong>~60 s</strong></td><td class="num"><strong>&asymp;34 s</strong></td></tr>
+    <tr><td>SSH / UI ready</td><td class="num">65&ndash;68 s<br><span class="fine">web GUI</span></td><td class="num">82 s<br><span class="fine">SSH</span></td><td class="num">43 s<br><span class="fine">SSH; UI assets not packaged yet</span></td></tr>
+    <tr><td>Fully ready</td><td class="num">81&ndash;85 s</td><td class="num">~85 s</td><td class="num">&asymp;66 s</td></tr>
   </table></div>
-  <p class="fine">Timed from the reboot command, so shutdown, the Pi firmware and the boot loader come first (the "kernel starts" row): OPNsense boots through UEFI, VyOS straight from the Pi firmware. "Traffic flowing" is the LAN port up with an address; "fully ready" is OPNsense's last boot script or VyOS's config loaded. OPNsense from its own boot logs over 7 typical reboots (1&nbsp;s resolution); VyOS from 2 warm reboots, its journal plus a 1&nbsp;s external watcher. VyOS has no web UI, so its figure is SSH. Method and every run: <a href="https://github.com/itpick/vyos-pi/blob/main/docs/comparison/pi5-iperf-vyos-vs-opnsense.md#boot-time">Pi 5 comparison, boot time</a>. sensr has not run on a Pi yet: its Pi 5 numbers will come from the upcoming on-device trial. Until then, the x86 VM benchmark below is the only measurement.</p>
+  <p class="fine">Timed from the reboot command, so shutdown, the Pi firmware and the boot loader come first (the "kernel starts" row): OPNsense boots through UEFI, VyOS straight from the Pi firmware. "Traffic flowing" is the LAN port up with an address; "fully ready" is OPNsense's last boot script or VyOS's config loaded. OPNsense from its own boot logs over 7 typical reboots (1&nbsp;s resolution). The VyOS column is the router this site's author runs: pi5-1 (Pi&nbsp;5, 16&nbsp;GB, NVMe, three NICs, ntopng and AdGuard containers), measured 2026-11-18 over two reboots with an external ping/SSH watcher (&asymp;1&nbsp;s resolution) plus the router's own journal (<code>short-monotonic</code>) &ndash; LAN up 59.6&nbsp;s, SSH 81.7 and 82.0&nbsp;s, config loaded 85&nbsp;s. That live configuration is what makes it slower than the 14&nbsp;s/47&ndash;49&nbsp;s figures measured on the same board with a minimal default config, which are in the <a href="https://github.com/itpick/vyos-pi/blob/main/docs/comparison/pi5-iperf-vyos-vs-opnsense.md#boot-time">Pi 5 comparison, boot time</a>. VyOS has no web UI, so its figure is SSH.</p>
+  <p class="fine">The sensr column is the development trial on pi5-1 (16&nbsp;GB, D0, three NICs) carrying an imported home-router config &ndash; Kea DHCP, Unbound, Suricata and 18 nftables chains &ndash; measured 2026-11-18. On the box: kernel 0.6&nbsp;s, initrd 4.7&nbsp;s, userspace 41.9&nbsp;s, multi-user at 28.4&nbsp;s, the LAN carrier 14.9&nbsp;s and SSH listening 24.0&nbsp;s after kernel start, and 43&nbsp;s from the reboot command to SSH by wall clock. The kernel/traffic/ready rows above are that 43&nbsp;s less the kernel-to-SSH interval, so they carry about a second of uncertainty; "fully ready" is the last unit (Suricata's signature update, 23.7&nbsp;s) at 47.3&nbsp;s after kernel start. The web UI's HTML is served, but its CSS, JS and wasm are not packaged in the build yet, so "UI ready" is SSH plus those pages.</p>
   <details class="x86">
     <summary>x86 VM (relative only, not the Pi)</summary>
     <div class="scroll"><table class="startup">
@@ -159,8 +161,19 @@
   </table></div>
   <p class="fine">Downloads: the latest GitHub releases (this page updates the sizes from GitHub when it loads). *Installed: measured on x86 VMs in the <a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md#22-b-os-base-footprint-and-boot">sensr benchmark</a> (OPNsense 26.7, VyOS rolling), not on the Pi images. The sensr row is measured on its development builds: the Pi 5 image as CI builds it (zstd), and the closure of the x86 qcow2 image (no Perl, no nixpkgs source, Kea without its Python shell).</p>
 
-  <h3 id="throughput">Throughput ceiling on the Pi 5</h3>
-  <p class="fine">Theoretical; not yet measured with 5&nbsp;GbE dongles.</p>
+  <h3 id="throughput">Throughput on a real Pi 5</h3>
+  <p>Measured on the development trial: pi5-1 (16&nbsp;GB, D0, three NICs) with the imported home-router config and Suricata, on a 1&nbsp;Gb/s AT&amp;T line, 2026-11-18.</p>
+  <div class="scroll"><table>
+    <tr><th>Test</th><th>Result</th><th>Limit</th></tr>
+    <tr><td>LAN, TCP 4 streams, into the router</td><td class="num">940 Mbit/s</td><td class="fine">the Mac's 1&nbsp;GbE port; 0 retransmits</td></tr>
+    <tr><td>LAN, TCP 4 streams, out of the router</td><td class="num">932 Mbit/s</td><td class="fine">the same 1&nbsp;GbE ceiling; 41 retransmits</td></tr>
+    <tr><td>Forwarded LAN &rarr; WAN, upload</td><td class="num">436 Mbit/s</td><td class="fine">the line's upstream (the router alone got 456)</td></tr>
+    <tr><td>Forwarded LAN &rarr; WAN, download</td><td class="num">&asymp;717 Mbit/s</td><td class="fine">HTTP, 86&nbsp;MB/s; public iperf3 servers refused the reverse run</td></tr>
+    <tr><td>WAN from the router, download</td><td class="num">&asymp;730 Mbit/s</td><td class="fine">HTTP, 91&nbsp;MB/s; 456&nbsp;Mbit/s up on iperf3</td></tr>
+    <tr><td>Latency to 8.8.8.8</td><td class="num">8.0 ms</td><td class="fine">0% loss over 3 pings</td></tr>
+  </table></div>
+  <p class="fine">The LAN figures measure the client's 1&nbsp;GbE port, not the router: both directions ran at line rate, and the 2.5&nbsp;GbE ports were not tested for lack of a second 2.5&nbsp;GbE peer. The forwarded runs went from another LAN host through NAT and the firewall to a public server, so they include the AT&amp;T line. The Mac was not used for those: its default route is a phone hotspot.</p>
+  <p class="fine">Ceiling of the hardware, for reference; not yet measured with 5&nbsp;GbE dongles.</p>
   <div class="scroll"><table>
     <tr><th>Link</th><th>Ceiling</th></tr>
     <tr><td>Onboard Ethernet</td><td>1&nbsp;Gbit/s</td></tr>
