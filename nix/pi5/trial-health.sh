@@ -28,6 +28,10 @@
 #                                no agent, seed folder or network involved),
 #                                and force the reboot 90 s later
 #   sensr-trial-health run       the gate (sensr-trial-health.service)
+#   sensr-trial-health revert    early in a trial boot: take this partition's
+#                                config.txt away again (the trial was armed by
+#                                copying config.txt.sensr-dormant over it), so
+#                                every reset from now on boots the installed OS
 #   sensr-trial-health confirm   keep this trial: no more checks, no timer
 #   sensr-trial-health status    what the gate saw last
 set -u
@@ -135,6 +139,54 @@ run() {
   done
 }
 
+# The trial installer's tryboot flag never reaches the kernel on every
+# downstream kernel (VyOS does not pass the reboot reason on), so a trial on
+# those is armed by copying the dormant config.txt.sensr-dormant over
+# config.txt on the trial's own FAT partition. That makes the trial the
+# default OS for every boot, not one. Count down seed/trial-boots-left here,
+# at sysinit and before anything can hang, and take config.txt away when it
+# runs out: the trial then gets its boots (the first one imports the seed and
+# pins the NICs; the gates need one more) and every reset after that runs the
+# installed OS, whether or not the gate ever gets to reboot. The image keeps
+# config.txt.sensr-dormant next to it, so a committed install (where the
+# dormant file is gone) is left alone.
+revert() {
+  is_trial || { log "not a trial boot"; exit 0; }
+  local dev mnt left
+  # This runs at sysinit, before udev has finished: give the card's nodes a
+  # moment rather than skip the revert on a boot that is merely fast.
+  udevadm settle --timeout=15 2>/dev/null || true
+  dev=$(blkid -c /dev/null -L FIRMWARE 2>/dev/null | head -n1)
+  if [ -z "$dev" ]; then
+    log "no FAT labelled FIRMWARE: leaving the boot config alone"
+    exit 0
+  fi
+  mnt=$(mktemp -d)
+  if ! mount -o rw "$dev" "$mnt" 2>/dev/null; then
+    log "cannot mount $dev: leaving the boot config alone"
+    rmdir "$mnt"
+    exit 0
+  fi
+  if [ -f "$mnt/config.txt" ] && [ -f "$mnt/config.txt.sensr-dormant" ]; then
+    left=2
+    if [ -r "$mnt/sensr/trial-boots-left" ]; then
+      read -r left < "$mnt/sensr/trial-boots-left" || true
+    fi
+    case $left in ''|*[!0-9]*) left=2 ;; esac
+    left=$((left - 1))
+    if [ "$left" -gt 0 ]; then
+      echo "$left" > "$mnt/sensr/trial-boots-left"
+      log "$left more trial boot(s) allowed"
+    else
+      rm -f "$mnt/config.txt" "$mnt/sensr/trial-boots-left"
+      log "removed $dev/config.txt: the next reset boots the installed OS"
+    fi
+    sync
+  fi
+  umount "$mnt"
+  rmdir "$mnt"
+}
+
 confirm() {
   if [ -e "$STATE/deadline" ]; then
     log "this trial has a hard deadline ($(cat "$STATE/deadline") s after boot) and is measure-only: nothing to confirm"
@@ -165,10 +217,11 @@ stream() {
 case ${1:-run} in
   detect) detect ;;
   run) run ;;
+  revert) revert ;;
   confirm) confirm ;;
   stream) stream ;;
   status)
     cat "$STATE/health" 2>/dev/null || echo "no health result yet"
     if [ -e "$STATE/confirmed" ]; then echo confirmed; fi ;;
-  *) echo "usage: sensr-trial-health detect|run|confirm|stream|status" >&2; exit 2 ;;
+  *) echo "usage: sensr-trial-health detect|run|revert|confirm|stream|status" >&2; exit 2 ;;
 esac

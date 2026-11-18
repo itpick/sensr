@@ -204,6 +204,8 @@ let
       dig
       curl
       inetutils
+      # blkid and mount, for the trial's own boot partition (revert)
+      util-linux
       config.systemd.package
     ];
     # Checks fail softly and are reported; the script decides when to reboot.
@@ -1226,6 +1228,29 @@ in
         ExecStart = "${lib.getExe trialHealth} detect";
       };
     };
+    # A trial boot that was armed by copying the dormant boot config over
+    # config.txt (see trial-health.sh's revert) must not become the default
+    # OS: count its boots down before anything else can hang and hand the boot
+    # back to the installed OS when they run out, so a mute trial can never
+    # trap the box again.
+    systemd.services.sensr-trial-revert = {
+      description = "Trial boot: hand the next boot back to the installed OS";
+      wantedBy = [ "sysinit.target" ];
+      before = [
+        "sysinit.target"
+        "sensr-trial-health.service"
+      ];
+      unitConfig = {
+        DefaultDependencies = false;
+        ConditionKernelCommandLine = "sensr.trial=1";
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${lib.getExe trialHealth} revert";
+      };
+    };
+
     systemd.services.sensr-trial-health = {
       description = "Trial boot self-health gate (reboots to the previous OS on failure)";
       wantedBy = [ "multi-user.target" ];

@@ -177,6 +177,7 @@
                 dig
                 curl
                 inetutils
+                util-linux
                 systemd
               ];
               bashOptions = [ ];

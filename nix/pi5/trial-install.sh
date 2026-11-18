@@ -228,6 +228,12 @@ install() {
   # The trial timer: sensr reboots (back to this OS) after N minutes unless
   # someone deletes the file; --commit removes it.
   echo "$minutes" > "$fat/sensr/reboot-after-minutes"
+  # Boots the trial may have before sensr-trial-health revert takes config.txt
+  # away again, when the trial is armed by copying config.txt.sensr-dormant
+  # over config.txt instead of the firmware's tryboot flag (see revert in
+  # trial-health.sh): the first boot imports the seed and pins the NICs, the
+  # second has them. Every reset after that boots the installed OS.
+  echo 2 > "$fat/sensr/trial-boots-left"
   [ -z "$health" ] || cp "$health" "$fat/sensr/trial-health.env"
   if [ "$mode" = before ]; then
     # Plain boots try DEVICE first: without config.txt they move on to the
