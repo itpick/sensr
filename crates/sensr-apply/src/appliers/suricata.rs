@@ -353,6 +353,11 @@ impl SuricataModel {
             format!("/{DIR}/suricata.yaml"),
             "--pidfile".to_owned(),
             "/run/suricata/suricata.pid".to_owned(),
+            // Suricata 8 ignores default-log-dir from the yaml when the
+            // process runs from another working directory; -l is the only
+            // thing that redirects eve.json (to the unit's LogsDirectory).
+            "-l".to_owned(),
+            LOG_DIR.to_owned(),
         ];
         if prevent {
             for q in self.queues.0..self.queues.0.saturating_add(self.queues.1) {

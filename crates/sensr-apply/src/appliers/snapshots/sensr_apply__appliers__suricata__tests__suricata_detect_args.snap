@@ -6,4 +6,6 @@ expression: "files[\"suricata.args\"]"
 /run/sensr/suricata/suricata.yaml
 --pidfile
 /run/suricata/suricata.pid
+-l
+/var/log/suricata
 --af-packet
