@@ -160,18 +160,12 @@ in
   };
 
   # The trial installer's log partition (sensr-pi5-trial-install
-  # --logs-mib): the journal lives there, so a trial that fell back to the
-  # previous OS can be read from it. Optional: without the partition the
-  # journal stays on the root.
-  fileSystems."/var/log" = {
-    device = "/dev/disk/by-label/SENSR_LOGS";
-    fsType = "ext4";
-    options = [
-      "nofail"
-      "noatime"
-      "x-systemd.device-timeout=10s"
-    ];
-  };
+  # --logs-mib) is not declared here: the plain SD image has only the FAT and
+  # root partitions, and a fileSystems entry for a missing label still makes
+  # systemd create var-log.mount, whose fsck dependency fails even with
+  # `nofail`. Anything using /var/log (suricata's LogsDirectory) then fails,
+  # and every `sensr config commit` with it. The journal stays on the root
+  # until the mount is made conditional on the partition existing.
 
   sdImage = {
     firmwareSize = 512;

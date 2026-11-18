@@ -31,6 +31,10 @@ let
 
   bootFiles = pkgs.callPackage ../pi4/boot-files.nix { inherit (kernelPackages) kernel; };
 
+  # start4.elf and fixup4.dat: the Pi 4 bootloader runs the first and cannot
+  # start a kernel without it (see populateFirmwareCommands).
+  raspberrypifw = "${pkgs.raspberrypifw}/share/raspberrypi/boot";
+
   # HDMI first, the header UART (ttyS0 with the mainline tree) last so it is
   # /dev/console; earlycon prints from the kernel's first instruction.
   extraCmdline = "console=tty1 console=ttyS0,115200 earlycon=pl011,0x7e201000,115200n8";
@@ -123,21 +127,23 @@ in
     ];
   };
 
-  fileSystems."/var/log" = {
-    device = "/dev/disk/by-label/SENSR_LOGS";
-    fsType = "ext4";
-    options = [
-      "nofail"
-      "noatime"
-      "x-systemd.device-timeout=10s"
-    ];
-  };
+  # No /var/log entry: this image has only the FAT and root partitions, and a
+  # fileSystems entry for a label that does not exist still makes systemd
+  # create var-log.mount, whose fsck dependency fails even with `nofail`.
+  # Anything that uses /var/log (suricata's LogsDirectory pulls in
+  # RequiresMountsFor) then fails, and every `sensr config commit` with it.
+  # Put the entry back when the card really carries a SENSR_LOGS partition.
 
   sdImage = {
     firmwareSize = 512;
     compressImage = false;
     populateFirmwareCommands = ''
       ${lib.getExe installBoot} ${config.system.build.toplevel} --dir ./firmware --slot current
+      # The Pi 4's EEPROM bootloader is not the Pi 5's: it does not start
+      # config.txt's kernel itself, it loads start4.elf from this partition and
+      # that firmware file starts the kernel. Without these two a Pi 4 powers
+      # on, lights its PHYs and never runs a byte of NixOS.
+      cp ${raspberrypifw}/start4.elf ${raspberrypifw}/fixup4.dat ./firmware/
       mkdir -p ./firmware/sensr
       cp ${pkgs.writeText "README.txt" seedReadme} ./firmware/sensr/README.txt
     '';
