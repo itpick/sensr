@@ -2,6 +2,7 @@
 //! `opnsense-shell`). Talks to `sensr-agent` over `sensr-ipc`.
 
 pub mod import;
+pub mod insight;
 pub mod output;
 
 use std::io::Write;
@@ -41,6 +42,9 @@ pub enum Command {
         /// Which subsystem.
         section: RuntimeArg,
     },
+    /// Traffic the router has recorded (Insight: per-host and per-flow).
+    #[command(subcommand)]
+    Insight(InsightCmd),
     /// Read and change the configuration.
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -73,6 +77,23 @@ pub enum RuntimeArg {
     Aliases,
     /// IPv6 prefix delegation.
     Ipv6,
+}
+
+/// `sensr insight …`
+#[derive(Debug, Subcommand)]
+pub enum InsightCmd {
+    /// Hosts ranked by traffic, newest window first.
+    Hosts {
+        /// Seconds to look back.
+        #[arg(long, default_value_t = 3600)]
+        since: i64,
+        /// How many rows.
+        #[arg(long, default_value_t = 25)]
+        limit: u32,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `sensr config …`
@@ -353,6 +374,16 @@ pub async fn run_with_input(
                 output::json(&v.unwrap_or(serde_json::Value::Null))
             )?;
         }
+        Command::Insight(cmd) => match cmd {
+            InsightCmd::Hosts { since, limit, json } => {
+                let v = insight::hosts(since, limit)?;
+                if json {
+                    writeln!(out, "{}", output::json(&v))?;
+                } else {
+                    insight::print_hosts(out, &v)?;
+                }
+            }
+        },
         Command::Config(cmd) => config(&mut c, cmd, out).await?,
         Command::Interfaces(cmd) => interfaces(&mut c, cmd, input, out).await?,
         Command::Import(ImportCmd::Opnsense {

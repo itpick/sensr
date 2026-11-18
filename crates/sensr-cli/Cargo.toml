@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }
+sensr-flow = { workspace = true, features = ["store"] }
 sensr-import-opnsense.workspace = true
 sensr-ipc.workspace = true
 sensr-schema.workspace = true
