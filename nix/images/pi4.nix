@@ -144,6 +144,13 @@ in
       # that firmware file starts the kernel. Without these two a Pi 4 powers
       # on, lights its PHYs and never runs a byte of NixOS.
       cp ${raspberrypifw}/start4.elf ${raspberrypifw}/fixup4.dat ./firmware/
+      # A bootloader older than the 2021 EEPROMs ignores config.txt's os_prefix
+      # and looks for Image, initrd, cmdline.txt and the dtbs at the root of
+      # this partition. Copy them there: bootloaders that do honour os_prefix
+      # ignore the duplicates, and ~100 MB of the 512 MB FAT is cheap next to
+      # a board that powers on, blinks and never reaches the kernel.
+      cp ./firmware/current/Image ./firmware/current/initrd \
+        ./firmware/current/cmdline.txt ./firmware/current/*.dtb ./firmware/
       mkdir -p ./firmware/sensr
       cp ${pkgs.writeText "README.txt" seedReadme} ./firmware/sensr/README.txt
     '';
