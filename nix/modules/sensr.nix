@@ -306,6 +306,17 @@ in
         default = false;
         description = "With `listen`: plain HTTP instead of HTTPS (credentials in clear).";
       };
+      uiRoot = mkOption {
+        type = types.nullOr types.path;
+        default = "${cfg.package}/share/sensr/ui";
+        defaultText = lib.literalExpression ''"''${cfg.package}/share/sensr/ui"'';
+        description = ''
+          Document root of the web UI (`cargo leptos build` output: `pkg/`,
+          `favicon.svg`). The server-rendered pages work without it; the
+          assets that make them interactive are served from here. `null`
+          serves the API alone.
+        '';
+      };
     };
 
     initrdTimeoutSec = mkOption {
@@ -587,6 +598,8 @@ in
             "--listen"
             cfg.api.listen
           ]
+          ++ lib.optional (cfg.api.uiRoot != null) "--ui-root"
+          ++ lib.optional (cfg.api.uiRoot != null) (toString cfg.api.uiRoot)
           ++ lib.optional cfg.api.insecureHttp "--insecure-http"
         );
         Restart = "on-failure";

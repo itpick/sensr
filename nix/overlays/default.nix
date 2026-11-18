@@ -85,6 +85,10 @@ in
         if [ ! -e $out/bin/sensr ] && [ -e $out/bin/sensr-cli ]; then
           ln -s sensr-cli $out/bin/sensr
         fi
+        # services.sensr.api.uiRoot: the place for `cargo leptos build`
+        # output. Empty until the UI assets are packaged, so the
+        # server-rendered pages still answer on their own.
+        mkdir -p $out/share/sensr/ui
       '';
       passthru = {
         inherit craneLib cargoArtifacts toolchain;
