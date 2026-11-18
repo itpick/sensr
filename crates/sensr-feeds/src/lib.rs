@@ -11,7 +11,7 @@
 //! - ASN aliases: an AS database (default iptoasn.com, public domain),
 //!   checked daily; only the AS numbers in use are stored.
 //! - Host names in host aliases: re-resolved every `resolve_interval`.
-//! - MAC aliases: the neighbour table, every 30 s.
+//! - MAC aliases: the neighbour table and DHCP leases, every 30 s.
 //!
 //! [`Feeds::sources`] gives `sensr-rules` a [`Sources`] that only reads the
 //! store, so rendering a ruleset never waits on the network; [`Feeds::refresh`]
