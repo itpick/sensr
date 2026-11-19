@@ -559,6 +559,15 @@ pub fn WireguardPeers() -> impl IntoView {
     view! { <Grid<WgPeer>/> }
 }
 
+/// System › Gateways › Configuration: the next hops rules and routes use.
+#[component]
+pub fn GatewaysConfig() -> impl IntoView {
+    view! {
+        <p class="intro">"Gateways are next hops on an assigned interface: the default route, policy-routed rules and failover groups are built from them. A gateway with no address is learned from DHCP, PPP or router advertisements on its interface."</p>
+        <Grid<Gateway> title="Gateways"/>
+    }
+}
+
 /// System › Settings › General.
 #[component]
 pub fn SystemGeneralPage() -> impl IntoView {

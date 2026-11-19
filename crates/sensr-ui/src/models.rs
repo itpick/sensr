@@ -1724,6 +1724,128 @@ impl GridModel for HostOverride {
     }
 }
 
+// ---------------------------------------------------------------- System › Gateways
+
+/// IPv4 or IPv6 next hop.
+pub const GATEWAY_FAMILIES: &[(&str, &str)] = &[("inet", "IPv4"), ("inet6", "IPv6")];
+
+/// System › Gateways › Configuration: one next hop.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Gateway {
+    /// Object key.
+    pub uuid: String,
+    /// Enabled.
+    pub enabled: bool,
+    /// The name rules and groups refer to.
+    pub name: String,
+    /// Free text.
+    pub description: String,
+    /// Interface the next hop is reached through.
+    pub interface: String,
+    /// `inet` or `inet6`.
+    pub family: String,
+    /// Next-hop address; empty for a gateway learned from DHCP, PPP or router
+    /// advertisements on the interface.
+    pub address: String,
+    /// Candidate for the default route.
+    pub default_route: bool,
+    /// The next hop is outside the interface's subnet.
+    pub far: bool,
+    /// Probe the gateway to detect failure.
+    pub monitor: bool,
+    /// Address to probe; empty probes the gateway address.
+    pub monitor_address: String,
+    /// Ranking among default-route candidates, 0 to 255: lower wins.
+    pub priority: u32,
+    /// Share of the traffic in a load-balancing group, 1 to 10.
+    pub weight: u32,
+    /// Treat the gateway as down whatever the probes say.
+    pub force_down: bool,
+}
+
+impl Default for Gateway {
+    fn default() -> Self {
+        Self {
+            uuid: String::new(),
+            enabled: false,
+            name: String::new(),
+            description: String::new(),
+            interface: String::new(),
+            family: "inet".into(),
+            address: String::new(),
+            default_route: false,
+            far: false,
+            monitor: true,
+            monitor_address: String::new(),
+            priority: 255,
+            weight: 1,
+            force_down: false,
+        }
+    }
+}
+
+impl FormModel for Gateway {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enable", K::Checkbox),
+            F::new("name", "Name", K::Text)
+                .required()
+                .help("Name of the gateway, used by routes, groups and rules (GW_WAN)."),
+            F::new("description", "Description", K::Text),
+            F::new("interface", "Interface", K::Choice(ChoiceSet::Interfaces))
+                .required()
+                .help("Interface the gateway is reached through."),
+            F::new("family", "Address Family", K::Select(GATEWAY_FAMILIES)),
+            F::new("address", "Gateway", K::Ip).help(
+                "Next-hop address. Leave empty for a gateway learned from DHCP, PPP or router advertisements on the interface.",
+            ),
+            F::new("default_route", "Default gateway", K::Checkbox)
+                .help("Use this gateway for the default route. With several candidates the priority decides."),
+            F::new("far", "Far gateway", K::Checkbox)
+                .help("The next hop is outside the interface's subnet."),
+            F::new("monitor", "Enable gateway monitoring", K::Checkbox)
+                .help("Probe the gateway and take it out of service when it stops answering."),
+            F::new("monitor_address", "Monitor IP", K::Ip)
+                .help("Address to probe instead of the gateway address."),
+            F::new(
+                "priority",
+                "Priority",
+                K::Number {
+                    min: 0,
+                    max: 255,
+                },
+            )
+            .help("Lower wins when several default gateways are available."),
+            F::new(
+                "weight",
+                "Weight",
+                K::Number { min: 1, max: 10 },
+            )
+            .help("Share of the traffic when the gateway joins a load-balancing group."),
+            F::new("force_down", "Force down", K::Checkbox)
+                .help("Keep the gateway out of service regardless of the probes."),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for Gateway {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::bool("enabled", "Enabled"),
+            Column::text("name", "Name"),
+            Column::text("interface", "Interface"),
+            Column::text("address", "Gateway"),
+            Column::text("family", "Family"),
+            Column::bool("default_route", "Default"),
+            Column::bool("monitor", "Monitor"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+}
+
 // ---------------------------------------------------------------- VPN › WireGuard
 
 fn is_wg_key(s: &str) -> bool {
@@ -2241,6 +2363,8 @@ pub enum GridId {
     IdsSuppressions,
     /// Services › Intrusion Detection › User defined.
     IdsUserRules,
+    /// System › Gateways › Configuration.
+    Gateways,
 }
 
 fn sanitize(scope: &Option<String>, default: &str) -> String {
@@ -2358,6 +2482,7 @@ impl GridId {
             Self::WgPeers => GridMeta::of::<WgPeer>(),
             Self::IdsSuppressions => GridMeta::of::<IdsSuppression>(),
             Self::IdsUserRules => GridMeta::of::<IdsUserRule>(),
+            Self::Gateways => GridMeta::of::<Gateway>(),
         }
     }
 
@@ -2383,6 +2508,7 @@ impl GridId {
             Self::WgPeers => go::<WgPeer>(base, inputs),
             Self::IdsSuppressions => go::<IdsSuppression>(base, inputs),
             Self::IdsUserRules => go::<IdsUserRule>(base, inputs),
+            Self::Gateways => go::<Gateway>(base, inputs),
         }
     }
 
@@ -2512,7 +2638,8 @@ kinds! {
         WgInstance => WgInstances, "instance",
         WgPeer => WgPeers, "peer",
         IdsSuppression => IdsSuppressions, "suppression",
-        IdsUserRule => IdsUserRules, "rule"
+        IdsUserRule => IdsUserRules, "rule",
+        Gateway => Gateways, "gateway"
 }
 
 #[cfg(test)]
@@ -2562,6 +2689,7 @@ mod tests {
             GridId::WgPeers,
             GridId::IdsSuppressions,
             GridId::IdsUserRules,
+            GridId::Gateways,
         ] {
             let meta = g.meta();
             assert!(!meta.columns.is_empty());

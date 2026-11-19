@@ -215,6 +215,7 @@ pub fn store(grid: GridId, scope: &str, doc: &Value) -> Store {
         GridId::WgPeers => Store::Map("wireguard.peers".into()),
         GridId::IdsSuppressions => Store::Map("ids.suppressions".into()),
         GridId::IdsUserRules => Store::Map("ids.user_rules".into()),
+        GridId::Gateways => Store::Map("gateways.gateways".into()),
     }
 }
 
@@ -478,6 +479,21 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
                 "applies": applies,
             })
         }
+        GridId::Gateways => json!({
+            "enabled": b(item, "enabled", true),
+            "name": s(item, "name"),
+            "description": s(item, "description"),
+            "interface": s(item, "interface"),
+            "family": or_default(s(item, "family"), "inet"),
+            "address": s(item, "address"),
+            "default_route": b(item, "default_route", false),
+            "far": b(item, "far", false),
+            "monitor": b(item, "monitor", false),
+            "monitor_address": s(item, "monitor_address"),
+            "priority": get_path(item, "priority").cloned().unwrap_or(json!(255)),
+            "weight": get_path(item, "weight").cloned().unwrap_or(json!(1)),
+            "force_down": b(item, "force_down", false),
+        }),
         GridId::IdsUserRules => json!({
             "enabled": b(item, "enabled", true),
             "description": s(item, "description"),
@@ -898,6 +914,22 @@ pub fn from_view(
             }
             put_opt(o, "description", view, "description");
         }
+        GridId::Gateways => {
+            let o = obj(&mut item);
+            put(o, "enabled", view, "enabled");
+            put(o, "name", view, "name");
+            put_opt(o, "description", view, "description");
+            put(o, "interface", view, "interface");
+            put(o, "family", view, "family");
+            put_opt(o, "address", view, "address");
+            put(o, "default_route", view, "default_route");
+            put(o, "far", view, "far");
+            put(o, "monitor", view, "monitor");
+            put_opt(o, "monitor_address", view, "monitor_address");
+            put(o, "priority", view, "priority");
+            put(o, "weight", view, "weight");
+            put(o, "force_down", view, "force_down");
+        }
         GridId::IdsUserRules => {
             let o = obj(&mut item);
             put(o, "enabled", view, "enabled");
@@ -1053,6 +1085,20 @@ pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
             ("track.net", "track_net"),
             ("track", "track_by"),
             ("description", "description"),
+        ],
+        GridId::Gateways => &[
+            ("name", "name"),
+            ("description", "description"),
+            ("interface", "interface"),
+            ("family", "family"),
+            ("address", "address"),
+            ("default_route", "default_route"),
+            ("far", "far"),
+            ("monitor", "monitor"),
+            ("monitor_address", "monitor_address"),
+            ("priority", "priority"),
+            ("weight", "weight"),
+            ("force_down", "force_down"),
         ],
         GridId::IdsUserRules => &[
             ("source", "source"),
