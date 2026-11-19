@@ -126,6 +126,13 @@ in
     "r8152"
   ];
 
+  # A wired router does not use the WiFi/BT SDIO chip, and its probe (and the
+  # firmware load on mmc1) is the piece that can sit in the kernel's probe work
+  # queue for a hundred seconds, or hang a cold boot: the box then never
+  # reaches multi-user and looks dead on the LAN. Leave brcmfmac out; wlan0 is
+  # unconfigured everywhere in the system.
+  boot.blacklistedKernelModules = [ "brcmfmac" ];
+
   # Same USB power management as the Pi 5 (pi5.nix): no autosuspend and no
   # U1/U2 link states for the RTL8156 dongles, whose resets leave eth1 with a
   # dead TX path.
