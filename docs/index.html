@@ -233,6 +233,9 @@
     <li>Planned: open <code>https://192.168.1.1</code> and finish the setup wizard, which makes you set an admin password. Today the UI answers HTTPS on port 443 with a self-signed certificate and the setup wizard does not exist yet.</li>
   </ol>
 
+  <h3>Updates</h3>
+  <p>The installed system updates from these releases: <strong>System &rsaquo; Updates</strong> in the web UI checks <a href="https://github.com/itpick/sensr/releases/latest/download/update-manifest.json">update-manifest.json</a>, verifies the closure's sha256 against it, imports it and switches to it atomically. The previous generation stays in the system profile and the boot menu. Automatic installs are off until you turn them on there.</p>
+
   <h3>Build it yourself</h3>
   <div class="cmd">
     <pre id="build">git clone https://github.com/itpick/sensr &amp;&amp; cd sensr &amp;&amp; nix build .#images.pi5</pre>
