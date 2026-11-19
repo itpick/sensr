@@ -109,7 +109,13 @@ const CORE: &[Node] = &[
             n("Group").order(20).url("/ui/routing/gateway_groups"),
         ]),
         n("Routes").kids(&[n("Configuration").order(10).url("/ui/routes")]),
-        n("Settings").kids(&[n("General").url("/ui/system/general")]),
+        n("Access").order(15).kids(&[
+            n("Users").order(10).url("/ui/system/user"),
+            n("Groups").order(20).url("/ui/system/group"),
+        ]),
+        n("Settings")
+            .order(20)
+            .kids(&[n("General").url("/ui/system/general")]),
     ]),
     n("Interfaces").order(30).icon(Icon::Interfaces),
     n("Firewall").order(40).icon(Icon::Firewall).kids(&[
@@ -410,7 +416,7 @@ mod tests {
         let m = build(&[]);
         assert_eq!(
             labels(&find(&m, &["System"]).children),
-            ["Configuration", "Gateways", "Routes", "Settings"]
+            ["Configuration", "Gateways", "Routes", "Access", "Settings"]
         );
         assert_eq!(
             labels(&find(&m, &["Firewall", "NAT"]).children),
@@ -477,6 +483,8 @@ mod tests {
             "/ui/unbound/forward",
             "/ui/wireguard/instances",
             "/ui/wireguard/peers",
+            "/ui/system/user",
+            "/ui/system/group",
             "/ui/system/general",
         ];
         fn walk(items: &[MenuItem], out: &mut Vec<String>) {

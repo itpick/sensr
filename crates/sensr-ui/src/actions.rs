@@ -277,6 +277,24 @@ pub async fn grid_save(
         Ok(v) => v,
         Err(errors) => return Ok(errors),
     };
+    // A user's password is write-only: the field holds the clear text only
+    // while the form is saved, and the document keeps the crypt(3) hash. An
+    // empty field means "keep the stored hash", so it has to be left alone.
+    let password_hash = if grid == GridId::Users {
+        match view
+            .get("password")
+            .and_then(Value::as_str)
+            .filter(|p| !p.is_empty())
+        {
+            Some(pw) => Some(
+                sensr_auth::password::hash_password(pw)
+                    .map_err(|e| ServerFnError::new(e.to_string()))?,
+            ),
+            None => None,
+        }
+    } else {
+        None
+    };
     if grid == GridId::FilterRules
         && view
             .get("interface")
@@ -286,6 +304,9 @@ pub async fn grid_save(
         view["interface"] = Value::String(scope.clone());
     }
     let mut item = adapt::from_view(grid, &doc, &scope, existing.map(|r| &r.item), &view);
+    if let Some(hash) = password_hash {
+        item["password_hash"] = Value::String(hash);
+    }
     let store = adapt::store(grid, &scope, &doc);
     let new_key = match (&key, &store) {
         (Some(k), _) => k.clone(),
@@ -307,6 +328,27 @@ pub async fn grid_save(
             .unwrap_or(0)
             + 10;
         item["sequence"] = Value::from(next);
+    }
+    // The user and group forms accept 0 as "assign one": a new account then
+    // gets the next free id, and root keeps its 0.
+    if key.is_none() {
+        let field = match grid {
+            GridId::Users => Some("uid"),
+            GridId::UserGroups => Some("gid"),
+            _ => None,
+        };
+        if let Some(field) = field
+            && item.get(field).and_then(Value::as_u64).unwrap_or(0) == 0
+        {
+            let next = rows
+                .iter()
+                .filter_map(|r| r.item.get(field).and_then(Value::as_u64))
+                .max()
+                .unwrap_or(999)
+                .max(999)
+                + 1;
+            item[field] = Value::from(next);
+        }
     }
     match imp::collection(&mut doc, &store) {
         Value::Object(m) => {

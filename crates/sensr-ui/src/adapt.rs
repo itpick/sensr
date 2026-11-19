@@ -223,6 +223,8 @@ pub fn store(grid: GridId, scope: &str, doc: &Value) -> Store {
         GridId::Loopbacks => Store::Map("devices.loopbacks".into()),
         GridId::VirtualIps => Store::Map("virtual_ips.vips".into()),
         GridId::FirewallGroups => Store::Map("firewall.groups".into()),
+        GridId::Users => Store::Map("system.users".into()),
+        GridId::UserGroups => Store::Map("system.groups".into()),
     }
 }
 
@@ -562,6 +564,23 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
             "sequence": get_path(item, "sequence").cloned().unwrap_or(json!(0)),
             "hidden": b(item, "hidden", false),
             "description": s(item, "description"),
+        }),
+        GridId::Users => json!({
+            "name": s(item, "name"),
+            "uid": get_path(item, "uid").cloned().unwrap_or(Value::Null),
+            "description": s(item, "description"),
+            "disabled": b(item, "disabled", false),
+            // Write-only: the clear password never exists on the way out.
+            "password": "",
+            "authorized_keys": strings(item, "authorized_keys"),
+            "groups": strings(item, "groups"),
+            "shell": s(item, "shell"),
+        }),
+        GridId::UserGroups => json!({
+            "name": s(item, "name"),
+            "gid": get_path(item, "gid").cloned().unwrap_or(Value::Null),
+            "description": s(item, "description"),
+            "privileges": strings(item, "privileges"),
         }),
         GridId::IdsUserRules => json!({
             "enabled": b(item, "enabled", true),
@@ -1089,6 +1108,25 @@ pub fn from_view(
             put(o, "hidden", view, "hidden");
             put_opt(o, "description", view, "description");
         }
+        GridId::Users => {
+            let o = obj(&mut item);
+            put(o, "name", view, "name");
+            put(o, "uid", view, "uid");
+            put_opt(o, "description", view, "description");
+            put(o, "disabled", view, "disabled");
+            put(o, "authorized_keys", view, "authorized_keys");
+            put(o, "groups", view, "groups");
+            put_opt(o, "shell", view, "shell");
+            // The hash of a new password is written by the save handler; the
+            // document keeps whatever is there when the field is left empty.
+        }
+        GridId::UserGroups => {
+            let o = obj(&mut item);
+            put(o, "name", view, "name");
+            put(o, "gid", view, "gid");
+            put_opt(o, "description", view, "description");
+            put(o, "privileges", view, "privileges");
+        }
         GridId::IdsUserRules => {
             let o = obj(&mut item);
             put(o, "enabled", view, "enabled");
@@ -1307,6 +1345,21 @@ pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
             ("sequence", "sequence"),
             ("hidden", "hidden"),
             ("description", "description"),
+        ],
+        GridId::Users => &[
+            ("name", "name"),
+            ("uid", "uid"),
+            ("description", "description"),
+            ("disabled", "disabled"),
+            ("authorized_keys", "authorized_keys"),
+            ("groups", "groups"),
+            ("shell", "shell"),
+        ],
+        GridId::UserGroups => &[
+            ("name", "name"),
+            ("gid", "gid"),
+            ("description", "description"),
+            ("privileges", "privileges"),
         ],
         GridId::IdsUserRules => &[
             ("source", "source"),
@@ -1899,6 +1952,17 @@ mod tests {
                     "primary_member": "", "lacp_fast_timeout": false, "mtu": 1500,
                     "description": "trunk"}),
             ),
+            (
+                GridId::Users,
+                json!({"name": "admin", "uid": 2000, "description": "Lars",
+                    "disabled": false, "password": "", "authorized_keys": [],
+                    "groups": ["admins"], "shell": "/bin/sh"}),
+            ),
+            (
+                GridId::UserGroups,
+                json!({"name": "admins", "gid": 2000, "description": "",
+                    "privileges": ["page-all"]}),
+            ),
         ];
         for (grid, view) in cases {
             let item = from_view(grid, &json!({}), "", None, &view);
@@ -1919,6 +1983,17 @@ mod tests {
             &json!({"name": "G", "members": ["GW_WAN:2"]}),
         );
         assert_eq!(item["members"], json!([{"gateway": "GW_WAN", "tier": 2}]));
+        // The password never comes back from the document, and an empty
+        // field leaves the stored hash alone.
+        let item = from_view(
+            GridId::Users,
+            &json!({}),
+            "",
+            Some(&json!({"password_hash": "$6$stored"})),
+            &json!({"name": "admin", "uid": 2000, "password": ""}),
+        );
+        assert_eq!(item["password_hash"], json!("$6$stored"));
+        assert!(item.get("password").is_none());
         // A loopback is addressed by its number and carries a description.
         let item = from_view(
             GridId::Loopbacks,

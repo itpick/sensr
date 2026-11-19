@@ -2189,6 +2189,130 @@ impl GridModel for InterfaceGroup {
     const TOGGLE: Option<&'static str> = None;
 }
 
+/// System › Access › Users: a local account.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct User {
+    /// Object key.
+    pub uuid: String,
+    /// Login name.
+    pub name: String,
+    /// Numeric user id.
+    pub uid: u32,
+    /// Full name or note.
+    pub description: String,
+    /// Account locked.
+    pub disabled: bool,
+    /// New password (write-only); empty keeps the stored hash.
+    pub password: String,
+    /// Keys allowed to log in over SSH.
+    pub authorized_keys: Vec<String>,
+    /// Groups the user belongs to.
+    pub groups: Vec<String>,
+    /// Login shell.
+    pub shell: String,
+}
+
+impl FormModel for User {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("name", "Username", K::Text)
+                .required()
+                .help("Login name."),
+            F::new(
+                "uid",
+                "User ID",
+                K::Number {
+                    min: 0,
+                    max: 65_000,
+                },
+            )
+            .help("Numeric id, unique on the system. 0 is root; leave it empty on a new account and the next free id is assigned."),
+            F::new("description", "Full name", K::Text),
+            F::new("disabled", "Disabled", K::Checkbox)
+                .help("A disabled account cannot log in, over the web GUI or SSH."),
+            F::new("password", "Password", K::Secret).help(
+                "Write-only: leave empty to keep the stored password. Changing it does not log the user out.",
+            ),
+            F::new("authorized_keys", "Authorized SSH keys", K::Lines)
+                .help("One public key per line, as in authorized_keys."),
+            F::new("groups", "Groups", K::Lines).help("One group name per line."),
+            F::new("shell", "Login shell", K::Text)
+                .help("Absolute path; leave empty for the system default."),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for User {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("name", "Username"),
+            Column::text("uid", "User ID"),
+            Column::text("description", "Full name"),
+            Column::list("groups", "Groups"),
+            Column::bool("disabled", "Disabled"),
+        ];
+        C
+    }
+
+    // The flag is inverted, so the bulk enable/disable buttons do not fit;
+    // the column has a plain Disabled marker instead.
+    const TOGGLE: Option<&'static str> = None;
+}
+
+/// System › Access › Groups: a local group and its privileges.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UserGroup {
+    /// Object key.
+    pub uuid: String,
+    /// Group name.
+    pub name: String,
+    /// Numeric group id.
+    pub gid: u32,
+    /// Free text.
+    pub description: String,
+    /// Privileges granted to members.
+    pub privileges: Vec<String>,
+}
+
+impl FormModel for UserGroup {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("name", "Group name", K::Text).required(),
+            F::new(
+                "gid",
+                "Group ID",
+                K::Number {
+                    min: 0,
+                    max: 65_000,
+                },
+            )
+            .help("Numeric id, unique on the system. Leave it empty on a new group and the next free id is assigned."),
+            F::new("description", "Description", K::Text),
+            F::new("privileges", "Privileges", K::Lines).help(
+                "One privilege per line, for example page-all (the whole web GUI) or page-firewall-rules.",
+            ),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for UserGroup {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("name", "Group name"),
+            Column::text("gid", "Group ID"),
+            Column::list("privileges", "Privileges"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
 /// Failure condition of a gateway group.
 pub const GROUP_TRIGGERS: &[(&str, &str)] = &[
     ("down", "Member down"),
@@ -2837,6 +2961,10 @@ pub enum GridId {
     VirtualIps,
     /// Firewall › Groups.
     FirewallGroups,
+    /// System › Access › Users.
+    Users,
+    /// System › Access › Groups.
+    UserGroups,
 }
 
 fn sanitize(scope: &Option<String>, default: &str) -> String {
@@ -2962,6 +3090,8 @@ impl GridId {
             Self::Loopbacks => GridMeta::of::<LoopbackDevice>(),
             Self::VirtualIps => GridMeta::of::<VirtualIp>(),
             Self::FirewallGroups => GridMeta::of::<InterfaceGroup>(),
+            Self::Users => GridMeta::of::<User>(),
+            Self::UserGroups => GridMeta::of::<UserGroup>(),
         }
     }
 
@@ -2995,6 +3125,8 @@ impl GridId {
             Self::Loopbacks => go::<LoopbackDevice>(base, inputs),
             Self::VirtualIps => go::<VirtualIp>(base, inputs),
             Self::FirewallGroups => go::<InterfaceGroup>(base, inputs),
+            Self::Users => go::<User>(base, inputs),
+            Self::UserGroups => go::<UserGroup>(base, inputs),
         }
     }
 
@@ -3132,7 +3264,9 @@ kinds! {
         Lagg => Laggs, "aggregate",
         LoopbackDevice => Loopbacks, "loopback",
         VirtualIp => VirtualIps, "virtual IP",
-        InterfaceGroup => FirewallGroups, "group"
+        InterfaceGroup => FirewallGroups, "group",
+        User => Users, "user",
+        UserGroup => UserGroups, "group"
 }
 
 #[cfg(test)]
@@ -3190,6 +3324,8 @@ mod tests {
             GridId::Loopbacks,
             GridId::VirtualIps,
             GridId::FirewallGroups,
+            GridId::Users,
+            GridId::UserGroups,
         ] {
             let meta = g.meta();
             assert!(!meta.columns.is_empty());

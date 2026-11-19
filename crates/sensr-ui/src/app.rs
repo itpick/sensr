@@ -80,6 +80,8 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/ui/unbound/dnsbl") view=UnboundBlocklist/>
                     <Route path=path!("/ui/wireguard/instances") view=WireguardInstances/>
                     <Route path=path!("/ui/wireguard/peers") view=WireguardPeers/>
+                    <Route path=path!("/ui/system/user") view=UsersPage/>
+                    <Route path=path!("/ui/system/group") view=UserGroupsPage/>
                     <Route path=path!("/ui/system/general") view=SystemGeneralPage/>
                     <Route path=path!("/ui/core/backup/history") view=History/>
                     <Route path=path!("/ui/ids") view=IdsSettingsPage/>

@@ -631,6 +631,24 @@ pub fn RoutesConfig() -> impl IntoView {
     }
 }
 
+/// System › Access › Users: local accounts.
+#[component]
+pub fn UsersPage() -> impl IntoView {
+    view! {
+        <p class="intro">"Local accounts for the web GUI and SSH. The password is write-only: it is stored as a hash and never shown again. The root account is the first entry and cannot be deleted."</p>
+        <Grid<User> title="Users"/>
+    }
+}
+
+/// System › Access › Groups: local groups and their privileges.
+#[component]
+pub fn UserGroupsPage() -> impl IntoView {
+    view! {
+        <p class="intro">"A group carries the privileges its members get in the web GUI. Privileges are named per page, for example page-all for the whole GUI or page-firewall-rules for one section."</p>
+        <Grid<UserGroup> title="Groups"/>
+    }
+}
+
 /// System › Settings › General.
 #[component]
 pub fn SystemGeneralPage() -> impl IntoView {
