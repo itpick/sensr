@@ -1397,9 +1397,6 @@ pub fn UpdatesLive(initial: UpdateStatus) -> impl IntoView {
             </button>
 
             {move || error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
-            <p class="muted small">
-                "Manifest: " <code>{move || st.with(|s| s.manifest_url.clone())}</code>
-            </p>
         </div>
     }
 }
