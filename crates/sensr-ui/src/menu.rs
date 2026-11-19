@@ -106,7 +106,9 @@ const CORE: &[Node] = &[
                 .url("/ui/routing/configuration"),
             // sensr addition: OPNsense shows the monitor state as a column of Configuration.
             n("Status").order(15).url("/ui/routing/status"),
+            n("Group").order(20).url("/ui/routing/gateway_groups"),
         ]),
+        n("Routes").kids(&[n("Configuration").order(10).url("/ui/routes")]),
         n("Settings").kids(&[n("General").url("/ui/system/general")]),
     ]),
     n("Interfaces").order(30).icon(Icon::Interfaces),
@@ -398,7 +400,7 @@ mod tests {
         let m = build(&[]);
         assert_eq!(
             labels(&find(&m, &["System"]).children),
-            ["Configuration", "Gateways", "Settings"]
+            ["Configuration", "Gateways", "Routes", "Settings"]
         );
         assert_eq!(
             labels(&find(&m, &["Firewall", "NAT"]).children),
@@ -443,7 +445,9 @@ mod tests {
             "/ui/interfaces/assignment",
             "/ui/interfaces/overview",
             "/ui/routing/configuration",
+            "/ui/routing/gateway_groups",
             "/ui/routing/status",
+            "/ui/routes",
             "/ui/firewall/alias",
             "/ui/firewall/filter",
             "/ui/firewall/source_nat",
@@ -515,7 +519,7 @@ mod tests {
         let m = build(&[]);
         assert_eq!(
             labels(&find(&m, &["System", "Gateways"]).children),
-            ["Configuration", "Status"]
+            ["Configuration", "Status", "Group"]
         );
         assert_eq!(
             breadcrumb(&m, "/ui/routing/status"),

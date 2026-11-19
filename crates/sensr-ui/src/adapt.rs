@@ -216,6 +216,8 @@ pub fn store(grid: GridId, scope: &str, doc: &Value) -> Store {
         GridId::IdsSuppressions => Store::Map("ids.suppressions".into()),
         GridId::IdsUserRules => Store::Map("ids.user_rules".into()),
         GridId::Gateways => Store::Map("gateways.gateways".into()),
+        GridId::GatewayGroups => Store::Map("gateways.groups".into()),
+        GridId::StaticRoutes => Store::Map("routes.routes".into()),
     }
 }
 
@@ -493,6 +495,24 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
             "priority": get_path(item, "priority").cloned().unwrap_or(json!(255)),
             "weight": get_path(item, "weight").cloned().unwrap_or(json!(1)),
             "force_down": b(item, "force_down", false),
+        }),
+        GridId::GatewayGroups => json!({
+            "name": s(item, "name"),
+            "description": s(item, "description"),
+            "members": arr(item, "members")
+                .iter()
+                .map(|m| {
+                    let tier = get_path(m, "tier").and_then(Value::as_u64).unwrap_or(1);
+                    Value::String(format!("{}:{tier}", s(m, "gateway")))
+                })
+                .collect::<Vec<_>>(),
+            "trigger": or_default(s(item, "trigger"), "down"),
+        }),
+        GridId::StaticRoutes => json!({
+            "enabled": b(item, "enabled", true),
+            "network": s(item, "network"),
+            "gateway": s(item, "gateway"),
+            "description": s(item, "description"),
         }),
         GridId::IdsUserRules => json!({
             "enabled": b(item, "enabled", true),
@@ -930,6 +950,30 @@ pub fn from_view(
             put(o, "weight", view, "weight");
             put(o, "force_down", view, "force_down");
         }
+        GridId::GatewayGroups => {
+            let o = obj(&mut item);
+            put(o, "name", view, "name");
+            put_opt(o, "description", view, "description");
+            let members: Vec<Value> = strings(view, "members")
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter_map(|m| {
+                    let (g, t) = m.rsplit_once(':')?;
+                    Some(json!({"gateway": g, "tier": t.parse::<u8>().ok()?}))
+                })
+                .collect();
+            o.insert("members".into(), Value::Array(members));
+            put(o, "trigger", view, "trigger");
+        }
+        GridId::StaticRoutes => {
+            let o = obj(&mut item);
+            put(o, "enabled", view, "enabled");
+            put(o, "network", view, "network");
+            put(o, "gateway", view, "gateway");
+            put_opt(o, "description", view, "description");
+        }
         GridId::IdsUserRules => {
             let o = obj(&mut item);
             put(o, "enabled", view, "enabled");
@@ -1099,6 +1143,18 @@ pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
             ("priority", "priority"),
             ("weight", "weight"),
             ("force_down", "force_down"),
+        ],
+        GridId::GatewayGroups => &[
+            ("name", "name"),
+            ("description", "description"),
+            ("members", "members"),
+            ("trigger", "trigger"),
+        ],
+        GridId::StaticRoutes => &[
+            ("enabled", "enabled"),
+            ("network", "network"),
+            ("gateway", "gateway"),
+            ("description", "description"),
         ],
         GridId::IdsUserRules => &[
             ("source", "source"),

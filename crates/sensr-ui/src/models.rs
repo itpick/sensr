@@ -1846,6 +1846,121 @@ impl GridModel for Gateway {
     }
 }
 
+/// Failure condition of a gateway group.
+pub const GROUP_TRIGGERS: &[(&str, &str)] = &[
+    ("down", "Member down"),
+    ("down_loss", "Packet loss"),
+    ("down_latency", "High latency"),
+    ("down_loss_latency", "Packet loss or high latency"),
+];
+
+/// System › Gateways › Group: failover or load balancing across gateways.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GatewayGroup {
+    /// Object key.
+    pub uuid: String,
+    /// The name rules refer to.
+    pub name: String,
+    /// Free text.
+    pub description: String,
+    /// Members, one `GATEWAY:tier` per line.
+    pub members: Vec<String>,
+    /// Failure condition.
+    pub trigger: String,
+}
+
+impl FormModel for GatewayGroup {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("name", "Group name", K::Text)
+                .required()
+                .help("Name rules and routes use for this group."),
+            F::new("description", "Description", K::Text),
+            F::new("members", "Gateways", K::Lines).help(
+                "One member per line as GATEWAY:tier, for example GW_WAN:1. The lowest tier with a member that is up carries the traffic; members of one tier share it by weight.",
+            ),
+            F::new("trigger", "Trigger Level", K::Select(GROUP_TRIGGERS))
+                .help("What counts as the member being down."),
+        ];
+        FIELDS
+    }
+
+    fn validate(&self) -> Vec<FieldError> {
+        let mut e = Vec::new();
+        for m in &self.members {
+            let ok = m.rsplit_once(':').is_some_and(|(g, t)| {
+                !g.is_empty() && t.parse::<u8>().is_ok_and(|t| (1..=5).contains(&t))
+            });
+            if !ok {
+                e.push(FieldError::new(
+                    "members",
+                    format!("{m}: expected GATEWAY:tier with a tier from 1 to 5."),
+                ));
+            }
+        }
+        e
+    }
+}
+
+impl GridModel for GatewayGroup {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("name", "Group name"),
+            Column::list("members", "Gateways"),
+            Column::text("trigger", "Trigger"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
+/// System › Routes › Configuration: a static route.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StaticRoute {
+    /// Object key.
+    pub uuid: String,
+    /// Installed when true.
+    pub enabled: bool,
+    /// Destination network.
+    pub network: String,
+    /// Next hop: a gateway or group name.
+    pub gateway: String,
+    /// Free text.
+    pub description: String,
+}
+
+impl FormModel for StaticRoute {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enable", K::Checkbox),
+            F::new("network", "Destination network", K::Cidr)
+                .required()
+                .help("Network the route is for, for example 10.0.0.0/8."),
+            F::new("gateway", "Gateway", K::Text).required().help(
+                "Name of the gateway or gateway group the traffic goes to. Both families must match the destination.",
+            ),
+            F::new("description", "Description", K::Text),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for StaticRoute {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::bool("enabled", "Enabled"),
+            Column::text("network", "Network"),
+            Column::text("gateway", "Gateway"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+}
+
 // ---------------------------------------------------------------- VPN › WireGuard
 
 fn is_wg_key(s: &str) -> bool {
@@ -2365,6 +2480,10 @@ pub enum GridId {
     IdsUserRules,
     /// System › Gateways › Configuration.
     Gateways,
+    /// System › Gateways › Group.
+    GatewayGroups,
+    /// System › Routes › Configuration.
+    StaticRoutes,
 }
 
 fn sanitize(scope: &Option<String>, default: &str) -> String {
@@ -2483,6 +2602,8 @@ impl GridId {
             Self::IdsSuppressions => GridMeta::of::<IdsSuppression>(),
             Self::IdsUserRules => GridMeta::of::<IdsUserRule>(),
             Self::Gateways => GridMeta::of::<Gateway>(),
+            Self::GatewayGroups => GridMeta::of::<GatewayGroup>(),
+            Self::StaticRoutes => GridMeta::of::<StaticRoute>(),
         }
     }
 
@@ -2509,6 +2630,8 @@ impl GridId {
             Self::IdsSuppressions => go::<IdsSuppression>(base, inputs),
             Self::IdsUserRules => go::<IdsUserRule>(base, inputs),
             Self::Gateways => go::<Gateway>(base, inputs),
+            Self::GatewayGroups => go::<GatewayGroup>(base, inputs),
+            Self::StaticRoutes => go::<StaticRoute>(base, inputs),
         }
     }
 
@@ -2639,7 +2762,9 @@ kinds! {
         WgPeer => WgPeers, "peer",
         IdsSuppression => IdsSuppressions, "suppression",
         IdsUserRule => IdsUserRules, "rule",
-        Gateway => Gateways, "gateway"
+        Gateway => Gateways, "gateway",
+        GatewayGroup => GatewayGroups, "group",
+        StaticRoute => StaticRoutes, "route"
 }
 
 #[cfg(test)]
@@ -2690,6 +2815,8 @@ mod tests {
             GridId::IdsSuppressions,
             GridId::IdsUserRules,
             GridId::Gateways,
+            GridId::GatewayGroups,
+            GridId::StaticRoutes,
         ] {
             let meta = g.meta();
             assert!(!meta.columns.is_empty());

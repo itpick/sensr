@@ -58,6 +58,8 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/ui/interfaces/if/:id") view=InterfacePage/>
                     <Route path=path!("/ui/interfaces/overview") view=InterfacesOverview/>
                     <Route path=path!("/ui/routing/configuration") view=GatewaysConfig/>
+                    <Route path=path!("/ui/routing/gateway_groups") view=GatewayGroupsPage/>
+                    <Route path=path!("/ui/routes") view=RoutesConfig/>
                     <Route path=path!("/ui/routing/status") view=GatewayStatusPage/>
                     <Route path=path!("/ui/firewall/alias") view=Aliases/>
                     <Route path=path!("/ui/firewall/filter") view=Rules/>

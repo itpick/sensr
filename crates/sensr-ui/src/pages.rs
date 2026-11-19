@@ -568,6 +568,24 @@ pub fn GatewaysConfig() -> impl IntoView {
     }
 }
 
+/// System › Gateways › Group: failover and load balancing across gateways.
+#[component]
+pub fn GatewayGroupsPage() -> impl IntoView {
+    view! {
+        <p class="intro">"A group fails over between gateways or shares the traffic over them: the lowest tier with a member that is up carries it, and members of one tier share it by weight. Rules and routes use the group name like a gateway name."</p>
+        <Grid<GatewayGroup> title="Gateway groups"/>
+    }
+}
+
+/// System › Routes › Configuration.
+#[component]
+pub fn RoutesConfig() -> impl IntoView {
+    view! {
+        <p class="intro">"Static routes send a destination network to a gateway or gateway group. Connected networks and the default route are derived from the interface and gateway configuration."</p>
+        <Grid<StaticRoute> title="Static routes"/>
+    }
+}
+
 /// System › Settings › General.
 #[component]
 pub fn SystemGeneralPage() -> impl IntoView {
