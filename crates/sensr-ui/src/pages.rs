@@ -1162,6 +1162,62 @@ pub fn Insight() -> impl IntoView {
     }
 }
 
+/// Reporting › Traffic: what crossed the interfaces, from the accounting database.
+#[component]
+pub fn Traffic() -> impl IntoView {
+    let load = || {
+        Suspend::new(async move {
+            match insight_data("24h".to_owned(), None).await {
+                Ok(r) if !r.available => view! {
+                    <section class="card">
+                        <h2>"Traffic"</h2>
+                        <p class="muted">
+                            "Traffic accounting has not written any data. Enable it with "
+                            <code>"insight.enabled"</code> "."</p>
+                    </section>
+                }
+                .into_any(),
+                Ok(r) => view! {
+                    <section class="card">
+                        <h2>"Traffic, last 24 hours"</h2>
+                        {traffic_chart(&r.series, r.from, r.to, "Traffic")}
+                    </section>
+                    <section class="card">
+                        <h2>"Per interface"</h2>
+                        {top_table("Interfaces", "Interface", r.ifaces, |_| None)}
+                    </section>
+                    <p class="muted small">
+                        "Per host, service and remote address detail is under "
+                        <a href="/ui/diagnostics/networkinsight">"Insight"</a> "."</p>
+                }
+                .into_any(),
+                Err(e) => load_error(e),
+            }
+        })
+    };
+    view! { <Suspense fallback=|| ()>{load}</Suspense> }
+}
+
+/// Reporting › Unbound DNS: resolver counters and blocklist state.
+#[component]
+pub fn UnboundOverview() -> impl IntoView {
+    let load = || {
+        Suspend::new(async move {
+            match dns_stats().await {
+                Ok(stats) => view! {
+                    <DnsStatsPanel stats/>
+                    <p class="muted small">
+                        "Configuration is under "
+                        <a href="/ui/unbound/general">"Services › Unbound DNS"</a> "."</p>
+                }
+                .into_any(),
+                Err(e) => load_error(e),
+            }
+        })
+    };
+    view! { <Suspense fallback=|| ()>{load}</Suspense> }
+}
+
 /// Menu entries sensr does not implement yet.
 #[component]
 pub fn NotYet() -> impl IntoView {

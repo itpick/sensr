@@ -52,6 +52,8 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("") view=Dashboard/>
                     <Route path=path!("/ui/core/dashboard") view=Dashboard/>
                     <Route path=path!("/ui/core/password") view=PasswordPage/>
+                    <Route path=path!("/ui/diagnostics/traffic") view=Traffic/>
+                    <Route path=path!("/ui/unbound/overview") view=UnboundOverview/>
                     <Route path=path!("/ui/interfaces/assignment") view=Assignments/>
                     <Route path=path!("/ui/interfaces/if/:id") view=InterfacePage/>
                     <Route path=path!("/ui/interfaces/overview") view=InterfacesOverview/>
