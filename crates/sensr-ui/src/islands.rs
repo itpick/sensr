@@ -1336,7 +1336,7 @@ pub fn UpdatesLive(initial: UpdateStatus) -> impl IntoView {
         <div class="card">
             <h2>"System updates"</h2>
             <p class="intro">
-                "An update replaces the whole system closure: the sensr binaries, the daemons and every package they use, including the kernel, atomically. The previous generation stays on the box for rollback."
+                "An update replaces the whole system closure: the sensr binaries, the daemons and every package they use, atomically, with no reboot: the switch takes effect at once and only restarts the services it changes. A new kernel starts at the next reboot you choose. The previous generation stays on the box for rollback."
             </p>
             <dl class="stat-tiles" aria-label="Update state">
                 <div>
