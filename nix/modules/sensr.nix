@@ -681,7 +681,17 @@ in
           mp=$(${pkgs.coreutils}/bin/dirname "$seed")
           if ${pkgs.util-linux}/bin/mountpoint -q "$mp"; then exit 0; fi
           unit=$(${config.systemd.package}/bin/systemd-escape -p --suffix=mount "$mp") || exit 0
-          ${config.systemd.package}/bin/systemctl cat "$unit" >/dev/null 2>&1 || exit 0
+          # Do not ask systemctl whether the unit exists: `systemctl cat` goes
+          # through D-Bus, and at this point in the boot dbus-broker is still
+          # starting (the agent is ordered before network.target, so it runs
+          # at ~26 s, dbus at ~27 s). That made the check fail, the script
+          # exit early, and the agent read the seed folder before the mount
+          # just as before. The unit files are on disk; look there instead.
+          found=0
+          for d in /run/systemd/generator.early /run/systemd/generator /run/systemd/system /etc/systemd/system; do
+            if [ -e "$d/$unit" ]; then found=1; break; fi
+          done
+          [ "$found" = 1 ] || exit 0
           ${config.systemd.package}/bin/systemctl start --no-block "$unit" 2>/dev/null || true
           # Bounded: the mount's own device timeout decides how long systemd
           # waits, and the agent must still start on factory defaults if the
