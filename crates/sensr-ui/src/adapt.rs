@@ -215,6 +215,16 @@ pub fn store(grid: GridId, scope: &str, doc: &Value) -> Store {
         GridId::WgPeers => Store::Map("wireguard.peers".into()),
         GridId::IdsSuppressions => Store::Map("ids.suppressions".into()),
         GridId::IdsUserRules => Store::Map("ids.user_rules".into()),
+        GridId::Gateways => Store::Map("gateways.gateways".into()),
+        GridId::GatewayGroups => Store::Map("gateways.groups".into()),
+        GridId::StaticRoutes => Store::Map("routes.routes".into()),
+        GridId::Bridges => Store::Map("devices.bridges".into()),
+        GridId::Laggs => Store::Map("devices.laggs".into()),
+        GridId::Loopbacks => Store::Map("devices.loopbacks".into()),
+        GridId::VirtualIps => Store::Map("virtual_ips.vips".into()),
+        GridId::FirewallGroups => Store::Map("firewall.groups".into()),
+        GridId::Users => Store::Map("system.users".into()),
+        GridId::UserGroups => Store::Map("system.groups".into()),
     }
 }
 
@@ -478,6 +488,100 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
                 "applies": applies,
             })
         }
+        GridId::Gateways => json!({
+            "enabled": b(item, "enabled", true),
+            "name": s(item, "name"),
+            "description": s(item, "description"),
+            "interface": s(item, "interface"),
+            "family": or_default(s(item, "family"), "inet"),
+            "address": s(item, "address"),
+            "default_route": b(item, "default_route", false),
+            "far": b(item, "far", false),
+            "monitor": b(item, "monitor", false),
+            "monitor_address": s(item, "monitor_address"),
+            "priority": get_path(item, "priority").cloned().unwrap_or(json!(255)),
+            "weight": get_path(item, "weight").cloned().unwrap_or(json!(1)),
+            "force_down": b(item, "force_down", false),
+        }),
+        GridId::GatewayGroups => json!({
+            "name": s(item, "name"),
+            "description": s(item, "description"),
+            "members": arr(item, "members")
+                .iter()
+                .map(|m| {
+                    let tier = get_path(m, "tier").and_then(Value::as_u64).unwrap_or(1);
+                    Value::String(format!("{}:{tier}", s(m, "gateway")))
+                })
+                .collect::<Vec<_>>(),
+            "trigger": or_default(s(item, "trigger"), "down"),
+        }),
+        GridId::StaticRoutes => json!({
+            "enabled": b(item, "enabled", true),
+            "network": s(item, "network"),
+            "gateway": s(item, "gateway"),
+            "description": s(item, "description"),
+        }),
+        GridId::Bridges => json!({
+            "device": s(item, "device"),
+            "members": strings(item, "members"),
+            "link_local": b(item, "link_local", false),
+            "max_addresses": get_path(item, "max_addresses").cloned().unwrap_or(Value::Null),
+            "ageing_time": get_path(item, "ageing_time").cloned().unwrap_or(Value::Null),
+            "description": s(item, "description"),
+        }),
+        GridId::Laggs => json!({
+            "device": s(item, "device"),
+            "members": strings(item, "members"),
+            "protocol": or_default(s(item, "protocol"), "lacp"),
+            "primary_member": s(item, "primary_member"),
+            "lacp_fast_timeout": b(item, "lacp_fast_timeout", false),
+            "mtu": get_path(item, "mtu").cloned().unwrap_or(Value::Null),
+            "description": s(item, "description"),
+        }),
+        GridId::Loopbacks => json!({
+            "id": get_path(item, "id").cloned().unwrap_or(Value::Null),
+            "description": s(item, "description"),
+        }),
+        GridId::VirtualIps => {
+            let mode = s(item, "mode.mode");
+            json!({
+                "interface": s(item, "interface"),
+                "address": s(item, "address"),
+                "mode": or_default(mode, "ip_alias"),
+                "vhid": get_path(item, "mode.vhid").cloned().unwrap_or(json!(1)),
+                "advbase": get_path(item, "mode.advbase").cloned().unwrap_or(json!(1)),
+                "advskew": get_path(item, "mode.advskew").cloned().unwrap_or(json!(0)),
+                // Write-only: the secret never leaves the server.
+                "password": "",
+                "no_bind": b(item, "no_bind", false),
+                "description": s(item, "description"),
+            })
+        }
+        GridId::FirewallGroups => json!({
+            "name": s(item, "name"),
+            "members": strings(item, "members"),
+            "wireguard": b(item, "wireguard", false),
+            "sequence": get_path(item, "sequence").cloned().unwrap_or(json!(0)),
+            "hidden": b(item, "hidden", false),
+            "description": s(item, "description"),
+        }),
+        GridId::Users => json!({
+            "name": s(item, "name"),
+            "uid": get_path(item, "uid").cloned().unwrap_or(Value::Null),
+            "description": s(item, "description"),
+            "disabled": b(item, "disabled", false),
+            // Write-only: the clear password never exists on the way out.
+            "password": "",
+            "authorized_keys": strings(item, "authorized_keys"),
+            "groups": strings(item, "groups"),
+            "shell": s(item, "shell"),
+        }),
+        GridId::UserGroups => json!({
+            "name": s(item, "name"),
+            "gid": get_path(item, "gid").cloned().unwrap_or(Value::Null),
+            "description": s(item, "description"),
+            "privileges": strings(item, "privileges"),
+        }),
         GridId::IdsUserRules => json!({
             "enabled": b(item, "enabled", true),
             "description": s(item, "description"),
@@ -898,6 +1002,131 @@ pub fn from_view(
             }
             put_opt(o, "description", view, "description");
         }
+        GridId::Gateways => {
+            let o = obj(&mut item);
+            put(o, "enabled", view, "enabled");
+            put(o, "name", view, "name");
+            put_opt(o, "description", view, "description");
+            put(o, "interface", view, "interface");
+            put(o, "family", view, "family");
+            put_opt(o, "address", view, "address");
+            put(o, "default_route", view, "default_route");
+            put(o, "far", view, "far");
+            put(o, "monitor", view, "monitor");
+            put_opt(o, "monitor_address", view, "monitor_address");
+            put(o, "priority", view, "priority");
+            put(o, "weight", view, "weight");
+            put(o, "force_down", view, "force_down");
+        }
+        GridId::GatewayGroups => {
+            let o = obj(&mut item);
+            put(o, "name", view, "name");
+            put_opt(o, "description", view, "description");
+            let members: Vec<Value> = strings(view, "members")
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter_map(|m| {
+                    let (g, t) = m.rsplit_once(':')?;
+                    Some(json!({"gateway": g, "tier": t.parse::<u8>().ok()?}))
+                })
+                .collect();
+            o.insert("members".into(), Value::Array(members));
+            put(o, "trigger", view, "trigger");
+        }
+        GridId::StaticRoutes => {
+            let o = obj(&mut item);
+            put(o, "enabled", view, "enabled");
+            put(o, "network", view, "network");
+            put(o, "gateway", view, "gateway");
+            put_opt(o, "description", view, "description");
+        }
+        GridId::Bridges => {
+            let o = obj(&mut item);
+            put(o, "device", view, "device");
+            put(o, "members", view, "members");
+            put(o, "link_local", view, "link_local");
+            put_opt(o, "max_addresses", view, "max_addresses");
+            put_opt(o, "ageing_time", view, "ageing_time");
+            put_opt(o, "description", view, "description");
+        }
+        GridId::Laggs => {
+            let o = obj(&mut item);
+            put(o, "device", view, "device");
+            put(o, "members", view, "members");
+            put(o, "protocol", view, "protocol");
+            put_opt(o, "primary_member", view, "primary_member");
+            put(o, "lacp_fast_timeout", view, "lacp_fast_timeout");
+            put_opt(o, "mtu", view, "mtu");
+            put_opt(o, "description", view, "description");
+        }
+        GridId::Loopbacks => {
+            let o = obj(&mut item);
+            put(o, "id", view, "id");
+            put(o, "description", view, "description");
+        }
+        GridId::VirtualIps => {
+            let o = obj(&mut item);
+            put(o, "interface", view, "interface");
+            put(o, "address", view, "address");
+            let mode = s(view, "mode");
+            let password = s(view, "password");
+            let stored = base
+                .and_then(|b| get_path(b, "mode.password"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let secret = if password.is_empty() {
+                stored
+            } else {
+                password
+            };
+            o.insert(
+                "mode".into(),
+                match mode.as_str() {
+                    "carp" => json!({
+                        "mode": "carp",
+                        "vhid": get_path(view, "vhid").cloned().unwrap_or(json!(1)),
+                        "advbase": get_path(view, "advbase").cloned().unwrap_or(json!(1)),
+                        "advskew": get_path(view, "advskew").cloned().unwrap_or(json!(0)),
+                        "password": secret,
+                    }),
+                    "proxy_arp" => json!({"mode": "proxy_arp"}),
+                    _ => json!({"mode": "ip_alias"}),
+                },
+            );
+            put(o, "no_bind", view, "no_bind");
+            put_opt(o, "description", view, "description");
+        }
+        GridId::FirewallGroups => {
+            let o = obj(&mut item);
+            put(o, "name", view, "name");
+            put(o, "members", view, "members");
+            put(o, "wireguard", view, "wireguard");
+            put(o, "sequence", view, "sequence");
+            put(o, "hidden", view, "hidden");
+            put_opt(o, "description", view, "description");
+        }
+        GridId::Users => {
+            let o = obj(&mut item);
+            put(o, "name", view, "name");
+            put(o, "uid", view, "uid");
+            put_opt(o, "description", view, "description");
+            put(o, "disabled", view, "disabled");
+            put(o, "authorized_keys", view, "authorized_keys");
+            put(o, "groups", view, "groups");
+            put_opt(o, "shell", view, "shell");
+            // The hash of a new password is written by the save handler; the
+            // document keeps whatever is there when the field is left empty.
+        }
+        GridId::UserGroups => {
+            let o = obj(&mut item);
+            put(o, "name", view, "name");
+            put(o, "gid", view, "gid");
+            put_opt(o, "description", view, "description");
+            put(o, "privileges", view, "privileges");
+        }
         GridId::IdsUserRules => {
             let o = obj(&mut item);
             put(o, "enabled", view, "enabled");
@@ -1053,6 +1282,84 @@ pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
             ("track.net", "track_net"),
             ("track", "track_by"),
             ("description", "description"),
+        ],
+        GridId::Gateways => &[
+            ("name", "name"),
+            ("description", "description"),
+            ("interface", "interface"),
+            ("family", "family"),
+            ("address", "address"),
+            ("default_route", "default_route"),
+            ("far", "far"),
+            ("monitor", "monitor"),
+            ("monitor_address", "monitor_address"),
+            ("priority", "priority"),
+            ("weight", "weight"),
+            ("force_down", "force_down"),
+        ],
+        GridId::GatewayGroups => &[
+            ("name", "name"),
+            ("description", "description"),
+            ("members", "members"),
+            ("trigger", "trigger"),
+        ],
+        GridId::StaticRoutes => &[
+            ("enabled", "enabled"),
+            ("network", "network"),
+            ("gateway", "gateway"),
+            ("description", "description"),
+        ],
+        GridId::Bridges => &[
+            ("device", "device"),
+            ("members", "members"),
+            ("link_local", "link_local"),
+            ("max_addresses", "max_addresses"),
+            ("ageing_time", "ageing_time"),
+            ("description", "description"),
+        ],
+        GridId::Laggs => &[
+            ("device", "device"),
+            ("members", "members"),
+            ("protocol", "protocol"),
+            ("primary_member", "primary_member"),
+            ("lacp_fast_timeout", "lacp_fast_timeout"),
+            ("mtu", "mtu"),
+            ("description", "description"),
+        ],
+        GridId::Loopbacks => &[("id", "id"), ("description", "description")],
+        GridId::VirtualIps => &[
+            ("interface", "interface"),
+            ("address", "address"),
+            ("mode.vhid", "vhid"),
+            ("mode.advbase", "advbase"),
+            ("mode.advskew", "advskew"),
+            ("mode.password", "password"),
+            ("mode", "mode"),
+            ("no_bind", "no_bind"),
+            ("description", "description"),
+        ],
+        GridId::FirewallGroups => &[
+            ("name", "name"),
+            ("members", "members"),
+            ("wireguard", "wireguard"),
+            ("sequence", "sequence"),
+            ("hidden", "hidden"),
+            ("description", "description"),
+        ],
+        GridId::Users => &[
+            ("name", "name"),
+            ("uid", "uid"),
+            ("description", "description"),
+            ("disabled", "disabled"),
+            ("authorized_keys", "authorized_keys"),
+            ("groups", "groups"),
+            ("shell", "shell"),
+        ],
+        GridId::UserGroups => &[
+            ("name", "name"),
+            ("gid", "gid"),
+            ("description", "description"),
+            ("privileges", "privileges"),
         ],
         GridId::IdsUserRules => &[
             ("source", "source"),
@@ -1613,6 +1920,92 @@ mod tests {
         assert_eq!(
             form_view_path(FormId::UnboundCache, "dns.tuning.log_verbosity"),
             None
+        );
+    }
+
+    /// A row that survives from_view -> to_view unchanged: the field names on
+    /// both sides have to agree with the schema document, and a typo on one
+    /// side would silently drop the value.
+    #[test]
+    fn new_routing_and_device_rows_round_trip() {
+        let cases = [
+            (
+                GridId::Gateways,
+                json!({"enabled": true, "name": "GW_WAN", "description": "upstream",
+                    "interface": "wan", "family": "inet", "address": "192.168.1.1",
+                    "default_route": true, "far": false, "monitor": true,
+                    "monitor_address": "", "priority": 10, "weight": 1, "force_down": false}),
+            ),
+            (
+                GridId::StaticRoutes,
+                json!({"enabled": true, "network": "10.0.0.0/8", "gateway": "GW_WAN",
+                    "description": "office"}),
+            ),
+            (
+                GridId::GatewayGroups,
+                json!({"name": "WAN_FAILOVER", "description": "", "members": ["GW_WAN:1"],
+                    "trigger": "down"}),
+            ),
+            (
+                GridId::Laggs,
+                json!({"device": "bond0", "members": ["ue1", "ue0"], "protocol": "lacp",
+                    "primary_member": "", "lacp_fast_timeout": false, "mtu": 1500,
+                    "description": "trunk"}),
+            ),
+            (
+                GridId::Users,
+                json!({"name": "admin", "uid": 2000, "description": "Lars",
+                    "disabled": false, "password": "", "authorized_keys": [],
+                    "groups": ["admins"], "shell": "/bin/sh"}),
+            ),
+            (
+                GridId::UserGroups,
+                json!({"name": "admins", "gid": 2000, "description": "",
+                    "privileges": ["page-all"]}),
+            ),
+        ];
+        for (grid, view) in cases {
+            let item = from_view(grid, &json!({}), "", None, &view);
+            let back = to_view(grid, &json!({}), &item);
+            for v in view.as_object().unwrap().values() {
+                assert!(
+                    back.as_object().unwrap().values().any(|b| b == v),
+                    "{grid:?}: {view} lost a value, got {back}"
+                );
+            }
+        }
+        // The group membership is a list of typed pairs in the document.
+        let item = from_view(
+            GridId::GatewayGroups,
+            &json!({}),
+            "",
+            None,
+            &json!({"name": "G", "members": ["GW_WAN:2"]}),
+        );
+        assert_eq!(item["members"], json!([{"gateway": "GW_WAN", "tier": 2}]));
+        // The password never comes back from the document, and an empty
+        // field leaves the stored hash alone.
+        let item = from_view(
+            GridId::Users,
+            &json!({}),
+            "",
+            Some(&json!({"password_hash": "$6$stored"})),
+            &json!({"name": "admin", "uid": 2000, "password": ""}),
+        );
+        assert_eq!(item["password_hash"], json!("$6$stored"));
+        assert!(item.get("password").is_none());
+        // A loopback is addressed by its number and carries a description.
+        let item = from_view(
+            GridId::Loopbacks,
+            &json!({}),
+            "",
+            None,
+            &json!({"id": 3, "description": "ospf"}),
+        );
+        assert_eq!(item, json!({"id": 3, "description": "ospf"}));
+        assert_eq!(
+            to_view(GridId::Loopbacks, &json!({}), &item)["id"],
+            json!(3)
         );
     }
 

@@ -4,14 +4,12 @@ sensr first-boot seed folder (@SEED_DIR@)
 Put files here on any computer before the first boot. sensr reads each one
 once, applies it and renames it to <name>.applied so it is not applied again.
 
-  config.json            a full sensr config (a backup export); applied as
-                         revision 1
-  seed.toml              a small hand-written seed: hostname, admin password
-                         hash and SSH keys, which NIC is lan/wan (by MAC, PCI
-                         path or first-link-up), WAN type (dhcp, pppoe,
-                         static); merged over the defaults
   config.xml             an OPNsense backup; imported, with a report written
                          to import-report.txt next to it
+  seed.toml              a small hand-written seed: hostname, domain and
+                         which NIC is which interface (by MAC or kernel name,
+                         e.g. an imported OPNsense device); applied on top of
+                         whatever config.xml imported
   ifnames                lines of "<mac> <name>" that name NICs before
                          networking starts
   authorized_keys        SSH keys for the admin account (SSH on LAN only)

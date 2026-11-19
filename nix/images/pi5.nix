@@ -41,8 +41,8 @@ let
     runtimeInputs = [ pkgs.coreutils ];
     text =
       builtins.replaceStrings
-        [ "@bootFiles@" "@extraCmdline@" "@tryboot@" "@watchdogTimeout@" ]
-        [ "${bootFiles}" extraCmdline "1" "300" ]
+        [ "@bootFiles@" "@extraCmdline@" "@tryboot@" "@watchdogTimeout@" "@section@" "@board@" ]
+        [ "${bootFiles}" extraCmdline "1" "300" "pi5" "Raspberry Pi 5" ]
         (builtins.readFile ../pi5/install-boot.sh);
   };
 
@@ -93,6 +93,14 @@ in
   boot.kernelPackages = kernelPackages;
   # sd-image pulls in all-hardware.nix; a Pi needs only its own drivers.
   hardware.enableAllHardware = lib.mkForce false;
+  # ...but hardware.firmware defaults to the same switch, and turning it off
+  # also dropped linux-firmware from the image. The r8152 driver then ran the
+  # USB NICs on their ROM defaults ("Direct firmware load for
+  # rtl_nic/rtl8156b-2.fw failed with error -2", "unable to load firmware
+  # patch") — those two adapters carry LAN and LAN2. Enabling the
+  # redistributable set brings the rtl_nic blobs (and brcmfmac's, for the
+  # onboard WiFi) without the whole unfree firmware list.
+  hardware.enableRedistributableFirmware = true;
   boot.initrd.availableKernelModules = [
     # SD card (sdhci-brcmstb is built in) and NVMe behind the BCM2712 PCIe
     "mmc_block"
@@ -109,11 +117,33 @@ in
     "vfat"
     "nls_cp437"
     "nls_iso8859_1"
+    # The RTL8156 USB NICs (LAN and LAN2). Loaded explicitly rather than left
+    # to udev's coldplug: on the Pi 4 the same dongles enumerate without ever
+    # binding, and auto-loading is the one difference between the boards.
+    "usbnet"
+    "r8152"
     # QEMU's virt machine (the image's boot test, nix/tests/pi5-qemu.sh)
     "virtio_pci"
     "virtio_blk"
   ];
-  boot.kernelModules = [ "bcm2835_wdt" ];
+  boot.kernelModules = [
+    "bcm2835_wdt"
+    "usbnet"
+    "r8152"
+  ];
+
+  # The 2.5 GbE USB dongles (Realtek RTL8156, 0bda:8156) that carry LAN and
+  # LAN2 on a Pi 5 reset under the r8152 driver: one reset left eth1 with a
+  # dead TX path, another left a zombie netdev that only a reboot cleared.
+  # Both start at USB power management, so no USB device may autosuspend
+  # (a negative delay disables it for all of them) and the RTL8156 gets
+  # USB_QUIRK_NO_LPM (`k`), i.e. no U1/U2 link states. The runtime watchdog
+  # (sensr-nic-recover) enforces the same per device for adapters that
+  # enumerate later, and re-enumerates one that has wedged anyway.
+  boot.kernelParams = [
+    "usbcore.autosuspend=-1"
+    "usbcore.quirks=0bda:8156:k"
+  ];
 
   boot.loader.grub.enable = false;
   boot.loader.generic-extlinux-compatible.enable = false;
@@ -139,18 +169,12 @@ in
   };
 
   # The trial installer's log partition (sensr-pi5-trial-install
-  # --logs-mib): the journal lives there, so a trial that fell back to the
-  # previous OS can be read from it. Optional: without the partition the
-  # journal stays on the root.
-  fileSystems."/var/log" = {
-    device = "/dev/disk/by-label/SENSR_LOGS";
-    fsType = "ext4";
-    options = [
-      "nofail"
-      "noatime"
-      "x-systemd.device-timeout=10s"
-    ];
-  };
+  # --logs-mib) is not declared here: the plain SD image has only the FAT and
+  # root partitions, and a fileSystems entry for a missing label still makes
+  # systemd create var-log.mount, whose fsck dependency fails even with
+  # `nofail`. Anything using /var/log (suricata's LogsDirectory) then fails,
+  # and every `sensr config commit` with it. The journal stays on the root
+  # until the mount is made conditional on the partition existing.
 
   sdImage = {
     firmwareSize = 512;
@@ -187,13 +211,37 @@ in
     description = "Boot log to the FAT partition";
     wantedBy = [ "multi-user.target" ];
     after = [ "local-fs.target" ];
-    unitConfig.RequiresMountsFor = fw;
+    # No RequiresMountsFor: the FAT partition's by-label device can appear
+    # long after multi-user.target (udev queues it behind the WiFi SDIO
+    # deferred probe), and a dependency on a mount unit that already failed
+    # would stop this service from running at all. bootlog.sh mounts it itself
+    # when it can and the retry timer below catches the rest.
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
       ExecStart = "${lib.getExe bootlog} early";
       # Runs before the FAT partition is unmounted at shutdown.
       ExecStop = "${lib.getExe bootlog} shutdown";
+    };
+  };
+  # Second chance once udev has published the label: write the log this boot
+  # should have produced at multi-user.target.
+  systemd.services.sensr-bootlog-retry = {
+    description = "Boot log to the FAT partition (late)";
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = [
+        "${lib.getExe bootlog} early"
+        "${lib.getExe bootlog} running"
+      ];
+    };
+  };
+  systemd.timers.sensr-bootlog-retry = {
+    description = "Retry the FAT boot log once the partition is mounted";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "150s";
+      Unit = "sensr-bootlog-retry.service";
     };
   };
   systemd.services.sensr-bootlog-running = {
@@ -204,7 +252,6 @@ in
       "sensr-selftest.service"
       "multi-user.target"
     ];
-    unitConfig.RequiresMountsFor = fw;
     serviceConfig = {
       Type = "oneshot";
       ExecStart = "${lib.getExe bootlog} running";

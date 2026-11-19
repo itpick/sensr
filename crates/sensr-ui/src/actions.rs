@@ -69,6 +69,56 @@ mod imp {
         }
     }
 
+    /// Where `sensr-update` keeps its state (nix/modules/updates.nix).
+    const UPDATE_DIR: &str = "/run/sensr/updates";
+
+    /// The updater's status; the running version comes from the booted
+    /// generation when the service has not written anything yet.
+    pub async fn read_update_status() -> crate::runtime::UpdateStatus {
+        let path = format!("{UPDATE_DIR}/status.json");
+        let mut st: crate::runtime::UpdateStatus = match tokio::fs::read_to_string(&path).await {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+            Err(_) => crate::runtime::UpdateStatus::default(),
+        };
+        if st.phase.is_empty() {
+            st.phase = "idle".to_owned();
+        }
+        if st.message.is_empty() {
+            st.message = "No check has run yet.".to_owned();
+        }
+        if st.current.version.is_empty() {
+            st.current.version =
+                match tokio::fs::read_to_string("/run/current-system/nixos-version").await {
+                    Ok(v) => v.trim().to_owned(),
+                    Err(_) => "unknown".to_owned(),
+                };
+        }
+        st
+    }
+
+    /// Writes `{mode: …}` into the updater's request file. The path unit starts
+    /// the root service; the rename publishes the file atomically.
+    pub async fn write_update_request(mode: &str) -> Result<(), ServerFnError> {
+        if !matches!(mode, "check" | "install" | "auto-on" | "auto-off") {
+            return Err(ServerFnError::new(format!(
+                "unknown update request: {mode}"
+            )));
+        }
+        tokio::fs::create_dir_all(UPDATE_DIR)
+            .await
+            .map_err(|e| ServerFnError::new(format!("{UPDATE_DIR}: {e}")))?;
+        let tmp = format!("{UPDATE_DIR}/request.json.tmp");
+        let dst = format!("{UPDATE_DIR}/request.json");
+        let body = serde_json::json!({ "mode": mode }).to_string();
+        tokio::fs::write(&tmp, body)
+            .await
+            .map_err(|e| ServerFnError::new(format!("{tmp}: {e}")))?;
+        tokio::fs::rename(&tmp, &dst)
+            .await
+            .map_err(|e| ServerFnError::new(format!("{dst}: {e}")))?;
+        Ok(())
+    }
+
     /// One grid row: its key, the stored item and the view.
     pub struct Row {
         pub key: String,
@@ -277,6 +327,24 @@ pub async fn grid_save(
         Ok(v) => v,
         Err(errors) => return Ok(errors),
     };
+    // A user's password is write-only: the field holds the clear text only
+    // while the form is saved, and the document keeps the crypt(3) hash. An
+    // empty field means "keep the stored hash", so it has to be left alone.
+    let password_hash = if grid == GridId::Users {
+        match view
+            .get("password")
+            .and_then(Value::as_str)
+            .filter(|p| !p.is_empty())
+        {
+            Some(pw) => Some(
+                sensr_auth::password::hash_password(pw)
+                    .map_err(|e| ServerFnError::new(e.to_string()))?,
+            ),
+            None => None,
+        }
+    } else {
+        None
+    };
     if grid == GridId::FilterRules
         && view
             .get("interface")
@@ -286,6 +354,9 @@ pub async fn grid_save(
         view["interface"] = Value::String(scope.clone());
     }
     let mut item = adapt::from_view(grid, &doc, &scope, existing.map(|r| &r.item), &view);
+    if let Some(hash) = password_hash {
+        item["password_hash"] = Value::String(hash);
+    }
     let store = adapt::store(grid, &scope, &doc);
     let new_key = match (&key, &store) {
         (Some(k), _) => k.clone(),
@@ -307,6 +378,27 @@ pub async fn grid_save(
             .unwrap_or(0)
             + 10;
         item["sequence"] = Value::from(next);
+    }
+    // The user and group forms accept 0 as "assign one": a new account then
+    // gets the next free id, and root keeps its 0.
+    if key.is_none() {
+        let field = match grid {
+            GridId::Users => Some("uid"),
+            GridId::UserGroups => Some("gid"),
+            _ => None,
+        };
+        if let Some(field) = field
+            && item.get(field).and_then(Value::as_u64).unwrap_or(0) == 0
+        {
+            let next = rows
+                .iter()
+                .filter_map(|r| r.item.get(field).and_then(Value::as_u64))
+                .max()
+                .unwrap_or(999)
+                .max(999)
+                + 1;
+            item[field] = Value::from(next);
+        }
     }
     match imp::collection(&mut doc, &store) {
         Value::Object(m) => {
@@ -764,6 +856,23 @@ pub async fn dns_stats() -> Result<crate::api::DnsStats, ServerFnError> {
     imp::backend()?.dns_stats().await.map_err(imp::err)
 }
 
+/// System › Updates: what `sensr-update` last wrote and what the running
+/// generation is. A missing status file (first boot, or the module disabled)
+/// yields an idle status rather than an error.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn update_status() -> Result<crate::runtime::UpdateStatus, ServerFnError> {
+    Ok(imp::read_update_status().await)
+}
+
+/// Asks `sensr-update` to run. `mode` is `check`, `install`, `auto-on` or
+/// `auto-off`; the service owns every privileged step, the API only drops the
+/// request file and reads the status back.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn update_request(mode: String) -> Result<crate::runtime::UpdateStatus, ServerFnError> {
+    imp::write_update_request(&mode).await?;
+    Ok(imp::read_update_status().await)
+}
+
 /// Session cookie name.
 pub const SESSION_COOKIE: &str = "sensr_session";
 
@@ -783,6 +892,52 @@ pub async fn login(username: String, password: String) -> Result<(), ServerFnErr
         }
         Err(_) => leptos_axum::redirect("/login?failed=1"),
     }
+    Ok(())
+}
+
+/// Change the signed-in user's password. A plain form post: works without
+/// JavaScript, like the login form.
+#[server(prefix = "/ui/fn", endpoint = "password")]
+pub async fn change_password(
+    new_password: String,
+    confirm_password: String,
+) -> Result<(), ServerFnError> {
+    if new_password != confirm_password {
+        leptos_axum::redirect("/ui/core/password?error=mismatch");
+        return Ok(());
+    }
+    if new_password.chars().count() < 8 {
+        leptos_axum::redirect("/ui/core/password?error=short");
+        return Ok(());
+    }
+    let name = imp::user();
+    let b = imp::backend()?;
+    let system = b.get("system").await.map_err(imp::err)?;
+    let Some(uuid) = system
+        .get("users")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|users| {
+            users.iter().find_map(|(uuid, user)| {
+                (user.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str()))
+                    .then(|| uuid.clone())
+            })
+        })
+    else {
+        leptos_axum::redirect("/ui/core/password?error=nouser");
+        return Ok(());
+    };
+    let hash = sensr_auth::password::hash_password(&new_password)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    b.set(
+        &format!("system.users.{uuid}.password_hash"),
+        serde_json::Value::String(hash),
+    )
+    .await
+    .map_err(imp::err)?;
+    b.commit(&name, "change password", None)
+        .await
+        .map_err(imp::err)?;
+    leptos_axum::redirect("/ui/core/password?changed=1");
     Ok(())
 }
 

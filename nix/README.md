@@ -4,8 +4,10 @@
 |---|---|
 | `overlays/default.nix` | `pkgs.sensr` (the workspace, crane) and `pkgs.sensr-kea` (Kea without kea-shell/Python) |
 | `modules/sensr.nix` | `services.sensr`: agent, API, daemon units, selftest, `/etc/sensr/version.json` |
+| `modules/updates.nix` | `services.sensr.updates`: manifest check, closure import, `switch-to-configuration`, timer and the request/status files the System › Updates page uses |
 | `images/common.nix` | what every image shares (panic/watchdog policy, no baked-in login, perlless) |
 | `images/qcow.nix` | `nix build .#images.qcow`: x86_64 UEFI qcow2, systemd-boot with boot counting |
+| `images/iso.nix` | `nix build .#images.iso`: x86_64 UEFI/BIOS live installer, `nixos-install` from the ISO store |
 | `tests/boot-first-run.nix` | `checks.x86_64-linux.boot-first-run`: units, selftest rows, hardening |
 | `tests/qcow-boot.nix` | `checks.x86_64-linux.qcow-boot`: boots the real qcow2 three times, records boot seconds |
 | `tests/slice.nix` | `checks.x86_64-linux.slice` (sensr) and `slice-reference` (hand-written oracle): the routing vertical slice with 6 VMs |

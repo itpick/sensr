@@ -353,6 +353,11 @@ impl SuricataModel {
             format!("/{DIR}/suricata.yaml"),
             "--pidfile".to_owned(),
             "/run/suricata/suricata.pid".to_owned(),
+            // Suricata 8 ignores default-log-dir from the yaml when the
+            // process runs from another working directory; -l is the only
+            // thing that redirects eve.json (to the unit's LogsDirectory).
+            "-l".to_owned(),
+            LOG_DIR.to_owned(),
         ];
         if prevent {
             for q in self.queues.0..self.queues.0.saturating_add(self.queues.1) {
@@ -373,6 +378,11 @@ impl SuricataModel {
             "--no-merge".to_owned(),
             "--no-reload".to_owned(),
             "--no-test".to_owned(),
+            // Without this a failed download exits 0 and keeps the store's
+            // distribution rules, so a fetch that raced the WAN at boot
+            // would go unnoticed until the next day. The unit's
+            // Restart=on-failure retries instead.
+            "--fail".to_owned(),
             "--enable-conf".to_owned(),
             format!("/{DIR}/enable.conf"),
             "--disable-conf".to_owned(),
@@ -797,7 +807,7 @@ pub(crate) mod tests {
         d.ids.enabled = true;
         d.ids.user_rules.push(UserRule {
             enabled: true,
-            source: Some("192.168.68.0/22".parse().unwrap()),
+            source: Some("192.168.1.0/22".parse().unwrap()),
             destination: None,
             fingerprint: None,
             action: UserRuleAction::Pass,
@@ -843,7 +853,7 @@ pub(crate) mod tests {
             sid: 2047702,
             track: Some(SuppressTrack {
                 by: TrackBy::Src,
-                net: "192.168.68.20/32".parse().unwrap(),
+                net: "192.168.1.20/32".parse().unwrap(),
             }),
             description: None,
         });
@@ -857,7 +867,7 @@ pub(crate) mod tests {
         assert!(f["drop.conf"].contains("group:emerging-scan.rules"));
         assert!(f["disable.conf"].contains("metadata: signature_severity Informational"));
         assert!(f["disable.conf"].contains("2024897"));
-        assert!(f["threshold.config"].contains("track by_src, ip 192.168.68.20/32"));
+        assert!(f["threshold.config"].contains("track by_src, ip 192.168.1.20/32"));
     }
 
     #[test]

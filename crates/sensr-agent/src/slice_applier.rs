@@ -69,10 +69,20 @@ impl SliceApplier {
         if let Some(dir) = feeds_dir {
             let runner: Arc<dyn Runner> = Arc::new(SystemRunner);
             let neighbours = move || {
-                runner
+                let mut table = runner
                     .run(&Cmd::new("ip").args(["-j", "neigh", "show"]), None)
                     .map(|o| sensr_feeds::neigh::parse_ip_neigh_json(&o.stdout))
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                // A just-leased device has no neighbour entry yet (nothing
+                // has made the box ARP it), so a MAC alias would miss it.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                table.extend(sensr_feeds::neigh::read_kea_leases(
+                    std::path::Path::new(sensr_apply::appliers::kea::LEASE_FILE),
+                    now,
+                ));
+                table
             };
             a.feeds = Some(Arc::new(Feeds::new(
                 dir,

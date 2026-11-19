@@ -50,7 +50,8 @@ pub trait Sources {
     fn geoip(&self, country: &str, fam: IpFamily) -> Vec<IpNet>;
     /// Networks announced by an AS.
     fn asn(&self, asn: u32) -> Vec<IpNet>;
-    /// The neighbour (ARP/NDP) table: `(mac, address)` pairs.
+    /// The addresses known for a MAC: the neighbour (ARP/NDP) table and
+    /// the DHCP leases, as `(mac, address)` pairs.
     fn neighbours(&self) -> Vec<(String, IpAddr)>;
     /// Current addresses of a logical interface.
     fn interface_addrs(&self, iface: &str) -> Vec<IfAddr>;

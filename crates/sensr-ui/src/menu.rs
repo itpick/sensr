@@ -2,8 +2,8 @@
 //! per-module fragments the way OPNsense merges each module's `Menu.xml`.
 //!
 //! Ordering rule (OPNsense `MenuItem`): siblings sort by `order` (default 0), then by id.
-//! Items sensr implements point at sensr routes; the rest keep their OPNsense URL and land on
-//! the "not yet available" page, so the tree is complete from day one.
+//! Only entries whose page sensr really has are listed, so no menu link lands on the "not yet
+//! available" page. Entries return as their pages are implemented.
 
 /// Section icons (drawn inline, see `components::icon`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,11 +81,13 @@ impl Node {
     }
 }
 
-/// Core fragment (OPNsense `Core/Menu/Menu.xml`).
+/// Core fragment (OPNsense `Core/Menu/Menu.xml`), limited to what sensr implements.
+///
+/// OPNsense entries whose page sensr does not have yet are left out on purpose: every link in
+/// the tree opens a real page. An entry comes back here when its page exists.
 const CORE: &[Node] = &[
     n("Lobby").order(10).icon(Icon::Lobby).kids(&[
         n("Dashboard").order(0).url("/ui/core/dashboard"),
-        n("License").order(1).url("/ui/core/license"),
         n("Password").order(2).url("/ui/core/password"),
         n("Logout").order(3).url("/logout"),
     ]),
@@ -97,32 +99,7 @@ const CORE: &[Node] = &[
             .url("/ui/unbound/overview"),
     ]),
     n("System").order(20).icon(Icon::System).kids(&[
-        n("Access").kids(&[
-            n("Users").order(10).url("/ui/auth/user"),
-            n("Groups").order(20).url("/ui/auth/group"),
-            n("Privileges").order(25).url("/ui/auth/priv"),
-            n("Servers").order(30).url("/ui/auth/server"),
-            n("Tester").order(40).url("/ui/auth/tester"),
-        ]),
-        n("Configuration").kids(&[
-            n("Backups").url("/ui/core/backup"),
-            n("Defaults").url("/ui/core/defaults"),
-            n("History").url("/ui/core/backup/history"),
-            n("Wizard").url("/ui/core/initial_setup"),
-        ]),
-        n("Firmware").kids(&[
-            n("Status").order(10).url("/ui/core/firmware/status"),
-            n("Settings").order(20).url("/ui/core/firmware/settings"),
-            n("Changelog").order(30).url("/ui/core/firmware/changelog"),
-            n("Updates").order(40).url("/ui/core/firmware/updates"),
-            n("Plugins").order(50).url("/ui/core/firmware/plugins"),
-            n("Packages").order(60).url("/ui/core/firmware/packages"),
-            n("Reporter").order(70).url("/ui/core/crash_reporter"),
-            n("LogFile")
-                .order(80)
-                .label("Log File")
-                .url("/ui/diagnostics/log/core/pkg"),
-        ]),
+        n("Configuration").kids(&[n("History").url("/ui/core/backup/history")]),
         n("Gateways").kids(&[
             n("Configuration")
                 .order(10)
@@ -130,102 +107,31 @@ const CORE: &[Node] = &[
             // sensr addition: OPNsense shows the monitor state as a column of Configuration.
             n("Status").order(15).url("/ui/routing/status"),
             n("Group").order(20).url("/ui/routing/gateway_groups"),
-            n("LogFile")
-                .order(30)
-                .label("Log File")
-                .url("/ui/diagnostics/log/core/gateways"),
         ]),
-        n("HighAvailability").label("High Availability").kids(&[
-            n("Settings").order(100).url("/ui/core/hasync"),
-            n("Status").order(200).url("/ui/core/hasync_status"),
+        n("Routes").kids(&[n("Configuration").order(10).url("/ui/routes")]),
+        n("Access").order(15).kids(&[
+            n("Users").order(10).url("/ui/system/user"),
+            n("Groups").order(20).url("/ui/system/group"),
         ]),
-        n("Routes").kids(&[
-            n("Configuration").order(10).url("/ui/routes"),
-            n("LogFile")
-                .order(100)
-                .label("Log File")
-                .url("/ui/diagnostics/log/core/routing"),
-        ]),
-        n("Settings").kids(&[
-            n("Administration").url("/ui/system/administration"),
-            n("General").url("/ui/system/general"),
-            n("Miscellaneous").url("/ui/system/miscellaneous"),
-            n("Tunables").url("/ui/core/tunables"),
-        ]),
-        n("Snapshots").url("/ui/core/snapshots"),
-        n("Trust").kids(&[
-            n("Authorities").url("/ui/trust/ca"),
-            n("Certificates").url("/ui/trust/cert"),
-            n("Revocation").url("/ui/trust/crl"),
-            n("Settings").url("/ui/trust/settings"),
-        ]),
-        n("LogFiles").order(150).label("Log Files").kids(&[
-            n("Audit").url("/ui/diagnostics/log/core/audit"),
-            n("Backend").url("/ui/diagnostics/log/core/configd"),
-            n("Boot").url("/ui/diagnostics/log/core/boot"),
-            n("General").url("/ui/diagnostics/log/core/system"),
-            n("WebGUI")
-                .label("Web GUI")
-                .url("/ui/diagnostics/log/core/webgui"),
-        ]),
-        n("Diagnostics")
-            .order(160)
-            .kids(&[n("Services").url("/ui/core/service")]),
+        n("Settings")
+            .order(20)
+            .kids(&[n("General").url("/ui/system/general")]),
+        n("Updates").order(30).url("/ui/system/updates"),
     ]),
     n("Interfaces").order(30).icon(Icon::Interfaces),
     n("Firewall").order(40).icon(Icon::Firewall).kids(&[
         n("Aliases").url("/ui/firewall/alias"),
-        n("Categories").url("/ui/firewall/category"),
         n("Groups").url("/ui/firewall/group"),
         n("NAT"),
-        n("Schedules").order(210).url("/ui/firewall/schedule"),
-        n("Diagnostics").order(500).kids(&[
-            n("Aliases").url("/ui/firewall/alias_util"),
-            n("States").url("/ui/diagnostics/firewall/states"),
-            n("Sessions").url("/ui/diagnostics/firewall/sessions"),
-            n("Statistics").url("/ui/diagnostics/firewall/statistics"),
-        ]),
-        n("LogFiles").order(400).label("Log Files").kids(&[
-            n("General").url("/ui/diagnostics/log/core/firewall"),
-            n("Live")
-                .label("Live View")
-                .url("/ui/diagnostics/firewall/log"),
-            n("Overview").url("/ui/diagnostics/firewall/stats"),
-            n("Plain")
-                .label("Plain View")
-                .url("/ui/diagnostics/log/core/filter"),
-        ]),
     ]),
     n("Services").order(60).icon(Icon::Services),
     n("VPN")
         .order(50)
         .icon(Icon::Vpn)
-        .kids(&[n("OpenVPN").kids(&[
-            n("Instances").order(10).url("/ui/openvpn/instances"),
-            n("CSC")
-                .order(30)
-                .label("Client Specific Overrides")
-                .url("/ui/openvpn/client_overwrites"),
-            n("ClientExport")
-                .order(40)
-                .label("Client Export")
-                .url("/ui/openvpn/export"),
-            n("Status")
-                .order(60)
-                .label("Connection Status")
-                .url("/ui/openvpn/status"),
-            n("LogFile")
-                .order(70)
-                .label("Log File")
-                .url("/ui/diagnostics/log/core/openvpn"),
+        .kids(&[n("WireGuard").kids(&[
+            n("Instances").order(10).url("/ui/wireguard/instances"),
+            n("Peers").order(20).url("/ui/wireguard/peers"),
         ])]),
-    n("Power").order(70).icon(Icon::Power).kids(&[
-        n("Reboot").order(10).url("/ui/core/reboot"),
-        n("PowerOff")
-            .order(20)
-            .label("Power Off")
-            .url("/ui/core/halt"),
-    ]),
     n("Help").order(80).icon(Icon::Help).kids(&[
         n("Documentation")
             .order(10)
@@ -248,124 +154,31 @@ const FIREWALL: &[Node] = &[n("Firewall").kids(&[
             .order(100)
             .label("Destination NAT")
             .url("/ui/firewall/d_nat"),
-        n("OneToOne")
-            .order(200)
-            .label("One-to-One NAT")
-            .url("/ui/firewall/one_to_one"),
-        n("NPTv6").order(500).url("/ui/firewall/npt"),
     ]),
-    n("Settings").order(200).url("/ui/firewall/settings"),
 ])];
 
 const INTERFACES: &[Node] = &[n("Interfaces").kids(&[
     n("Assignments").order(200).url("/ui/interfaces/assignment"),
     n("Devices").order(210).kids(&[
         n("Bridge").url("/ui/interfaces/bridge"),
-        n("GIF").url("/ui/interfaces/gif"),
-        n("GRE").url("/ui/interfaces/gre"),
         n("LAGG").url("/ui/interfaces/lagg"),
         n("Loopback").url("/ui/interfaces/loopback"),
-        n("PPP").label("Point-to-Point").url("/ui/interfaces/ppp"),
-        n("TAP").url("/ui/interfaces/tap"),
-        n("VLAN").url("/ui/interfaces/vlan"),
-        n("VXLAN").url("/ui/interfaces/vxlan"),
     ]),
-    n("Neighbors").order(225).url("/ui/interfaces/neighbor"),
     n("Overview").order(230).url("/ui/interfaces/overview"),
-    n("Settings").order(240).url("/ui/interfaces/settings"),
-    n("VIP").order(250).label("Virtual IPs").kids(&[
-        n("Settings").url("/ui/interfaces/vip"),
-        n("Status").url("/ui/diagnostics/interface/vip"),
-    ]),
-    n("Wireless")
-        .order(260)
-        .kids(&[n("Devices").url("/ui/interfaces/wireless")]),
-    n("Diagnostics").order(270).kids(&[
-        n("ARPTable")
-            .label("ARP Table")
-            .url("/ui/diagnostics/interface/arp"),
-        n("DNSLookup")
-            .label("DNS Lookup")
-            .url("/ui/diagnostics/dns_diagnostics"),
-        n("NDPTable")
-            .label("NDP Table")
-            .url("/ui/diagnostics/interface/ndp"),
-        n("Netstat").url("/ui/diagnostics/interface/netstat"),
-        n("PacketCapture")
-            .label("Packet Capture")
-            .url("/ui/diagnostics/packet_capture"),
-        n("Ping").url("/ui/diagnostics/ping"),
-        n("TestPort")
-            .label("Port Probe")
-            .url("/ui/diagnostics/portprobe"),
-        n("Traceroute")
-            .label("Trace Route")
-            .url("/ui/diagnostics/traceroute"),
-    ]),
+    n("VIP")
+        .order(250)
+        .label("Virtual IPs")
+        .kids(&[n("Settings").url("/ui/interfaces/vip")]),
 ])];
 
-const DIAGNOSTICS: &[Node] = &[
-    n("Reporting").kids(&[
-        n("Health").url("/ui/diagnostics/systemhealth"),
-        n("Insight").url("/ui/diagnostics/networkinsight"),
-        n("NetFlow").url("/ui/diagnostics/netflow"),
-    ]),
-    n("System").kids(&[
-        n("Diagnostics").kids(&[
-            n("Activity").url("/ui/diagnostics/activity"),
-            n("Statistics").url("/ui/diagnostics/system/memory"),
-        ]),
-        n("Routes").kids(&[n("Status")
-            .order(20)
-            .url("/ui/diagnostics/interface/routes")]),
-        n("Settings").kids(&[n("Cron").url("/ui/cron"), n("Logging").url("/ui/syslog")]),
-    ]),
-];
+const DIAGNOSTICS: &[Node] =
+    &[n("Reporting").kids(&[n("Insight").url("/ui/diagnostics/networkinsight")])];
 
 const SERVICES: &[Node] = &[n("Services").kids(&[
-    n("CaptivePortal").label("Captive Portal").kids(&[
-        n("Administration").order(10).url("/ui/captiveportal"),
-        n("Sessions").order(20).url("/ui/captiveportal/session"),
-        n("Vouchers").order(30).url("/ui/captiveportal/voucher"),
-        n("Log")
-            .order(40)
-            .label("Log File")
-            .url("/ui/diagnostics/log/core/portalauth"),
-    ]),
-    n("DHCRelay").kids(&[
-        n("Configuration").url("/ui/dhcrelay/relay"),
-        n("LogFile")
-            .label("Log File")
-            .url("/ui/diagnostics/log/core/dhcrelay"),
-    ]),
     n("DHCPv4"),
-    n("IDS").label("Intrusion Detection").kids(&[
-        n("Administration").order(10).url("/ui/ids"),
-        n("Policy").order(20).url("/ui/ids/policy"),
-        n("Log")
-            .order(100)
-            .label("Log File")
-            .url("/ui/diagnostics/log/core/suricata"),
-    ]),
-    n("Monit").kids(&[
-        n("Settings").url("/ui/monit"),
-        n("Status").url("/ui/monit/status"),
-        n("Log")
-            .order(100)
-            .label("Log File")
-            .url("/ui/diagnostics/log/core/monit"),
-    ]),
-    n("NTP").label("Network Time").kids(&[
-        n("General").order(10).url("/ui/ntpd/general"),
-        n("Status").order(40).url("/ui/ntpd/status"),
-        n("Log")
-            .order(50)
-            .label("Log File")
-            .url("/ui/diagnostics/log/core/ntpd"),
-    ]),
-    n("RouterAdv")
-        .label("Router Advertisements")
-        .url("/ui/radvd/settings"),
+    n("IDS")
+        .label("Intrusion Detection")
+        .kids(&[n("Administration").order(10).url("/ui/ids")]),
     n("Unbound").label("Unbound DNS").kids(&[
         n("General").order(10).url("/ui/unbound/general"),
         n("Overrides").order(20).url("/ui/unbound/overrides"),
@@ -379,67 +192,16 @@ const SERVICES: &[Node] = &[n("Services").kids(&[
             .order(60)
             .label("Query Forwarding")
             .url("/ui/unbound/forward"),
-        n("Dot")
-            .order(70)
-            .label("DNS over TLS")
-            .url("/ui/unbound/dot"),
-        n("Statistics").order(90).url("/ui/unbound/stats"),
-        n("LogFile")
-            .order(100)
-            .label("Log File")
-            .url("/ui/diagnostics/log/core/resolver"),
     ]),
 ])];
 
-const VPN: &[Node] = &[n("VPN").kids(&[
-    n("IPsec").kids(&[
-        n("Connections").order(5).url("/ui/ipsec/connections"),
-        n("Keys")
-            .order(30)
-            .label("Pre-Shared Keys")
-            .url("/ui/ipsec/pre_shared_keys"),
-        n("KeyPairs")
-            .order(40)
-            .label("Key Pairs")
-            .url("/ui/ipsec/key_pairs"),
-        n("Status")
-            .order(60)
-            .label("Status Overview")
-            .url("/ui/ipsec/sessions"),
-        n("LogFile")
-            .order(100)
-            .label("Log File")
-            .url("/ui/diagnostics/log/core/ipsec"),
-    ]),
-    n("WireGuard").kids(&[
-        n("Instances").order(10).url("/ui/wireguard/instances"),
-        n("Peers").order(20).url("/ui/wireguard/peers"),
-        n("Status").order(40).url("/ui/wireguard/diagnostics"),
-        n("LogFile")
-            .order(50)
-            .label("Log File")
-            .url("/ui/diagnostics/log/core/wireguard"),
-    ]),
-])];
-
-/// Firewall › Shaper (TrafficShaper module).
-const SHAPER: &[Node] = &[n("Firewall").kids(&[n("Shaper").kids(&[
-    n("Pipes").order(10).url("/ui/trafficshaper/pipes"),
-    n("Queues").order(20).url("/ui/trafficshaper/queues"),
-    n("Rules").order(30).url("/ui/trafficshaper/rules"),
-    n("Status").order(40).url("/ui/trafficshaper/status"),
+const VPN: &[Node] = &[n("VPN").kids(&[n("WireGuard").kids(&[
+    n("Instances").order(10).url("/ui/wireguard/instances"),
+    n("Peers").order(20).url("/ui/wireguard/peers"),
 ])])];
 
 /// Every fragment, merged in this order.
-pub const FRAGMENTS: &[&[Node]] = &[
-    CORE,
-    FIREWALL,
-    INTERFACES,
-    DIAGNOSTICS,
-    SERVICES,
-    VPN,
-    SHAPER,
-];
+pub const FRAGMENTS: &[&[Node]] = &[CORE, FIREWALL, INTERFACES, DIAGNOSTICS, SERVICES, VPN];
 
 /// A merged, sorted menu item.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -645,7 +407,6 @@ mod tests {
                 "Firewall",
                 "VPN",
                 "Services",
-                "Power",
                 "Help"
             ]
         );
@@ -654,60 +415,107 @@ mod tests {
     #[test]
     fn siblings_sort_by_order_then_id() {
         let m = build(&[]);
-        // System children without order sort by id; LogFiles (150) and Diagnostics (160) last.
         assert_eq!(
             labels(&find(&m, &["System"]).children),
             [
-                "Access",
                 "Configuration",
-                "Firmware",
                 "Gateways",
-                "High Availability",
                 "Routes",
+                "Access",
                 "Settings",
-                "Snapshots",
-                "Trust",
-                "Log Files",
-                "Diagnostics"
+                "Updates"
             ]
         );
         assert_eq!(
             labels(&find(&m, &["Firewall", "NAT"]).children),
-            ["Source NAT", "Destination NAT", "One-to-One NAT", "NPTv6"]
+            ["Source NAT", "Destination NAT"]
         );
     }
 
     #[test]
     fn fragments_merge_into_existing_sections() {
         let m = build(&[]);
-        let settings = find(&m, &["System", "Settings"]);
         assert_eq!(
-            labels(&settings.children),
+            labels(&find(&m, &["System", "Settings"]).children),
+            ["General"]
+        );
+        assert_eq!(
+            labels(&find(&m, &["Firewall"]).children),
+            ["Aliases", "Groups", "NAT", "Rules"]
+        );
+        assert_eq!(
+            labels(&find(&m, &["Services", "Unbound"]).children),
             [
-                "Administration",
-                "Cron",
                 "General",
-                "Logging",
-                "Miscellaneous",
-                "Tunables"
+                "Overrides",
+                "Advanced",
+                "Access Lists",
+                "Blocklists",
+                "Query Forwarding"
             ]
         );
-        let fw = labels(&find(&m, &["Firewall"]).children);
-        assert_eq!(
-            fw,
-            [
-                "Aliases",
-                "Categories",
-                "Groups",
-                "NAT",
-                "Rules",
-                "Shaper",
-                "Settings",
-                "Schedules",
-                "Log Files",
-                "Diagnostics"
-            ]
-        );
+    }
+
+    /// Every menu link opens a page: internal links are routes `app.rs` serves, the only
+    /// exceptions being the logout handler and the per-interface pages built from assignments.
+    #[test]
+    fn every_menu_link_has_a_page() {
+        const ROUTES: &[&str] = &[
+            "/ui/core/dashboard",
+            "/ui/core/password",
+            "/ui/core/backup/history",
+            "/ui/diagnostics/traffic",
+            "/ui/diagnostics/networkinsight",
+            "/ui/interfaces/assignment",
+            "/ui/interfaces/overview",
+            "/ui/interfaces/bridge",
+            "/ui/interfaces/lagg",
+            "/ui/interfaces/loopback",
+            "/ui/interfaces/vip",
+            "/ui/firewall/group",
+            "/ui/routing/configuration",
+            "/ui/routing/gateway_groups",
+            "/ui/routing/status",
+            "/ui/routes",
+            "/ui/firewall/alias",
+            "/ui/firewall/filter",
+            "/ui/firewall/source_nat",
+            "/ui/firewall/d_nat",
+            "/ui/ids",
+            "/ui/unbound/overview",
+            "/ui/unbound/general",
+            "/ui/unbound/overrides",
+            "/ui/unbound/advanced",
+            "/ui/unbound/acl",
+            "/ui/unbound/dnsbl",
+            "/ui/unbound/forward",
+            "/ui/wireguard/instances",
+            "/ui/wireguard/peers",
+            "/ui/system/user",
+            "/ui/system/group",
+            "/ui/system/general",
+            "/ui/system/updates",
+        ];
+        fn walk(items: &[MenuItem], out: &mut Vec<String>) {
+            for item in items {
+                if let Some(u) = &item.url {
+                    out.push(u.clone());
+                }
+                walk(&item.children, out);
+            }
+        }
+        let m = build(&[]);
+        let mut urls = Vec::new();
+        walk(&m, &mut urls);
+        for url in urls {
+            if url.starts_with("https://") || url == "/logout" {
+                continue;
+            }
+            assert!(
+                ROUTES.contains(&url.as_str()),
+                "menu link without a page: {url}"
+            );
+        }
     }
 
     #[test]
@@ -743,7 +551,7 @@ mod tests {
         let m = build(&[]);
         assert_eq!(
             labels(&find(&m, &["System", "Gateways"]).children),
-            ["Configuration", "Status", "Group", "Log File"]
+            ["Configuration", "Status", "Group"]
         );
         assert_eq!(
             breadcrumb(&m, "/ui/routing/status"),

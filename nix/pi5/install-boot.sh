@@ -1,11 +1,11 @@
-# sensr-pi5-install-boot: put a NixOS generation on the Pi 5's FAT partition
+# sensr-pi*-install-boot: put a NixOS generation on the board's FAT partition
 # so the EEPROM bootloader starts it directly (no UEFI, no U-Boot).
 #
-#   sensr-pi5-install-boot TOPLEVEL [--dir DIR] [--slot current|next]
+#   sensr-pi*-install-boot TOPLEVEL [--dir DIR] [--slot current|next]
 #
 # Layout of the FAT partition (DIR, default /boot/firmware):
 #
-#   config.txt        [pi5] os_prefix=current/ ...: boots the current slot
+#   config.txt        [@section@] os_prefix=current/ ...: boots the current slot
 #   tryboot.txt       the same with os_prefix=next/; the firmware reads it
 #                     instead of config.txt for one boot after
 #                     `reboot "0 tryboot"` (sensr-pi5-tryboot)
@@ -22,6 +22,7 @@
 # The image build calls it with --slot current.
 set -euo pipefail
 
+name=$(basename "$0")
 toplevel=$1
 shift
 dir=/boot/firmware
@@ -37,7 +38,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ ! -d "$dir" ]; then
-  echo "sensr-pi5-install-boot: $dir is not mounted" >&2
+  echo "$name: $dir is not mounted" >&2
   exit 1
 fi
 
@@ -51,24 +52,24 @@ fi
 
 config_txt() { # os_prefix
   cat <<EOF
-# sensr, Raspberry Pi 5. Written by sensr-pi5-install-boot; edits are lost.
+# sensr, @board@. Written by $name; edits are lost.
 # The EEPROM bootloader loads everything below from $1 on this partition.
-[pi5]
+[@section@]
 arm_64bit=1
 os_prefix=$1
 kernel=Image
 initramfs initrd followkernel
 cmdline=cmdline.txt
 # A mainline device tree: the firmware's downstream-kernel check does not
-# apply. On D0 boards it still applies overlays/bcm2712d0.dtbo.
+# apply. (On a Pi 5 D0 board the firmware still applies overlays/bcm2712d0.dtbo.)
 os_check=0
-# Debug UART (3-pin header between the HDMI ports), 115200 8N1: firmware log,
-# then the kernel from its first instruction (earlycon in cmdline.txt).
+# Debug UART on the board's header, 115200 8N1: firmware log, then the kernel
+# from its first instruction (earlycon in cmdline.txt).
 enable_uart=1
 uart_2ndstage=1
-# The firmware starts the hardware watchdog before the kernel; a boot that
-# hangs anywhere resets the board after this many seconds (needs a 2025 or
-# later bootloader EEPROM; older ones ignore it).
+# Where the firmware supports it (Pi 5 with a 2025 or later bootloader EEPROM)
+# it starts the hardware watchdog before the kernel; a boot that hangs
+# anywhere then resets the board after this many seconds. Others ignore it.
 kernel_watchdog_timeout=@watchdogTimeout@
 
 [all]
@@ -81,7 +82,10 @@ mkdir -p "$tmp/overlays"
 cp "$toplevel/kernel" "$tmp/Image"
 cp "$toplevel/initrd" "$tmp/initrd"
 cp @bootFiles@/*.dtb "$tmp/"
-cp @bootFiles@/overlays/*.dtbo "$tmp/overlays/"
+# Boards whose trees need no overlays (the Pi 4) ship none.
+if [ -d @bootFiles@/overlays ]; then
+  cp @bootFiles@/overlays/*.dtbo "$tmp/overlays/"
+fi
 echo "init=$toplevel/init $(cat "$toplevel/kernel-params") @extraCmdline@" > "$tmp/cmdline.txt"
 readlink -f "$toplevel" > "$tmp/system"
 sync -f "$tmp/system"
@@ -98,7 +102,7 @@ mv "$dir/config.txt.new" "$dir/config.txt"
 if [ "$slot" = next ]; then
   config_txt next/ > "$dir/tryboot.txt.new"
   mv "$dir/tryboot.txt.new" "$dir/tryboot.txt"
-  echo "sensr-pi5-install-boot: $(cat "$dir/next/system") is in next/;" \
+  echo "$name: $(cat "$dir/next/system") is in next/;" \
     "sensr-pi5-tryboot boots it once, and it becomes current after it comes up"
 else
   rm -f "$dir/tryboot.txt"

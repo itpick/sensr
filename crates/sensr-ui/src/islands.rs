@@ -8,7 +8,7 @@ use crate::api::{DiffKind, FieldError, Pending, SystemStatus};
 use crate::form::{Choices, FieldKind, FieldSpec, Inputs, to_inputs};
 use crate::grid::{ColumnKind, GridPage, GridQuery, SortDir, cell_text};
 use crate::models::{FormId, GridId};
-use crate::runtime::{GatewayRow, GatewayState, GatewaysView, ms, pct};
+use crate::runtime::{GatewayRow, GatewayState, GatewaysView, UpdateStatus, ms, pct};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde_json::Value;
@@ -1257,6 +1257,149 @@ pub fn DashboardLive(initial: SystemStatus) -> impl IntoView {
                     }
                 })}
             </section>
+        </div>
+    }
+}
+
+/// System › Updates: the running generation, what the release manifest offers, and
+/// automatic installs. Polls while the update service is checking, downloading or
+/// switching.
+#[island]
+pub fn UpdatesLive(initial: UpdateStatus) -> impl IntoView {
+    mark_hydrated();
+    let st = RwSignal::new(initial);
+    let error = RwSignal::new(None::<String>);
+    let pending = RwSignal::new(false);
+    // Extra refreshes after a request: the path unit starts the root service
+    // asynchronously, so the status it writes appears a moment later.
+    let settle = RwSignal::new(0u32);
+
+    let refresh = move || {
+        spawn_local(async move {
+            match update_status().await {
+                Ok(v) => {
+                    st.set(v);
+                    error.set(None);
+                }
+                Err(e) => error.set(Some(format!("Could not read update status: {e}"))),
+            }
+        });
+    };
+
+    // A check or switch is quick, but the download is not: poll while the
+    // service is working so the page shows the progress it wrote.
+    Effect::new(move |_| {
+        refresh();
+        set_interval(
+            move || {
+                let left = settle.get_untracked();
+                if st.with(UpdateStatus::busy) || pending.get_untracked() || left > 0 {
+                    if left > 0 {
+                        settle.set(left - 1);
+                    }
+                    refresh();
+                }
+            },
+            std::time::Duration::from_secs(3),
+        );
+    });
+
+    let send = move |mode: &'static str| {
+        pending.set(true);
+        spawn_local(async move {
+            match update_request(mode.to_owned()).await {
+                Ok(v) => {
+                    st.set(v);
+                    error.set(None);
+                }
+                Err(e) => error.set(Some(e.to_string())),
+            }
+            settle.set(4);
+            pending.set(false);
+        });
+    };
+
+    let phase_pill = move || {
+        st.with(|s| {
+            let (class, label) = match s.phase.as_str() {
+                "error" => ("pill pill-off", "error"),
+                "update-available" => ("pill pill-info", "update available"),
+                "up-to-date" | "done" => ("pill pill-on", "up to date"),
+                "checking" | "downloading" | "installing" => ("pill pill-info", "working"),
+                _ => ("pill", "idle"),
+            };
+            view! { <span class=class>{label}</span> }
+        })
+    };
+
+    view! {
+        <div class="card">
+            <h2>"System updates"</h2>
+            <p class="intro">
+                "An update replaces the whole system closure: the sensr binaries, the daemons and every package they use, including the kernel, atomically. The previous generation stays on the box for rollback."
+            </p>
+            <dl class="stat-tiles" aria-label="Update state">
+                <div>
+                    <dt>"Running release"</dt>
+                    <dd id="update-current">{move || st.with(|s| s.current.label().to_string())}</dd>
+                </div>
+                <div>
+                    <dt>"Image"</dt>
+                    <dd>{move || st.with(|s| s.current.image.clone())}</dd>
+                </div>
+                <div>
+                    <dt>"Status"</dt>
+                    <dd>{phase_pill()} " " {move || st.with(|s| s.message.clone())}</dd>
+                </div>
+                <div>
+                    <dt>"Last check"</dt>
+                    <dd>{move || st.with(|s| s.last_check.clone()).unwrap_or_else(|| "never".to_owned())}</dd>
+                </div>
+            </dl>
+
+            {move || st.with(|s| match &s.available {
+                None => view! {
+                    <p class="muted" id="update-available-none">"No newer system has been found."</p>
+                }.into_any(),
+                Some(a) => view! {
+                    <div class="card" id="update-available">
+                        <h3>{format!("Release {} is available", a.label())}</h3>
+                        {(!a.notes.is_empty()).then(|| view! { <p>{a.notes.clone()}</p> })}
+                        <p class="muted small">
+                            "sha256 " <code>{a.sha256.trim_start_matches("sha256:").chars().take(16).collect::<String>()}</code>
+                        </p>
+                    </div>
+                }.into_any(),
+            })}
+
+            <div class="banner-actions">
+                <button type="button" class="btn secondary"
+                    disabled=move || pending.get()
+                    on:click=move |_| send("check")>"Check for updates"</button>
+                <button type="button" class="btn"
+                    disabled=move || pending.get() || st.with(|s| s.busy() || !s.has_update())
+                    on:click=move |_| send("install")>"Install update"</button>
+            </div>
+
+            <h3>"Automatic updates"</h3>
+            <p>
+                {move || if st.with(|s| s.auto) {
+                    "On: the timer checks the manifest and installs a newer system. sensr restarts its services for a few seconds while it switches."
+                } else {
+                    "Off: the timer only checks, and an update waits for the button above."
+                }}
+            </p>
+            <button type="button" class="btn secondary"
+                aria-pressed=move || st.with(|s| s.auto).to_string()
+                disabled=move || pending.get()
+                on:click=move |_| send(if st.get_untracked().auto { "auto-off" } else { "auto-on" })>
+                {move || if st.with(|s| s.auto) { "Turn automatic updates off" } else { "Turn automatic updates on" }}
+            </button>
+
+            {move || error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
+            <p class="muted small">
+                "Manifest: " <code>{move || st.with(|s| s.manifest_url.clone())}</code>
+            </p>
         </div>
     }
 }

@@ -335,3 +335,48 @@ fn mac_alias_follows_the_neighbour_table() {
     assert!(f.refresh(&doc, 29).updates.is_empty());
     assert_eq!(f.refresh(&doc, 30).updates[0].1.nets.len(), 2);
 }
+
+/// A feed that has never been fetched is almost always the boot-time DNS race,
+/// not a dead URL: retry it in seconds so GeoIP tables are not empty for
+/// minutes while the first firewall checks run.
+#[test]
+fn never_fetched_source_retries_soon() {
+    let m = Meta {
+        url: "https://www.ipdeny.com/ipblocks/data/aggregated/cn-aggregated.zone".into(),
+        failures: 1,
+        attempted_at: Some(1_000),
+        error: Some("io: failed to lookup address information: Name or service not known".into()),
+        ..Meta::default()
+    };
+    assert_eq!(retry_at(&m), 1_000 + EARLY_RETRY_AFTER);
+    // and it still backs off if it keeps failing
+    let m = Meta { failures: 5, ..m };
+    assert_eq!(retry_at(&m), 1_000 + EARLY_RETRY_AFTER * 16);
+}
+
+/// A source that worked before and then failed keeps the cautious retry: its
+/// last-good content is still installed, so there is no hurry.
+#[test]
+fn previously_fetched_source_keeps_long_retry() {
+    let m = Meta {
+        url: "https://www.spamhaus.org/drop/drop.txt".into(),
+        failures: 1,
+        attempted_at: Some(1_000),
+        fetched_at: Some(900),
+        ..Meta::default()
+    };
+    assert_eq!(retry_at(&m), 1_000 + RETRY_AFTER);
+}
+
+/// A URL the server answers "404" is not a boot race: keep the long retry.
+#[test]
+fn definitive_http_error_keeps_long_retry() {
+    let m = Meta {
+        url: "https://download.db-ip.com/free/dbip-country-lite-2026-11.csv.gz".into(),
+        failures: 1,
+        attempted_at: Some(1_000),
+        error: Some("HTTP status 404".into()),
+        ..Meta::default()
+    };
+    assert_eq!(retry_at(&m), 1_000 + RETRY_AFTER);
+}

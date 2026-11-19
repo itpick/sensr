@@ -1,5 +1,7 @@
 <p align="center"><img src="docs/logo.svg" alt="sensr" width="220"></p>
 
+<p align="center"><img src="docs/ui-dashboard.png" alt="sensr web UI: dashboard with system information, CPU and memory, interfaces, gateways and traffic graphs" width="880"></p>
+
 A firewall and router OS written in Rust on NixOS. The goal is feature parity with
 [OPNsense](https://opnsense.org/), including its Business Edition features, plus
 atomic upgrades, rollback and a typed, tested configuration model.
@@ -24,6 +26,24 @@ hardware in the mainline kernel. NixOS adds reproducible images and generation-b
 rollback. OPNsense's own issue tracker shows the rest: most recurring bugs are
 config-apply races, migrations and upgrade regressions, and typed Rust and a declarative
 OS can design those out.
+
+## Hardware
+
+Targets: x86-64 (UEFI installer ISO, qcow2 image), Raspberry Pi 5 and
+Raspberry Pi 4. Both Pi images boot straight from the card with the mainline
+kernel, and bind each interface to a NIC by MAC address.
+
+| Board | RAM | Notes |
+|---|---|---|
+| Raspberry Pi 4 | 2 GB minimum | Onboard `genet` plus one USB NIC is enough for a small home network. |
+| Raspberry Pi 4 | 4 GB recommended | Headroom for IDS, large blocklists and connection tracking. |
+| Raspberry Pi 5 | 2 GB usable, 4 GB and up recommended | Faster CPU and PCIe; 2.5/5 GbE USB NICs. |
+| x86-64 | 2 GB minimum, 4 GB recommended | Under QEMU/KVM or on bare metal. |
+
+2 GB is the floor: the firewall, DHCP, DNS, NAT and the web UI fit in it.
+More RAM is what makes Suricata, big DNS blocklists and a busy connection
+table comfortable. The Pi 4 image is what this project runs on at home, on
+both the 2 GB and 4 GB boards.
 
 ## Research (written with Fable)
 

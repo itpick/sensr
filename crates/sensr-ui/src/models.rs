@@ -1724,6 +1724,710 @@ impl GridModel for HostOverride {
     }
 }
 
+// ---------------------------------------------------------------- System › Gateways
+
+/// IPv4 or IPv6 next hop.
+pub const GATEWAY_FAMILIES: &[(&str, &str)] = &[("inet", "IPv4"), ("inet6", "IPv6")];
+
+/// System › Gateways › Configuration: one next hop.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Gateway {
+    /// Object key.
+    pub uuid: String,
+    /// Enabled.
+    pub enabled: bool,
+    /// The name rules and groups refer to.
+    pub name: String,
+    /// Free text.
+    pub description: String,
+    /// Interface the next hop is reached through.
+    pub interface: String,
+    /// `inet` or `inet6`.
+    pub family: String,
+    /// Next-hop address; empty for a gateway learned from DHCP, PPP or router
+    /// advertisements on the interface.
+    pub address: String,
+    /// Candidate for the default route.
+    pub default_route: bool,
+    /// The next hop is outside the interface's subnet.
+    pub far: bool,
+    /// Probe the gateway to detect failure.
+    pub monitor: bool,
+    /// Address to probe; empty probes the gateway address.
+    pub monitor_address: String,
+    /// Ranking among default-route candidates, 0 to 255: lower wins.
+    pub priority: u32,
+    /// Share of the traffic in a load-balancing group, 1 to 10.
+    pub weight: u32,
+    /// Treat the gateway as down whatever the probes say.
+    pub force_down: bool,
+}
+
+impl Default for Gateway {
+    fn default() -> Self {
+        Self {
+            uuid: String::new(),
+            enabled: false,
+            name: String::new(),
+            description: String::new(),
+            interface: String::new(),
+            family: "inet".into(),
+            address: String::new(),
+            default_route: false,
+            far: false,
+            monitor: true,
+            monitor_address: String::new(),
+            priority: 255,
+            weight: 1,
+            force_down: false,
+        }
+    }
+}
+
+impl FormModel for Gateway {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enable", K::Checkbox),
+            F::new("name", "Name", K::Text)
+                .required()
+                .help("Name of the gateway, used by routes, groups and rules (GW_WAN)."),
+            F::new("description", "Description", K::Text),
+            F::new("interface", "Interface", K::Choice(ChoiceSet::Interfaces))
+                .required()
+                .help("Interface the gateway is reached through."),
+            F::new("family", "Address Family", K::Select(GATEWAY_FAMILIES)),
+            F::new("address", "Gateway", K::Ip).help(
+                "Next-hop address. Leave empty for a gateway learned from DHCP, PPP or router advertisements on the interface.",
+            ),
+            F::new("default_route", "Default gateway", K::Checkbox)
+                .help("Use this gateway for the default route. With several candidates the priority decides."),
+            F::new("far", "Far gateway", K::Checkbox)
+                .help("The next hop is outside the interface's subnet."),
+            F::new("monitor", "Enable gateway monitoring", K::Checkbox)
+                .help("Probe the gateway and take it out of service when it stops answering."),
+            F::new("monitor_address", "Monitor IP", K::Ip)
+                .help("Address to probe instead of the gateway address."),
+            F::new(
+                "priority",
+                "Priority",
+                K::Number {
+                    min: 0,
+                    max: 255,
+                },
+            )
+            .help("Lower wins when several default gateways are available."),
+            F::new(
+                "weight",
+                "Weight",
+                K::Number { min: 1, max: 10 },
+            )
+            .help("Share of the traffic when the gateway joins a load-balancing group."),
+            F::new("force_down", "Force down", K::Checkbox)
+                .help("Keep the gateway out of service regardless of the probes."),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for Gateway {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::bool("enabled", "Enabled"),
+            Column::text("name", "Name"),
+            Column::text("interface", "Interface"),
+            Column::text("address", "Gateway"),
+            Column::text("family", "Family"),
+            Column::bool("default_route", "Default"),
+            Column::bool("monitor", "Monitor"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+}
+
+/// LAGG distribution protocol.
+pub const LAGG_PROTOCOLS: &[(&str, &str)] = &[
+    ("lacp", "LACP"),
+    ("failover", "Failover"),
+    ("loadbalance", "Load balancing"),
+    ("roundrobin", "Round robin"),
+    ("none", "None"),
+];
+
+/// Interfaces › Devices › Bridge: a layer-2 bridge between devices.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Bridge {
+    /// Object key.
+    pub uuid: String,
+    /// Device name.
+    pub device: String,
+    /// Member devices.
+    pub members: Vec<String>,
+    /// Keep an IPv6 link-local address on the bridge.
+    pub link_local: bool,
+    /// Learned address table size.
+    pub max_addresses: Option<u32>,
+    /// Learned address timeout in seconds.
+    pub ageing_time: Option<u32>,
+    /// Free text.
+    pub description: String,
+}
+
+impl FormModel for Bridge {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("device", "Device", K::Text)
+                .required()
+                .help("Name of the bridge, for example br0."),
+            F::new("members", "Member devices", K::Lines)
+                .required()
+                .help("One device per line, for example ue1. Cards are named by the assignment they carry."),
+            F::new("link_local", "Link-local address", K::Checkbox)
+                .help("Keep an IPv6 link-local address on the bridge."),
+            F::new(
+                "max_addresses",
+                "Address table size",
+                K::Number {
+                    min: 1,
+                    max: 1_000_000,
+                },
+            )
+            .help("Leave empty for the kernel default."),
+            F::new(
+                "ageing_time",
+                "Ageing time (seconds)",
+                K::Number {
+                    min: 1,
+                    max: 1_000_000,
+                },
+            )
+            .help("How long a learned address is kept. Empty for the kernel default."),
+            F::new("description", "Description", K::Text),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for Bridge {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("device", "Device"),
+            Column::list("members", "Members"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
+/// Interfaces › Devices › LAGG: a link aggregate.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Lagg {
+    /// Object key.
+    pub uuid: String,
+    /// Device name.
+    pub device: String,
+    /// Member devices.
+    pub members: Vec<String>,
+    /// Distribution protocol.
+    pub protocol: String,
+    /// Preferred member for failover.
+    pub primary_member: String,
+    /// LACP fast (1 s) timeout.
+    pub lacp_fast_timeout: bool,
+    /// MTU.
+    pub mtu: Option<u16>,
+    /// Free text.
+    pub description: String,
+}
+
+impl FormModel for Lagg {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("device", "Device", K::Text)
+                .required()
+                .help("Name of the aggregate, for example bond0."),
+            F::new("members", "Member devices", K::Lines)
+                .required()
+                .help("One device per line. Members must not carry an assignment of their own."),
+            F::new("protocol", "Protocol", K::Select(LAGG_PROTOCOLS)),
+            F::new("primary_member", "Primary member", K::Text)
+                .help("Member the failover protocol prefers; empty picks the first."),
+            F::new("lacp_fast_timeout", "LACP fast timeout", K::Checkbox),
+            F::new(
+                "mtu",
+                "MTU",
+                K::Number {
+                    min: 1280,
+                    max: 9000,
+                },
+            ),
+            F::new("description", "Description", K::Text),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for Lagg {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("device", "Device"),
+            Column::list("members", "Members"),
+            Column::text("protocol", "Protocol"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
+/// Interfaces › Devices › Loopback: an extra `lo<id>` device.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoopbackDevice {
+    /// Object key.
+    pub uuid: String,
+    /// Device number.
+    pub id: u32,
+    /// Free text.
+    pub description: String,
+}
+
+impl FormModel for LoopbackDevice {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("id", "Device number", K::Number { min: 1, max: 9999 })
+                .required()
+                .help("The device is named lo<number>."),
+            F::new("description", "Description", K::Text).required(),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for LoopbackDevice {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("id", "Device"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
+/// How a virtual IP is provided.
+pub const VIP_MODES: &[(&str, &str)] = &[
+    ("ip_alias", "IP alias"),
+    ("proxy_arp", "Proxy ARP"),
+    ("carp", "Shared address (CARP/VRRP)"),
+];
+
+/// Interfaces › Virtual IPs › Settings.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VirtualIp {
+    /// Object key.
+    pub uuid: String,
+    /// Interface carrying the address.
+    pub interface: String,
+    /// The address with its prefix length.
+    pub address: String,
+    /// How the address is provided.
+    pub mode: String,
+    /// Virtual host id for a shared address, 1 to 255.
+    pub vhid: u32,
+    /// Advertisement interval base in seconds.
+    pub advbase: u32,
+    /// Advertisement skew; higher loses elections.
+    pub advskew: u32,
+    /// Shared secret (write-only).
+    pub password: String,
+    /// Do not bind services to the address.
+    pub no_bind: bool,
+    /// Free text.
+    pub description: String,
+}
+
+impl FormModel for VirtualIp {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("interface", "Interface", K::Choice(ChoiceSet::Interfaces))
+                .required()
+                .help("Interface the address belongs to."),
+            F::new("address", "Address", K::Cidr)
+                .required()
+                .help("The address with its prefix length, for example 192.168.1.2/24."),
+            F::new("mode", "Type", K::Select(VIP_MODES)),
+            F::new(
+                "vhid",
+                "Virtual host ID",
+                K::Number {
+                    min: 1,
+                    max: 255,
+                },
+            )
+            .help("Unique per interface. Only for a shared address."),
+            F::new(
+                "advbase",
+                "Advertisement base (seconds)",
+                K::Number {
+                    min: 1,
+                    max: 254,
+                },
+            ),
+            F::new(
+                "advskew",
+                "Advertisement skew",
+                K::Number {
+                    min: 0,
+                    max: 254,
+                },
+            )
+            .help("Higher skew loses the election."),
+            F::new("password", "Password", K::Secret).help(
+                "Shared secret of the failover pair. Write-only: leave empty to keep the stored one.",
+            ),
+            F::new("no_bind", "Do not bind services", K::Checkbox)
+                .help("Services listen on the wildcard address instead of this one."),
+            F::new("description", "Description", K::Text),
+        ];
+        FIELDS
+    }
+
+    fn validate(&self) -> Vec<FieldError> {
+        let mut e = Vec::new();
+        if self.mode == "carp" && !self.uuid.is_empty() && self.password.is_empty() {
+            // A new address needs the secret; an existing one keeps it.
+        }
+        if self.mode == "carp" && self.uuid.is_empty() && self.password.is_empty() {
+            e.push(FieldError::new(
+                "password",
+                "A shared address needs the secret it shares with its peer.",
+            ));
+        }
+        e
+    }
+}
+
+impl GridModel for VirtualIp {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("interface", "Interface"),
+            Column::text("address", "Address"),
+            Column::text("mode", "Type"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
+/// Firewall › Groups: interface groups rules can name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InterfaceGroup {
+    /// Object key.
+    pub uuid: String,
+    /// The name rules use.
+    pub name: String,
+    /// Member interfaces.
+    pub members: Vec<String>,
+    /// Include every WireGuard instance.
+    pub wireguard: bool,
+    /// Evaluation order between groups.
+    pub sequence: u32,
+    /// Hide the group from the interface menu.
+    pub hidden: bool,
+    /// Free text.
+    pub description: String,
+}
+
+impl FormModel for InterfaceGroup {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("name", "Name", K::Text).required().help(
+                "Name rules use for this group; it must differ from every interface identifier.",
+            ),
+            F::new("members", "Member interfaces", K::Lines)
+                .help("One interface per line, for example lan or opt1."),
+            F::new("wireguard", "Include every WireGuard instance", K::Checkbox),
+            F::new(
+                "sequence",
+                "Sequence",
+                K::Number {
+                    min: 0,
+                    max: 1_000_000,
+                },
+            )
+            .help("Groups with a lower sequence are evaluated first."),
+            F::new("hidden", "Hide from the interface menu", K::Checkbox),
+            F::new("description", "Description", K::Text),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for InterfaceGroup {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("name", "Name"),
+            Column::list("members", "Members"),
+            Column::bool("hidden", "Hidden"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
+/// System › Access › Users: a local account.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct User {
+    /// Object key.
+    pub uuid: String,
+    /// Login name.
+    pub name: String,
+    /// Numeric user id.
+    pub uid: u32,
+    /// Full name or note.
+    pub description: String,
+    /// Account locked.
+    pub disabled: bool,
+    /// New password (write-only); empty keeps the stored hash.
+    pub password: String,
+    /// Keys allowed to log in over SSH.
+    pub authorized_keys: Vec<String>,
+    /// Groups the user belongs to.
+    pub groups: Vec<String>,
+    /// Login shell.
+    pub shell: String,
+}
+
+impl FormModel for User {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("name", "Username", K::Text)
+                .required()
+                .help("Login name."),
+            F::new(
+                "uid",
+                "User ID",
+                K::Number {
+                    min: 0,
+                    max: 65_000,
+                },
+            )
+            .help("Numeric id, unique on the system. 0 is root; leave it empty on a new account and the next free id is assigned."),
+            F::new("description", "Full name", K::Text),
+            F::new("disabled", "Disabled", K::Checkbox)
+                .help("A disabled account cannot log in, over the web GUI or SSH."),
+            F::new("password", "Password", K::Secret).help(
+                "Write-only: leave empty to keep the stored password. Changing it does not log the user out.",
+            ),
+            F::new("authorized_keys", "Authorized SSH keys", K::Lines)
+                .help("One public key per line, as in authorized_keys."),
+            F::new("groups", "Groups", K::Lines).help("One group name per line."),
+            F::new("shell", "Login shell", K::Text)
+                .help("Absolute path; leave empty for the system default."),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for User {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("name", "Username"),
+            Column::text("uid", "User ID"),
+            Column::text("description", "Full name"),
+            Column::list("groups", "Groups"),
+            Column::bool("disabled", "Disabled"),
+        ];
+        C
+    }
+
+    // The flag is inverted, so the bulk enable/disable buttons do not fit;
+    // the column has a plain Disabled marker instead.
+    const TOGGLE: Option<&'static str> = None;
+}
+
+/// System › Access › Groups: a local group and its privileges.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UserGroup {
+    /// Object key.
+    pub uuid: String,
+    /// Group name.
+    pub name: String,
+    /// Numeric group id.
+    pub gid: u32,
+    /// Free text.
+    pub description: String,
+    /// Privileges granted to members.
+    pub privileges: Vec<String>,
+}
+
+impl FormModel for UserGroup {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("name", "Group name", K::Text).required(),
+            F::new(
+                "gid",
+                "Group ID",
+                K::Number {
+                    min: 0,
+                    max: 65_000,
+                },
+            )
+            .help("Numeric id, unique on the system. Leave it empty on a new group and the next free id is assigned."),
+            F::new("description", "Description", K::Text),
+            F::new("privileges", "Privileges", K::Lines).help(
+                "One privilege per line, for example page-all (the whole web GUI) or page-firewall-rules.",
+            ),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for UserGroup {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("name", "Group name"),
+            Column::text("gid", "Group ID"),
+            Column::list("privileges", "Privileges"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
+/// Failure condition of a gateway group.
+pub const GROUP_TRIGGERS: &[(&str, &str)] = &[
+    ("down", "Member down"),
+    ("down_loss", "Packet loss"),
+    ("down_latency", "High latency"),
+    ("down_loss_latency", "Packet loss or high latency"),
+];
+
+/// System › Gateways › Group: failover or load balancing across gateways.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GatewayGroup {
+    /// Object key.
+    pub uuid: String,
+    /// The name rules refer to.
+    pub name: String,
+    /// Free text.
+    pub description: String,
+    /// Members, one `GATEWAY:tier` per line.
+    pub members: Vec<String>,
+    /// Failure condition.
+    pub trigger: String,
+}
+
+impl FormModel for GatewayGroup {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("name", "Group name", K::Text)
+                .required()
+                .help("Name rules and routes use for this group."),
+            F::new("description", "Description", K::Text),
+            F::new("members", "Gateways", K::Lines).help(
+                "One member per line as GATEWAY:tier, for example GW_WAN:1. The lowest tier with a member that is up carries the traffic; members of one tier share it by weight.",
+            ),
+            F::new("trigger", "Trigger Level", K::Select(GROUP_TRIGGERS))
+                .help("What counts as the member being down."),
+        ];
+        FIELDS
+    }
+
+    fn validate(&self) -> Vec<FieldError> {
+        let mut e = Vec::new();
+        for m in &self.members {
+            let ok = m.rsplit_once(':').is_some_and(|(g, t)| {
+                !g.is_empty() && t.parse::<u8>().is_ok_and(|t| (1..=5).contains(&t))
+            });
+            if !ok {
+                e.push(FieldError::new(
+                    "members",
+                    format!("{m}: expected GATEWAY:tier with a tier from 1 to 5."),
+                ));
+            }
+        }
+        e
+    }
+}
+
+impl GridModel for GatewayGroup {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("name", "Group name"),
+            Column::list("members", "Gateways"),
+            Column::text("trigger", "Trigger"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
+/// System › Routes › Configuration: a static route.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StaticRoute {
+    /// Object key.
+    pub uuid: String,
+    /// Installed when true.
+    pub enabled: bool,
+    /// Destination network.
+    pub network: String,
+    /// Next hop: a gateway or group name.
+    pub gateway: String,
+    /// Free text.
+    pub description: String,
+}
+
+impl FormModel for StaticRoute {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enable", K::Checkbox),
+            F::new("network", "Destination network", K::Cidr)
+                .required()
+                .help("Network the route is for, for example 10.0.0.0/8."),
+            F::new("gateway", "Gateway", K::Text).required().help(
+                "Name of the gateway or gateway group the traffic goes to. Both families must match the destination.",
+            ),
+            F::new("description", "Description", K::Text),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for StaticRoute {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::bool("enabled", "Enabled"),
+            Column::text("network", "Network"),
+            Column::text("gateway", "Gateway"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+}
+
 // ---------------------------------------------------------------- VPN › WireGuard
 
 fn is_wg_key(s: &str) -> bool {
@@ -2241,6 +2945,26 @@ pub enum GridId {
     IdsSuppressions,
     /// Services › Intrusion Detection › User defined.
     IdsUserRules,
+    /// System › Gateways › Configuration.
+    Gateways,
+    /// System › Gateways › Group.
+    GatewayGroups,
+    /// System › Routes › Configuration.
+    StaticRoutes,
+    /// Interfaces › Devices › Bridge.
+    Bridges,
+    /// Interfaces › Devices › LAGG.
+    Laggs,
+    /// Interfaces › Devices › Loopback.
+    Loopbacks,
+    /// Interfaces › Virtual IPs › Settings.
+    VirtualIps,
+    /// Firewall › Groups.
+    FirewallGroups,
+    /// System › Access › Users.
+    Users,
+    /// System › Access › Groups.
+    UserGroups,
 }
 
 fn sanitize(scope: &Option<String>, default: &str) -> String {
@@ -2358,6 +3082,16 @@ impl GridId {
             Self::WgPeers => GridMeta::of::<WgPeer>(),
             Self::IdsSuppressions => GridMeta::of::<IdsSuppression>(),
             Self::IdsUserRules => GridMeta::of::<IdsUserRule>(),
+            Self::Gateways => GridMeta::of::<Gateway>(),
+            Self::GatewayGroups => GridMeta::of::<GatewayGroup>(),
+            Self::StaticRoutes => GridMeta::of::<StaticRoute>(),
+            Self::Bridges => GridMeta::of::<Bridge>(),
+            Self::Laggs => GridMeta::of::<Lagg>(),
+            Self::Loopbacks => GridMeta::of::<LoopbackDevice>(),
+            Self::VirtualIps => GridMeta::of::<VirtualIp>(),
+            Self::FirewallGroups => GridMeta::of::<InterfaceGroup>(),
+            Self::Users => GridMeta::of::<User>(),
+            Self::UserGroups => GridMeta::of::<UserGroup>(),
         }
     }
 
@@ -2383,6 +3117,16 @@ impl GridId {
             Self::WgPeers => go::<WgPeer>(base, inputs),
             Self::IdsSuppressions => go::<IdsSuppression>(base, inputs),
             Self::IdsUserRules => go::<IdsUserRule>(base, inputs),
+            Self::Gateways => go::<Gateway>(base, inputs),
+            Self::GatewayGroups => go::<GatewayGroup>(base, inputs),
+            Self::StaticRoutes => go::<StaticRoute>(base, inputs),
+            Self::Bridges => go::<Bridge>(base, inputs),
+            Self::Laggs => go::<Lagg>(base, inputs),
+            Self::Loopbacks => go::<LoopbackDevice>(base, inputs),
+            Self::VirtualIps => go::<VirtualIp>(base, inputs),
+            Self::FirewallGroups => go::<InterfaceGroup>(base, inputs),
+            Self::Users => go::<User>(base, inputs),
+            Self::UserGroups => go::<UserGroup>(base, inputs),
         }
     }
 
@@ -2512,7 +3256,17 @@ kinds! {
         WgInstance => WgInstances, "instance",
         WgPeer => WgPeers, "peer",
         IdsSuppression => IdsSuppressions, "suppression",
-        IdsUserRule => IdsUserRules, "rule"
+        IdsUserRule => IdsUserRules, "rule",
+        Gateway => Gateways, "gateway",
+        GatewayGroup => GatewayGroups, "group",
+        StaticRoute => StaticRoutes, "route",
+        Bridge => Bridges, "bridge",
+        Lagg => Laggs, "aggregate",
+        LoopbackDevice => Loopbacks, "loopback",
+        VirtualIp => VirtualIps, "virtual IP",
+        InterfaceGroup => FirewallGroups, "group",
+        User => Users, "user",
+        UserGroup => UserGroups, "group"
 }
 
 #[cfg(test)]
@@ -2562,6 +3316,16 @@ mod tests {
             GridId::WgPeers,
             GridId::IdsSuppressions,
             GridId::IdsUserRules,
+            GridId::Gateways,
+            GridId::GatewayGroups,
+            GridId::StaticRoutes,
+            GridId::Bridges,
+            GridId::Laggs,
+            GridId::Loopbacks,
+            GridId::VirtualIps,
+            GridId::FirewallGroups,
+            GridId::Users,
+            GridId::UserGroups,
         ] {
             let meta = g.meta();
             assert!(!meta.columns.is_empty());

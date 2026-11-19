@@ -11,6 +11,7 @@ expression: "files[\"update.args\"]"
 --no-merge
 --no-reload
 --no-test
+--fail
 --enable-conf
 /run/sensr/suricata/enable.conf
 --disable-conf

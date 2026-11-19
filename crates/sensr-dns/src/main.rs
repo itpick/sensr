@@ -83,7 +83,7 @@ fn main() -> Result<()> {
             // A configuration change while a refresh runs (its path unit
             // cannot start it twice) is picked up by running again.
             let mut text = fs::read_to_string(&cli.config).unwrap_or_default();
-            loop {
+            let st = loop {
                 let cfg = load(&cli.config)?;
                 let control = Control::new(&SystemRunner, &cfg.control_conf);
                 let st = update::run(
@@ -103,10 +103,20 @@ fn main() -> Result<()> {
                 );
                 let again = fs::read_to_string(&cli.config).unwrap_or_default();
                 if again == text {
-                    break;
+                    break st;
                 }
                 tracing::info!("configuration changed during the refresh; running again");
                 text = again;
+            };
+            // A list with no copy at all means the first download failed
+            // (typically a refresh that raced the WAN at boot). Fail the
+            // unit so systemd retries; the timer would wait an hour.
+            let missing = update::missing(&st);
+            if !missing.is_empty() {
+                anyhow::bail!(
+                    "no copy of {}; failing so the unit retries",
+                    missing.join(", ")
+                );
             }
         }
         Cmd::Watch => watch(&cli.config)?,

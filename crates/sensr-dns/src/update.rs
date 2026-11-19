@@ -94,6 +94,20 @@ pub struct Status {
     pub policies: Vec<PolicyStatus>,
 }
 
+/// Sources with no usable copy at all, because their first fetch failed.
+/// The service fails on these so systemd retries soon; otherwise a refresh
+/// that raced the WAN at boot would leave the list empty until the next
+/// timer (an hour later).
+pub fn missing(status: &Status) -> Vec<&str> {
+    status
+        .policies
+        .iter()
+        .flat_map(|p| p.sources.iter())
+        .filter(|s| s.error.is_some() && s.fetched.is_none())
+        .map(|s| s.url.as_str())
+        .collect()
+}
+
 /// Seconds since the epoch as RFC 3339 UTC.
 pub fn rfc3339(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
@@ -492,6 +506,7 @@ mod tests {
         assert_eq!(srcs[0].entries, 2);
         assert_eq!(srcs[1].url, "https://down.example/list.txt");
         assert!(srcs[1].error.as_deref().unwrap().contains("503"));
+        assert_eq!(missing(&st), ["https://down.example/list.txt"]);
         let include = fs::read_to_string(&paths.include).unwrap();
         assert!(include.contains("local-zone: \"ads.example.com.\" always_null"));
         assert!(include.contains("local-data: \"tracker.example.net. A 0.0.0.0\""));

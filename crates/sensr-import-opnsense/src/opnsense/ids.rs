@@ -485,8 +485,8 @@ mod tests {
 <opnsense>
   <interfaces>
     <wan><if>igc0</if><enable>1</enable><ipaddr>dhcp</ipaddr></wan>
-    <lan><if>igc1</if><enable>1</enable><ipaddr>192.168.68.1</ipaddr><subnet>22</subnet></lan>
-    <opt1><if>igc2</if><enable>1</enable><ipaddr>192.168.72.1</ipaddr><subnet>22</subnet></opt1>
+    <lan><if>igc1</if><enable>1</enable><ipaddr>192.168.1.1</ipaddr><subnet>22</subnet></lan>
+    <opt1><if>igc2</if><enable>1</enable><ipaddr>192.168.2.1</ipaddr><subnet>22</subnet></opt1>
   </interfaces>
   <OPNsense>{body}</OPNsense>
 </opnsense>"#
@@ -506,7 +506,7 @@ mod tests {
       </policies>
       <userDefinedRules>
         <rule uuid="33333333-61be-4036-ae90-57b4bc44e243">
-          <enabled>1</enabled><source>192.168.68.0/22</source><destination/><fingerprint/>
+          <enabled>1</enabled><source>192.168.1.0/22</source><destination/><fingerprint/>
           <description>lan bypass</description><action>pass</action><bypass>1</bypass>
         </rule>
       </userDefinedRules>

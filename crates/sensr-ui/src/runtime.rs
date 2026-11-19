@@ -246,6 +246,110 @@ pub struct Ipv6Status {
     pub now: u64,
 }
 
+/// The running system, as the update service reports it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateCurrent {
+    /// `nixos-version` of the running generation.
+    #[serde(default)]
+    pub version: String,
+    /// Release tag (`v0.1.1`) when the running store path matched a manifest.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// Image variant (`pi4`, `pi5`, `qcow`, `iso`).
+    #[serde(default)]
+    pub image: String,
+}
+
+impl UpdateCurrent {
+    /// What to call the running system: its release tag when known.
+    pub fn label(&self) -> &str {
+        match self.tag.as_deref() {
+            Some(tag) if !tag.is_empty() => tag,
+            _ => &self.version,
+        }
+    }
+}
+
+/// A newer system the manifest offers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateCandidate {
+    /// Release tag (`v0.1.1`), when the manifest carries one.
+    #[serde(default)]
+    pub tag: String,
+    /// Version string of the offered generation.
+    #[serde(default)]
+    pub version: String,
+    /// sha256 of the closure archive.
+    #[serde(default)]
+    pub sha256: String,
+    /// Download URL.
+    #[serde(default)]
+    pub url: String,
+    /// Release notes, if the manifest carries any.
+    #[serde(default)]
+    pub notes: String,
+}
+
+/// State of the in-app updater, as `sensr-update` leaves it in
+/// `/run/sensr/updates/status.json` (nix/modules/updates.nix).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateStatus {
+    /// `idle`, `checking`, `update-available`, `downloading`, `installing`,
+    /// `up-to-date`, `done` or `error`.
+    #[serde(default)]
+    pub phase: String,
+    /// One line for the page.
+    #[serde(default)]
+    pub message: String,
+    /// Whether the timer installs by itself.
+    #[serde(default)]
+    pub auto: bool,
+    /// The running system.
+    #[serde(default)]
+    pub current: UpdateCurrent,
+    /// The offered system, when one was found.
+    #[serde(default)]
+    pub available: Option<UpdateCandidate>,
+    /// Manifest the service was built with.
+    #[serde(default)]
+    pub manifest_url: String,
+    /// Last check, RFC 3339.
+    #[serde(default)]
+    pub last_check: Option<String>,
+    /// Last successful install, RFC 3339.
+    #[serde(default)]
+    pub last_install: Option<String>,
+    /// When the status was written, RFC 3339.
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+impl UpdateCandidate {
+    /// What to call this release on the page: the tag, else the version.
+    pub fn label(&self) -> &str {
+        if self.tag.is_empty() {
+            &self.version
+        } else {
+            &self.tag
+        }
+    }
+}
+
+impl UpdateStatus {
+    /// True while the service is doing something the page should poll for.
+    pub fn busy(&self) -> bool {
+        matches!(
+            self.phase.as_str(),
+            "checking" | "downloading" | "installing"
+        )
+    }
+
+    /// Whether a newer system is ready to install.
+    pub fn has_update(&self) -> bool {
+        self.available.is_some()
+    }
+}
+
 /// Parses an agent reply; `null` (subsystem not running) and unknown shapes give the default.
 pub fn parse<T: serde::de::DeserializeOwned + Default>(v: Value) -> T {
     if v.is_null() {
@@ -340,6 +444,37 @@ mod tests {
         assert_eq!(v.groups["failover"], ["WAN_DHCP"]);
         assert_eq!(ms(g.latency_ms), "12.5 ms");
         assert_eq!(ms(None), "~");
+    }
+
+    #[test]
+    fn parses_the_updater_status() {
+        let s: UpdateStatus = parse(json!({
+            "phase": "update-available",
+            "message": "Version x is available",
+            "auto": true,
+            "current": {"version": "sd-card-26.11.1", "image": "pi4"},
+            "available": {
+                "tag": "v0.1.1", "version": "sd-card-26.11.2", "sha256": "abc", "url": "https://example/u",
+                "store_path": "/nix/store/x-nixos-system", "notes": "notes"
+            },
+            "manifest_url": "https://example/m.json",
+            "last_check": "2026-11-19T00:00:00Z",
+            "last_install": null,
+            "updated_at": "2026-11-19T00:00:00Z"
+        }));
+        assert!(!s.busy() && s.has_update() && s.auto);
+        assert_eq!(s.available.as_ref().unwrap().version, "sd-card-26.11.2");
+        assert_eq!(s.available.as_ref().unwrap().label(), "v0.1.1");
+        assert_eq!(s.current.image, "pi4");
+        // Without a remembered tag the label falls back to the version.
+        assert_eq!(s.current.label(), "sd-card-26.11.1");
+        let tagged: UpdateStatus = parse(json!({
+            "current": {"version": "sd-card-26.11.1", "tag": "v0.1.1", "image": "pi4"}
+        }));
+        assert_eq!(tagged.current.label(), "v0.1.1");
+        // An older service, or a disabled module, gives the defaults.
+        let e: UpdateStatus = parse(Value::Null);
+        assert!(!e.busy() && !e.has_update());
     }
 
     #[test]

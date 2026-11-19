@@ -28,6 +28,10 @@
 #                                no agent, seed folder or network involved),
 #                                and force the reboot 90 s later
 #   sensr-trial-health run       the gate (sensr-trial-health.service)
+#   sensr-trial-health revert    early in a trial boot: take this partition's
+#                                config.txt away again (the trial was armed by
+#                                copying config.txt.sensr-dormant over it), so
+#                                every reset from now on boots the installed OS
 #   sensr-trial-health confirm   keep this trial: no more checks, no timer
 #   sensr-trial-health status    what the gate saw last
 set -u
@@ -135,6 +139,93 @@ run() {
   done
 }
 
+# The trial installer's tryboot flag never reaches the kernel on every
+# downstream kernel (VyOS does not pass the reboot reason on), so a trial on
+# those is armed by copying the dormant config.txt.sensr-dormant over
+# config.txt on the trial's own FAT partition. That makes the trial the
+# default OS for every boot, not one. Count down seed/trial-boots-left here,
+# at sysinit and before anything can hang, and take config.txt away when it
+# runs out: the trial then gets its boots (the first one imports the seed and
+# pins the NICs; the gates need one more) and every reset after that runs the
+# installed OS, whether or not the gate ever gets to reboot. The image keeps
+# config.txt.sensr-dormant next to it, so a committed install (where the
+# dormant file is gone) is left alone.
+is_our_config() { # FILE
+  # The trial's own config, whether written by trial-install (the marker) or
+  # by the same layout by hand (os_prefix=sensr-trial/, which no other OS uses).
+  grep -q "^# sensr-pi5-trial-install" "$1" 2>/dev/null ||
+    grep -q "^os_prefix=sensr-trial/" "$1" 2>/dev/null
+}
+
+config_backup() { # DIR -> the previous OS's config on that FAT, if any
+  # Two layouts exist. When the trial's disk comes first in BOOT_ORDER, its
+  # config.txt is renamed config.txt.sensr-dormant while the trial runs. When
+  # the running OS's disk (NVMe here) comes first, the config it boots by is
+  # kept as config.<name>.txt (config.vyos.txt, ...) and config.txt is the
+  # trial's. Restore whichever is there; never our own.
+  local dir=$1 f
+  if [ -f "$dir/config.txt.sensr-dormant" ]; then
+    echo "$dir/config.txt.sensr-dormant"
+    return
+  fi
+  for f in "$dir"/config.*.txt; do
+    [ -e "$f" ] || continue
+    is_our_config "$f" && continue
+    echo "$f"
+    return
+  done
+}
+
+revert() {
+  is_trial || { log "not a trial boot"; exit 0; }
+  local dev mnt left backup done=
+  # This runs at sysinit, before udev has finished: give the disks' nodes a
+  # moment rather than skip the revert on a boot that is merely fast.
+  udevadm settle --timeout=15 2>/dev/null || true
+  mnt=$(mktemp -d)
+  # The boot partition can be the SD card's (FIRMWARE) or, on this board, the
+  # NVMe's EFI partition: try every FAT rather than only the label the image
+  # happens to use, or a trial armed on another one could never disarm itself.
+  for dev in $(blkid -c /dev/null -t TYPE=vfat -o device 2>/dev/null); do
+    [ -f "$mnt/config.txt" ] && umount "$mnt" 2>/dev/null
+    if ! mount -o rw "$dev" "$mnt" 2>/dev/null; then
+      log "cannot mount $dev: leaving its boot config alone"
+      continue
+    fi
+    if [ ! -f "$mnt/config.txt" ] || ! is_our_config "$mnt/config.txt"; then
+      umount "$mnt"
+      continue
+    fi
+    backup=$(config_backup "$mnt")
+    if [ -z "$backup" ]; then
+      log "$dev has the trial's config but no previous one: leaving it"
+      umount "$mnt"
+      continue
+    fi
+    left=2
+    if [ -r "$mnt/sensr/trial-boots-left" ]; then
+      read -r left < "$mnt/sensr/trial-boots-left" || true
+    fi
+    case $left in ''|*[!0-9]*) left=2 ;; esac
+    left=$((left - 1))
+    if [ "$left" -gt 0 ]; then
+      echo "$left" > "$mnt/sensr/trial-boots-left"
+      log "$left more trial boot(s) allowed"
+    else
+      cp -f "$backup" "$mnt/config.txt.new"
+      mv -f "$mnt/config.txt.new" "$mnt/config.txt"
+      rm -f "$mnt/sensr/trial-boots-left"
+      log "restored $dev/config.txt from $(basename "$backup"): the next reset boots the installed OS"
+    fi
+    sync
+    umount "$mnt"
+    done=1
+    break
+  done
+  rmdir "$mnt" 2>/dev/null || true
+  [ -n "$done" ] || log "no FAT with the trial's config.txt: leaving the boot config alone"
+}
+
 confirm() {
   if [ -e "$STATE/deadline" ]; then
     log "this trial has a hard deadline ($(cat "$STATE/deadline") s after boot) and is measure-only: nothing to confirm"
@@ -165,10 +256,11 @@ stream() {
 case ${1:-run} in
   detect) detect ;;
   run) run ;;
+  revert) revert ;;
   confirm) confirm ;;
   stream) stream ;;
   status)
     cat "$STATE/health" 2>/dev/null || echo "no health result yet"
     if [ -e "$STATE/confirmed" ]; then echo confirmed; fi ;;
-  *) echo "usage: sensr-trial-health detect|run|confirm|stream|status" >&2; exit 2 ;;
+  *) echo "usage: sensr-trial-health detect|run|revert|confirm|stream|status" >&2; exit 2 ;;
 esac

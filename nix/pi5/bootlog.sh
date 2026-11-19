@@ -8,6 +8,18 @@ set +e
 set -u
 stage=$1
 logdir=@seedDir@/boot-log
+mnt=${logdir%/sensr/boot-log}
+
+# The FAT partition is not always mounted yet: its by-label device only
+# appears when udev gets to it, which on a Pi 4 can be ~100 s in because the
+# WiFi SDIO controller's deferred probe holds the queue. If /boot/firmware is
+# not mounted, writing there lands on the root filesystem instead and is
+# hidden for ever once the FAT is mounted over it, so check first and let the
+# late retry (sensr-bootlog-retry) do the work when the mount is up.
+if ! mountpoint -q "$mnt"; then
+  systemctl start "$(systemd-escape -p --suffix=mount "$mnt")" 2>/dev/null
+  mountpoint -q "$mnt" || exit 0
+fi
 mkdir -p "$logdir" || exit 0
 
 # One counter per boot, shared by the stages of that boot.
@@ -35,6 +47,11 @@ tryboot=$(od -An -tu4 --endian=big /proc/device-tree/chosen/bootloader/tryboot 2
   echo "== journal"; journalctl -b --no-pager -o short-monotonic 2>&1 | tail -n 2000
 } > "$logdir/$n-$stage.txt.tmp" 2>&1
 mv "$logdir/$n-$stage.txt.tmp" "$logdir/$n-$stage.txt"
+# The box may be powered off before the FAT is flushed (a hang, a yanked
+# plug), and the writeback queue would take the file with it: only the
+# counter used to be synced, which is why boots 12-14 kept their early
+# captures and lost everything written afterwards.
+sync -f "$logdir/$n-$stage.txt"
 
 # Keep the last 10 boots.
 for f in "$logdir"/*-*.txt; do

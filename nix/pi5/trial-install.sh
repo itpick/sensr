@@ -214,7 +214,11 @@ install() {
   local fat
   fat=$(mktemp -d)
   mount_target_fat "$dev" "$fat"
-  trap 'umount "$fat" 2>/dev/null; rmdir "$fat" 2>/dev/null' EXIT
+  # The trap runs after this function's scope is gone, so it must not name the
+  # local: with set -u a failure otherwise reports "fat: unbound variable"
+  # instead of the error that stopped the install.
+  trial_fat=$fat
+  trap 'umount "${trial_fat:-}" 2>/dev/null; rmdir "${trial_fat:-}" 2>/dev/null' EXIT
   [ -e "$fat/current/system" ] || die "$image is not a sensr Pi 5 image (no current/ on its FAT partition)"
   mkdir -p "$fat/sensr"
   if [ -n "$seed" ]; then
@@ -224,6 +228,12 @@ install() {
   # The trial timer: sensr reboots (back to this OS) after N minutes unless
   # someone deletes the file; --commit removes it.
   echo "$minutes" > "$fat/sensr/reboot-after-minutes"
+  # Boots the trial may have before sensr-trial-health revert takes config.txt
+  # away again, when the trial is armed by copying config.txt.sensr-dormant
+  # over config.txt instead of the firmware's tryboot flag (see revert in
+  # trial-health.sh): the first boot imports the seed and pins the NICs, the
+  # second has them. Every reset after that boots the installed OS.
+  echo 2 > "$fat/sensr/trial-boots-left"
   [ -z "$health" ] || cp "$health" "$fat/sensr/trial-health.env"
   if [ "$mode" = before ]; then
     # Plain boots try DEVICE first: without config.txt they move on to the

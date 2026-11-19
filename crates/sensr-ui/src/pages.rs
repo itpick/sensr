@@ -4,14 +4,14 @@
 
 use crate::actions::{
     alias_feeds, dns_stats, field_choices, form_load, gateways_status, grid_fetch, ids_alerts,
-    insight_data, live_status, pd_status, revision_diff, revisions,
+    insight_data, live_status, pd_status, revision_diff, revisions, update_status,
 };
 use crate::api::{
     AlertPage, DiffLine, DnsStats, INSIGHT_RANGES, InsightReport, TrafficPoint, TrafficRow,
 };
 use crate::grid::GridQuery;
 use crate::islands::{
-    DashboardLive, GatewaysLive, GridIsland, SettingsFormIsland, bps, diff_class,
+    DashboardLive, GatewaysLive, GridIsland, SettingsFormIsland, UpdatesLive, bps, diff_class,
 };
 use crate::models::*;
 use crate::runtime::{Ipv6Status, fmt_time, lifetime, until};
@@ -559,10 +559,152 @@ pub fn WireguardPeers() -> impl IntoView {
     view! { <Grid<WgPeer>/> }
 }
 
+/// System › Gateways › Configuration: the next hops rules and routes use.
+#[component]
+pub fn GatewaysConfig() -> impl IntoView {
+    view! {
+        <p class="intro">"Gateways are next hops on an assigned interface: the default route, policy-routed rules and failover groups are built from them. A gateway with no address is learned from DHCP, PPP or router advertisements on its interface."</p>
+        <Grid<Gateway> title="Gateways"/>
+    }
+}
+
+/// Interfaces › Virtual IPs › Settings.
+#[component]
+pub fn VirtualIpsPage() -> impl IntoView {
+    view! {
+        <p class="intro">"An IP alias adds an address to an interface, proxy ARP answers for addresses the host does not hold, and a shared address fails over between two firewalls. Shared addresses need the same virtual host id and secret on both peers."</p>
+        <Grid<VirtualIp> title="Virtual IPs"/>
+    }
+}
+
+/// Firewall › Groups.
+#[component]
+pub fn FirewallGroups() -> impl IntoView {
+    view! {
+        <p class="intro">"An interface group can be named by a rule like an interface, so one rule covers several networks. Rules on a group with a lower sequence are evaluated first."</p>
+        <Grid<InterfaceGroup> title="Interface groups"/>
+    }
+}
+
+/// Interfaces › Devices › Bridge.
+#[component]
+pub fn Bridges() -> impl IntoView {
+    view! {
+        <p class="intro">"A bridge joins devices into one layer-2 segment. Assign the bridge itself under Interfaces › Assignments to give it addresses; the member devices lose theirs."</p>
+        <Grid<Bridge> title="Bridges"/>
+    }
+}
+
+/// Interfaces › Devices › LAGG.
+#[component]
+pub fn Laggs() -> impl IntoView {
+    view! {
+        <p class="intro">"A link aggregate bundles several devices into one link for bandwidth or redundancy. Assign it under Interfaces › Assignments once it exists."</p>
+        <Grid<Lagg> title="Link aggregates"/>
+    }
+}
+
+/// Interfaces › Devices › Loopback.
+#[component]
+pub fn Loopbacks() -> impl IntoView {
+    view! {
+        <p class="intro">"Extra loopback devices, for routing protocols and services that need an address of their own. Assign one under Interfaces › Assignments to put addresses on it."</p>
+        <Grid<LoopbackDevice> title="Loopback devices"/>
+    }
+}
+
+/// System › Gateways › Group: failover and load balancing across gateways.
+#[component]
+pub fn GatewayGroupsPage() -> impl IntoView {
+    view! {
+        <p class="intro">"A group fails over between gateways or shares the traffic over them: the lowest tier with a member that is up carries it, and members of one tier share it by weight. Rules and routes use the group name like a gateway name."</p>
+        <Grid<GatewayGroup> title="Gateway groups"/>
+    }
+}
+
+/// System › Routes › Configuration.
+#[component]
+pub fn RoutesConfig() -> impl IntoView {
+    view! {
+        <p class="intro">"Static routes send a destination network to a gateway or gateway group. Connected networks and the default route are derived from the interface and gateway configuration."</p>
+        <Grid<StaticRoute> title="Static routes"/>
+    }
+}
+
+/// System › Access › Users: local accounts.
+#[component]
+pub fn UsersPage() -> impl IntoView {
+    view! {
+        <p class="intro">"Local accounts for the web GUI and SSH. The password is write-only: it is stored as a hash and never shown again. The root account is the first entry and cannot be deleted."</p>
+        <Grid<User> title="Users"/>
+    }
+}
+
+/// System › Access › Groups: local groups and their privileges.
+#[component]
+pub fn UserGroupsPage() -> impl IntoView {
+    view! {
+        <p class="intro">"A group carries the privileges its members get in the web GUI. Privileges are named per page, for example page-all for the whole GUI or page-firewall-rules for one section."</p>
+        <Grid<UserGroup> title="Groups"/>
+    }
+}
+
 /// System › Settings › General.
 #[component]
 pub fn SystemGeneralPage() -> impl IntoView {
     view! { <SettingsForm<SystemGeneral> title="System"/> }
+}
+
+/// System › Updates: pull and install a prebuilt system, optionally on a timer.
+#[component]
+pub fn UpdatesPage() -> impl IntoView {
+    let load = || {
+        Suspend::new(async move {
+            match update_status().await {
+                Ok(initial) => view! { <UpdatesLive initial/> }.into_any(),
+                Err(e) => load_error(e),
+            }
+        })
+    };
+    view! { <Suspense fallback=|| ()>{load}</Suspense> }
+}
+
+/// Lobby › Password: change the signed-in account's password.
+#[component]
+pub fn PasswordPage() -> impl IntoView {
+    let q = use_query_map().get_untracked();
+    let changed = q.get("changed").is_some();
+    let error = match q.get("error").as_deref() {
+        Some("mismatch") => Some("The two new passwords do not match."),
+        Some("short") => Some("The new password must be at least 8 characters."),
+        Some("nouser") => Some("Could not find your account in the configuration."),
+        _ => None,
+    };
+    view! {
+        <section class="card">
+            <h2>"Change password"</h2>
+            {changed.then(|| view! {
+                <p class="notice" role="status">"Password changed. Use it the next time you sign in."</p>
+            })}
+            {error.map(|e| view! {
+                <p class="field-error" role="alert">{e}</p>
+            })}
+            <form method="post" action="/ui/fn/password">
+                <div class="field-stack">
+                    <label for="new_password">"New password"</label>
+                    <input id="new_password" name="new_password" type="password"
+                        autocomplete="new-password" minlength="8" required/>
+                    <p class="muted small">"At least 8 characters."</p>
+                </div>
+                <div class="field-stack">
+                    <label for="confirm_password">"Confirm new password"</label>
+                    <input id="confirm_password" name="confirm_password" type="password"
+                        autocomplete="new-password" minlength="8" required/>
+                </div>
+                <button type="submit" class="btn btn-primary">"Change password"</button>
+            </form>
+        </section>
+    }
 }
 
 /// System › Configuration › History: revisions, diff between any two, rollback.
@@ -1122,6 +1264,62 @@ pub fn Insight() -> impl IntoView {
         <nav class="tabs" aria-label="Time range">{tabs}</nav>
         <Suspense fallback=|| ()>{load}</Suspense>
     }
+}
+
+/// Reporting › Traffic: what crossed the interfaces, from the accounting database.
+#[component]
+pub fn Traffic() -> impl IntoView {
+    let load = || {
+        Suspend::new(async move {
+            match insight_data("24h".to_owned(), None).await {
+                Ok(r) if !r.available => view! {
+                    <section class="card">
+                        <h2>"Traffic"</h2>
+                        <p class="muted">
+                            "Traffic accounting has not written any data. Enable it with "
+                            <code>"insight.enabled"</code> "."</p>
+                    </section>
+                }
+                .into_any(),
+                Ok(r) => view! {
+                    <section class="card">
+                        <h2>"Traffic, last 24 hours"</h2>
+                        {traffic_chart(&r.series, r.from, r.to, "Traffic")}
+                    </section>
+                    <section class="card">
+                        <h2>"Per interface"</h2>
+                        {top_table("Interfaces", "Interface", r.ifaces, |_| None)}
+                    </section>
+                    <p class="muted small">
+                        "Per host, service and remote address detail is under "
+                        <a href="/ui/diagnostics/networkinsight">"Insight"</a> "."</p>
+                }
+                .into_any(),
+                Err(e) => load_error(e),
+            }
+        })
+    };
+    view! { <Suspense fallback=|| ()>{load}</Suspense> }
+}
+
+/// Reporting › Unbound DNS: resolver counters and blocklist state.
+#[component]
+pub fn UnboundOverview() -> impl IntoView {
+    let load = || {
+        Suspend::new(async move {
+            match dns_stats().await {
+                Ok(stats) => view! {
+                    <DnsStatsPanel stats/>
+                    <p class="muted small">
+                        "Configuration is under "
+                        <a href="/ui/unbound/general">"Services › Unbound DNS"</a> "."</p>
+                }
+                .into_any(),
+                Err(e) => load_error(e),
+            }
+        })
+    };
+    view! { <Suspense fallback=|| ()>{load}</Suspense> }
 }
 
 /// Menu entries sensr does not implement yet.

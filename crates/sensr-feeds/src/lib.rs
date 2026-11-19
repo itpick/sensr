@@ -11,7 +11,7 @@
 //! - ASN aliases: an AS database (default iptoasn.com, public domain),
 //!   checked daily; only the AS numbers in use are stored.
 //! - Host names in host aliases: re-resolved every `resolve_interval`.
-//! - MAC aliases: the neighbour table, every 30 s.
+//! - MAC aliases: the neighbour table and DHCP leases, every 30 s.
 //!
 //! [`Feeds::sources`] gives `sensr-rules` a [`Sources`] that only reads the
 //! store, so rendering a ruleset never waits on the network; [`Feeds::refresh`]
@@ -47,6 +47,17 @@ pub const MAC_INTERVAL: u64 = 30;
 pub const DB_INTERVAL: u64 = 86_400;
 /// First retry after a failed fetch; doubles per failure up to [`MAX_BACKOFF`].
 pub const RETRY_AFTER: u64 = 300;
+/// First retry for a source that has never been fetched successfully.
+///
+/// At boot the feeds are read before the resolver answers, so the first attempt
+/// fails with "Name or service not known" on every URL. Waiting the full
+/// [`RETRY_AFTER`] leaves every alias table empty for five minutes, which is
+/// long enough that the first firewall check sees an empty GeoIP set and lets
+/// traffic through. A never-successful source is much more likely to be a
+/// not-yet-ready network than a dead URL, so retry it soon; the back-off below
+/// still doubles from here, and a source that has worked once uses
+/// [`RETRY_AFTER`].
+pub const EARLY_RETRY_AFTER: u64 = 10;
 /// Longest retry interval.
 pub const MAX_BACKOFF: u64 = 3_600;
 /// URL sources fetched at once.
@@ -163,8 +174,23 @@ fn retry_at(m: &Meta) -> u64 {
     if m.failures == 0 {
         return 0;
     }
+    // A source that has never loaded because the network was not up yet (at
+    // boot every URL fails with "Name or service not known") is retried soon:
+    // otherwise the alias tables stay empty for five minutes and the first
+    // firewall checks see nothing. An HTTP status is a definitive answer, and a
+    // source that worked before still has its last-good content, so both keep
+    // the cautious retry.
+    let transport = m
+        .error
+        .as_deref()
+        .is_some_and(|e| !e.starts_with("HTTP status"));
+    let base = if m.fetched_at.is_none() && transport {
+        EARLY_RETRY_AFTER
+    } else {
+        RETRY_AFTER
+    };
     let shift = (m.failures - 1).min(10);
-    let wait = (RETRY_AFTER << shift).min(MAX_BACKOFF);
+    let wait = (base << shift).min(MAX_BACKOFF);
     m.attempted_at.unwrap_or(0) + wait
 }
 

@@ -51,9 +51,20 @@ pub fn App() -> impl IntoView {
                 <ParentRoute path=path!("") view=Layout ssr=SsrMode::Async>
                     <Route path=path!("") view=Dashboard/>
                     <Route path=path!("/ui/core/dashboard") view=Dashboard/>
+                    <Route path=path!("/ui/core/password") view=PasswordPage/>
+                    <Route path=path!("/ui/diagnostics/traffic") view=Traffic/>
+                    <Route path=path!("/ui/unbound/overview") view=UnboundOverview/>
                     <Route path=path!("/ui/interfaces/assignment") view=Assignments/>
                     <Route path=path!("/ui/interfaces/if/:id") view=InterfacePage/>
                     <Route path=path!("/ui/interfaces/overview") view=InterfacesOverview/>
+                    <Route path=path!("/ui/routing/configuration") view=GatewaysConfig/>
+                    <Route path=path!("/ui/routing/gateway_groups") view=GatewayGroupsPage/>
+                    <Route path=path!("/ui/routes") view=RoutesConfig/>
+                    <Route path=path!("/ui/interfaces/bridge") view=Bridges/>
+                    <Route path=path!("/ui/interfaces/lagg") view=Laggs/>
+                    <Route path=path!("/ui/interfaces/loopback") view=Loopbacks/>
+                    <Route path=path!("/ui/interfaces/vip") view=VirtualIpsPage/>
+                    <Route path=path!("/ui/firewall/group") view=FirewallGroups/>
                     <Route path=path!("/ui/routing/status") view=GatewayStatusPage/>
                     <Route path=path!("/ui/firewall/alias") view=Aliases/>
                     <Route path=path!("/ui/firewall/filter") view=Rules/>
@@ -69,7 +80,10 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/ui/unbound/dnsbl") view=UnboundBlocklist/>
                     <Route path=path!("/ui/wireguard/instances") view=WireguardInstances/>
                     <Route path=path!("/ui/wireguard/peers") view=WireguardPeers/>
+                    <Route path=path!("/ui/system/user") view=UsersPage/>
+                    <Route path=path!("/ui/system/group") view=UserGroupsPage/>
                     <Route path=path!("/ui/system/general") view=SystemGeneralPage/>
+                    <Route path=path!("/ui/system/updates") view=UpdatesPage/>
                     <Route path=path!("/ui/core/backup/history") view=History/>
                     <Route path=path!("/ui/ids") view=IdsSettingsPage/>
                     <Route path=path!("/ui/ids/rules") view=IdsRulesPage/>
@@ -281,7 +295,6 @@ pub fn Login() -> impl IntoView {
                     <input id="password" name="password" type="password" autocomplete="current-password" required/>
                 </div>
                 <button type="submit" class="btn btn-primary btn-block">"Login"</button>
-                <p class="muted small">"Default credentials on a new install: root / sensr"</p>
             </form>
         </main>
     }
