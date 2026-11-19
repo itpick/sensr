@@ -1270,6 +1270,9 @@ pub fn UpdatesLive(initial: UpdateStatus) -> impl IntoView {
     let st = RwSignal::new(initial);
     let error = RwSignal::new(None::<String>);
     let pending = RwSignal::new(false);
+    // Extra refreshes after a request: the path unit starts the root service
+    // asynchronously, so the status it writes appears a moment later.
+    let settle = RwSignal::new(0u32);
 
     let refresh = move || {
         spawn_local(async move {
@@ -1289,7 +1292,11 @@ pub fn UpdatesLive(initial: UpdateStatus) -> impl IntoView {
         refresh();
         set_interval(
             move || {
-                if st.with(UpdateStatus::busy) {
+                let left = settle.get_untracked();
+                if st.with(UpdateStatus::busy) || pending.get_untracked() || left > 0 {
+                    if left > 0 {
+                        settle.set(left - 1);
+                    }
                     refresh();
                 }
             },
@@ -1307,6 +1314,7 @@ pub fn UpdatesLive(initial: UpdateStatus) -> impl IntoView {
                 }
                 Err(e) => error.set(Some(e.to_string())),
             }
+            settle.set(4);
             pending.set(false);
         });
     };
