@@ -218,6 +218,9 @@ pub fn store(grid: GridId, scope: &str, doc: &Value) -> Store {
         GridId::Gateways => Store::Map("gateways.gateways".into()),
         GridId::GatewayGroups => Store::Map("gateways.groups".into()),
         GridId::StaticRoutes => Store::Map("routes.routes".into()),
+        GridId::Bridges => Store::Map("devices.bridges".into()),
+        GridId::Laggs => Store::Map("devices.laggs".into()),
+        GridId::Loopbacks => Store::Map("devices.loopbacks".into()),
     }
 }
 
@@ -512,6 +515,27 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
             "enabled": b(item, "enabled", true),
             "network": s(item, "network"),
             "gateway": s(item, "gateway"),
+            "description": s(item, "description"),
+        }),
+        GridId::Bridges => json!({
+            "device": s(item, "device"),
+            "members": strings(item, "members"),
+            "link_local": b(item, "link_local", false),
+            "max_addresses": get_path(item, "max_addresses").cloned().unwrap_or(Value::Null),
+            "ageing_time": get_path(item, "ageing_time").cloned().unwrap_or(Value::Null),
+            "description": s(item, "description"),
+        }),
+        GridId::Laggs => json!({
+            "device": s(item, "device"),
+            "members": strings(item, "members"),
+            "protocol": or_default(s(item, "protocol"), "lacp"),
+            "primary_member": s(item, "primary_member"),
+            "lacp_fast_timeout": b(item, "lacp_fast_timeout", false),
+            "mtu": get_path(item, "mtu").cloned().unwrap_or(Value::Null),
+            "description": s(item, "description"),
+        }),
+        GridId::Loopbacks => json!({
+            "id": get_path(item, "id").cloned().unwrap_or(Value::Null),
             "description": s(item, "description"),
         }),
         GridId::IdsUserRules => json!({
@@ -974,6 +998,30 @@ pub fn from_view(
             put(o, "gateway", view, "gateway");
             put_opt(o, "description", view, "description");
         }
+        GridId::Bridges => {
+            let o = obj(&mut item);
+            put(o, "device", view, "device");
+            put(o, "members", view, "members");
+            put(o, "link_local", view, "link_local");
+            put_opt(o, "max_addresses", view, "max_addresses");
+            put_opt(o, "ageing_time", view, "ageing_time");
+            put_opt(o, "description", view, "description");
+        }
+        GridId::Laggs => {
+            let o = obj(&mut item);
+            put(o, "device", view, "device");
+            put(o, "members", view, "members");
+            put(o, "protocol", view, "protocol");
+            put_opt(o, "primary_member", view, "primary_member");
+            put(o, "lacp_fast_timeout", view, "lacp_fast_timeout");
+            put_opt(o, "mtu", view, "mtu");
+            put_opt(o, "description", view, "description");
+        }
+        GridId::Loopbacks => {
+            let o = obj(&mut item);
+            put(o, "id", view, "id");
+            put(o, "description", view, "description");
+        }
         GridId::IdsUserRules => {
             let o = obj(&mut item);
             put(o, "enabled", view, "enabled");
@@ -1156,6 +1204,24 @@ pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
             ("gateway", "gateway"),
             ("description", "description"),
         ],
+        GridId::Bridges => &[
+            ("device", "device"),
+            ("members", "members"),
+            ("link_local", "link_local"),
+            ("max_addresses", "max_addresses"),
+            ("ageing_time", "ageing_time"),
+            ("description", "description"),
+        ],
+        GridId::Laggs => &[
+            ("device", "device"),
+            ("members", "members"),
+            ("protocol", "protocol"),
+            ("primary_member", "primary_member"),
+            ("lacp_fast_timeout", "lacp_fast_timeout"),
+            ("mtu", "mtu"),
+            ("description", "description"),
+        ],
+        GridId::Loopbacks => &[("id", "id"), ("description", "description")],
         GridId::IdsUserRules => &[
             ("source", "source"),
             ("destination", "destination"),
@@ -1715,6 +1781,70 @@ mod tests {
         assert_eq!(
             form_view_path(FormId::UnboundCache, "dns.tuning.log_verbosity"),
             None
+        );
+    }
+
+    /// A row that survives from_view -> to_view unchanged: the field names on
+    /// both sides have to agree with the schema document, and a typo on one
+    /// side would silently drop the value.
+    #[test]
+    fn new_routing_and_device_rows_round_trip() {
+        let cases = [
+            (
+                GridId::Gateways,
+                json!({"enabled": true, "name": "GW_WAN", "description": "upstream",
+                    "interface": "wan", "family": "inet", "address": "192.168.1.1",
+                    "default_route": true, "far": false, "monitor": true,
+                    "monitor_address": "", "priority": 10, "weight": 1, "force_down": false}),
+            ),
+            (
+                GridId::StaticRoutes,
+                json!({"enabled": true, "network": "10.0.0.0/8", "gateway": "GW_WAN",
+                    "description": "office"}),
+            ),
+            (
+                GridId::GatewayGroups,
+                json!({"name": "WAN_FAILOVER", "description": "", "members": ["GW_WAN:1"],
+                    "trigger": "down"}),
+            ),
+            (
+                GridId::Laggs,
+                json!({"device": "bond0", "members": ["ue1", "ue0"], "protocol": "lacp",
+                    "primary_member": "", "lacp_fast_timeout": false, "mtu": 1500,
+                    "description": "trunk"}),
+            ),
+        ];
+        for (grid, view) in cases {
+            let item = from_view(grid, &json!({}), "", None, &view);
+            let back = to_view(grid, &json!({}), &item);
+            for v in view.as_object().unwrap().values() {
+                assert!(
+                    back.as_object().unwrap().values().any(|b| b == v),
+                    "{grid:?}: {view} lost a value, got {back}"
+                );
+            }
+        }
+        // The group membership is a list of typed pairs in the document.
+        let item = from_view(
+            GridId::GatewayGroups,
+            &json!({}),
+            "",
+            None,
+            &json!({"name": "G", "members": ["GW_WAN:2"]}),
+        );
+        assert_eq!(item["members"], json!([{"gateway": "GW_WAN", "tier": 2}]));
+        // A loopback is addressed by its number and carries a description.
+        let item = from_view(
+            GridId::Loopbacks,
+            &json!({}),
+            "",
+            None,
+            &json!({"id": 3, "description": "ospf"}),
+        );
+        assert_eq!(item, json!({"id": 3, "description": "ospf"}));
+        assert_eq!(
+            to_view(GridId::Loopbacks, &json!({}), &item)["id"],
+            json!(3)
         );
     }
 

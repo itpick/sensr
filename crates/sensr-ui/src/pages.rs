@@ -568,6 +568,33 @@ pub fn GatewaysConfig() -> impl IntoView {
     }
 }
 
+/// Interfaces › Devices › Bridge.
+#[component]
+pub fn Bridges() -> impl IntoView {
+    view! {
+        <p class="intro">"A bridge joins devices into one layer-2 segment. Assign the bridge itself under Interfaces › Assignments to give it addresses; the member devices lose theirs."</p>
+        <Grid<Bridge> title="Bridges"/>
+    }
+}
+
+/// Interfaces › Devices › LAGG.
+#[component]
+pub fn Laggs() -> impl IntoView {
+    view! {
+        <p class="intro">"A link aggregate bundles several devices into one link for bandwidth or redundancy. Assign it under Interfaces › Assignments once it exists."</p>
+        <Grid<Lagg> title="Link aggregates"/>
+    }
+}
+
+/// Interfaces › Devices › Loopback.
+#[component]
+pub fn Loopbacks() -> impl IntoView {
+    view! {
+        <p class="intro">"Extra loopback devices, for routing protocols and services that need an address of their own. Assign one under Interfaces › Assignments to put addresses on it."</p>
+        <Grid<LoopbackDevice> title="Loopback devices"/>
+    }
+}
+
 /// System › Gateways › Group: failover and load balancing across gateways.
 #[component]
 pub fn GatewayGroupsPage() -> impl IntoView {

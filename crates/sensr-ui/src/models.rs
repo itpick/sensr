@@ -1846,6 +1846,182 @@ impl GridModel for Gateway {
     }
 }
 
+/// LAGG distribution protocol.
+pub const LAGG_PROTOCOLS: &[(&str, &str)] = &[
+    ("lacp", "LACP"),
+    ("failover", "Failover"),
+    ("loadbalance", "Load balancing"),
+    ("roundrobin", "Round robin"),
+    ("none", "None"),
+];
+
+/// Interfaces › Devices › Bridge: a layer-2 bridge between devices.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Bridge {
+    /// Object key.
+    pub uuid: String,
+    /// Device name.
+    pub device: String,
+    /// Member devices.
+    pub members: Vec<String>,
+    /// Keep an IPv6 link-local address on the bridge.
+    pub link_local: bool,
+    /// Learned address table size.
+    pub max_addresses: Option<u32>,
+    /// Learned address timeout in seconds.
+    pub ageing_time: Option<u32>,
+    /// Free text.
+    pub description: String,
+}
+
+impl FormModel for Bridge {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("device", "Device", K::Text)
+                .required()
+                .help("Name of the bridge, for example br0."),
+            F::new("members", "Member devices", K::Lines)
+                .required()
+                .help("One device per line, for example ue1. Cards are named by the assignment they carry."),
+            F::new("link_local", "Link-local address", K::Checkbox)
+                .help("Keep an IPv6 link-local address on the bridge."),
+            F::new(
+                "max_addresses",
+                "Address table size",
+                K::Number {
+                    min: 1,
+                    max: 1_000_000,
+                },
+            )
+            .help("Leave empty for the kernel default."),
+            F::new(
+                "ageing_time",
+                "Ageing time (seconds)",
+                K::Number {
+                    min: 1,
+                    max: 1_000_000,
+                },
+            )
+            .help("How long a learned address is kept. Empty for the kernel default."),
+            F::new("description", "Description", K::Text),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for Bridge {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("device", "Device"),
+            Column::list("members", "Members"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
+/// Interfaces › Devices › LAGG: a link aggregate.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Lagg {
+    /// Object key.
+    pub uuid: String,
+    /// Device name.
+    pub device: String,
+    /// Member devices.
+    pub members: Vec<String>,
+    /// Distribution protocol.
+    pub protocol: String,
+    /// Preferred member for failover.
+    pub primary_member: String,
+    /// LACP fast (1 s) timeout.
+    pub lacp_fast_timeout: bool,
+    /// MTU.
+    pub mtu: Option<u16>,
+    /// Free text.
+    pub description: String,
+}
+
+impl FormModel for Lagg {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("device", "Device", K::Text)
+                .required()
+                .help("Name of the aggregate, for example bond0."),
+            F::new("members", "Member devices", K::Lines)
+                .required()
+                .help("One device per line. Members must not carry an assignment of their own."),
+            F::new("protocol", "Protocol", K::Select(LAGG_PROTOCOLS)),
+            F::new("primary_member", "Primary member", K::Text)
+                .help("Member the failover protocol prefers; empty picks the first."),
+            F::new("lacp_fast_timeout", "LACP fast timeout", K::Checkbox),
+            F::new(
+                "mtu",
+                "MTU",
+                K::Number {
+                    min: 1280,
+                    max: 9000,
+                },
+            ),
+            F::new("description", "Description", K::Text),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for Lagg {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("device", "Device"),
+            Column::list("members", "Members"),
+            Column::text("protocol", "Protocol"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
+/// Interfaces › Devices › Loopback: an extra `lo<id>` device.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoopbackDevice {
+    /// Object key.
+    pub uuid: String,
+    /// Device number.
+    pub id: u32,
+    /// Free text.
+    pub description: String,
+}
+
+impl FormModel for LoopbackDevice {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("id", "Device number", K::Number { min: 1, max: 9999 })
+                .required()
+                .help("The device is named lo<number>."),
+            F::new("description", "Description", K::Text).required(),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for LoopbackDevice {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("id", "Device"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
 /// Failure condition of a gateway group.
 pub const GROUP_TRIGGERS: &[(&str, &str)] = &[
     ("down", "Member down"),
@@ -2484,6 +2660,12 @@ pub enum GridId {
     GatewayGroups,
     /// System › Routes › Configuration.
     StaticRoutes,
+    /// Interfaces › Devices › Bridge.
+    Bridges,
+    /// Interfaces › Devices › LAGG.
+    Laggs,
+    /// Interfaces › Devices › Loopback.
+    Loopbacks,
 }
 
 fn sanitize(scope: &Option<String>, default: &str) -> String {
@@ -2604,6 +2786,9 @@ impl GridId {
             Self::Gateways => GridMeta::of::<Gateway>(),
             Self::GatewayGroups => GridMeta::of::<GatewayGroup>(),
             Self::StaticRoutes => GridMeta::of::<StaticRoute>(),
+            Self::Bridges => GridMeta::of::<Bridge>(),
+            Self::Laggs => GridMeta::of::<Lagg>(),
+            Self::Loopbacks => GridMeta::of::<LoopbackDevice>(),
         }
     }
 
@@ -2632,6 +2817,9 @@ impl GridId {
             Self::Gateways => go::<Gateway>(base, inputs),
             Self::GatewayGroups => go::<GatewayGroup>(base, inputs),
             Self::StaticRoutes => go::<StaticRoute>(base, inputs),
+            Self::Bridges => go::<Bridge>(base, inputs),
+            Self::Laggs => go::<Lagg>(base, inputs),
+            Self::Loopbacks => go::<LoopbackDevice>(base, inputs),
         }
     }
 
@@ -2764,7 +2952,10 @@ kinds! {
         IdsUserRule => IdsUserRules, "rule",
         Gateway => Gateways, "gateway",
         GatewayGroup => GatewayGroups, "group",
-        StaticRoute => StaticRoutes, "route"
+        StaticRoute => StaticRoutes, "route",
+        Bridge => Bridges, "bridge",
+        Lagg => Laggs, "aggregate",
+        LoopbackDevice => Loopbacks, "loopback"
 }
 
 #[cfg(test)]
@@ -2817,6 +3008,9 @@ mod tests {
             GridId::Gateways,
             GridId::GatewayGroups,
             GridId::StaticRoutes,
+            GridId::Bridges,
+            GridId::Laggs,
+            GridId::Loopbacks,
         ] {
             let meta = g.meta();
             assert!(!meta.columns.is_empty());

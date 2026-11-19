@@ -151,6 +151,11 @@ const FIREWALL: &[Node] = &[n("Firewall").kids(&[
 
 const INTERFACES: &[Node] = &[n("Interfaces").kids(&[
     n("Assignments").order(200).url("/ui/interfaces/assignment"),
+    n("Devices").order(210).kids(&[
+        n("Bridge").url("/ui/interfaces/bridge"),
+        n("LAGG").url("/ui/interfaces/lagg"),
+        n("Loopback").url("/ui/interfaces/loopback"),
+    ]),
     n("Overview").order(230).url("/ui/interfaces/overview"),
 ])];
 
@@ -444,6 +449,9 @@ mod tests {
             "/ui/diagnostics/networkinsight",
             "/ui/interfaces/assignment",
             "/ui/interfaces/overview",
+            "/ui/interfaces/bridge",
+            "/ui/interfaces/lagg",
+            "/ui/interfaces/loopback",
             "/ui/routing/configuration",
             "/ui/routing/gateway_groups",
             "/ui/routing/status",
