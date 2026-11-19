@@ -82,6 +82,7 @@
         qcow-aarch64 = mkSystem "aarch64-linux" [ ./nix/images/qcow.nix ];
         pi4 = mkSystem "aarch64-linux" [ ./nix/images/pi4.nix ];
         pi5 = mkSystem "aarch64-linux" [ ./nix/images/pi5.nix ];
+        iso = mkSystem "x86_64-linux" [ ./nix/images/iso.nix ];
       };
 
       # nix build .#images.qcow (docs/PLAN.md §6)
@@ -93,6 +94,8 @@
         # Raspberry Pi 5 SD/USB/NVMe image (aarch64-linux; boot-tested with
         # nix/tests/pi5-qemu.sh)
         pi5 = self.nixosConfigurations.pi5.config.system.build.sdImage;
+        # x86_64 live installer USB image (UEFI, BIOS via the ISO's GRUB)
+        iso = self.nixosConfigurations.iso.config.system.build.isoImage;
       };
 
       # Boot-time benchmark images (nix/bench/boot-times.py): the qcow
