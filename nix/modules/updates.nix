@@ -268,20 +268,23 @@ let
         write_status "done" "Updated to $remote_version" null
       }
 
-      # Handle the UI request. The file is removed first so a second click
-      # during a run starts a new handler once the lock is free.
+      # Handle the UI request. The file is removed before the action so a
+      # second click during a long download is still there afterwards; the
+      # loop consumes it, up to a point.
       handle_request() {
-        [ -r "$request_file" ] || return 0
-        local req
-        req=$(cat "$request_file") || true
-        rm -f "$request_file"
-        case "$(printf '%s' "$req" | jq -r '.mode // "check"')" in
-          check) check ;;
-          install) install ;;
-          auto-on) set_auto true; write_status idle "Automatic updates are on" null ;;
-          auto-off) set_auto false; write_status idle "Automatic updates are off" null ;;
-          *) write_status error "Unknown update request" null ;;
-        esac
+        local n=0 req
+        while [ -r "$request_file" ] && [ "$n" -lt 10 ]; do
+          n=$((n + 1))
+          req=$(cat "$request_file") || true
+          rm -f "$request_file"
+          case "$(printf '%s' "$req" | jq -r '.mode // "check"')" in
+            check) check ;;
+            install) install ;;
+            auto-on) set_auto true; write_status idle "Automatic updates are on" null ;;
+            auto-off) set_auto false; write_status idle "Automatic updates are off" null ;;
+            *) write_status error "Unknown update request" null ;;
+          esac
+        done
       }
 
       case "''${1:---timer}" in
@@ -289,6 +292,9 @@ let
         --install) install ;;
         --handle) handle_request ;;
         --timer)
+          # A request that arrived while the path unit was busy is still on
+          # disk; handle it before the schedule runs.
+          handle_request
           # Auto mode installs; otherwise the check still refreshes what the
           # page shows, so the operator sees a pending update.
           if [ "$(state_auto)" = true ]; then
