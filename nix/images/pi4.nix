@@ -122,7 +122,10 @@ in
   fileSystems.${fw} = {
     options = lib.mkForce [
       "nofail"
-      "x-systemd.device-timeout=90s"
+      # Short: the by-label device can take 100 s to appear here, and a fstab
+      # mount is ordered before local-fs.target, so every second of this
+      # timeout is a second of boot. bootlog.sh mounts it later instead.
+      "x-systemd.device-timeout=15s"
       "umask=0077"
     ];
   };
@@ -165,12 +168,33 @@ in
     description = "Boot log to the FAT partition";
     wantedBy = [ "multi-user.target" ];
     after = [ "local-fs.target" ];
-    unitConfig.RequiresMountsFor = fw;
+    # No RequiresMountsFor: on this board udev can publish the FAT partition's
+    # by-label device ~100 s into the boot (the WiFi SDIO controller's deferred
+    # probe holds the queue), long after multi-user.target. bootlog.sh mounts
+    # it itself when it can; the retry timer below catches the rest.
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
       ExecStart = "${lib.getExe bootlog} early";
       ExecStop = "${lib.getExe bootlog} shutdown";
+    };
+  };
+  systemd.services.sensr-bootlog-retry = {
+    description = "Boot log to the FAT partition (late)";
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = [
+        "${lib.getExe bootlog} early"
+        "${lib.getExe bootlog} running"
+      ];
+    };
+  };
+  systemd.timers.sensr-bootlog-retry = {
+    description = "Retry the FAT boot log once the partition is mounted";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "150s";
+      Unit = "sensr-bootlog-retry.service";
     };
   };
   systemd.services.sensr-bootlog-running = {
@@ -181,7 +205,6 @@ in
       "sensr-selftest.service"
       "multi-user.target"
     ];
-    unitConfig.RequiresMountsFor = fw;
     serviceConfig = {
       Type = "oneshot";
       ExecStart = "${lib.getExe bootlog} running";

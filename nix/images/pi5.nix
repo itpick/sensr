@@ -202,13 +202,37 @@ in
     description = "Boot log to the FAT partition";
     wantedBy = [ "multi-user.target" ];
     after = [ "local-fs.target" ];
-    unitConfig.RequiresMountsFor = fw;
+    # No RequiresMountsFor: the FAT partition's by-label device can appear
+    # long after multi-user.target (udev queues it behind the WiFi SDIO
+    # deferred probe), and a dependency on a mount unit that already failed
+    # would stop this service from running at all. bootlog.sh mounts it itself
+    # when it can and the retry timer below catches the rest.
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
       ExecStart = "${lib.getExe bootlog} early";
       # Runs before the FAT partition is unmounted at shutdown.
       ExecStop = "${lib.getExe bootlog} shutdown";
+    };
+  };
+  # Second chance once udev has published the label: write the log this boot
+  # should have produced at multi-user.target.
+  systemd.services.sensr-bootlog-retry = {
+    description = "Boot log to the FAT partition (late)";
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = [
+        "${lib.getExe bootlog} early"
+        "${lib.getExe bootlog} running"
+      ];
+    };
+  };
+  systemd.timers.sensr-bootlog-retry = {
+    description = "Retry the FAT boot log once the partition is mounted";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "150s";
+      Unit = "sensr-bootlog-retry.service";
     };
   };
   systemd.services.sensr-bootlog-running = {
@@ -219,7 +243,6 @@ in
       "sensr-selftest.service"
       "multi-user.target"
     ];
-    unitConfig.RequiresMountsFor = fw;
     serviceConfig = {
       Type = "oneshot";
       ExecStart = "${lib.getExe bootlog} running";

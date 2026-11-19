@@ -8,6 +8,18 @@ set +e
 set -u
 stage=$1
 logdir=@seedDir@/boot-log
+mnt=${logdir%/sensr/boot-log}
+
+# The FAT partition is not always mounted yet: its by-label device only
+# appears when udev gets to it, which on a Pi 4 can be ~100 s in because the
+# WiFi SDIO controller's deferred probe holds the queue. If /boot/firmware is
+# not mounted, writing there lands on the root filesystem instead and is
+# hidden for ever once the FAT is mounted over it, so check first and let the
+# late retry (sensr-bootlog-retry) do the work when the mount is up.
+if ! mountpoint -q "$mnt"; then
+  systemctl start "$(systemd-escape -p --suffix=mount "$mnt")" 2>/dev/null
+  mountpoint -q "$mnt" || exit 0
+fi
 mkdir -p "$logdir" || exit 0
 
 # One counter per boot, shared by the stages of that boot.
