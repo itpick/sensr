@@ -110,6 +110,7 @@ jobs:
     needs: [x86_64, aarch64]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v5
         with:
           path: assets
@@ -193,8 +194,11 @@ jobs:
             assets/sensr-iso.closure.tar.zst assets/sensr-iso.closure.tar.zst.sha256
             assets/update-manifest.json assets/manifest.json
           )
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" --clobber "${files[@]}"
+          # The publish job runs outside the checkout's working tree only if
+          # checkout is removed; gh still needs to know the repository.
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber -R "$GITHUB_REPOSITORY" "${files[@]}"
           else
-            gh release create "$TAG" --title "sensr $TAG" --generate-notes --latest "${files[@]}"
+            gh release create "$TAG" --title "sensr $TAG" --generate-notes --latest \
+              -R "$GITHUB_REPOSITORY" "${files[@]}"
           fi
