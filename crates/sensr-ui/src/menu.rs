@@ -333,6 +333,18 @@ pub fn build(interfaces: &[MenuInterface]) -> Vec<MenuItem> {
     root.children
 }
 
+/// The page a section stands for when every level below it holds exactly one
+/// item and that item is a link (System › Settings › General, Interfaces ›
+/// Virtual IPs › Settings). A nest that opens to a single link is noise, so the
+/// sidebar links the section straight to that page instead.
+pub fn sole_page(item: &MenuItem) -> Option<&MenuItem> {
+    let mut node = item;
+    while node.url.is_none() && node.children.len() == 1 {
+        node = &node.children[0];
+    }
+    (node.url.is_some() && node.children.is_empty()).then_some(node)
+}
+
 /// The URL of the menu item that best matches `path` (longest matching URL).
 pub fn best_url(menu: &[MenuItem], path: &str) -> Option<String> {
     fn walk(items: &[MenuItem], path: &str, best: &mut Option<String>) {
@@ -561,6 +573,28 @@ mod tests {
             breadcrumb(&m, "/ui/interfaces/overview"),
             ["Interfaces", "Overview"]
         );
+    }
+
+    #[test]
+    fn a_section_holding_one_page_is_that_page() {
+        let m = build(&[]);
+        let sole = |path: &[&str]| {
+            sole_page(find(&m, path)).and_then(|page| page.url.clone())
+        };
+        assert_eq!(
+            sole(&["System", "Settings"]).as_deref(),
+            Some("/ui/system/general")
+        );
+        assert_eq!(
+            sole(&["System", "Configuration"]).as_deref(),
+            Some("/ui/core/backup/history")
+        );
+        assert_eq!(
+            sole(&["Interfaces", "VIP"]).as_deref(),
+            Some("/ui/interfaces/vip")
+        );
+        assert_eq!(sole(&["System", "Gateways"]), None);
+        assert_eq!(sole(&["VPN", "WireGuard"]), None);
     }
 
     #[test]

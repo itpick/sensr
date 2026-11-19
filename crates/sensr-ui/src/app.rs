@@ -151,9 +151,15 @@ fn menu_level(
         .into_iter()
         .map(|item| {
             let active = item.contains(&path);
-            if item.children.is_empty() {
-                let url = item.url.clone().unwrap_or_default();
-                let current = item.url.is_some() && item.url == current;
+            // A section that holds a single page is a link, not a nest: show the
+            // section name pointing at that page (see menu::sole_page).
+            let sole = (!item.children.is_empty())
+                .then(|| menu::sole_page(&item))
+                .flatten()
+                .map(|page| page.url.clone().unwrap_or_default());
+            if item.children.is_empty() || sole.is_some() {
+                let url = sole.unwrap_or_else(|| item.url.clone().unwrap_or_default());
+                let current = current.as_deref() == Some(url.as_str());
                 let external = url.starts_with("http");
                 view! {
                     <li>
