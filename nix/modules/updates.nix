@@ -356,6 +356,10 @@ in
 
     systemd.services.sensr-update = {
       description = "sensr system update: handle a web UI request";
+      # switch-to-configuration installs a new ExecStart for this unit. Do not
+      # restart it there: the script that started the switch must keep running
+      # so it can record the outcome in status.json.
+      restartIfChanged = false;
       wants = [ "network-online.target" ];
       after = [
         "network-online.target"
@@ -399,6 +403,8 @@ in
 
     systemd.services.sensr-update-timer = {
       description = "sensr system update: scheduled check";
+      # See sensr-update.service: the script outlives the switch it starts.
+      restartIfChanged = false;
       wants = [ "network-online.target" ];
       after = [
         "network-online.target"
