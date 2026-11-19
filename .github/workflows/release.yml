@@ -38,7 +38,7 @@ jobs:
           iso=$(nix build -L --print-out-paths .#images.iso)
           cp "$iso/iso/sensr-x86_64-installer.iso" out/sensr-x86_64-installer.iso
           qcow=$(nix build -L --print-out-paths .#images.qcow)
-          img=$(find "$qcow" -name '*.qcow2' -print -quit)
+          img=$(find "$qcow" -type f -name '*.qcow2' -print -quit)
           zstd -T0 -10 -o out/sensr-x86_64.qcow2.zst "$img"
       - name: Pack the updater closures
         run: |
@@ -75,7 +75,14 @@ jobs:
           mkdir -p out
           for board in pi4 pi5; do
             img=$(nix build -L --print-out-paths ".#images.$board")
-            file=$(find "$img" -name '*.img' -print -quit)
+            # sd-image keeps the compressed image next to a directory of the
+            # same name, so take the regular file only.
+            file=$(find "$img" -type f -name '*.img' -print -quit)
+            if [ -z "$file" ]; then
+              echo "no .img file under $img" >&2
+              find "$img" -maxdepth 3 >&2
+              exit 1
+            fi
             zstd -T0 -10 -o "out/sensr-$board.img.zst" "$file"
           done
       - name: Pack the updater closures
