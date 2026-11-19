@@ -117,11 +117,20 @@ in
     "vfat"
     "nls_cp437"
     "nls_iso8859_1"
+    # The RTL8156 USB NICs (LAN and LAN2). Loaded explicitly rather than left
+    # to udev's coldplug: on the Pi 4 the same dongles enumerate without ever
+    # binding, and auto-loading is the one difference between the boards.
+    "usbnet"
+    "r8152"
     # QEMU's virt machine (the image's boot test, nix/tests/pi5-qemu.sh)
     "virtio_pci"
     "virtio_blk"
   ];
-  boot.kernelModules = [ "bcm2835_wdt" ];
+  boot.kernelModules = [
+    "bcm2835_wdt"
+    "usbnet"
+    "r8152"
+  ];
 
   # The 2.5 GbE USB dongles (Realtek RTL8156, 0bda:8156) that carry LAN and
   # LAN2 on a Pi 5 reset under the r8152 driver: one reset left eth1 with a

@@ -679,7 +679,15 @@ in
           set -u
           seed=${lib.escapeShellArg cfg.seedDir}
           mp=$(${pkgs.coreutils}/bin/dirname "$seed")
-          if ${pkgs.util-linux}/bin/mountpoint -q "$mp"; then exit 0; fi
+          # Not `mountpoint`: ProtectSystem=strict below gives this service its
+          # own mount namespace with /boot/firmware bind-mounted from the
+          # ReadWritePaths entry, so mountpoint reports it as a mount point
+          # even when the FAT is not mounted and the path is an empty
+          # directory on the root filesystem. That is exactly how the seed
+          # came to be read too early. The FAT's filesystem type is the
+          # honest test, and the host mount propagates into the namespace.
+          fatfs=$(${pkgs.util-linux}/bin/findmnt -n -o FSTYPE --mountpoint "$mp" 2>/dev/null || true)
+          if [ "$fatfs" = vfat ]; then exit 0; fi
           unit=$(${config.systemd.package}/bin/systemd-escape -p --suffix=mount "$mp") || exit 0
           # Do not ask systemctl whether the unit exists: `systemctl cat` goes
           # through D-Bus, and at this point in the boot dbus-broker is still
@@ -697,7 +705,8 @@ in
           # waits, and the agent must still start on factory defaults if the
           # partition is genuinely not there.
           for _ in $(${pkgs.coreutils}/bin/seq 1 40); do
-            if ${pkgs.util-linux}/bin/mountpoint -q "$mp"; then exit 0; fi
+            fatfs=$(${pkgs.util-linux}/bin/findmnt -n -o FSTYPE --mountpoint "$mp" 2>/dev/null || true)
+            if [ "$fatfs" = vfat ]; then exit 0; fi
             ${pkgs.coreutils}/bin/sleep 0.25
           done
           exit 0
