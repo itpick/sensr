@@ -1363,7 +1363,7 @@ pub fn UpdatesLive(initial: UpdateStatus) -> impl IntoView {
                 }.into_any(),
                 Some(a) => view! {
                     <div class="card" id="update-available">
-                        <h3>{format!("Version {} is available", a.version)}</h3>
+                        <h3>{format!("Release {} is available", a.label())}</h3>
                         {(!a.notes.is_empty()).then(|| view! { <p>{a.notes.clone()}</p> })}
                         <p class="muted small">
                             "sha256 " <code>{a.sha256.trim_start_matches("sha256:").chars().take(16).collect::<String>()}</code>

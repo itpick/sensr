@@ -260,6 +260,9 @@ pub struct UpdateCurrent {
 /// A newer system the manifest offers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateCandidate {
+    /// Release tag (`v0.1.1`), when the manifest carries one.
+    #[serde(default)]
+    pub tag: String,
     /// Version string of the offered generation.
     #[serde(default)]
     pub version: String,
@@ -306,6 +309,17 @@ pub struct UpdateStatus {
     /// When the status was written, RFC 3339.
     #[serde(default)]
     pub updated_at: Option<String>,
+}
+
+impl UpdateCandidate {
+    /// What to call this release on the page: the tag, else the version.
+    pub fn label(&self) -> &str {
+        if self.tag.is_empty() {
+            &self.version
+        } else {
+            &self.tag
+        }
+    }
 }
 
 impl UpdateStatus {
@@ -427,7 +441,7 @@ mod tests {
             "auto": true,
             "current": {"version": "sd-card-26.11.1", "image": "pi4"},
             "available": {
-                "version": "sd-card-26.11.2", "sha256": "abc", "url": "https://example/u",
+                "tag": "v0.1.1", "version": "sd-card-26.11.2", "sha256": "abc", "url": "https://example/u",
                 "store_path": "/nix/store/x-nixos-system", "notes": "notes"
             },
             "manifest_url": "https://example/m.json",
@@ -437,6 +451,7 @@ mod tests {
         }));
         assert!(!s.busy() && s.has_update() && s.auto);
         assert_eq!(s.available.as_ref().unwrap().version, "sd-card-26.11.2");
+        assert_eq!(s.available.as_ref().unwrap().label(), "v0.1.1");
         assert_eq!(s.current.image, "pi4");
         // An older service, or a disabled module, gives the defaults.
         let e: UpdateStatus = parse(Value::Null);

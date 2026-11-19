@@ -62,6 +62,7 @@ let
       request_file=${lib.escapeShellArg requestFile}
       state_file="$state_dir/state.json"
       work=""
+      remote_tag=""
       remote_version=""
       remote_system=""
       remote_sha=""
@@ -72,7 +73,11 @@ let
       trap 'if [ -n "''${work:-}" ]; then rm -rf "$work"; fi' EXIT
 
       mkdir -p "$run_dir" "$state_dir"
-      chmod 0755 "$run_dir"
+      # The UI (sensr-api) writes request.json and reads status.json here, so
+      # the directory must stay group-writable even if a restart recreated it
+      # after systemd-tmpfiles ran.
+      chmod 0775 "$run_dir"
+      chgrp sensr-api "$run_dir" 2>/dev/null || true
 
       # One writer at a time: the timer and a UI request must not import into
       # the store at once.
@@ -143,8 +148,8 @@ let
         esac
       }
 
-      # Fetches the manifest and picks this board's entry; sets remote_version,
-      # remote_system (URL), remote_sha, remote_notes.
+      # Fetches the manifest and picks this board's entry; sets remote_tag,
+      # remote_version, remote_system (URL), remote_sha, remote_path, remote_notes.
       fetch_manifest() {
         local mf="$work/manifest.json"
         if ! curl -fsSL --retry 3 --connect-timeout 10 -o "$mf" "$manifest_url"; then
@@ -154,6 +159,7 @@ let
           echo "manifest has no image for '$board'" >&2
           return 2
         fi
+        remote_tag=$(jq -r '.tag // ""' "$mf")
         remote_version=$(jq -r '.version // ""' "$mf")
         remote_system=$(asset_url "$(jq -r --arg b "$board" '.images[$b].system' "$mf")")
         remote_sha=$(jq -r --arg b "$board" '.images[$b].sha256 // ""' "$mf")
@@ -189,7 +195,7 @@ let
           write_status up-to-date "This system is up to date ($cur)" null
           return 0
         fi
-        write_status update-available "Version $remote_version is available" "$(available_json)"
+        write_status update-available "Release ''${remote_tag:-$remote_version} is available" "$(available_json)"
       }
 
       install() {
@@ -209,7 +215,7 @@ let
           write_status error "The manifest has no sha256 for '$board'" "$(available_json)"
           return 1
         fi
-        write_status downloading "Downloading $remote_version" "$(available_json)"
+        write_status downloading "Downloading ''${remote_tag:-$remote_version}" "$(available_json)"
 
         local archive="$work/closure.tar.zst"
         if ! curl -fL --retry 3 --connect-timeout 10 -o "$archive" "$remote_system"; then
@@ -225,7 +231,7 @@ let
           return 1
         fi
 
-        write_status installing "Importing $remote_version" "$(available_json)"
+        write_status installing "Importing ''${remote_tag:-$remote_version}" "$(available_json)"
         local imported
         mapfile -t imported < <(zstd -dc "$archive" | nix-store --import)
         # The archive carries the whole runtime closure; the toplevel is the
@@ -253,7 +259,7 @@ let
           return 1
         fi
 
-        write_status installing "Switching to $remote_version" "$(available_json)"
+        write_status installing "Switching to ''${remote_tag:-$remote_version}" "$(available_json)"
         # Run the switch in its own transient unit: the activation restarts
         # changed units, and sensr-update.service is one of them. In this
         # unit's cgroup that restart could kill the script before it records
@@ -265,7 +271,7 @@ let
         fi
 
         last_installed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        write_status "done" "Updated to $remote_version" null
+        write_status "done" "Updated to ''${remote_tag:-$remote_version}" null
       }
 
       # Handle the UI request. The file is removed before the action so a
