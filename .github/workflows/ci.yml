@@ -144,17 +144,29 @@ jobs:
       - uses: actions/checkout@v5
       - uses: DeterminateSystems/nix-installer-action@main
       - run: nix build -L .#checks.aarch64-linux.sensr
-      - name: Build the Pi 5 image
-        run: nix build -L .#images.pi5 -o pi5
-      - name: Image size
+      - name: Build the Pi 4 and Pi 5 images
         run: |
-          img=$(echo pi5/sd-image/*.img)
-          echo "pi5 image: $(stat -L -c %s "$img") bytes" >> "$GITHUB_STEP_SUMMARY"
-          mkdir -p out && zstd -T0 -10 -o "out/$(basename "$img").zst" "$img"
+          nix build -L .#images.pi4 -o pi4
+          nix build -L .#images.pi5 -o pi5
+      - name: Image sizes
+        run: |
+          mkdir -p out
+          for b in pi4 pi5; do
+            img=$(echo $b/sd-image/*.img)
+            echo "$b image: $(stat -L -c %s "$img") bytes" >> "$GITHUB_STEP_SUMMARY"
+            # Stable names: the install page and the one-liner link to
+            # releases/latest/download/sensr-$b.img.zst.
+            zstd -T0 -10 -o "out/sensr-$b.img.zst" "$img"
+          done
       # Boot-tested under QEMU on the nixtop builder (nix/tests/pi5-qemu.sh),
       # not here: no hardware and no KVM on this runner.
       - uses: actions/upload-artifact@v5
         with:
+          name: sensr-pi4-image
+          path: out/sensr-pi4.img.zst
+          retention-days: 7
+      - uses: actions/upload-artifact@v5
+        with:
           name: sensr-pi5-image
-          path: out/*.zst
+          path: out/sensr-pi5.img.zst
           retention-days: 7

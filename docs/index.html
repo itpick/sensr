@@ -93,7 +93,7 @@
         <li>Intel, Realtek and Mellanox NICs from the mainline kernel</li>
         <li>AES-NI, so VPNs are fast</li>
       </ul>
-      <a class="btn" aria-disabled="true" href="https://github.com/itpick/sensr/releases/latest/download/sensr-x86_64-installer.iso">Download installer ISO</a>
+      <a class="btn" aria-disabled="true" data-download="sensr-x86_64-installer.iso" href="https://github.com/itpick/sensr/releases/latest/download/sensr-x86_64-installer.iso">Download installer ISO</a>
       <div class="small">sha256 published alongside</div>
     </div>
     <div class="card">
@@ -106,7 +106,7 @@
         <li>2&nbsp;GB RAM minimum, 4&nbsp;GB or more for Suricata and large blocklists</li>
         <li>Try it from Raspberry Pi OS first: a one-time trial boot that falls back to your OS by itself</li>
       </ul>
-      <a class="btn" aria-disabled="true" href="https://github.com/itpick/sensr/releases/latest/download/sensr-pi5.img.zst">Download for Pi 5</a>
+      <a class="btn" aria-disabled="true" data-download="sensr-pi5.img.zst" href="https://github.com/itpick/sensr/releases/latest/download/sensr-pi5.img.zst">Download for Pi 5</a>
       <div class="small">sha256 published alongside</div>
     </div>
     <div class="card">
@@ -118,7 +118,7 @@
         <li>2&nbsp;GB RAM minimum, 4&nbsp;GB recommended for IDS and large blocklists</li>
         <li>No AES hardware, so VPNs are CPU-bound</li>
       </ul>
-      <a class="btn" aria-disabled="true" href="https://github.com/itpick/sensr/releases/latest/download/sensr-pi4.img.zst">Download for Pi 4</a>
+      <a class="btn" aria-disabled="true" data-download="sensr-pi4.img.zst" href="https://github.com/itpick/sensr/releases/latest/download/sensr-pi4.img.zst">Download for Pi 4</a>
       <div class="small">sha256 published alongside</div>
     </div>
     <div class="card">
@@ -129,7 +129,7 @@
         <li>virtio NICs</li>
         <li>The same image the CI tests boot</li>
       </ul>
-      <a class="btn" aria-disabled="true" href="https://github.com/itpick/sensr/releases/latest/download/sensr-x86_64.qcow2.zst">Download qcow2</a>
+      <a class="btn" aria-disabled="true" data-download="sensr-x86_64.qcow2.zst" href="https://github.com/itpick/sensr/releases/latest/download/sensr-x86_64.qcow2.zst">Download qcow2</a>
       <div class="small">aarch64 qcow2 also planned</div>
     </div>
   </div>
@@ -187,7 +187,7 @@
   </table></div>
 
   <h3>One-liner (Linux)</h3>
-  <p>Writes the Pi 5 image straight to a disk. Replace <code>/dev/sdX</code>; everything on it is erased.</p>
+  <p>Writes the Pi 5 image straight to a disk. Replace <code>/dev/sdX</code>; everything on it is erased. For a Pi 4, use the same line with <code>sensr-pi4.img.zst</code> instead.</p>
   <div class="cmd">
     <pre id="oneliner">curl -fL https://github.com/itpick/sensr/releases/latest/download/sensr-pi5.img.zst | zstd -dc | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress</pre>
     <button class="copy" data-target="oneliner">Copy</button>
@@ -254,6 +254,19 @@
         })
         .catch(function () {});
     });
+    // sensr's own images: a download button turns live only when the latest
+    // release really carries that asset, so nothing links to a 404.
+    fetch("https://api.github.com/repos/itpick/sensr/releases/latest")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (rel) {
+        if (!rel) return;
+        (rel.assets || []).forEach(function (a) {
+          document.querySelectorAll('[data-download="' + a.name + '"]').forEach(function (b) {
+            b.removeAttribute("aria-disabled");
+          });
+        });
+      })
+      .catch(function () {});
   })();
 </script>
 </body>
