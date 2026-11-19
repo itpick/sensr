@@ -100,6 +100,16 @@ in
     # QEMU's virt machine (the image's boot test)
     "virtio_pci"
     "virtio_blk"
+    # The WiFi/BT SDIO controller (mmc1) is enabled in the DT even though a
+    # wired router never uses it, and it defers its probe until the reset
+    # controller it wants exists: "wifi-pwrseq: deferred probe pending:
+    # pwrseq_simple: reset control not ready" at ~20 s, retried at ~28 s.
+    # The kernel keeps the whole probe work queue behind it, so udev cannot
+    # publish /dev/disk/by-label/FIRMWARE until ~27.7 s and the boot
+    # partition's 15 s device timeout always expires first (see fileSystems
+    # below). Loading the reset driver with the initrd lets the controller
+    # probe during coldplug instead.
+    "reset_gpio"
   ];
   # genet is the Pi 4's only built-in Ethernet (the WAN port on a stock board).
   #
@@ -136,7 +146,10 @@ in
       "nofail"
       # Short: the by-label device can take 100 s to appear here, and a fstab
       # mount is ordered before local-fs.target, so every second of this
-      # timeout is a second of boot. bootlog.sh mounts it later instead.
+      # timeout is a second of boot. bootlog.sh mounts it later instead, and
+      # so does the agent's wait-seed script, which is why a failed mount is
+      # not fatal. With reset_gpio in the initrd the device should appear
+      # during coldplug; if a boot still races it, this is the knob to raise.
       "x-systemd.device-timeout=15s"
       "umask=0077"
     ];

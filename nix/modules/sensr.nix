@@ -679,6 +679,10 @@ in
           set -u
           seed=${lib.escapeShellArg cfg.seedDir}
           mp=$(${pkgs.coreutils}/bin/dirname "$seed")
+          # This wait is on the boot path, so report what it cost: the boot
+          # time work needs the number, not a guess.
+          t0=$(${pkgs.coreutils}/bin/date +%s%N)
+          trap 'echo "sensr-agent-wait-seed: waited $(( ($(${pkgs.coreutils}/bin/date +%s%N) - t0) / 1000000 )) ms" >&2' EXIT
           # Not `mountpoint`: ProtectSystem=strict below gives this service its
           # own mount namespace with /boot/firmware bind-mounted from the
           # ReadWritePaths entry, so mountpoint reports it as a mount point

@@ -47,6 +47,11 @@ tryboot=$(od -An -tu4 --endian=big /proc/device-tree/chosen/bootloader/tryboot 2
   echo "== journal"; journalctl -b --no-pager -o short-monotonic 2>&1 | tail -n 2000
 } > "$logdir/$n-$stage.txt.tmp" 2>&1
 mv "$logdir/$n-$stage.txt.tmp" "$logdir/$n-$stage.txt"
+# The box may be powered off before the FAT is flushed (a hang, a yanked
+# plug), and the writeback queue would take the file with it: only the
+# counter used to be synced, which is why boots 12-14 kept their early
+# captures and lost everything written afterwards.
+sync -f "$logdir/$n-$stage.txt"
 
 # Keep the last 10 boots.
 for f in "$logdir"/*-*.txt; do
