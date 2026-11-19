@@ -1,0 +1,189 @@
+# Publishes the images the install page links to, plus the closures the
+# in-app updater (nix/modules/updates.nix) installs from.
+#
+#   git tag v26.11.1 && git push origin v26.11.1
+#
+# Every asset is a stable name under releases/latest/download/, which is what
+# docs/index.html and the updater's default manifest URL point at. Each image
+# gets a .sha256 next to it, and update-manifest.json lists, per board, the
+# system closure and its digest.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v26.11.1); the tag must exist"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Make room for the store
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Build the installer ISO and the qcow2 image
+        run: |
+          mkdir -p out
+          iso=$(nix build -L --print-out-paths .#images.iso)
+          cp "$iso/iso/sensr-x86_64-installer.iso" out/sensr-x86_64-installer.iso
+          qcow=$(nix build -L --print-out-paths .#images.qcow)
+          img=$(find "$qcow" -name '*.qcow2' -print -quit)
+          zstd -T0 -10 -o out/sensr-x86_64.qcow2.zst "$img"
+      - name: Pack the updater closures
+        run: |
+          for board in qcow iso; do
+            top=$(nix build -L --print-out-paths ".#nixosConfigurations.$board.config.system.build.toplevel")
+            nix-store -qR "$top" | xargs nix-store --export | zstd -T0 -10 -o "out/sensr-$board.closure.tar.zst"
+            # The updater compares this exactly with /run/current-system/nixos-version.
+            cat "$top/nixos-version" > "out/sensr-$board.version"
+          done
+      - name: Digests
+        run: |
+          cd out
+          for f in sensr-x86_64-installer.iso sensr-x86_64.qcow2.zst \
+                   sensr-qcow.closure.tar.zst sensr-iso.closure.tar.zst; do
+            sha256sum "$f" > "$f.sha256"
+          done
+      - uses: actions/upload-artifact@v5
+        with:
+          name: release-x86_64
+          path: out/*
+          retention-days: 3
+
+  aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - name: Make room for the store
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Build the Pi 4 and Pi 5 images
+        run: |
+          mkdir -p out
+          for board in pi4 pi5; do
+            img=$(nix build -L --print-out-paths ".#images.$board")
+            file=$(find "$img" -name '*.img' -print -quit)
+            zstd -T0 -10 -o "out/sensr-$board.img.zst" "$file"
+          done
+      - name: Pack the updater closures
+        run: |
+          for board in pi4 pi5; do
+            top=$(nix build -L --print-out-paths ".#nixosConfigurations.$board.config.system.build.toplevel")
+            nix-store -qR "$top" | xargs nix-store --export | zstd -T0 -10 -o "out/sensr-$board.closure.tar.zst"
+            cat "$top/nixos-version" > "out/sensr-$board.version"
+          done
+      - name: Digests
+        run: |
+          cd out
+          for f in sensr-pi4.img.zst sensr-pi5.img.zst \
+                   sensr-pi4.closure.tar.zst sensr-pi5.closure.tar.zst; do
+            sha256sum "$f" > "$f.sha256"
+          done
+      - uses: actions/upload-artifact@v5
+        with:
+          name: release-aarch64
+          path: out/*
+          retention-days: 3
+
+  publish:
+    needs: [x86_64, aarch64]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Assemble the manifests
+        run: |
+          set -euo pipefail
+          base="https://github.com/itpick/sensr/releases/download/$TAG"
+          # Per-board entries: the version is the built system's own
+          # nixos-version, which is what the updater compares against.
+          jq -n --arg base "$base" '{}' > images.json
+          for board in pi4 pi5 qcow iso; do
+            img=""
+            case "$board" in
+              pi4) img=sensr-pi4.img.zst ;;
+              pi5) img=sensr-pi5.img.zst ;;
+              qcow) img=sensr-x86_64.qcow2.zst ;;
+              iso) img=sensr-x86_64-installer.iso ;;
+            esac
+            version=$(cat "assets/sensr-$board.version")
+            closure="sensr-$board.closure.tar.zst"
+            sha=$(cut -d' ' -f1 "assets/$closure.sha256")
+            size=$(stat -c %s "assets/$closure")
+            jq --arg b "$board" --arg v "$version" --arg u "$base/$closure" \
+               --arg s "$sha" --argjson n "$size" \
+               '.[$b] = {version: $v, system: $u, sha256: $s, size: $n}' \
+               images.json > images.tmp && mv images.tmp images.json
+            # The same entry carries the download the install page links to.
+            jq --arg b "$board" --arg img "$img" --arg iu "$base/$img" \
+               --arg isha "$(cut -d' ' -f1 "assets/$img.sha256")" \
+               '.[$b].image = {name: $img, url: $iu, sha256: $isha}' \
+               images.json > images.tmp && mv images.tmp images.json
+          done
+          jq -n --arg tag "$TAG" --arg rev "$GITHUB_SHA" \
+             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             --slurpfile images images.json \
+             '{
+                product: "sensr",
+                tag: $tag,
+                version: ($images[0].pi4.version),
+                git_rev: $rev,
+                published: $at,
+                notes: ("sensr " + $tag),
+                images: $images[0]
+              }' > assets/update-manifest.json
+          # A plain manifest of the publishable files (docs/PLAN.md §6).
+          jq -n --arg tag "$TAG" --arg rev "$GITHUB_SHA" \
+             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             --slurpfile images images.json \
+             '{
+                product: "sensr",
+                tag: $tag,
+                git_rev: $rev,
+                published: $at,
+                images: $images[0]
+              }' > assets/manifest.json
+      - name: Check every linked asset is present
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in sensr-pi4.img.zst sensr-pi5.img.zst \
+                   sensr-x86_64.qcow2.zst sensr-x86_64-installer.iso \
+                   sensr-pi4.closure.tar.zst sensr-pi5.closure.tar.zst \
+                   sensr-qcow.closure.tar.zst sensr-iso.closure.tar.zst; do
+            [ -f "assets/$f" ] && [ -f "assets/$f.sha256" ] || { echo "missing $f"; missing=1; }
+          done
+          exit $missing
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=(
+            assets/sensr-pi4.img.zst assets/sensr-pi4.img.zst.sha256
+            assets/sensr-pi5.img.zst assets/sensr-pi5.img.zst.sha256
+            assets/sensr-x86_64.qcow2.zst assets/sensr-x86_64.qcow2.zst.sha256
+            assets/sensr-x86_64-installer.iso assets/sensr-x86_64-installer.iso.sha256
+            assets/sensr-pi4.closure.tar.zst assets/sensr-pi4.closure.tar.zst.sha256
+            assets/sensr-pi5.closure.tar.zst assets/sensr-pi5.closure.tar.zst.sha256
+            assets/sensr-qcow.closure.tar.zst assets/sensr-qcow.closure.tar.zst.sha256
+            assets/sensr-iso.closure.tar.zst assets/sensr-iso.closure.tar.zst.sha256
+            assets/update-manifest.json assets/manifest.json
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber "${files[@]}"
+          else
+            gh release create "$TAG" --title "sensr $TAG" --generate-notes --latest "${files[@]}"
+          fi

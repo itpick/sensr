@@ -4,6 +4,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="canonical" href="https://itpick.github.io/sensr/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="sensr">
+<meta property="og:title" content="sensr: a firewall and router OS in Rust">
+<meta property="og:description" content="sensr: a Rust firewall OS on NixOS, an OPNsense-style router for x86, Raspberry Pi 4/5 and VMs.">
+<meta property="og:url" content="https://itpick.github.io/sensr/">
+<meta property="og:image" content="https://itpick.github.io/sensr/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="sensr: a firewall and router OS written in Rust, built on NixOS">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="sensr: a firewall and router OS in Rust">
+<meta name="twitter:description" content="sensr: a Rust firewall OS on NixOS, an OPNsense-style router for x86, Raspberry Pi 4/5 and VMs.">
+<meta name="twitter:image" content="https://itpick.github.io/sensr/og.png">
+<meta name="twitter:image:alt" content="sensr: a firewall and router OS written in Rust, built on NixOS">
+
 <title>sensr installer</title>
 <meta name="description" content="sensr: a Rust firewall OS on NixOS, an OPNsense-style router for x86, Raspberry Pi 4/5 and VMs.">
 <style>
@@ -73,7 +90,7 @@
 <main>
   <h1 class="logo" aria-label="sensr"><span class="s">s</span><span class="hl">ens</span><span class="r">r</span></h1>
   <p class="sub">A firewall and router OS written in Rust, built on NixOS. It aims to match OPNsense feature for feature, with atomic upgrades and rollback.</p>
-  <p class="note">In development: no images have been released yet. The buttons below go live with the first release. If you need a router today, use <a href="https://itpick.github.io/opnsense-pi/">OPNsense for Raspberry Pi</a> or <a href="https://itpick.github.io/vyos-pi/">VyOS for Raspberry Pi</a>.</p>
+  <p class="note">In development. Images are built and boot-tested by CI and published as GitHub releases; a download button that is still dimmed has no asset in the latest release yet. If you need a router today, use <a href="https://itpick.github.io/opnsense-pi/">OPNsense for Raspberry Pi</a> or <a href="https://itpick.github.io/vyos-pi/">VyOS for Raspberry Pi</a>.</p>
   <aside class="related" aria-label="Related projects">
     <strong>Related projects</strong>
     <ul>
@@ -86,7 +103,7 @@
 
   <div class="boards">
     <div class="card">
-      <span class="tag plan">Planned</span>
+      <span class="tag ok">Boot-tested in a VM</span>
       <h2>x86_64 PC / appliance</h2>
       <ul>
         <li>UEFI USB installer, writes to an internal disk</li>
@@ -94,7 +111,7 @@
         <li>AES-NI, so VPNs are fast</li>
       </ul>
       <a class="btn" aria-disabled="true" data-download="sensr-x86_64-installer.iso" href="https://github.com/itpick/sensr/releases/latest/download/sensr-x86_64-installer.iso">Download installer ISO</a>
-      <div class="small">sha256 published alongside</div>
+      <div class="small"><span data-asset="sensr/sensr-x86_64-installer.iso">ISO image</span> &middot; <a href="https://github.com/itpick/sensr/releases/latest/download/sensr-x86_64-installer.iso.sha256">sha256</a></div>
     </div>
     <div class="card">
       <span class="tag ok">Runs on a real Pi 5</span>
@@ -107,7 +124,7 @@
         <li>Try it from Raspberry Pi OS first: a one-time trial boot that falls back to your OS by itself</li>
       </ul>
       <a class="btn" aria-disabled="true" data-download="sensr-pi5.img.zst" href="https://github.com/itpick/sensr/releases/latest/download/sensr-pi5.img.zst">Download for Pi 5</a>
-      <div class="small">sha256 published alongside</div>
+      <div class="small"><span data-asset="sensr/sensr-pi5.img.zst">image</span> &middot; <a href="https://github.com/itpick/sensr/releases/latest/download/sensr-pi5.img.zst.sha256">sha256</a></div>
     </div>
     <div class="card">
       <span class="tag ok">Runs on a real Pi 4</span>
@@ -119,10 +136,10 @@
         <li>No AES hardware, so VPNs are CPU-bound</li>
       </ul>
       <a class="btn" aria-disabled="true" data-download="sensr-pi4.img.zst" href="https://github.com/itpick/sensr/releases/latest/download/sensr-pi4.img.zst">Download for Pi 4</a>
-      <div class="small">sha256 published alongside</div>
+      <div class="small"><span data-asset="sensr/sensr-pi4.img.zst">image</span> &middot; <a href="https://github.com/itpick/sensr/releases/latest/download/sensr-pi4.img.zst.sha256">sha256</a></div>
     </div>
     <div class="card">
-      <span class="tag plan">Planned</span>
+      <span class="tag">qemu-guest profile</span>
       <h2>Virtual machine</h2>
       <ul>
         <li>qcow2 for Proxmox, libvirt and QEMU</li>
@@ -130,7 +147,7 @@
         <li>The same image the CI tests boot</li>
       </ul>
       <a class="btn" aria-disabled="true" data-download="sensr-x86_64.qcow2.zst" href="https://github.com/itpick/sensr/releases/latest/download/sensr-x86_64.qcow2.zst">Download qcow2</a>
-      <div class="small">aarch64 qcow2 also planned</div>
+      <div class="small"><span data-asset="sensr/sensr-x86_64.qcow2.zst">image</span> &middot; <a href="https://github.com/itpick/sensr/releases/latest/download/sensr-x86_64.qcow2.zst.sha256">sha256</a></div>
     </div>
   </div>
 
@@ -160,7 +177,7 @@
     <tr><th></th><th>Pi 5 download (.img.xz)</th><th>Pi 4 download</th><th>Installed on disk<span class="fine">*</span></th></tr>
     <tr><td>opnsense-pi <span class="fine">(release <span data-release="opnsense-pi">26.7-4</span>)</span></td><td class="num"><span data-asset="opnsense-pi/opnsense-pi5.img.xz">1.32 GB</span></td><td class="num"><span data-asset="opnsense-pi/opnsense-pi4.img.xz">1.32 GB</span></td><td class="num">~2.1 GiB <span class="fine">(2,104 MiB)</span></td></tr>
     <tr><td>vyos-pi <span class="fine">(release <span data-release="vyos-pi">2026.11.16-2</span>)</span></td><td class="num"><span data-asset="vyos-pi/vyos-pi-pi5.img.xz">599 MB</span></td><td class="num"><span data-asset="vyos-pi/vyos-pi-pi4.img.xz">562 MB</span></td><td class="num">~0.7 GiB <span class="fine">(732 MiB squashfs)</span></td></tr>
-    <tr><td>sensr <span class="fine">(development build, not released)</span></td><td class="num">~373 MB <span class="fine">(.img.zst from CI; 2.1 GB raw)</span></td><td class="num">~373 MB <span class="fine">(.img.zst from the same CI build)</span></td><td class="num">~0.85 GiB <span class="fine">(870 MiB x86 closure)</span></td></tr>
+    <tr><td>sensr <span class="fine">(release <span data-release="sensr">latest</span>)</span></td><td class="num"><span data-asset="sensr/sensr-pi5.img.zst">see release</span> <span class="fine">(.img.zst; 2.1 GB raw)</span></td><td class="num"><span data-asset="sensr/sensr-pi4.img.zst">see release</span> <span class="fine">(.img.zst)</span></td><td class="num">~0.85 GiB <span class="fine">(870 MiB x86 closure)</span></td></tr>
   </table></div>
   <p class="fine">Downloads: the latest GitHub releases (this page updates the sizes from GitHub when it loads). *Installed: measured on x86 VMs in the <a href="https://github.com/itpick/sensr/blob/main/docs/research/07-performance-evaluation.md#22-b-os-base-footprint-and-boot">sensr benchmark</a> (OPNsense 26.7, VyOS rolling), not on the Pi images. The sensr row is measured on its development builds: the Pi 5 image as CI builds it (zstd), and the closure of the x86 qcow2 image (no Perl, no nixpkgs source, Kea without its Python shell).</p>
 
@@ -213,7 +230,7 @@
   <ol>
     <li>Pi: update the EEPROM bootloader first (Raspberry Pi OS: <code>sudo rpi-eeprom-update -a</code>).</li>
     <li>Without a seed, the first NIC (<code>eth0</code>) is WAN (DHCP) and the second (<code>eth1</code>) is LAN with 192.168.1.1/24. Plug your computer into LAN.</li>
-    <li>Planned: open <code>https://192.168.1.1</code> and finish the setup wizard, which makes you set an admin password. Today the API answers plain HTTP on port 443 and the wizard does not exist yet.</li>
+    <li>Planned: open <code>https://192.168.1.1</code> and finish the setup wizard, which makes you set an admin password. Today the UI answers HTTPS on port 443 with a self-signed certificate and the setup wizard does not exist yet.</li>
   </ol>
 
   <h3>Build it yourself</h3>
@@ -260,9 +277,13 @@
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (rel) {
         if (!rel) return;
+        document.querySelectorAll('[data-release="sensr"]').forEach(function (e) { e.textContent = rel.tag_name; });
         (rel.assets || []).forEach(function (a) {
           document.querySelectorAll('[data-download="' + a.name + '"]').forEach(function (b) {
             b.removeAttribute("aria-disabled");
+          });
+          document.querySelectorAll('[data-asset="sensr/' + a.name + '"]').forEach(function (e) {
+            e.textContent = fmt(a.size);
           });
         });
       })
