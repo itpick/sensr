@@ -807,7 +807,7 @@ pub(crate) mod tests {
         d.ids.enabled = true;
         d.ids.user_rules.push(UserRule {
             enabled: true,
-            source: Some("192.168.68.0/22".parse().unwrap()),
+            source: Some("192.168.1.0/22".parse().unwrap()),
             destination: None,
             fingerprint: None,
             action: UserRuleAction::Pass,
@@ -853,7 +853,7 @@ pub(crate) mod tests {
             sid: 2047702,
             track: Some(SuppressTrack {
                 by: TrackBy::Src,
-                net: "192.168.68.20/32".parse().unwrap(),
+                net: "192.168.1.20/32".parse().unwrap(),
             }),
             description: None,
         });
@@ -867,7 +867,7 @@ pub(crate) mod tests {
         assert!(f["drop.conf"].contains("group:emerging-scan.rules"));
         assert!(f["disable.conf"].contains("metadata: signature_severity Informational"));
         assert!(f["disable.conf"].contains("2024897"));
-        assert!(f["threshold.config"].contains("track by_src, ip 192.168.68.20/32"));
+        assert!(f["threshold.config"].contains("track by_src, ip 192.168.1.20/32"));
     }
 
     #[test]

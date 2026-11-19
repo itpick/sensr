@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Write the sensr Pi 4 image to the card in this machine's reader.
-# Run as root: sudo /home/lucaspick/write-pi4-card.sh [image]
+# Run as root: sudo ./nix/pi4/write-card.sh [image] [seed-dir]
 #
 # Destroys everything on the card. Refuses to write to anything that is not a
 # removable 25-35 GB USB device, so the NVMe cannot be hit by a typo.
 set -euo pipefail
 
-img=${1:-/home/lucaspick/pi4-card.img}
+img=${1:-./pi4-card.img}
 [ -f "$img" ] || { echo "no image at $img" >&2; exit 1; }
 
 # Candidates: USB disks that are not zero-sized (readers show an empty slot
@@ -46,7 +46,7 @@ sync
 
 # The first-boot seed: config.json (the running router's document), so the
 # Pi 4 comes up as the same router. Read by sensr before networking starts.
-seed=${2:-/home/lucaspick/pi4-seed}
+seed=${2:-./pi4-seed}
 if [ -d "$seed" ]; then
   blockdev --rereadpt "$dev" || true
   sleep 1

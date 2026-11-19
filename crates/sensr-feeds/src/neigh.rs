@@ -116,16 +116,16 @@ mod lease_tests {
     fn active_leases_become_mac_addresses() {
         let text = format!(
             "{HEADER}\n\
-             192.168.72.2,\"46:7E:11:F7:A6:1F\",\"01:46:7e:11:f7:a6:1f\",3600,2000000000,1,\
+             192.168.2.2,\"46:7E:11:F7:A6:1F\",\"01:46:7e:11:f7:a6:1f\",3600,2000000000,1,\
              0,0,trusted,0,,0\n\
-             192.168.72.3,,\"01:aa\",3600,2000000000,1,0,0,nameless,0,,0\n"
+             192.168.2.3,,\"01:aa\",3600,2000000000,1,0,0,nameless,0,,0\n"
         );
         let mut m = BTreeMap::new();
         parse_kea_lease_csv(&text, 1_700_000_000, &mut m);
         assert_eq!(
             m.into_iter().collect::<Vec<_>>(),
             vec![(
-                "192.168.72.2".parse::<IpAddr>().unwrap(),
+                "192.168.2.2".parse::<IpAddr>().unwrap(),
                 "46:7e:11:f7:a6:1f".to_string()
             )]
         );

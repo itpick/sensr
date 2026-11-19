@@ -863,7 +863,7 @@ mod tests {
             sid: 2024897,
             track: Some(SuppressTrack {
                 by: TrackBy::Src,
-                net: "192.168.68.20/32".parse().unwrap(),
+                net: "192.168.1.20/32".parse().unwrap(),
             }),
             description: None,
         });
