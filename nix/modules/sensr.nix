@@ -375,6 +375,8 @@ in
     };
   };
 
+  imports = [ ./updates.nix ];
+
   config = mkIf cfg.enable {
     # sensr owns the packet filter and the interfaces. NixOS's own firewall
     # and its nftables service would flush the ruleset sensr applies.

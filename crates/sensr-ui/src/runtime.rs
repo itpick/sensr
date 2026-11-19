@@ -246,6 +246,83 @@ pub struct Ipv6Status {
     pub now: u64,
 }
 
+/// The running system, as the update service reports it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateCurrent {
+    /// `nixos-version` of the running generation.
+    #[serde(default)]
+    pub version: String,
+    /// Image variant (`pi4`, `pi5`, `qcow`, `iso`).
+    #[serde(default)]
+    pub image: String,
+}
+
+/// A newer system the manifest offers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateCandidate {
+    /// Version string of the offered generation.
+    #[serde(default)]
+    pub version: String,
+    /// sha256 of the closure archive.
+    #[serde(default)]
+    pub sha256: String,
+    /// Download URL.
+    #[serde(default)]
+    pub url: String,
+    /// Release notes, if the manifest carries any.
+    #[serde(default)]
+    pub notes: String,
+}
+
+/// State of the in-app updater, as `sensr-update` leaves it in
+/// `/run/sensr/updates/status.json` (nix/modules/updates.nix).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateStatus {
+    /// `idle`, `checking`, `update-available`, `downloading`, `installing`,
+    /// `up-to-date`, `done` or `error`.
+    #[serde(default)]
+    pub phase: String,
+    /// One line for the page.
+    #[serde(default)]
+    pub message: String,
+    /// Whether the timer installs by itself.
+    #[serde(default)]
+    pub auto: bool,
+    /// The running system.
+    #[serde(default)]
+    pub current: UpdateCurrent,
+    /// The offered system, when one was found.
+    #[serde(default)]
+    pub available: Option<UpdateCandidate>,
+    /// Manifest the service was built with.
+    #[serde(default)]
+    pub manifest_url: String,
+    /// Last check, RFC 3339.
+    #[serde(default)]
+    pub last_check: Option<String>,
+    /// Last successful install, RFC 3339.
+    #[serde(default)]
+    pub last_install: Option<String>,
+    /// When the status was written, RFC 3339.
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+impl UpdateStatus {
+    /// True while the service is doing something the page should poll for.
+    pub fn busy(&self) -> bool {
+        matches!(
+            self.phase.as_str(),
+            "checking" | "downloading" | "installing"
+        )
+    }
+
+    /// Whether a newer system is ready to install.
+    pub fn has_update(&self) -> bool {
+        self.available.is_some()
+    }
+}
+
 /// Parses an agent reply; `null` (subsystem not running) and unknown shapes give the default.
 pub fn parse<T: serde::de::DeserializeOwned + Default>(v: Value) -> T {
     if v.is_null() {

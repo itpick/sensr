@@ -957,6 +957,18 @@ with `.sha256` and `manifest.json`):
 | `pi4` | Raspberry Pi 4 | U-Boot extlinux | `genet` LAN; no AES → WireGuard (ChaCha20) recommended, documented |
 | `qcow` | KVM/Proxmox/libvirt (x86_64, aarch64) | systemd-boot | the image CI tests boot; cloud variants (amazon, azure, proxmox, hyperv, vmware, oci) in Phase 3 |
 
+**Releases and updates.** `.github/workflows/release.yml` runs on a `v*` tag:
+it builds the four images, packs each board's system closure, writes
+`.sha256` for every asset and publishes `update-manifest.json` (per board:
+closure URL, digest, version) plus `manifest.json` with `gh release create`.
+The appliance consumes the former: `services.sensr.updates` (`nix/modules/
+updates.nix`) checks the manifest, verifies the digest, imports the closure
+and runs `switch-to-configuration switch`, so one update replaces the sensr
+binaries and every package they use atomically; the previous generation stays
+in the profile for rollback. The timer and the System › Updates page share
+one root unit; the unprivileged web UI only writes a request file and reads
+the status file. Automatic installs are off until enabled on that page.
+
 **Lessons from opnsense-pi applied** (06 §1): L1 pins live in `flake.lock`,
 `Cargo.lock`, `nix/overlays`; L2 seed folder on the FAT partition; L3 NIC
 names pinned by MAC through generated `systemd.link` files and a MAC → logical

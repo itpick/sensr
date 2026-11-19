@@ -4,14 +4,14 @@
 
 use crate::actions::{
     alias_feeds, dns_stats, field_choices, form_load, gateways_status, grid_fetch, ids_alerts,
-    insight_data, live_status, pd_status, revision_diff, revisions,
+    insight_data, live_status, pd_status, revision_diff, revisions, update_status,
 };
 use crate::api::{
     AlertPage, DiffLine, DnsStats, INSIGHT_RANGES, InsightReport, TrafficPoint, TrafficRow,
 };
 use crate::grid::GridQuery;
 use crate::islands::{
-    DashboardLive, GatewaysLive, GridIsland, SettingsFormIsland, bps, diff_class,
+    DashboardLive, GatewaysLive, GridIsland, SettingsFormIsland, UpdatesLive, bps, diff_class,
 };
 use crate::models::*;
 use crate::runtime::{Ipv6Status, fmt_time, lifetime, until};
@@ -653,6 +653,20 @@ pub fn UserGroupsPage() -> impl IntoView {
 #[component]
 pub fn SystemGeneralPage() -> impl IntoView {
     view! { <SettingsForm<SystemGeneral> title="System"/> }
+}
+
+/// System › Updates: pull and install a prebuilt system, optionally on a timer.
+#[component]
+pub fn UpdatesPage() -> impl IntoView {
+    let load = || {
+        Suspend::new(async move {
+            match update_status().await {
+                Ok(initial) => view! { <UpdatesLive initial/> }.into_any(),
+                Err(e) => load_error(e),
+            }
+        })
+    };
+    view! { <Suspense fallback=|| ()>{load}</Suspense> }
 }
 
 /// Lobby › Password: change the signed-in account's password.

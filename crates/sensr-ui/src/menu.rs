@@ -116,6 +116,7 @@ const CORE: &[Node] = &[
         n("Settings")
             .order(20)
             .kids(&[n("General").url("/ui/system/general")]),
+        n("Updates").order(30).url("/ui/system/updates"),
     ]),
     n("Interfaces").order(30).icon(Icon::Interfaces),
     n("Firewall").order(40).icon(Icon::Firewall).kids(&[
@@ -416,7 +417,14 @@ mod tests {
         let m = build(&[]);
         assert_eq!(
             labels(&find(&m, &["System"]).children),
-            ["Configuration", "Gateways", "Routes", "Access", "Settings"]
+            [
+                "Configuration",
+                "Gateways",
+                "Routes",
+                "Access",
+                "Settings",
+                "Updates"
+            ]
         );
         assert_eq!(
             labels(&find(&m, &["Firewall", "NAT"]).children),
@@ -486,6 +494,7 @@ mod tests {
             "/ui/system/user",
             "/ui/system/group",
             "/ui/system/general",
+            "/ui/system/updates",
         ];
         fn walk(items: &[MenuItem], out: &mut Vec<String>) {
             for item in items {

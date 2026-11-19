@@ -69,6 +69,56 @@ mod imp {
         }
     }
 
+    /// Where `sensr-update` keeps its state (nix/modules/updates.nix).
+    const UPDATE_DIR: &str = "/run/sensr/updates";
+
+    /// The updater's status; the running version comes from the booted
+    /// generation when the service has not written anything yet.
+    pub async fn read_update_status() -> crate::runtime::UpdateStatus {
+        let path = format!("{UPDATE_DIR}/status.json");
+        let mut st: crate::runtime::UpdateStatus = match tokio::fs::read_to_string(&path).await {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+            Err(_) => crate::runtime::UpdateStatus::default(),
+        };
+        if st.phase.is_empty() {
+            st.phase = "idle".to_owned();
+        }
+        if st.message.is_empty() {
+            st.message = "No check has run yet.".to_owned();
+        }
+        if st.current.version.is_empty() {
+            st.current.version =
+                match tokio::fs::read_to_string("/run/current-system/nixos-version").await {
+                    Ok(v) => v.trim().to_owned(),
+                    Err(_) => "unknown".to_owned(),
+                };
+        }
+        st
+    }
+
+    /// Writes `{mode: …}` into the updater's request file. The path unit starts
+    /// the root service; the rename publishes the file atomically.
+    pub async fn write_update_request(mode: &str) -> Result<(), ServerFnError> {
+        if !matches!(mode, "check" | "install" | "auto-on" | "auto-off") {
+            return Err(ServerFnError::new(format!(
+                "unknown update request: {mode}"
+            )));
+        }
+        tokio::fs::create_dir_all(UPDATE_DIR)
+            .await
+            .map_err(|e| ServerFnError::new(format!("{UPDATE_DIR}: {e}")))?;
+        let tmp = format!("{UPDATE_DIR}/request.json.tmp");
+        let dst = format!("{UPDATE_DIR}/request.json");
+        let body = serde_json::json!({ "mode": mode }).to_string();
+        tokio::fs::write(&tmp, body)
+            .await
+            .map_err(|e| ServerFnError::new(format!("{tmp}: {e}")))?;
+        tokio::fs::rename(&tmp, &dst)
+            .await
+            .map_err(|e| ServerFnError::new(format!("{dst}: {e}")))?;
+        Ok(())
+    }
+
     /// One grid row: its key, the stored item and the view.
     pub struct Row {
         pub key: String,
@@ -804,6 +854,23 @@ pub async fn pd_status() -> Result<Ipv6Status, ServerFnError> {
 #[server(prefix = "/ui/fn", input = Json)]
 pub async fn dns_stats() -> Result<crate::api::DnsStats, ServerFnError> {
     imp::backend()?.dns_stats().await.map_err(imp::err)
+}
+
+/// System › Updates: what `sensr-update` last wrote and what the running
+/// generation is. A missing status file (first boot, or the module disabled)
+/// yields an idle status rather than an error.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn update_status() -> Result<crate::runtime::UpdateStatus, ServerFnError> {
+    Ok(imp::read_update_status().await)
+}
+
+/// Asks `sensr-update` to run. `mode` is `check`, `install`, `auto-on` or
+/// `auto-off`; the service owns every privileged step, the API only drops the
+/// request file and reads the status back.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn update_request(mode: String) -> Result<crate::runtime::UpdateStatus, ServerFnError> {
+    imp::write_update_request(&mode).await?;
+    Ok(imp::read_update_status().await)
 }
 
 /// Session cookie name.
