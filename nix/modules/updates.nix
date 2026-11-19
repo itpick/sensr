@@ -62,7 +62,11 @@ let
       request_file=${lib.escapeShellArg requestFile}
       state_file="$state_dir/state.json"
       work=""
+      remote_version=""
+      remote_system=""
+      remote_sha=""
       remote_path=""
+      remote_notes=""
       last_checked=""
       last_installed=""
       trap 'if [ -n "''${work:-}" ]; then rm -rf "$work"; fi' EXIT
@@ -250,7 +254,12 @@ let
         fi
 
         write_status installing "Switching to $remote_version" "$(available_json)"
-        if ! "$toplevel/bin/switch-to-configuration" switch; then
+        # Run the switch in its own transient unit: the activation restarts
+        # changed units, and sensr-update.service is one of them. In this
+        # unit's cgroup that restart could kill the script before it records
+        # the outcome; a separate unit runs to completion either way.
+        if ! systemd-run --unit=sensr-update-switch --collect --wait \
+             "$toplevel/bin/switch-to-configuration" switch; then
           write_status error "switch-to-configuration failed; the previous generation still boots" "$(available_json)"
           return 1
         fi
