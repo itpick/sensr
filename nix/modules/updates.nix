@@ -62,6 +62,7 @@ let
       request_file=${lib.escapeShellArg requestFile}
       state_file="$state_dir/state.json"
       work=""
+      remote_path=""
       last_checked=""
       last_installed=""
       trap 'if [ -n "''${work:-}" ]; then rm -rf "$work"; fi' EXIT
@@ -89,6 +90,14 @@ let
 
       current_version() {
         cat /run/current-system/nixos-version 2>/dev/null || echo unknown
+      }
+
+      # The release manifest names the exact toplevel its closure contains.
+      # Comparing store paths is what decides "up to date": the nixos label
+      # alone is the nixpkgs revision and date, so two sensr builds from the
+      # same nixpkgs would otherwise look identical.
+      current_system() {
+        readlink -f /run/current-system 2>/dev/null || true
       }
 
       # The status the UI reads. Every field is always present so the page
@@ -144,6 +153,7 @@ let
         remote_version=$(jq -r '.version // ""' "$mf")
         remote_system=$(asset_url "$(jq -r --arg b "$board" '.images[$b].system' "$mf")")
         remote_sha=$(jq -r --arg b "$board" '.images[$b].sha256 // ""' "$mf")
+        remote_path=$(jq -r --arg b "$board" '.images[$b].store_path // ""' "$mf")
         remote_notes=$(jq -r '.notes // ""' "$mf")
       }
 
@@ -152,8 +162,9 @@ let
           --arg version "$remote_version" \
           --arg sha "$remote_sha" \
           --arg url "$remote_system" \
+          --arg path "$remote_path" \
           --arg notes "$remote_notes" \
-          '{version: $version, sha256: $sha, url: $url, notes: $notes}'
+          '{version: $version, sha256: $sha, url: $url, store_path: $path, notes: $notes}'
       }
 
       check() {
@@ -166,7 +177,11 @@ let
         fi
         local cur
         cur=$(current_version)
-        if [ "$remote_version" = "$cur" ]; then
+        if [ -n "$remote_path" ] && [ "$remote_path" = "$(current_system)" ]; then
+          write_status up-to-date "This system is up to date ($cur)" null
+          return 0
+        fi
+        if [ -z "$remote_path" ] && [ "$remote_version" = "$cur" ]; then
           write_status up-to-date "This system is up to date ($cur)" null
           return 0
         fi
@@ -182,7 +197,7 @@ let
         fi
         local cur
         cur=$(current_version)
-        if [ "$remote_version" = "$cur" ]; then
+        if [ -n "$remote_path" ] && [ "$remote_path" = "$(current_system)" ]; then
           write_status up-to-date "This system is up to date ($cur)" null
           return 0
         fi
@@ -220,6 +235,10 @@ let
         done
         if [ -z "$toplevel" ]; then
           write_status error "The archive did not contain a system toplevel" "$(available_json)"
+          return 1
+        fi
+        if [ -n "$remote_path" ] && [ "$toplevel" != "$remote_path" ]; then
+          write_status error "The archive contains $toplevel, not the manifest's $remote_path" "$(available_json)"
           return 1
         fi
 

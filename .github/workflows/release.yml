@@ -47,6 +47,8 @@ jobs:
             nix-store -qR "$top" | xargs nix-store --export | zstd -T0 -10 -o "out/sensr-$board.closure.tar.zst"
             # The updater compares this exactly with /run/current-system/nixos-version.
             cat "$top/nixos-version" > "out/sensr-$board.version"
+            # ... and this with the running /run/current-system store path.
+            echo "$top" > "out/sensr-$board.toplevel"
           done
       - name: Digests
         run: |
@@ -82,6 +84,7 @@ jobs:
             top=$(nix build -L --print-out-paths ".#nixosConfigurations.$board.config.system.build.toplevel")
             nix-store -qR "$top" | xargs nix-store --export | zstd -T0 -10 -o "out/sensr-$board.closure.tar.zst"
             cat "$top/nixos-version" > "out/sensr-$board.version"
+            echo "$top" > "out/sensr-$board.toplevel"
           done
       - name: Digests
         run: |
@@ -120,12 +123,13 @@ jobs:
               iso) img=sensr-x86_64-installer.iso ;;
             esac
             version=$(cat "assets/sensr-$board.version")
+            path=$(cat "assets/sensr-$board.toplevel")
             closure="sensr-$board.closure.tar.zst"
             sha=$(cut -d' ' -f1 "assets/$closure.sha256")
             size=$(stat -c %s "assets/$closure")
             jq --arg b "$board" --arg v "$version" --arg u "$base/$closure" \
-               --arg s "$sha" --argjson n "$size" \
-               '.[$b] = {version: $v, system: $u, sha256: $s, size: $n}' \
+               --arg s "$sha" --arg p "$path" --argjson n "$size" \
+               '.[$b] = {version: $v, store_path: $p, system: $u, sha256: $s, size: $n}' \
                images.json > images.tmp && mv images.tmp images.json
             # The same entry carries the download the install page links to.
             jq --arg b "$board" --arg img "$img" --arg iu "$base/$img" \
