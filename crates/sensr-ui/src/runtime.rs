@@ -420,6 +420,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_updater_status() {
+        let s: UpdateStatus = parse(json!({
+            "phase": "update-available",
+            "message": "Version x is available",
+            "auto": true,
+            "current": {"version": "sd-card-26.11.1", "image": "pi4"},
+            "available": {
+                "version": "sd-card-26.11.2", "sha256": "abc", "url": "https://example/u",
+                "store_path": "/nix/store/x-nixos-system", "notes": "notes"
+            },
+            "manifest_url": "https://example/m.json",
+            "last_check": "2026-11-19T00:00:00Z",
+            "last_install": null,
+            "updated_at": "2026-11-19T00:00:00Z"
+        }));
+        assert!(!s.busy() && s.has_update() && s.auto);
+        assert_eq!(s.available.as_ref().unwrap().version, "sd-card-26.11.2");
+        assert_eq!(s.current.image, "pi4");
+        // An older service, or a disabled module, gives the defaults.
+        let e: UpdateStatus = parse(Value::Null);
+        assert!(!e.busy() && !e.has_update());
+    }
+
+    #[test]
     fn null_and_garbage_parse_to_empty() {
         let v: GatewaysView = parse(Value::Null);
         assert!(v.gateways.is_empty());
