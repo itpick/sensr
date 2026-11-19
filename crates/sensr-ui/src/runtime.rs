@@ -252,9 +252,22 @@ pub struct UpdateCurrent {
     /// `nixos-version` of the running generation.
     #[serde(default)]
     pub version: String,
+    /// Release tag (`v0.1.1`) when the running store path matched a manifest.
+    #[serde(default)]
+    pub tag: Option<String>,
     /// Image variant (`pi4`, `pi5`, `qcow`, `iso`).
     #[serde(default)]
     pub image: String,
+}
+
+impl UpdateCurrent {
+    /// What to call the running system: its release tag when known.
+    pub fn label(&self) -> &str {
+        match self.tag.as_deref() {
+            Some(tag) if !tag.is_empty() => tag,
+            _ => &self.version,
+        }
+    }
 }
 
 /// A newer system the manifest offers.
@@ -453,6 +466,12 @@ mod tests {
         assert_eq!(s.available.as_ref().unwrap().version, "sd-card-26.11.2");
         assert_eq!(s.available.as_ref().unwrap().label(), "v0.1.1");
         assert_eq!(s.current.image, "pi4");
+        // Without a remembered tag the label falls back to the version.
+        assert_eq!(s.current.label(), "sd-card-26.11.1");
+        let tagged: UpdateStatus = parse(json!({
+            "current": {"version": "sd-card-26.11.1", "tag": "v0.1.1", "image": "pi4"}
+        }));
+        assert_eq!(tagged.current.label(), "v0.1.1");
         // An older service, or a disabled module, gives the defaults.
         let e: UpdateStatus = parse(Value::Null);
         assert!(!e.busy() && !e.has_update());

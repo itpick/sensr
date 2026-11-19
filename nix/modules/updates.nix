@@ -61,6 +61,10 @@ let
       status_file=${lib.escapeShellArg statusFile}
       request_file=${lib.escapeShellArg requestFile}
       state_file="$state_dir/state.json"
+      # Release tag of the running system, remembered when a check or install
+      # matches the manifest, so the page can name it ("v0.1.1") instead of
+      # only the nixos label, which repeats across builds from one nixpkgs.
+      release_file="$state_dir/running-release"
       work=""
       remote_tag=""
       remote_version=""
@@ -109,6 +113,15 @@ let
         readlink -f /run/current-system 2>/dev/null || true
       }
 
+      current_release() {
+        cat "$release_file" 2>/dev/null || true
+      }
+
+      remember_release() {
+        [ -n "$1" ] || return 0
+        printf '%s\n' "$1" > "$release_file.tmp" && mv "$release_file.tmp" "$release_file"
+      }
+
       # The status the UI reads. Every field is always present so the page
       # renders before the first check has run.
       write_status() {
@@ -119,6 +132,7 @@ let
           --argjson available "$available" \
           --argjson auto "$(state_auto)" \
           --arg current "$(current_version)" \
+          --arg release "$(current_release)" \
           --arg image "$board" \
           --arg manifest "$manifest_url" \
           --arg checked "$last_checked" \
@@ -128,7 +142,11 @@ let
             phase: $phase,
             message: $message,
             auto: $auto,
-            current: {version: $current, image: $image},
+            current: {
+              version: $current,
+              tag: (if $release == "" then null else $release end),
+              image: $image
+            },
             available: $available,
             manifest_url: $manifest,
             last_check: (if $checked == "" then null else $checked end),
@@ -188,11 +206,13 @@ let
         local cur
         cur=$(current_version)
         if [ -n "$remote_path" ] && [ "$remote_path" = "$(current_system)" ]; then
-          write_status up-to-date "This system is up to date ($cur)" null
+          remember_release "$remote_tag"
+          write_status up-to-date "This system is up to date (''${remote_tag:-$cur})" null
           return 0
         fi
         if [ -z "$remote_path" ] && [ "$remote_version" = "$cur" ]; then
-          write_status up-to-date "This system is up to date ($cur)" null
+          remember_release "$remote_tag"
+          write_status up-to-date "This system is up to date (''${remote_tag:-$cur})" null
           return 0
         fi
         write_status update-available "Release ''${remote_tag:-$remote_version} is available" "$(available_json)"
@@ -208,7 +228,8 @@ let
         local cur
         cur=$(current_version)
         if [ -n "$remote_path" ] && [ "$remote_path" = "$(current_system)" ]; then
-          write_status up-to-date "This system is up to date ($cur)" null
+          remember_release "$remote_tag"
+          write_status up-to-date "This system is up to date (''${remote_tag:-$cur})" null
           return 0
         fi
         if [ -z "$remote_sha" ]; then
@@ -271,6 +292,7 @@ let
         fi
 
         last_installed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        remember_release "$remote_tag"
         write_status "done" "Updated to ''${remote_tag:-$remote_version}" null
       }
 

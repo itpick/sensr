@@ -1340,8 +1340,8 @@ pub fn UpdatesLive(initial: UpdateStatus) -> impl IntoView {
             </p>
             <dl class="stat-tiles" aria-label="Update state">
                 <div>
-                    <dt>"Running version"</dt>
-                    <dd id="update-current">{move || st.with(|s| s.current.version.clone())}</dd>
+                    <dt>"Running release"</dt>
+                    <dd id="update-current">{move || st.with(|s| s.current.label().to_string())}</dd>
                 </div>
                 <div>
                     <dt>"Image"</dt>
