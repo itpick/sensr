@@ -112,10 +112,11 @@ const CORE: &[Node] = &[
         n("Settings").kids(&[n("General").url("/ui/system/general")]),
     ]),
     n("Interfaces").order(30).icon(Icon::Interfaces),
-    n("Firewall")
-        .order(40)
-        .icon(Icon::Firewall)
-        .kids(&[n("Aliases").url("/ui/firewall/alias"), n("NAT")]),
+    n("Firewall").order(40).icon(Icon::Firewall).kids(&[
+        n("Aliases").url("/ui/firewall/alias"),
+        n("Groups").url("/ui/firewall/group"),
+        n("NAT"),
+    ]),
     n("Services").order(60).icon(Icon::Services),
     n("VPN")
         .order(50)
@@ -157,6 +158,10 @@ const INTERFACES: &[Node] = &[n("Interfaces").kids(&[
         n("Loopback").url("/ui/interfaces/loopback"),
     ]),
     n("Overview").order(230).url("/ui/interfaces/overview"),
+    n("VIP")
+        .order(250)
+        .label("Virtual IPs")
+        .kids(&[n("Settings").url("/ui/interfaces/vip")]),
 ])];
 
 const DIAGNOSTICS: &[Node] =
@@ -422,7 +427,7 @@ mod tests {
         );
         assert_eq!(
             labels(&find(&m, &["Firewall"]).children),
-            ["Aliases", "NAT", "Rules"]
+            ["Aliases", "Groups", "NAT", "Rules"]
         );
         assert_eq!(
             labels(&find(&m, &["Services", "Unbound"]).children),
@@ -452,6 +457,8 @@ mod tests {
             "/ui/interfaces/bridge",
             "/ui/interfaces/lagg",
             "/ui/interfaces/loopback",
+            "/ui/interfaces/vip",
+            "/ui/firewall/group",
             "/ui/routing/configuration",
             "/ui/routing/gateway_groups",
             "/ui/routing/status",

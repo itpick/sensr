@@ -221,6 +221,8 @@ pub fn store(grid: GridId, scope: &str, doc: &Value) -> Store {
         GridId::Bridges => Store::Map("devices.bridges".into()),
         GridId::Laggs => Store::Map("devices.laggs".into()),
         GridId::Loopbacks => Store::Map("devices.loopbacks".into()),
+        GridId::VirtualIps => Store::Map("virtual_ips.vips".into()),
+        GridId::FirewallGroups => Store::Map("firewall.groups".into()),
     }
 }
 
@@ -536,6 +538,29 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
         }),
         GridId::Loopbacks => json!({
             "id": get_path(item, "id").cloned().unwrap_or(Value::Null),
+            "description": s(item, "description"),
+        }),
+        GridId::VirtualIps => {
+            let mode = s(item, "mode.mode");
+            json!({
+                "interface": s(item, "interface"),
+                "address": s(item, "address"),
+                "mode": or_default(mode, "ip_alias"),
+                "vhid": get_path(item, "mode.vhid").cloned().unwrap_or(json!(1)),
+                "advbase": get_path(item, "mode.advbase").cloned().unwrap_or(json!(1)),
+                "advskew": get_path(item, "mode.advskew").cloned().unwrap_or(json!(0)),
+                // Write-only: the secret never leaves the server.
+                "password": "",
+                "no_bind": b(item, "no_bind", false),
+                "description": s(item, "description"),
+            })
+        }
+        GridId::FirewallGroups => json!({
+            "name": s(item, "name"),
+            "members": strings(item, "members"),
+            "wireguard": b(item, "wireguard", false),
+            "sequence": get_path(item, "sequence").cloned().unwrap_or(json!(0)),
+            "hidden": b(item, "hidden", false),
             "description": s(item, "description"),
         }),
         GridId::IdsUserRules => json!({
@@ -1022,6 +1047,48 @@ pub fn from_view(
             put(o, "id", view, "id");
             put(o, "description", view, "description");
         }
+        GridId::VirtualIps => {
+            let o = obj(&mut item);
+            put(o, "interface", view, "interface");
+            put(o, "address", view, "address");
+            let mode = s(view, "mode");
+            let password = s(view, "password");
+            let stored = base
+                .and_then(|b| get_path(b, "mode.password"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let secret = if password.is_empty() {
+                stored
+            } else {
+                password
+            };
+            o.insert(
+                "mode".into(),
+                match mode.as_str() {
+                    "carp" => json!({
+                        "mode": "carp",
+                        "vhid": get_path(view, "vhid").cloned().unwrap_or(json!(1)),
+                        "advbase": get_path(view, "advbase").cloned().unwrap_or(json!(1)),
+                        "advskew": get_path(view, "advskew").cloned().unwrap_or(json!(0)),
+                        "password": secret,
+                    }),
+                    "proxy_arp" => json!({"mode": "proxy_arp"}),
+                    _ => json!({"mode": "ip_alias"}),
+                },
+            );
+            put(o, "no_bind", view, "no_bind");
+            put_opt(o, "description", view, "description");
+        }
+        GridId::FirewallGroups => {
+            let o = obj(&mut item);
+            put(o, "name", view, "name");
+            put(o, "members", view, "members");
+            put(o, "wireguard", view, "wireguard");
+            put(o, "sequence", view, "sequence");
+            put(o, "hidden", view, "hidden");
+            put_opt(o, "description", view, "description");
+        }
         GridId::IdsUserRules => {
             let o = obj(&mut item);
             put(o, "enabled", view, "enabled");
@@ -1222,6 +1289,25 @@ pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
             ("description", "description"),
         ],
         GridId::Loopbacks => &[("id", "id"), ("description", "description")],
+        GridId::VirtualIps => &[
+            ("interface", "interface"),
+            ("address", "address"),
+            ("mode.vhid", "vhid"),
+            ("mode.advbase", "advbase"),
+            ("mode.advskew", "advskew"),
+            ("mode.password", "password"),
+            ("mode", "mode"),
+            ("no_bind", "no_bind"),
+            ("description", "description"),
+        ],
+        GridId::FirewallGroups => &[
+            ("name", "name"),
+            ("members", "members"),
+            ("wireguard", "wireguard"),
+            ("sequence", "sequence"),
+            ("hidden", "hidden"),
+            ("description", "description"),
+        ],
         GridId::IdsUserRules => &[
             ("source", "source"),
             ("destination", "destination"),

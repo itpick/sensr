@@ -63,6 +63,8 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/ui/interfaces/bridge") view=Bridges/>
                     <Route path=path!("/ui/interfaces/lagg") view=Laggs/>
                     <Route path=path!("/ui/interfaces/loopback") view=Loopbacks/>
+                    <Route path=path!("/ui/interfaces/vip") view=VirtualIpsPage/>
+                    <Route path=path!("/ui/firewall/group") view=FirewallGroups/>
                     <Route path=path!("/ui/routing/status") view=GatewayStatusPage/>
                     <Route path=path!("/ui/firewall/alias") view=Aliases/>
                     <Route path=path!("/ui/firewall/filter") view=Rules/>

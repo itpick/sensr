@@ -2022,6 +2022,173 @@ impl GridModel for LoopbackDevice {
     const TOGGLE: Option<&'static str> = None;
 }
 
+/// How a virtual IP is provided.
+pub const VIP_MODES: &[(&str, &str)] = &[
+    ("ip_alias", "IP alias"),
+    ("proxy_arp", "Proxy ARP"),
+    ("carp", "Shared address (CARP/VRRP)"),
+];
+
+/// Interfaces › Virtual IPs › Settings.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VirtualIp {
+    /// Object key.
+    pub uuid: String,
+    /// Interface carrying the address.
+    pub interface: String,
+    /// The address with its prefix length.
+    pub address: String,
+    /// How the address is provided.
+    pub mode: String,
+    /// Virtual host id for a shared address, 1 to 255.
+    pub vhid: u32,
+    /// Advertisement interval base in seconds.
+    pub advbase: u32,
+    /// Advertisement skew; higher loses elections.
+    pub advskew: u32,
+    /// Shared secret (write-only).
+    pub password: String,
+    /// Do not bind services to the address.
+    pub no_bind: bool,
+    /// Free text.
+    pub description: String,
+}
+
+impl FormModel for VirtualIp {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("interface", "Interface", K::Choice(ChoiceSet::Interfaces))
+                .required()
+                .help("Interface the address belongs to."),
+            F::new("address", "Address", K::Cidr)
+                .required()
+                .help("The address with its prefix length, for example 192.168.1.2/24."),
+            F::new("mode", "Type", K::Select(VIP_MODES)),
+            F::new(
+                "vhid",
+                "Virtual host ID",
+                K::Number {
+                    min: 1,
+                    max: 255,
+                },
+            )
+            .help("Unique per interface. Only for a shared address."),
+            F::new(
+                "advbase",
+                "Advertisement base (seconds)",
+                K::Number {
+                    min: 1,
+                    max: 254,
+                },
+            ),
+            F::new(
+                "advskew",
+                "Advertisement skew",
+                K::Number {
+                    min: 0,
+                    max: 254,
+                },
+            )
+            .help("Higher skew loses the election."),
+            F::new("password", "Password", K::Secret).help(
+                "Shared secret of the failover pair. Write-only: leave empty to keep the stored one.",
+            ),
+            F::new("no_bind", "Do not bind services", K::Checkbox)
+                .help("Services listen on the wildcard address instead of this one."),
+            F::new("description", "Description", K::Text),
+        ];
+        FIELDS
+    }
+
+    fn validate(&self) -> Vec<FieldError> {
+        let mut e = Vec::new();
+        if self.mode == "carp" && !self.uuid.is_empty() && self.password.is_empty() {
+            // A new address needs the secret; an existing one keeps it.
+        }
+        if self.mode == "carp" && self.uuid.is_empty() && self.password.is_empty() {
+            e.push(FieldError::new(
+                "password",
+                "A shared address needs the secret it shares with its peer.",
+            ));
+        }
+        e
+    }
+}
+
+impl GridModel for VirtualIp {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("interface", "Interface"),
+            Column::text("address", "Address"),
+            Column::text("mode", "Type"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
+/// Firewall › Groups: interface groups rules can name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InterfaceGroup {
+    /// Object key.
+    pub uuid: String,
+    /// The name rules use.
+    pub name: String,
+    /// Member interfaces.
+    pub members: Vec<String>,
+    /// Include every WireGuard instance.
+    pub wireguard: bool,
+    /// Evaluation order between groups.
+    pub sequence: u32,
+    /// Hide the group from the interface menu.
+    pub hidden: bool,
+    /// Free text.
+    pub description: String,
+}
+
+impl FormModel for InterfaceGroup {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("name", "Name", K::Text).required().help(
+                "Name rules use for this group; it must differ from every interface identifier.",
+            ),
+            F::new("members", "Member interfaces", K::Lines)
+                .help("One interface per line, for example lan or opt1."),
+            F::new("wireguard", "Include every WireGuard instance", K::Checkbox),
+            F::new(
+                "sequence",
+                "Sequence",
+                K::Number {
+                    min: 0,
+                    max: 1_000_000,
+                },
+            )
+            .help("Groups with a lower sequence are evaluated first."),
+            F::new("hidden", "Hide from the interface menu", K::Checkbox),
+            F::new("description", "Description", K::Text),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for InterfaceGroup {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("name", "Name"),
+            Column::list("members", "Members"),
+            Column::bool("hidden", "Hidden"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = None;
+}
+
 /// Failure condition of a gateway group.
 pub const GROUP_TRIGGERS: &[(&str, &str)] = &[
     ("down", "Member down"),
@@ -2666,6 +2833,10 @@ pub enum GridId {
     Laggs,
     /// Interfaces › Devices › Loopback.
     Loopbacks,
+    /// Interfaces › Virtual IPs › Settings.
+    VirtualIps,
+    /// Firewall › Groups.
+    FirewallGroups,
 }
 
 fn sanitize(scope: &Option<String>, default: &str) -> String {
@@ -2789,6 +2960,8 @@ impl GridId {
             Self::Bridges => GridMeta::of::<Bridge>(),
             Self::Laggs => GridMeta::of::<Lagg>(),
             Self::Loopbacks => GridMeta::of::<LoopbackDevice>(),
+            Self::VirtualIps => GridMeta::of::<VirtualIp>(),
+            Self::FirewallGroups => GridMeta::of::<InterfaceGroup>(),
         }
     }
 
@@ -2820,6 +2993,8 @@ impl GridId {
             Self::Bridges => go::<Bridge>(base, inputs),
             Self::Laggs => go::<Lagg>(base, inputs),
             Self::Loopbacks => go::<LoopbackDevice>(base, inputs),
+            Self::VirtualIps => go::<VirtualIp>(base, inputs),
+            Self::FirewallGroups => go::<InterfaceGroup>(base, inputs),
         }
     }
 
@@ -2955,7 +3130,9 @@ kinds! {
         StaticRoute => StaticRoutes, "route",
         Bridge => Bridges, "bridge",
         Lagg => Laggs, "aggregate",
-        LoopbackDevice => Loopbacks, "loopback"
+        LoopbackDevice => Loopbacks, "loopback",
+        VirtualIp => VirtualIps, "virtual IP",
+        InterfaceGroup => FirewallGroups, "group"
 }
 
 #[cfg(test)]
@@ -3011,6 +3188,8 @@ mod tests {
             GridId::Bridges,
             GridId::Laggs,
             GridId::Loopbacks,
+            GridId::VirtualIps,
+            GridId::FirewallGroups,
         ] {
             let meta = g.meta();
             assert!(!meta.columns.is_empty());

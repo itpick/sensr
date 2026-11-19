@@ -568,6 +568,24 @@ pub fn GatewaysConfig() -> impl IntoView {
     }
 }
 
+/// Interfaces › Virtual IPs › Settings.
+#[component]
+pub fn VirtualIpsPage() -> impl IntoView {
+    view! {
+        <p class="intro">"An IP alias adds an address to an interface, proxy ARP answers for addresses the host does not hold, and a shared address fails over between two firewalls. Shared addresses need the same virtual host id and secret on both peers."</p>
+        <Grid<VirtualIp> title="Virtual IPs"/>
+    }
+}
+
+/// Firewall › Groups.
+#[component]
+pub fn FirewallGroups() -> impl IntoView {
+    view! {
+        <p class="intro">"An interface group can be named by a rule like an interface, so one rule covers several networks. Rules on a group with a lower sequence are evaluated first."</p>
+        <Grid<InterfaceGroup> title="Interface groups"/>
+    }
+}
+
 /// Interfaces › Devices › Bridge.
 #[component]
 pub fn Bridges() -> impl IntoView {
