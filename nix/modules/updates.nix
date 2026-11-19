@@ -31,7 +31,6 @@ let
   upd = cfg.updates;
   inherit (lib)
     mkOption
-    mkEnableOption
     types
     ;
 
@@ -238,7 +237,7 @@ let
         fi
 
         last_installed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        write_status done "Updated to $remote_version" null
+        write_status "done" "Updated to $remote_version" null
       }
 
       # Handle the UI request. The file is removed first so a second click
@@ -277,7 +276,11 @@ let
 in
 {
   options.services.sensr.updates = {
-    enable = mkEnableOption "in-app system updates";
+    enable = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Enable in-app system updates (the System > Updates page).";
+    };
     manifestUrl = mkOption {
       type = types.str;
       default = "https://github.com/itpick/sensr/releases/latest/download/update-manifest.json";
