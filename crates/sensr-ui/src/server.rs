@@ -116,6 +116,20 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
     res
 }
 
+/// The wasm file cargo-leptos wrote. Current builds name it `<output>_bg.wasm`,
+/// which is exactly what the generated JS fetches; older layouts name it
+/// `<output>.wasm`. Both spellings are served from the file that exists: a
+/// route pointing at the missing spelling would shadow the real file and the
+/// browser would fail to hydrate.
+fn ui_wasm(pkg_dir: &std::path::Path, output_name: &str) -> std::path::PathBuf {
+    let bg = pkg_dir.join(format!("{output_name}_bg.wasm"));
+    if bg.is_file() {
+        bg
+    } else {
+        pkg_dir.join(format!("{output_name}.wasm"))
+    }
+}
+
 /// The complete UI: pages, server functions, static assets and the session gate.
 pub fn router(options: LeptosOptions, sessions: SessionsHandle) -> Router {
     let routes = generate_route_list(App);
@@ -123,18 +137,24 @@ pub fn router(options: LeptosOptions, sessions: SessionsHandle) -> Router {
     let site = std::path::PathBuf::from(options.site_root.as_ref());
     // Static assets are mounted explicitly: the UI's catch-all route would otherwise swallow
     // them. Hashless names, so revalidate rather than cache forever.
-    let pkg = tower_http::services::ServeDir::new(site.join(options.site_pkg_dir.as_ref()));
+    let pkg_dir = site.join(options.site_pkg_dir.as_ref());
+    let pkg = tower_http::services::ServeDir::new(&pkg_dir);
+    let wasm = ui_wasm(&pkg_dir, &options.output_name);
     Router::new()
         .route("/healthz", axum::routing::get(|| async { "ok" }))
         // Leptos names the wasm `<output>_bg.wasm` unless LEPTOS_OUTPUT_NAME was set when the
         // *server* was compiled (cargo-leptos does that; a plain `cargo build` of sensr-api
         // does not). Serve both names from the one file cargo-leptos writes.
         .route_service(
-            &format!("/{}/{}_bg.wasm", options.site_pkg_dir, options.output_name),
-            tower_http::services::ServeFile::new(
-                site.join(options.site_pkg_dir.as_ref())
-                    .join(format!("{}.wasm", options.output_name)),
+            &format!(
+                "/{}/{}_bg.wasm",
+                options.site_pkg_dir, options.output_name
             ),
+            tower_http::services::ServeFile::new(wasm.clone()),
+        )
+        .route_service(
+            &format!("/{}/{}.wasm", options.site_pkg_dir, options.output_name),
+            tower_http::services::ServeFile::new(wasm),
         )
         .nest_service("/pkg", pkg)
         .route_service(
@@ -169,5 +189,18 @@ mod tests {
         );
         assert_eq!(cookie("a=1", "sensr_session"), None);
         assert!(is_public("/pkg/sensr-ui.wasm") && !is_public("/ui/firewall/alias"));
+    }
+
+    #[test]
+    fn wasm_alias_follows_the_file_that_exists() {
+        let dir = std::env::temp_dir().join(format!("sensr-ui-wasm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app_bg.wasm"), b"wasm").unwrap();
+        assert_eq!(ui_wasm(&dir, "app"), dir.join("app_bg.wasm"));
+        // A build that only ships the plain name must still serve both spellings.
+        std::fs::remove_file(dir.join("app_bg.wasm")).unwrap();
+        std::fs::write(dir.join("app.wasm"), b"wasm").unwrap();
+        assert_eq!(ui_wasm(&dir, "app"), dir.join("app.wasm"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

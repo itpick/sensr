@@ -76,6 +76,8 @@ async fn start() -> Fx {
     let state = sensr_api::AppState::new(socket);
     let site = dir.path().join("site");
     std::fs::create_dir_all(site.join("pkg")).unwrap();
+    // What cargo-leptos writes; the generated JS fetches this exact name.
+    std::fs::write(site.join("pkg/sensr-ui_bg.wasm"), b"wasm-bytes").unwrap();
     tokio::spawn(sensr_api::serve_with_ui(
         listener,
         state,
@@ -138,6 +140,19 @@ async fn login(fx: &Fx, user: &str, pass: &str) -> (u16, String) {
     )
     .await;
     (status, head)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_wasm_bundle_is_served_under_its_built_name() {
+    let fx = start().await;
+    // The hydration script fetches `/pkg/sensr-ui_bg.wasm`; a route mapping
+    // that name to a file that does not exist broke every island's JS.
+    let (status, head, body) = http(&fx, "GET", "/pkg/sensr-ui_bg.wasm", &[], "").await;
+    assert_eq!(status, 200, "{head}");
+    assert_eq!(body, "wasm-bytes");
+    let (status, _, body) = http(&fx, "GET", "/pkg/sensr-ui.wasm", &[], "").await;
+    assert_eq!(status, 200, "the plain alias must work too");
+    assert_eq!(body, "wasm-bytes");
 }
 
 #[tokio::test(flavor = "multi_thread")]
