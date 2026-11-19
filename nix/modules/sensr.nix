@@ -667,6 +667,31 @@ in
         Type = "notify";
         NotifyAccess = "main";
         WatchdogSec = "30s";
+        # WantsMountsFor above is only an ordering hint while the mount is
+        # still in the transaction. When the FAT's by-label device is late
+        # (udev can hold it behind the WiFi SDIO deferred probe), the mount
+        # unit fails first and the agent then starts before it without any
+        # ordering at all: it reads an empty /boot/firmware, logs NoSeed and
+        # the seeded config is silently ignored. Wait for the mount here
+        # instead (bootlog.sh starts it the same way). Nothing happens when
+        # the seed is not on its own mount, so x86 is unaffected.
+        ExecStartPre = pkgs.writeShellScript "sensr-agent-wait-seed" ''
+          set -u
+          seed=${lib.escapeShellArg cfg.seedDir}
+          mp=$(${pkgs.coreutils}/bin/dirname "$seed")
+          if ${pkgs.util-linux}/bin/mountpoint -q "$mp"; then exit 0; fi
+          unit=$(${config.systemd.package}/bin/systemd-escape -p --suffix=mount "$mp") || exit 0
+          ${config.systemd.package}/bin/systemctl cat "$unit" >/dev/null 2>&1 || exit 0
+          ${config.systemd.package}/bin/systemctl start --no-block "$unit" 2>/dev/null || true
+          # Bounded: the mount's own device timeout decides how long systemd
+          # waits, and the agent must still start on factory defaults if the
+          # partition is genuinely not there.
+          for _ in $(${pkgs.coreutils}/bin/seq 1 40); do
+            if ${pkgs.util-linux}/bin/mountpoint -q "$mp"; then exit 0; fi
+            ${pkgs.coreutils}/bin/sleep 0.25
+          done
+          exit 0
+        '';
         ExecStart = lib.escapeShellArgs (
           [
             "${cfg.package}/bin/sensr-agent"

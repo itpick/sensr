@@ -94,14 +94,26 @@ in
     "vfat"
     "nls_cp437"
     "nls_iso8859_1"
+    # The RTL8156 USB NICs: present but not bound on every board otherwise
+    "usbnet"
+    "r8152"
     # QEMU's virt machine (the image's boot test)
     "virtio_pci"
     "virtio_blk"
   ];
   # genet is the Pi 4's only built-in Ethernet (the WAN port on a stock board).
+  #
+  # r8152 is loaded explicitly rather than left to udev's coldplug. On the 4 GB
+  # board the RTL8156 dongles enumerate on the VL805's XHCI bus (usb 2-1 and
+  # 2-2) but no driver ever binds to them, so there is no LAN at all and the
+  # boot never reaches multi-user. The 2 GB board gets the module autoloaded,
+  # so this is a timing/dependency ordering difference, not a missing driver:
+  # the module is in the kernel closure either way.
   boot.kernelModules = [
     "bcm2835_wdt"
     "genet"
+    "usbnet"
+    "r8152"
   ];
 
   # Same USB power management as the Pi 5 (pi5.nix): no autosuspend and no
