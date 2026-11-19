@@ -20,7 +20,7 @@ is put together. Six parts:
 
 ## 1. Lessons from opnsense-pi
 
-`/Users/lucaspick/workspace/itpick/opnsense-pi` built flashable OPNsense 26.7
+`opnsense-pi` (the sibling project) built flashable OPNsense 26.7
 (FreeBSD 15.1) images for Raspberry Pi 4/5 from the community aarch64 VM images,
 added Pi UEFI firmware, out-of-tree kernel modules, a first-boot hook, QEMU tests
 and a GitHub release pipeline. Everything it learned the hard way is listed here
