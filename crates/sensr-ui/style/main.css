@@ -129,6 +129,8 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .btn-ghost { background: transparent; border-color: transparent; color: inherit; }
 .btn-sm { min-height: 28px; padding: 3px 10px; font-size: 13px; }
 .btn-block { width: 100%; }
+/* A row that is shown for context but no longer live (expired, released). */
+tr.dimmed td { color: var(--muted); }
 .icon-btn {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 30px; height: 30px; padding: 0 6px;

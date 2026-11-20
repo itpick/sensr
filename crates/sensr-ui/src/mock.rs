@@ -364,6 +364,9 @@ impl Backend for MockBackend {
     fn dns_stats(&self) -> BoxFuture<'_, ApiResult<DnsStats>> {
         ready(Ok(simulated_dns_stats()))
     }
+    fn dhcp_leases(&self) -> BoxFuture<'_, ApiResult<Vec<DhcpLease>>> {
+        ready(Ok(simulated_leases()))
+    }
     fn insight_dir(&self) -> std::path::PathBuf {
         self.insight_dir.clone().unwrap_or_else(|| {
             std::env::var_os("SENSR_INSIGHT_DIR").map_or_else(
@@ -372,6 +375,55 @@ impl Backend for MockBackend {
             )
         })
     }
+}
+
+/// Leases for the seeded DHCP server on 192.168.1.0/24: a client of each kind the page
+/// has to render. The first is the seeded `nas` reservation (192.168.1.20,
+/// `52:54:00:aa:bb:01`), so a real recomputation of `reserved` agrees with it.
+pub fn simulated_leases() -> Vec<DhcpLease> {
+    let now = now();
+    vec![
+        DhcpLease {
+            address: "192.168.1.20".into(),
+            mac: Some("52:54:00:aa:bb:01".into()),
+            client_id: None,
+            hostname: "nas".into(),
+            subnet_id: 1,
+            expire: now + 3_600,
+            state: LeaseState::Active,
+            reserved: true,
+        },
+        DhcpLease {
+            address: "192.168.1.112".into(),
+            mac: Some("b8:27:eb:7d:4e:25".into()),
+            client_id: None,
+            hostname: "bench-pi".into(),
+            subnet_id: 1,
+            expire: now + 1_800,
+            state: LeaseState::Active,
+            reserved: false,
+        },
+        DhcpLease {
+            address: "192.168.1.131".into(),
+            mac: None,
+            client_id: Some("01:9c:bf:0d:01:2d:96".into()),
+            hostname: "phone".into(),
+            subnet_id: 1,
+            expire: now + 900,
+            state: LeaseState::Active,
+            reserved: false,
+        },
+        DhcpLease {
+            address: "192.168.1.142".into(),
+            mac: Some("50:a1:32:3d:42:24".into()),
+            client_id: None,
+            hostname: "laptop".into(),
+            subnet_id: 1,
+            expire: now - 600,
+            state: LeaseState::Expired,
+            reserved: false,
+        },
+    ]
 }
 
 /// What sensr-dns would report for the seeded blocklist policies.

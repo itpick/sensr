@@ -520,3 +520,46 @@ fn ipv6_panel_shows_prefix_lifetimes_and_deprecated_subnets() {
     let empty = render(|| view! { <Ipv6Prefixes status=Ipv6Status::default()/> }.into_any());
     assert!(text(empty.root_element()).contains("No interface requests a delegated prefix."));
 }
+
+#[test]
+fn lease_table_marks_reserved_rows_and_offers_the_rest() {
+    use sensr_ui::actions::LeaseTable;
+    use sensr_ui::islands::DhcpLeases;
+    let leases = sensr_ui::mock::simulated_leases();
+    let table = LeaseTable {
+        now: 1_794_787_200,
+        leases,
+    };
+    let doc = render(|| view! { <DhcpLeases initial=table/> }.into_any());
+    let rows: Vec<_> = doc.select(&sel("tbody tr")).collect();
+    assert_eq!(rows.len(), 4, "one row per lease");
+    // The reserved client is marked and has nothing to press.
+    assert!(text(rows[0]).contains("nas"));
+    assert!(text(rows[0]).contains("static"));
+    assert!(rows[0].select(&sel("button")).next().is_none());
+    // A live lease without a reservation offers the button.
+    assert!(text(rows[1]).contains("bench-pi"));
+    let button = rows[1]
+        .select(&sel("button"))
+        .next()
+        .expect("make-static button");
+    assert_eq!(text(button), "Make static");
+    // A client-id-only lease is reservable as well (Kea records no MAC for it).
+    assert!(rows[2].select(&sel("button")).next().is_some());
+    // The expired lease is dimmed and shows its state.
+    assert_eq!(rows[3].value().attr("class"), Some("dimmed"));
+    assert!(text(rows[3]).contains("expired"));
+    let headers: Vec<String> = doc.select(&sel("thead th")).map(text).collect();
+    assert!(headers.contains(&"MAC address".to_owned()));
+}
+
+#[test]
+fn lease_table_explains_an_empty_dhcp_server() {
+    use sensr_ui::actions::LeaseTable;
+    use sensr_ui::islands::DhcpLeases;
+    let doc = render(|| {
+        view! { <DhcpLeases initial=LeaseTable { now: 0, leases: Vec::new() }/> }.into_any()
+    });
+    assert!(text(doc.root_element()).contains("No leases yet"));
+    assert!(doc.select(&sel("tbody tr")).next().is_none());
+}

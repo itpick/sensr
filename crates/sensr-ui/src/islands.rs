@@ -8,7 +8,7 @@ use crate::api::{DiffKind, FieldError, Pending, SystemStatus};
 use crate::form::{Choices, FieldKind, FieldSpec, Inputs, to_inputs};
 use crate::grid::{ColumnKind, GridPage, GridQuery, SortDir, cell_text};
 use crate::models::{FormId, GridId};
-use crate::runtime::{GatewayRow, GatewayState, GatewaysView, UpdateStatus, ms, pct};
+use crate::runtime::{GatewayRow, GatewayState, GatewaysView, UpdateStatus, ms, pct, until};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde_json::Value;
@@ -1426,6 +1426,142 @@ pub fn UpdatesLive(initial: UpdateStatus) -> impl IntoView {
                 {move || if st.with(|s| s.auto) { "Turn automatic updates off" } else { "Turn automatic updates on" }}
             </button>
 
+            {move || error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
+        </div>
+    }
+}
+
+/// The DHCPv4 lease table: what Kea has handed out, with a button that stages a static
+/// reservation for a client.
+#[island]
+pub fn DhcpLeases(initial: LeaseTable) -> impl IntoView {
+    mark_hydrated();
+    let table = RwSignal::new(initial);
+    let error = RwSignal::new(None::<String>);
+    let busy = RwSignal::new(None::<String>);
+
+    let refresh = move || {
+        spawn_local(async move {
+            match dhcp_leases().await {
+                Ok(t) => {
+                    table.set(t);
+                    error.set(None);
+                }
+                Err(e) => error.set(Some(format!("Could not read the lease table: {e}"))),
+            }
+        });
+    };
+
+    let reserve = move |lease: crate::api::DhcpLease| {
+        busy.set(Some(lease.address.clone()));
+        spawn_local(async move {
+            match reserve_lease(
+                lease.address.clone(),
+                lease.mac.clone(),
+                lease.client_id.clone(),
+                lease.hostname.clone(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    error.set(None);
+                    // The Apply banner owns the staged document; a stage from here has to
+                    // tell it, the way a grid does.
+                    bump();
+                    refresh();
+                }
+                Err(e) => error.set(Some(e.to_string())),
+            }
+            busy.set(None);
+        });
+    };
+
+    view! {
+        <div class="card">
+            <h2>"Leases"</h2>
+            <p class="intro">
+                "Addresses Kea has handed out, live ones first. Making a lease static stages a reservation for that client with the same address and host name; nothing changes until you apply it."
+            </p>
+            {move || {
+                let t = table.get();
+                if t.leases.is_empty() {
+                    view! {
+                        <p class="muted" id="leases-none">
+                            "No leases yet: no client has asked this DHCP server for an address."
+                        </p>
+                    }
+                    .into_any()
+                } else {
+                    let rows = t
+                        .leases
+                        .iter()
+                        .map(|l| {
+                            let lease = l.clone();
+                            let address = l.address.clone();
+                            let age = match l.state {
+                                crate::api::LeaseState::Active => until(t.now, l.expire),
+                                crate::api::LeaseState::Expired => "expired".to_owned(),
+                                _ => until(t.now, l.expire),
+                            };
+                            let (pill, label) = match l.state {
+                                crate::api::LeaseState::Active => ("pill pill-on", "active"),
+                                crate::api::LeaseState::Expired => ("pill pill-off", "expired"),
+                                crate::api::LeaseState::Released => ("pill", "released"),
+                                crate::api::LeaseState::Declined => ("pill pill-off", "declined"),
+                                crate::api::LeaseState::Reclaimed => ("pill", "reclaimed"),
+                            };
+                            let action = if l.reserved {
+                                view! { <span class="pill pill-on">"static"</span> }.into_any()
+                            } else if l.mac.is_none() && l.client_id.is_none() {
+                                view! { <span class="muted">"no client id"</span> }.into_any()
+                            } else {
+                                let for_row = lease.clone();
+                                view! {
+                                    <button type="button" class="btn btn-sm"
+                                        disabled=move || busy.get().as_deref() == Some(address.as_str())
+                                        on:click=move |_| reserve(for_row.clone())>
+                                        "Make static"
+                                    </button>
+                                }
+                                .into_any()
+                            };
+                            view! {
+                                <tr class:dimmed=!l.active()>
+                                    <td class="num">{l.address.clone()}</td>
+                                    <td class="num">{l.mac.clone().unwrap_or_else(|| "—".to_owned())}</td>
+                                    <td>{if l.hostname.is_empty() { "—".to_owned() } else { l.hostname.clone() }}</td>
+                                    <td class="num">{l.subnet_id.to_string()}</td>
+                                    <td>{age}</td>
+                                    <td><span class=pill>{label}</span></td>
+                                    <td>{action}</td>
+                                </tr>
+                            }
+                        })
+                        .collect_view();
+                    view! {
+                        <div class="table-wrap">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th scope="col">"Address"</th>
+                                        <th scope="col">"MAC address"</th>
+                                        <th scope="col">"Host name"</th>
+                                        <th scope="col">"Subnet"</th>
+                                        <th scope="col">"Expires"</th>
+                                        <th scope="col">"State"</th>
+                                        <th scope="col">"Reservation"</th>
+                                    </tr>
+                                </thead>
+                                <tbody>{rows}</tbody>
+                            </table>
+                        </div>
+                    }
+                    .into_any()
+                }
+            }}
+            <div class="banner-actions">
+                <button type="button" class="btn" on:click=move |_| refresh()>"Refresh"</button>
+            </div>
             {move || error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
         </div>
     }

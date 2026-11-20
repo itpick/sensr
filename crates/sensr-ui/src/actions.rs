@@ -650,6 +650,122 @@ pub async fn form_save(
     .await
 }
 
+/// The lease table as the page renders it: the leases and the moment they were read, so
+/// "expires in" is right at the time of the response.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LeaseTable {
+    /// Unix time the leases were read.
+    pub now: u64,
+    /// Leases, live ones first.
+    pub leases: Vec<crate::api::DhcpLease>,
+}
+
+/// The DHCPv4 lease table, with each row marked when a static reservation already covers
+/// the client.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn dhcp_leases() -> Result<LeaseTable, ServerFnError> {
+    use serde_json::Value;
+    let doc = imp::doc().await?;
+    let mut leases = imp::backend()?.dhcp_leases().await.map_err(imp::err)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let reservations: Vec<&Value> = doc
+        .pointer("/dhcpv4/reservations")
+        .and_then(Value::as_object)
+        .map(|m| m.values().collect())
+        .unwrap_or_default();
+    let field = |r: &Value, path: &[&str]| {
+        path.iter()
+            .try_fold(r, |v, k| v.get(k))
+            .and_then(Value::as_str)
+            .map(str::to_ascii_lowercase)
+    };
+    for lease in &mut leases {
+        let ip = lease.address.as_str();
+        lease.reserved = reservations.iter().any(|r| {
+            (lease.mac.is_some() && field(r, &["client", "hw_address"]) == lease.mac)
+                || (lease.client_id.is_some()
+                    && field(r, &["client", "client_id"]) == lease.client_id)
+                || r.get("ip_address").and_then(Value::as_str) == Some(ip)
+        });
+    }
+    Ok(LeaseTable { now, leases })
+}
+
+/// Stages a static reservation for a lease, mirroring the lease's MAC (or client id, when
+/// the lease has no MAC) and host name. Nothing takes effect until the change is applied.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn reserve_lease(
+    address: String,
+    mac: Option<String>,
+    client_id: Option<String>,
+    hostname: String,
+) -> Result<(), ServerFnError> {
+    use serde_json::{Map, Value, json};
+    let ip: std::net::Ipv4Addr = address
+        .parse()
+        .map_err(|_| ServerFnError::new(format!("{address} is not an IPv4 address")))?;
+    let client = match (mac, client_id) {
+        (Some(mac), _) if !mac.is_empty() => json!({ "hw_address": mac.to_ascii_lowercase() }),
+        (_, Some(id)) if !id.is_empty() => json!({ "client_id": id.to_ascii_lowercase() }),
+        _ => {
+            return Err(ServerFnError::new(
+                "this lease has no MAC address or client identifier to reserve for",
+            ));
+        }
+    };
+    let mut doc = imp::doc().await?;
+    // The reservation has to name the subnet it belongs to, and Kea resolves that by the
+    // address: the first configured subnet that contains it.
+    let subnet = doc
+        .pointer("/dhcpv4/subnets")
+        .and_then(Value::as_object)
+        .and_then(|subnets| {
+            subnets.iter().find_map(|(id, s)| {
+                let net: ipnet::Ipv4Net = s.get("subnet")?.as_str()?.parse().ok()?;
+                net.contains(&ip).then(|| id.clone())
+            })
+        })
+        .ok_or_else(|| ServerFnError::new(format!("no configured DHCP subnet contains {ip}")))?;
+    let mut item = Map::new();
+    item.insert("subnet".into(), Value::String(subnet));
+    item.insert("client".into(), client);
+    item.insert("ip_address".into(), Value::String(ip.to_string()));
+    let hostname = hostname.trim();
+    if !hostname.is_empty()
+        && hostname.len() <= 63
+        && hostname
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        item.insert("hostname".into(), Value::String(hostname.to_owned()));
+    }
+    item.insert(
+        "description".into(),
+        Value::String("Reserved from the lease table".into()),
+    );
+    let reservations = doc
+        .as_object_mut()
+        .and_then(|d| d.get_mut("dhcpv4"))
+        .and_then(Value::as_object_mut)
+        .map(|d| d.entry("reservations").or_insert(json!({})));
+    let Some(Value::Object(map)) = reservations else {
+        return Err(ServerFnError::new(
+            "dhcpv4.reservations has an unexpected shape",
+        ));
+    };
+    map.insert(crate::models::new_uuid(), Value::Object(item));
+    let errors = imp::store(&doc, &["dhcpv4"], |p| {
+        p.strip_prefix("dhcpv4.").map(str::to_owned)
+    })
+    .await?;
+    match errors.first() {
+        Some(e) => Err(ServerFnError::new(e.message.clone())),
+        None => Ok(()),
+    }
+}
+
 /// Staged state for the Apply banner.
 #[server(prefix = "/ui/fn", input = Json)]
 pub async fn pending_state() -> Result<Pending, ServerFnError> {

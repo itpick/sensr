@@ -5277,6 +5277,7 @@ dependencies = [
  "axum",
  "console_error_panic_hook",
  "futures",
+ "ipnet",
  "leptos",
  "leptos_axum",
  "leptos_meta",

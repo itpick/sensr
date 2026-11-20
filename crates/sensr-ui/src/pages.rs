@@ -3,16 +3,17 @@
 //! Pages are server-rendered; only the form, grid, banner and dashboard islands hydrate.
 
 use crate::actions::{
-    alias_feeds, dns_stats, field_choices, form_load, gateways_status, grid_fetch, ids_alerts,
-    insight_data, live_status, passkey_list, pd_status, revision_diff, revisions, totp_status,
-    update_status,
+    alias_feeds, dhcp_leases, dns_stats, field_choices, form_load, gateways_status, grid_fetch,
+    ids_alerts, insight_data, live_status, passkey_list, pd_status, revision_diff, revisions,
+    totp_status, update_status,
 };
 use crate::api::{
     AlertPage, DiffLine, DnsStats, INSIGHT_RANGES, InsightReport, TrafficPoint, TrafficRow,
 };
 use crate::grid::GridQuery;
 use crate::islands::{
-    DashboardLive, GatewaysLive, GridIsland, SettingsFormIsland, UpdatesLive, bps, diff_class,
+    DashboardLive, DhcpLeases, GatewaysLive, GridIsland, SettingsFormIsland, UpdatesLive, bps,
+    diff_class,
 };
 use crate::models::*;
 use crate::runtime::{Ipv6Status, fmt_time, lifetime, until};
@@ -340,10 +341,19 @@ pub fn DestinationNat() -> impl IntoView {
 #[component]
 pub fn Dhcpv4() -> impl IntoView {
     let iface = param("if").unwrap_or_else(|| "lan".to_owned());
+    let leases = || {
+        Suspend::new(async move {
+            match dhcp_leases().await {
+                Ok(table) => view! { <DhcpLeases initial=table/> }.into_any(),
+                Err(e) => load_error(e),
+            }
+        })
+    };
     view! {
         <SettingsForm<DhcpSettings> scope=iface.clone() title="General settings"/>
         <Grid<DhcpRange> scope=iface.clone() title="Additional pools"/>
         <Grid<StaticMap> scope=iface title="Static mappings"/>
+        <Suspense fallback=|| ()>{leases}</Suspense>
     }
 }
 

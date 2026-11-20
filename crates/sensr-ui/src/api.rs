@@ -514,6 +514,54 @@ pub struct RecentQuery {
     pub kind: String,
 }
 
+/// What a lease record says about its own validity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseState {
+    /// Offered and not expired.
+    Active,
+    /// Past its expiry.
+    Expired,
+    /// Handed back by the client.
+    Released,
+    /// The client said the address was already in use.
+    Declined,
+    /// Reclaimed after an expiry.
+    Reclaimed,
+}
+
+/// One DHCPv4 lease from Kea's memfile database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DhcpLease {
+    /// Address handed out.
+    pub address: String,
+    /// Client hardware address, when the lease has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    /// Client identifier (option 61), hex, when the lease has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Host name the client asked for or the router registered.
+    #[serde(default)]
+    pub hostname: String,
+    /// Kea's subnet id for the lease.
+    pub subnet_id: u32,
+    /// Unix time the lease expires.
+    pub expire: u64,
+    /// State as recorded.
+    pub state: LeaseState,
+    /// Whether a static reservation already covers this client in the configuration.
+    #[serde(default)]
+    pub reserved: bool,
+}
+
+impl DhcpLease {
+    /// Whether the lease is live right now.
+    pub fn active(&self) -> bool {
+        self.state == LeaseState::Active
+    }
+}
+
 /// Everything the blocklist page shows about the running resolver. `None` means the file
 /// has not been written yet.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -573,6 +621,11 @@ mod server {
         /// stats timer write on this host (see [`crate::dnsstats`]).
         fn dns_stats(&self) -> BoxFuture<'_, ApiResult<DnsStats>> {
             Box::pin(async { Ok(crate::dnsstats::DnsStatsPaths::from_env().read()) })
+        }
+        /// DHCPv4 leases as Kea recorded them on this host. The default reads the lease
+        /// files (see [`crate::leases`]).
+        fn dhcp_leases(&self) -> BoxFuture<'_, ApiResult<Vec<DhcpLease>>> {
+            Box::pin(async { Ok(crate::leases::read_now()) })
         }
         /// Whether the caller's privileges cover `url` (an API path such as
         /// `/api/v1/ids/alerts`). Data the UI reads itself (the traffic and alert databases)
