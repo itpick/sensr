@@ -245,11 +245,12 @@ meter { width: 100%; height: 14px; }
 .stat-tiles dd { margin: 2px 0 0; font-size: 1.15rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .stats-policy { margin: 16px 0 6px; font-size: .95rem; }
 td.url { word-break: break-all; }
+.dns-cols { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 0 18px; }
 
 .graph-head { display: flex; flex-wrap: wrap; gap: 8px 16px; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .graph-head .legend { margin: 0; }
 .seg { display: inline-flex; gap: 4px; }
-.seg .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.seg .btn[aria-pressed="true"], .seg .btn[aria-current="page"] { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 
 /* ------------------------------------------------------------ insight, alerts */
 .chart { display: block; width: 100%; height: 200px; background: var(--bg); border-radius: 3px; }
@@ -296,23 +297,81 @@ span.btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
 .login-card .btn-block + .btn-block { margin-top: 8px; }
 
 /* ------------------------------------------------------------ narrow screens */
+.nav-scrim { display: none; }
 @media (max-width: 860px) {
-  .app { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "head" "banner" "main"; grid-template-rows: 56px auto auto 1fr; }
-  .icon-btn.nav-toggle { display: inline-flex; }
-  .app { background: none; }
-  .sidebar {
-    position: fixed; top: 56px; left: 0; bottom: 0; width: min(300px, 85vw); height: auto;
-    transform: translateX(-100%); transition: transform .18s ease; z-index: 30;
-    box-shadow: 4px 0 20px rgb(0 0 0 / 30%);
+  /* Without scripting the menu stays in the page above the content, so every
+   * page is still reachable; with scripting it becomes an off-canvas drawer. */
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "top" "side" "head" "banner" "main";
+    grid-template-rows: 56px auto auto auto 1fr;
+    min-height: 100dvh;
+    background: none;
   }
-  body.nav-open .sidebar { transform: none; }
+  .sidebar { position: static; height: auto; max-height: none; }
+  html.js .app { grid-template-areas: "top" "head" "banner" "main"; grid-template-rows: 56px auto auto 1fr; }
+  html.js .sidebar {
+    position: fixed; top: 56px; left: 0; bottom: 0; width: min(300px, 85vw); height: auto;
+    transform: translateX(-100%); visibility: hidden;
+    transition: transform .18s ease, visibility .18s ease; z-index: 30;
+    box-shadow: 4px 0 20px rgb(0 0 0 / 30%);
+    padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  }
+  html.js body.nav-open .sidebar { transform: none; visibility: visible; }
+  html.js body.nav-open { overflow: hidden; }
+  html.js body.nav-open .nav-scrim {
+    display: block; position: fixed; inset: 56px 0 0; z-index: 25;
+    background: rgb(0 0 0 / 45%);
+  }
+  html.js .icon-btn.nav-toggle { display: inline-flex; }
+
   .content, .page-head, .banner-slot { padding-left: 12px; padding-right: 12px; }
+  .content { padding-bottom: calc(32px + env(safe-area-inset-bottom, 0px)); }
   .field { grid-template-columns: minmax(0, 1fr); }
   .field > label, .field > .field-label { padding-top: 0; }
   .card-wide { grid-column: auto; }
   .dashboard { grid-template-columns: minmax(0, 1fr); }
   .user span { display: none; }
   .grid-toolbar .search, .grid-toolbar .search input { width: 100%; max-width: none; }
+
+  /* Thumb-sized controls, and 16px fields so iOS does not zoom on focus. */
+  .btn, .icon-btn, .menu a, .menu summary { min-height: 44px; }
+  .icon-btn { min-width: 44px; height: 44px; }
+  .menu a, .menu summary { padding-top: 11px; padding-bottom: 11px; }
+  input[type="text"], input[type="password"], input[type="search"], select, textarea {
+    max-width: none; font-size: 16px; min-height: 44px;
+  }
+  input[type="checkbox"], input[type="radio"] { width: 20px; height: 20px; }
+  .multi-opt { padding: 4px 0; }
+  .row-actions { flex-direction: row; flex-wrap: wrap; }
+  .row-actions .btn { flex: 1 1 auto; }
+  .filters .field-stack { max-width: none; }
+  .pager, .grid-toolbar { gap: 10px; }
+  .kv { grid-template-columns: minmax(6.5em, max-content) minmax(0, 1fr); }
+  .kv dd, td, th { overflow-wrap: anywhere; }
+  .table-wrap { -webkit-overflow-scrolling: touch; }
+  .meter-row { grid-template-columns: 90px minmax(0, 1fr) auto; font-size: 12.5px; }
+}
+@media (max-width: 600px) {
+  .wordmark { height: 28px; }
+  .topbar { padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px)); }
+  .page-head { padding-top: 12px; }
+  .card { padding: 12px; border-radius: 3px; }
+  .modal {
+    width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh;
+    margin: 0; border: 0; border-radius: 0;
+  }
+  .modal form { height: 100%; max-height: 100dvh; }
+  .modal-head, .modal-foot { padding: 10px 12px; }
+  .modal-body { padding: 4px 12px; }
+  .modal-foot .btn { flex: 1 1 auto; }
+  .diff { font-size: 11.5px; }
+  .stat-tiles { grid-template-columns: repeat(auto-fill, minmax(min(140px, 100%), 1fr)); }
+}
+@media (max-width: 360px) {
+  .topbar { gap: 6px; padding-left: 8px; padding-right: 8px; }
+  .wordmark { height: 24px; }
+  .topbar-right { gap: 4px; }
 }
 @media (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }
 

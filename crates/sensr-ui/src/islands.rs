@@ -96,22 +96,52 @@ pub fn ThemeToggle(initial: Option<String>) -> impl IntoView {
     }
 }
 
+/// Sets the drawer state on the signal and the body class the CSS reacts to.
+fn set_nav(open: RwSignal<bool>, next: bool) {
+    open.set(next);
+    #[cfg(feature = "hydrate")]
+    if let Some(body) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.body())
+    {
+        let _ = body.class_list().toggle_with_force("nav-open", next);
+    }
+}
+
 /// Opens and closes the menu on narrow screens.
 #[island]
 pub fn NavToggle() -> impl IntoView {
     mark_hydrated();
     let open = RwSignal::new(false);
-    let toggle = move |_| {
-        let next = !open.get_untracked();
-        open.set(next);
-        #[cfg(feature = "hydrate")]
-        if let Some(body) = web_sys::window()
-            .and_then(|w| w.document())
-            .and_then(|d| d.body())
-        {
-            let _ = body.class_list().toggle_with_force("nav-open", next);
-        }
-    };
+    let toggle = move |_| set_nav(open, !open.get_untracked());
+    // Escape, a menu link and a tap on the dimmed page behind the drawer all
+    // close it, the way a phone menu is expected to behave.
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::JsCast as _;
+        let esc = window_event_listener(leptos::ev::keydown, move |ev| {
+            if ev.key() == "Escape" && open.get_untracked() {
+                set_nav(open, false);
+            }
+        });
+        on_cleanup(move || drop(esc));
+        let click = window_event_listener(leptos::ev::click, move |ev| {
+            if !open.get_untracked() {
+                return;
+            }
+            let Some(el) = ev
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            else {
+                return;
+            };
+            let hit = |sel: &str| el.closest(sel).ok().flatten().is_some();
+            if hit("#sidebar a") || hit(".nav-scrim") {
+                set_nav(open, false);
+            }
+        });
+        on_cleanup(move || drop(click));
+    }
     view! {
         <button
             type="button"

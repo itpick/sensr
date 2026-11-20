@@ -25,8 +25,11 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
         <html lang="en" data-theme=theme>
             <head>
                 <meta charset="utf-8"/>
-                <meta name="viewport" content="width=device-width, initial-scale=1"/>
+                <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
                 <meta name="color-scheme" content="light dark"/>
+                // The menu only becomes a drawer when scripting is on: without
+                // it the same tree stays on the page, in flow.
+                <script>{ "document.documentElement.classList.add('js')" }</script>
                 <link rel="icon" href="/favicon.svg" type="image/svg+xml"/>
                 <style>{crate::theme::tokens_css()}</style>
                 <link rel="stylesheet" href="/pkg/sensr-ui.css"/>
@@ -274,6 +277,8 @@ pub fn Layout() -> impl IntoView {
         <a class="skip-link" href="#content">"Skip to content"</a>
         <div class="app">
             <Suspense fallback=|| ()>{chrome}</Suspense>
+            // Dims the page behind the menu drawer and closes it when tapped.
+            <div class="nav-scrim" aria-hidden="true"></div>
             <main id="content" class="content" tabindex="-1">
                 <Outlet/>
             </main>
