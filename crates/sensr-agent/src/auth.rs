@@ -371,6 +371,9 @@ pub fn authenticate(doc: &Value, cred: &Credential, remote: Option<IpAddr>) -> O
             }
             u
         }
+        Credential::Passkey { user } => users(doc)
+            .into_iter()
+            .find(|u| text(u.get("name")) == *user)?,
         Credential::ApiKey { key, secret } => users(doc).into_iter().find(|u| {
             api_keys(u)
                 .iter()

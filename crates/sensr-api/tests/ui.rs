@@ -933,3 +933,101 @@ async fn two_factor_enrolment_shows_the_secret_and_arms_login() {
     assert!(matches!(status, 302 | 303), "{head}");
     assert!(session_cookie(&head).is_some(), "{head}");
 }
+
+// --------------------------------------------------------------- passkeys
+
+/// A JSON server function call; returns the status and parsed reply.
+async fn post_json(
+    fx: &Fx,
+    path: &str,
+    cookie: Option<&str>,
+    body: &str,
+) -> (u16, String, serde_json::Value) {
+    let mut headers = vec![
+        ("Content-Type", "application/json"),
+        ("Accept", "application/json"),
+    ];
+    if let Some(c) = cookie {
+        headers.push(("Cookie", c));
+    }
+    let (status, head, text) = http(fx, "POST", path, &headers, body).await;
+    let value =
+        serde_json::from_str(&text).unwrap_or_else(|_| serde_json::Value::String(text.clone()));
+    (status, head, value)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_passkey_can_be_registered_and_used_to_sign_in() {
+    use webauthn_authenticator_rs::prelude::{
+        CreationChallengeResponse, RequestChallengeResponse, Url, WebauthnAuthenticator,
+    };
+    use webauthn_authenticator_rs::softpasskey::SoftPasskey;
+
+    let fx = start().await;
+    let (_, head) = login(&fx, "admin", "adminpw").await;
+    let token = session_cookie(&head).expect("session cookie");
+    let cookie = format!("sensr_session={token}");
+    let origin = Url::parse("https://test").unwrap();
+
+    // Register the soft authenticator against the account.
+    let (status, head, started) =
+        post_json(&fx, "/ui/fn/passkey/register/start", Some(&cookie), "{}").await;
+    assert_eq!(status, 200, "{head} {started}");
+    let state = started["state"]
+        .as_str()
+        .expect("ceremony state")
+        .to_owned();
+    let options: CreationChallengeResponse =
+        serde_json::from_value(started["options"].clone()).expect("creation options");
+    let mut authenticator = SoftPasskey::new(true);
+    let credential = authenticator
+        .do_registration(origin.clone(), options)
+        .unwrap();
+    let finish = json!({
+        "state": state,
+        "name": "Test key",
+        "credential": credential,
+    });
+    let (status, _, reply) = post_json(
+        &fx,
+        "/ui/fn/passkey/register/finish",
+        Some(&cookie),
+        &finish.to_string(),
+    )
+    .await;
+    assert_eq!(status, 200, "{reply}");
+
+    // The account page lists it.
+    let (status, _, page) = http(&fx, "GET", "/ui/core/password", &[("Cookie", &cookie)], "").await;
+    assert_eq!(status, 200);
+    assert!(page.contains("Test key"), "{page}");
+
+    // The login page offers the passkey button (passkey.js reveals it).
+    let (_, _, page) = http(&fx, "GET", "/login", &[], "").await;
+    assert!(page.contains("id=\"passkey-login\""), "{page}");
+    assert!(page.contains("/passkey.js"), "{page}");
+
+    // A fresh browser can now sign in with the passkey alone.
+    let (status, _, started) = post_json(&fx, "/ui/fn/passkey/login/start", None, "{}").await;
+    assert_eq!(status, 200, "{started}");
+    let state = started["state"]
+        .as_str()
+        .expect("ceremony state")
+        .to_owned();
+    let options: RequestChallengeResponse =
+        serde_json::from_value(started["options"].clone()).expect("request options");
+    let assertion = authenticator.do_authentication(origin, options).unwrap();
+    let finish = json!({ "state": state, "credential": assertion });
+    let (status, head, reply) = post_json(
+        &fx,
+        "/ui/fn/passkey/login/finish",
+        None,
+        &finish.to_string(),
+    )
+    .await;
+    assert_eq!(status, 200, "{reply}");
+    let token = session_cookie(&head).expect("passkey login opens a session");
+    let cookie = format!("sensr_session={token}");
+    let (status, _, _) = http(&fx, "GET", "/ui/firewall/alias", &[("Cookie", &cookie)], "").await;
+    assert_eq!(status, 200);
+}

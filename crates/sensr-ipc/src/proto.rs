@@ -48,6 +48,7 @@ impl Principal {
             AuthMethod::Password => "ui",
             AuthMethod::ApiKey { .. } => "api",
             AuthMethod::External { .. } => "oidc",
+            AuthMethod::Passkey => "passkey",
             AuthMethod::System => "system",
         };
         format!("{}@{via}", self.user)
@@ -74,6 +75,8 @@ pub enum AuthMethod {
         /// Provider object id.
         provider: String,
     },
+    /// A WebAuthn assertion the API checked against the stored passkey.
+    Passkey,
     /// The agent itself (boot apply, confirm-timeout rollback).
     System,
 }
@@ -123,6 +126,12 @@ pub enum Credential {
         /// Secret.
         secret: String,
     },
+    /// A local account whose passkey assertion the API verified. The agent
+    /// only resolves the account, its groups and its privileges.
+    Passkey {
+        /// Login name.
+        user: String,
+    },
     /// An identity an OpenID Connect provider authenticated for us. The API
     /// has already validated the ID token; the agent applies the provider's
     /// claim→group mapping from the configuration.
@@ -140,6 +149,7 @@ impl std::fmt::Debug for Credential {
         match self {
             Self::Password { user, .. } => write!(f, "Password {{ user: {user:?}, .. }}"),
             Self::ApiKey { key, .. } => write!(f, "ApiKey {{ key: {key:?}, .. }}"),
+            Self::Passkey { user } => write!(f, "Passkey {{ user: {user:?} }}"),
             Self::External { provider, .. } => {
                 write!(f, "External {{ provider: {provider:?} }}")
             }

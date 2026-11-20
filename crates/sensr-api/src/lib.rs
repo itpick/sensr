@@ -14,6 +14,7 @@ pub mod oidc;
 pub mod saml;
 pub mod tls;
 pub mod ui;
+pub mod webauthn;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -35,6 +36,8 @@ pub struct AppState {
     pub oidc: oidc::OidcFlows,
     /// In-flight SAML authorizations.
     pub saml: saml::SamlFlows,
+    /// In-flight WebAuthn ceremonies.
+    pub webauthn: webauthn::WebauthnFlows,
 }
 
 impl AppState {
@@ -46,6 +49,7 @@ impl AppState {
             registry: Registry::builtin(),
             oidc: oidc::OidcFlows::default(),
             saml: saml::SamlFlows::default(),
+            webauthn: webauthn::WebauthnFlows::default(),
         })
     }
 }

@@ -349,6 +349,53 @@ impl Sessions for UiSessions {
         .boxed()
     }
 
+    fn passkey_register_start<'a>(
+        &'a self,
+        user: &'a str,
+        user_uuid: &'a str,
+        base: &'a str,
+        exclude: &'a [String],
+    ) -> BoxFuture<'a, ApiResult<Value>> {
+        let result = crate::webauthn::register_start(&self.state, user_uuid, user, base, exclude);
+        futures::future::ready(result.map_err(ui_oidc_error)).boxed()
+    }
+
+    fn passkey_register_finish<'a>(
+        &'a self,
+        user_uuid: &'a str,
+        state: &'a str,
+        credential: &'a Value,
+        base: &'a str,
+    ) -> BoxFuture<'a, ApiResult<Value>> {
+        let result =
+            crate::webauthn::register_finish(&self.state, user_uuid, state, credential, base);
+        futures::future::ready(result.map_err(ui_oidc_error)).boxed()
+    }
+
+    fn passkey_login_start<'a>(&'a self, base: &'a str) -> BoxFuture<'a, ApiResult<Value>> {
+        async move {
+            crate::webauthn::login_start(&self.state, base)
+                .await
+                .map_err(ui_oidc_error)
+        }
+        .boxed()
+    }
+
+    fn passkey_login_finish<'a>(
+        &'a self,
+        state: &'a str,
+        credential: &'a Value,
+        base: &'a str,
+        remote: Option<std::net::IpAddr>,
+    ) -> BoxFuture<'a, ApiResult<String>> {
+        async move {
+            crate::webauthn::login_finish(&self.state, state, credential, base, remote)
+                .await
+                .map_err(ui_oidc_error)
+        }
+        .boxed()
+    }
+
     fn open<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Option<Session>> {
         let session = self.state.auth.session(token).map(|caller| Session {
             user: caller.info.user.clone(),

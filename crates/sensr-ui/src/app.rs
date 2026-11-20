@@ -30,6 +30,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="icon" href="/favicon.svg" type="image/svg+xml"/>
                 <style>{crate::theme::tokens_css()}</style>
                 <link rel="stylesheet" href="/pkg/sensr-ui.css"/>
+                <script src="/passkey.js" defer></script>
                 <HydrationScripts options islands=true/>
                 <leptos_meta::MetaTags/>
             </head>
@@ -334,6 +335,10 @@ pub fn Login() -> impl IntoView {
                     <p id="otp-help" class="muted small">"Six digits from your authenticator app, when two-factor login is enabled."</p>
                 </div>
                 <button type="submit" class="btn btn-primary btn-block">"Login"</button>
+                <button type="button" id="passkey-login" class="btn btn-block" hidden>
+                    "Sign in with a passkey"
+                </button>
+                <p id="passkey-error" class="field-error" role="alert" hidden></p>
                 <Suspense fallback=|| ()>{load}</Suspense>
             </form>
         </main>

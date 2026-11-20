@@ -9,7 +9,7 @@ use sensr_schema::models::dns::{DnsRecord, HostOverride};
 use sensr_schema::models::firewall::{Alias, FilterRule};
 use sensr_schema::models::interfaces::{Ipv4Config, Ipv6Config};
 use sensr_schema::models::nat::{ForwardFilter, OneToOneRule, PortForward};
-use sensr_schema::models::system::{Group, OidcProvider, OidcProviderKind, User};
+use sensr_schema::models::system::{Group, OidcProvider, OidcProviderKind, Passkey, User};
 use sensr_schema::models::wireguard::{WgPeer, WgServer};
 use sensr_schema::{Document, PathAccess, Relation, Section, Uuid, Validations};
 use serde_json::json;
@@ -1188,6 +1188,7 @@ fn system_rules() {
         password_hash: Some("$2y$10$abc".to_owned().into()),
         otp_seed: None,
         otp_enabled: false,
+        passkeys: vec![],
         authorized_keys: vec![],
         groups: vec!["admins".parse().unwrap()],
         shell: Some("bin/sh".into()),
@@ -1525,6 +1526,7 @@ fn two_factor_login_needs_a_base32_seed() {
         password_hash: Some("$2y$10$abc".to_owned().into()),
         otp_seed: Some("not base32!".to_owned().into()),
         otp_enabled: false,
+        passkeys: vec![],
         authorized_keys: vec![],
         groups: vec![],
         shell: None,
@@ -1549,5 +1551,44 @@ fn two_factor_login_needs_a_base32_seed() {
 
     let u = doc.system.users.get_mut(&id).unwrap();
     u.otp_seed = Some("JBSWY3DPEHPK3PXP".to_owned().into());
+    assert!(doc.validate().is_ok());
+}
+
+#[test]
+fn user_passkeys_must_be_well_formed() {
+    let mut doc = Document::factory();
+    let user = User {
+        name: "root".parse().unwrap(),
+        uid: 0,
+        description: None,
+        disabled: false,
+        password_hash: None,
+        otp_seed: None,
+        otp_enabled: false,
+        passkeys: vec![Passkey {
+            name: "  ".to_owned(),
+            credential: json!({"cred": {"kty": "EC"}}),
+        }],
+        authorized_keys: vec![],
+        groups: vec![],
+        shell: None,
+        api_keys: vec![],
+    };
+    let id = doc.system.users.push(user);
+    let v = doc.validate();
+    assert_eq!(
+        messages(&v, &format!("system.users.{id}.passkeys.0.name")),
+        ["Give the passkey a name."]
+    );
+    assert_eq!(
+        messages(&v, &format!("system.users.{id}.passkeys.0.credential")),
+        ["The stored passkey is malformed; register it again."]
+    );
+
+    let u = doc.system.users.get_mut(&id).unwrap();
+    u.passkeys[0] = Passkey {
+        name: "Work laptop".to_owned(),
+        credential: json!({"cred_id": "abc", "counter": 0}),
+    };
     assert!(doc.validate().is_ok());
 }

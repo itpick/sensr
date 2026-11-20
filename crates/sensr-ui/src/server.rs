@@ -57,8 +57,10 @@ fn is_public(path: &str) -> bool {
         || path.starts_with("/ui/fn/login")
         || path.starts_with("/ui/oidc/")
         || path.starts_with("/ui/saml/")
+        || path.starts_with("/ui/fn/passkey/login/")
         || path.starts_with("/pkg/")
         || path == "/favicon.svg"
+        || path == "/passkey.js"
         || path == "/healthz"
 }
 
@@ -136,7 +138,7 @@ fn ui_wasm(pkg_dir: &std::path::Path, output_name: &str) -> std::path::PathBuf {
 /// The public base URL of this GUI, as the browser (or a reverse proxy in
 /// front of it) sees it. OIDC redirect URIs must match what the provider has
 /// registered, so forwarded headers win over the connection's own.
-fn external_base(headers: &axum::http::HeaderMap) -> String {
+pub(crate) fn external_base(headers: &axum::http::HeaderMap) -> String {
     let value = |name: &str| {
         headers
             .get(name)

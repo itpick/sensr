@@ -623,10 +623,10 @@ and HA.
   DEC-010).
 - `sensr-plugin` trait + out-of-tree module path (ARCH-005).
 - BIZ-007 (encrypted off-box backups — the engine above), BIZ-008 (scheduled
-  jobs + maintenance windows), BIZ-003 (TOTP done; WebAuthn in Phase 3),
+  jobs + maintenance windows), BIZ-003 (TOTP and WebAuthn done),
   BIZ-006 (expiring, source-restricted API tokens), BE-007, BE-008.
 - ISS-C: -002 (complete incl. /62–/48 carving, PD-only WAN, DS-Lite),
-  -010..-013 (OTP field + WebAuthn-ready login), -021 (NAT reflection suite),
+  -010..-013 (OTP field + passkey login), -021 (NAT reflection suite),
   -026 (NAT64/DS-Lite; MAP-E/T stretch), -027..-037, -040. ISS-P: -001..-009,
   -011..-021, -023..-025, -028, -029.
 

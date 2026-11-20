@@ -53,6 +53,21 @@ mod imp {
         ServerFnError::new(e.to_string())
     }
 
+    /// The origin the browser used, for WebAuthn's relying-party id.
+    pub fn base() -> Result<String, ServerFnError> {
+        let parts = use_context::<axum::http::request::Parts>()
+            .ok_or_else(|| ServerFnError::new("no request"))?;
+        Ok(crate::server::external_base(&parts.headers))
+    }
+
+    /// The client address, for group source-network restrictions.
+    pub fn remote() -> Option<std::net::IpAddr> {
+        use_context::<axum::http::request::Parts>()?
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|axum::extract::ConnectInfo(a)| a.ip())
+    }
+
     /// Cookie carrying the secret while enrolment is pending: the API masks
     /// secrets on reads, so the browser that generated it is the only one
     /// that can show it before the first code arms the account.
@@ -1328,4 +1343,174 @@ mod tests {
             &alert(2016149, "10.0.0.1")
         ));
     }
+}
+
+/// One passkey on the signed-in account.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PasskeyView {
+    /// Credential id (base64url).
+    pub id: String,
+    /// Device label.
+    pub name: String,
+}
+
+#[cfg(feature = "ssr")]
+fn passkeys_of(user: &serde_json::Value) -> Vec<PasskeyView> {
+    user.get("passkeys")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|p| {
+                    Some(PasskeyView {
+                        id: p.get("credential")?.get("cred_id")?.as_str()?.to_owned(),
+                        name: p.get("name")?.as_str()?.to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The signed-in account's registered passkeys.
+#[server(prefix = "/ui/fn", endpoint = "passkey/list")]
+pub async fn passkey_list() -> Result<Vec<PasskeyView>, ServerFnError> {
+    use serde_json::Value;
+    let b = imp::backend()?;
+    let name = imp::user();
+    let system = b.get("system").await.map_err(imp::err)?;
+    let Some(uuid) = imp::user_uuid(&system, &name) else {
+        return Ok(Vec::new());
+    };
+    let user = system
+        .get("users")
+        .and_then(|u| u.get(&uuid))
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(passkeys_of(&user))
+}
+
+/// Starts a passkey registration; the browser answers with
+/// `passkey_register_finish`.
+#[server(prefix = "/ui/fn", endpoint = "passkey/register/start", input = Json)]
+pub async fn passkey_register_start() -> Result<serde_json::Value, ServerFnError> {
+    let b = imp::backend()?;
+    let name = imp::user();
+    let system = b.get("system").await.map_err(imp::err)?;
+    let Some(uuid) = imp::user_uuid(&system, &name) else {
+        return Err(ServerFnError::new("could not find your account"));
+    };
+    let user = system
+        .get("users")
+        .and_then(|u| u.get(&uuid))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let exclude: Vec<String> = passkeys_of(&user).into_iter().map(|p| p.id).collect();
+    let base = imp::base()?;
+    imp::sessions()?
+        .passkey_register_start(&name, &uuid, &base, &exclude)
+        .await
+        .map_err(imp::err)
+}
+
+/// Verifies the registration and appends the credential to the account.
+#[server(prefix = "/ui/fn", endpoint = "passkey/register/finish", input = Json)]
+pub async fn passkey_register_finish(
+    state: String,
+    name: String,
+    credential: serde_json::Value,
+) -> Result<(), ServerFnError> {
+    use serde_json::Value;
+    let b = imp::backend()?;
+    let user = imp::user();
+    let system = b.get("system").await.map_err(imp::err)?;
+    let Some(uuid) = imp::user_uuid(&system, &user) else {
+        return Err(ServerFnError::new("could not find your account"));
+    };
+    let base = imp::base()?;
+    let credential = imp::sessions()?
+        .passkey_register_finish(&uuid, &state, &credential, &base)
+        .await
+        .map_err(imp::err)?;
+    let label = name.trim();
+    let label = if label.is_empty() { "Passkey" } else { label };
+    let mut list = system
+        .get("users")
+        .and_then(|u| u.get(&uuid))
+        .and_then(|u| u.get("passkeys"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    list.push(serde_json::json!({"name": label, "credential": credential}));
+    b.set(&format!("system.users.{uuid}.passkeys"), Value::Array(list))
+        .await
+        .map_err(imp::err)?;
+    b.commit(&user, "add a passkey", None)
+        .await
+        .map_err(imp::err)?;
+    Ok(())
+}
+
+/// Removes one passkey from the signed-in account.
+#[server(prefix = "/ui/fn", endpoint = "passkey/remove")]
+pub async fn passkey_remove(id: String) -> Result<(), ServerFnError> {
+    use serde_json::Value;
+    let b = imp::backend()?;
+    let user = imp::user();
+    let system = b.get("system").await.map_err(imp::err)?;
+    let Some(uuid) = imp::user_uuid(&system, &user) else {
+        leptos_axum::redirect("/ui/core/password?passkey=error");
+        return Ok(());
+    };
+    let mut list = system
+        .get("users")
+        .and_then(|u| u.get(&uuid))
+        .and_then(|u| u.get("passkeys"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    list.retain(|p| {
+        p.get("credential")
+            .and_then(|c| c.get("cred_id"))
+            .and_then(Value::as_str)
+            != Some(id.as_str())
+    });
+    b.set(&format!("system.users.{uuid}.passkeys"), Value::Array(list))
+        .await
+        .map_err(imp::err)?;
+    b.commit(&user, "remove a passkey", None)
+        .await
+        .map_err(imp::err)?;
+    leptos_axum::redirect("/ui/core/password?passkey=removed");
+    Ok(())
+}
+
+/// Starts a passkey login and returns `{state, options}` for the browser.
+#[server(prefix = "/ui/fn", endpoint = "passkey/login/start", input = Json)]
+pub async fn passkey_login_start() -> Result<serde_json::Value, ServerFnError> {
+    let base = imp::base()?;
+    imp::sessions()?
+        .passkey_login_start(&base)
+        .await
+        .map_err(imp::err)
+}
+
+/// Verifies a passkey login and sets the session cookie.
+#[server(prefix = "/ui/fn", endpoint = "passkey/login/finish", input = Json)]
+pub async fn passkey_login_finish(
+    state: String,
+    credential: serde_json::Value,
+) -> Result<(), ServerFnError> {
+    use axum::http::{HeaderValue, header::SET_COOKIE};
+    let base = imp::base()?;
+    let remote = imp::remote();
+    let token = imp::sessions()?
+        .passkey_login_finish(&state, &credential, &base, remote)
+        .await
+        .map_err(imp::err)?;
+    let opts = expect_context::<leptos_axum::ResponseOptions>();
+    let cookie = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict");
+    if let Ok(v) = HeaderValue::from_str(&cookie) {
+        opts.insert_header(SET_COOKIE, v);
+    }
+    Ok(())
 }

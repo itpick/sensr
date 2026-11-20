@@ -94,6 +94,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 trybuild = "1.0.125"
 ureq = "3.5.2"
+webauthn-rs = { version = "0.6.2", features = ["danger-credential-internals"] }
 uuid = { version = "1.29.2", features = ["v4", "serde"] }
 wasm-bindgen = "0.2.130"
 web-sys = "0.3.107"

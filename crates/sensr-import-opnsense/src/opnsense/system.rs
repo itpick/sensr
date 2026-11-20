@@ -192,6 +192,8 @@ fn map_user<'doc>(
         password_hash: ctx.non_empty(u, "password").map(Secret::new),
         otp_enabled: otp_seed.is_some(),
         otp_seed,
+        // OPNsense has no passkeys; they are a sensr feature.
+        passkeys: Vec::new(),
         authorized_keys: Vec::new(),
         groups: Vec::new(),
         shell: ctx.non_empty(u, "shell"),

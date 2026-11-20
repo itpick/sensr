@@ -106,6 +106,9 @@ pub struct User {
     /// Require a code from the secret at password login.
     #[serde(default)]
     pub otp_enabled: bool,
+    /// Registered passkeys (WebAuthn credentials) for passwordless login.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passkeys: Vec<Passkey>,
     /// Keys allowed to log in over SSH.
     #[serde(default)]
     pub authorized_keys: Vec<SshPublicKey>,
@@ -118,6 +121,18 @@ pub struct User {
     /// API key pairs for HTTP Basic `key:secret` access (OPNsense `apikeys`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub api_keys: Vec<ApiKey>,
+}
+
+/// A WebAuthn credential registered to a local account. The public key is
+/// stored as the library serialises it, so counter and backup flags survive
+/// round-trips; the private key never leaves the authenticator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Passkey {
+    /// Label the user gave the device ("YubiKey", "Work laptop").
+    pub name: String,
+    /// The credential object: id, COSE public key, counter and flags.
+    pub credential: serde_json::Value,
 }
 
 /// One API key: the public key and a crypt(3) hash of the secret (SHA-512-crypt
@@ -690,6 +705,30 @@ impl Validate for System {
                     ValidatorKind::PresenceOf,
                     "A two-factor login needs a secret; enrol one first.",
                 );
+            }
+            let passkeys = p.join("passkeys");
+            for (i, passkey) in user.passkeys.iter().enumerate() {
+                let at = passkeys.join(i.to_string());
+                if passkey.name.trim().is_empty() {
+                    out.add(
+                        &at.join("name"),
+                        ValidatorKind::PresenceOf,
+                        "Give the passkey a name.",
+                    );
+                }
+                if !passkey.credential.is_object()
+                    || passkey
+                        .credential
+                        .get("cred_id")
+                        .and_then(|v| v.as_str())
+                        .is_none_or(str::is_empty)
+                {
+                    out.add(
+                        &at.join("credential"),
+                        ValidatorKind::Callback,
+                        "The stored passkey is malformed; register it again.",
+                    );
+                }
             }
         }
         let mut keys = std::collections::HashSet::new();

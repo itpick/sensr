@@ -642,6 +642,47 @@ mod server {
             let _ = (provider, base);
             Box::pin(async { Err(ApiError::Unauthorized) })
         }
+        /// Starts passkey registration; returns `{state, options}`.
+        fn passkey_register_start<'a>(
+            &'a self,
+            user: &'a str,
+            user_uuid: &'a str,
+            base: &'a str,
+            exclude: &'a [String],
+        ) -> BoxFuture<'a, ApiResult<serde_json::Value>> {
+            let _ = (user, user_uuid, base, exclude);
+            Box::pin(async { Err(ApiError::Unauthorized) })
+        }
+        /// Verifies a registration and returns the credential to store.
+        fn passkey_register_finish<'a>(
+            &'a self,
+            user_uuid: &'a str,
+            state: &'a str,
+            credential: &'a serde_json::Value,
+            base: &'a str,
+        ) -> BoxFuture<'a, ApiResult<serde_json::Value>> {
+            let _ = (user_uuid, state, credential, base);
+            Box::pin(async { Err(ApiError::Unauthorized) })
+        }
+        /// Starts a passkey login; returns `{state, options}`.
+        fn passkey_login_start<'a>(
+            &'a self,
+            base: &'a str,
+        ) -> BoxFuture<'a, ApiResult<serde_json::Value>> {
+            let _ = base;
+            Box::pin(async { Err(ApiError::Unauthorized) })
+        }
+        /// Verifies a passkey login and returns the new session token.
+        fn passkey_login_finish<'a>(
+            &'a self,
+            state: &'a str,
+            credential: &'a serde_json::Value,
+            base: &'a str,
+            remote: Option<std::net::IpAddr>,
+        ) -> BoxFuture<'a, ApiResult<String>> {
+            let _ = (state, credential, base, remote);
+            Box::pin(async { Err(ApiError::Unauthorized) })
+        }
     }
 
     /// Shared handle the server finds in Leptos context.

@@ -150,6 +150,7 @@ pub async fn verify(
         Credential::External { provider, .. } => AuthMethod::External {
             provider: provider.clone(),
         },
+        Credential::Passkey { .. } => AuthMethod::Passkey,
     };
     // The API's own identity on the socket; the agent trusts it by peer uid.
     let me = Principal {

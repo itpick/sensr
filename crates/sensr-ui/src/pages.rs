@@ -4,7 +4,8 @@
 
 use crate::actions::{
     alias_feeds, dns_stats, field_choices, form_load, gateways_status, grid_fetch, ids_alerts,
-    insight_data, live_status, pd_status, revision_diff, revisions, totp_status, update_status,
+    insight_data, live_status, passkey_list, pd_status, revision_diff, revisions, totp_status,
+    update_status,
 };
 use crate::api::{
     AlertPage, DiffLine, DnsStats, INSIGHT_RANGES, InsightReport, TrafficPoint, TrafficRow,
@@ -726,6 +727,7 @@ pub fn PasswordPage() -> impl IntoView {
             </form>
         </section>
         <TotpCard/>
+        <PasskeysCard/>
     }
 }
 
@@ -809,6 +811,78 @@ fn TotpCard() -> impl IntoView {
     view! {
         <section class="card">
             <h2>"Two-factor authentication"</h2>
+            <Suspense fallback=|| ()>{load}</Suspense>
+        </section>
+    }
+}
+
+/// Lobby › Password › passkeys (WebAuthn credentials) for the signed-in account.
+#[component]
+fn PasskeysCard() -> impl IntoView {
+    let q = use_query_map().get_untracked();
+    let notice = match q.get("passkey").as_deref() {
+        Some("added") => Some("Passkey added. You can sign in with it from now on."),
+        Some("removed") => Some("Passkey removed."),
+        _ => None,
+    };
+    let error = match q.get("passkey").as_deref() {
+        Some("error") => Some("Could not find your account in the configuration."),
+        _ => None,
+    };
+    let load = move || {
+        Suspend::new(async move {
+            let passkeys = match passkey_list().await {
+                Ok(p) => p,
+                Err(e) => return load_error(e),
+            };
+            let rows = passkeys
+                .iter()
+                .map(|p| {
+                    let id = p.id.clone();
+                    view! {
+                        <li class="passkey-row">
+                            <span class="passkey-name">{p.name.clone()}</span>
+                            <form method="post" action="/ui/fn/passkey/remove">
+                                <input type="hidden" name="id" value=id/>
+                                <button type="submit" class="btn btn-sm">"Remove"</button>
+                            </form>
+                        </li>
+                    }
+                })
+                .collect_view();
+            let empty = passkeys.is_empty();
+            view! {
+                {notice.map(|n| view! { <p class="notice" role="status">{n}</p> })}
+                {error.map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
+                {empty.then(|| view! {
+                    <p>"No passkeys are registered for this account yet."</p>
+                })}
+                {(!empty).then(|| view! {
+                    <ul class="passkey-list">{rows}</ul>
+                })}
+                <div class="passkey-add">
+                    <div class="field-stack">
+                        <label for="passkey_name">"Name this passkey"</label>
+                        <input id="passkey_name" name="name" type="text" maxlength="64"
+                            placeholder="Work laptop, YubiKey…" autocomplete="off"/>
+                    </div>
+                    <button type="button" id="passkey-add" class="btn btn-primary" hidden>
+                        "Add a passkey"
+                    </button>
+                    <p id="passkey-card-error" class="field-error" role="alert" hidden></p>
+                    <p id="passkey-card-notice" class="notice" role="status" hidden></p>
+                </div>
+                <p class="muted small">
+                    "Passkeys need the GUI to be opened by hostname, not by IP address, and
+                    the browser must offer WebAuthn."
+                </p>
+            }
+            .into_any()
+        })
+    };
+    view! {
+        <section class="card">
+            <h2>"Passkeys"</h2>
             <Suspense fallback=|| ()>{load}</Suspense>
         </section>
     }
