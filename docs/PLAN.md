@@ -727,6 +727,41 @@ certification track.
   portal.
 - v2.0.0 tagged.
 
+### Deferred — SD-card boot resilience (after the Phase 3 feature set)
+
+Investigated after a Pi 4 installer card needed 52 boot attempts to come up.
+Diagnosis at the time: the FAT partition's by-label device never appeared
+within the 15 s device timeout, the boot log write landed on that partition
+while PID 1 held the BCM2835 watchdog, and the board reset about 30 s in.
+The system generation was healthy; the card was marginal. These are the
+follow-ups, deliberately parked until the Phase 3 features are in.
+
+- **Log retention and cleanup on a successful boot.** `bootlog.sh` keeps 10
+  boots and never deletes orphans. Keep 5, drop `-running.txt` except for the
+  last 2 boots, remove `*.tmp` left by a reset mid-write, and clear
+  `FSCK0000.REC` and macOS litter (`.fseventsd`, `.Spotlight-V100`). Vacuum
+  the journal on boot-complete (cap it lower than the current 256 MiB for a
+  router) and `nix-collect-garbage --delete-older-than 14d` while keeping the
+  current and previous generation. This is ~3 MiB of logs; the space that
+  actually matters on the FAT is the 190 MiB of legacy `Image`/`initrd`/dtb
+  copies that only pre-2021 EEPROMs need.
+- **A/B boot slot with the initrd as arbiter.** `os_prefix` selects
+  `sensr/slot-a/` or `sensr/slot-b/`; an update writes the inactive slot,
+  fsyncs, then flips the pointer and bumps a `tries` counter in one small
+  rename. The candidate's initrd increments `tries` and reverts to the last
+  good slot when it sees more than one, so the 15 s watchdog reset becomes
+  the failure detector and a loop self-heals on the second attempt. The
+  counter clears only after the `T-0391..T-0401` selftest passes, and the old
+  slot survives one further confirmed boot. Reuse the Pi 5
+  `sensr-trial-health` logic rather than adding a second mechanism; note that
+  the Pi 4 has no working `tryboot.txt` on mainline kernels, so a kernel or
+  initrd that does not start at all still needs the FAT or a USB boot. Two
+  94 MiB slots fit the existing 512 MiB FAT, so no layout change is needed.
+- **Replace the card when it next misbehaves.** Keep the rescued images
+  (`root.img`, a FAT image and a matching MBR) so a spare card is a single
+  write, and note that a swap is the only test that distinguishes a bad card
+  from a bad slot.
+
 ### Deferred, community-tier or out of scope
 
 - **Community modules** (module API supported from Phase 2; not on the core
