@@ -9,6 +9,22 @@ fn agent_seed_matches_the_mock_document() {
         return;
     };
     let mut fixture: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if std::env::var_os("SENSR_REGEN_SEED").is_some() {
+        // Rewrite the fixture from the mock document, keeping the test
+        // account and groups the browser tests sign in with.
+        let old = fixture["system"].clone();
+        let mut regenerated = sensr_ui::mock::seed();
+        for key in ["users", "groups"] {
+            if let Some(v) = old.get(key) {
+                regenerated["system"][key] = v.clone();
+            }
+        }
+        let mut out = serde_json::to_string_pretty(&regenerated).unwrap();
+        out.push('\n');
+        std::fs::write(path, out).unwrap();
+        eprintln!("regenerated {path}");
+        return;
+    }
     let system = fixture["system"].as_object_mut().unwrap();
     assert!(
         system.remove("users").is_some(),

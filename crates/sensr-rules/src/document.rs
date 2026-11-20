@@ -23,6 +23,7 @@ use crate::alias::{self, AliasDef, Resolution, Sources};
 use crate::conf;
 use crate::conf::{Conf, Value};
 use crate::ir::{FilterRule, IfAddr, Interface, InterfaceMap, IpFamily, V4Mode, V6Mode};
+use crate::isolation;
 use crate::nat::{self, NatRules, OutboundMode, ReflectionDefaults, StaticDefaults};
 use crate::normalize::Context;
 use crate::render::{nft, pf};
@@ -595,6 +596,35 @@ pub fn compile(doc: &Document, rt: &Runtime<'_>) -> Compiled {
 
     let mut rs = Ruleset::default();
     system_rules::register(&mut rs, &settings, &ctx);
+
+    // Device isolation runs before the user's rules so a broad "allow LAN"
+    // cannot undo it.
+    let sources: Vec<String> = doc
+        .firewall
+        .isolation
+        .values()
+        .filter(|i| i.enabled)
+        .map(|i| net_token(&i.source.net))
+        .collect();
+    let policies: Vec<isolation::Policy<'_>> = doc
+        .firewall
+        .isolation
+        .values()
+        .filter(|i| i.enabled)
+        .zip(sources.iter())
+        .map(|(i, source)| isolation::Policy {
+            interface: i.interface.as_str(),
+            source,
+            source_not: i.source.not,
+            description: i
+                .description
+                .as_ref()
+                .map(|d| d.as_str())
+                .unwrap_or_default(),
+        })
+        .collect();
+    isolation::register(&mut rs, &policies, &ctx);
+
     for (uuid, r) in doc.firewall.rules_in_order() {
         let (prio, c) = filter_conf_in(&uuid.to_string(), r, doc, &ifs);
         rs.register_filter(prio, &c, None, &ctx);

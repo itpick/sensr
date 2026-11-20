@@ -15,6 +15,7 @@ pub mod conf;
 pub mod document;
 pub mod icmp;
 pub mod ir;
+pub mod isolation;
 pub mod nat;
 pub mod normalize;
 pub mod proto;

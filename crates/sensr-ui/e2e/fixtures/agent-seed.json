@@ -10,15 +10,6 @@
     "dns_allow_override": true,
     "timezone": "Etc/UTC",
     "ipv6_allow": true,
-    "groups": {
-      "6f0c6f9e-0000-4000-8000-0000000000a1": {
-        "name": "admins",
-        "gid": 1999,
-        "privileges": [
-          "page-all"
-        ]
-      }
-    },
     "users": {
       "6f0c6f9e-0000-4000-8000-000000000001": {
         "name": "root",
@@ -26,6 +17,15 @@
         "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$DTIjRUJeOpN2j+GVCY9Zvg$RqdIqklfzIY1cxXJgcHetiLzLJk2blo1s9SyibQvP4c",
         "groups": [
           "admins"
+        ]
+      }
+    },
+    "groups": {
+      "6f0c6f9e-0000-4000-8000-0000000000a1": {
+        "name": "admins",
+        "gid": 1999,
+        "privileges": [
+          "page-all"
         ]
       }
     }
@@ -134,6 +134,28 @@
           ]
         },
         "description": "Admin workstations"
+      },
+      "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a06": {
+        "enabled": true,
+        "name": "cameras",
+        "content": {
+          "type": "mac",
+          "addresses": [
+            "b8:27:eb:7d:4e:25",
+            "50:a1:32:3d:42:24"
+          ]
+        },
+        "description": "Guest and IoT cameras"
+      }
+    },
+    "isolation": {
+      "e0000000-0000-4000-a000-000000000001": {
+        "enabled": true,
+        "interface": "lan",
+        "source": {
+          "net": "alias:cameras"
+        },
+        "description": "Cameras see the router only"
       }
     },
     "rules": {

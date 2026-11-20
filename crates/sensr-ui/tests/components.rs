@@ -52,7 +52,7 @@ const FORMS: [FormId; 12] = [
     FormId::IdsSettings,
 ];
 
-const GRIDS: [GridId; 15] = [
+const GRIDS: [GridId; 16] = [
     GridId::Assignments,
     GridId::Aliases,
     GridId::FilterRules,
@@ -68,6 +68,7 @@ const GRIDS: [GridId; 15] = [
     GridId::WgPeers,
     GridId::IdsSuppressions,
     GridId::IdsUserRules,
+    GridId::FirewallIsolation,
 ];
 
 #[test]

@@ -124,6 +124,7 @@ const CORE: &[Node] = &[
     n("Firewall").order(40).icon(Icon::Firewall).kids(&[
         n("Aliases").url("/ui/firewall/alias"),
         n("Groups").url("/ui/firewall/group"),
+        n("Isolation").url("/ui/firewall/isolation"),
         n("NAT"),
     ]),
     n("Services").order(60).icon(Icon::Services),
@@ -455,7 +456,7 @@ mod tests {
         );
         assert_eq!(
             labels(&find(&m, &["Firewall"]).children),
-            ["Aliases", "Groups", "NAT", "Rules"]
+            ["Aliases", "Groups", "Isolation", "NAT", "Rules"]
         );
         assert_eq!(
             labels(&find(&m, &["Services", "Unbound"]).children),
@@ -487,6 +488,7 @@ mod tests {
             "/ui/interfaces/loopback",
             "/ui/interfaces/vip",
             "/ui/firewall/group",
+            "/ui/firewall/isolation",
             "/ui/routing/configuration",
             "/ui/routing/gateway_groups",
             "/ui/routing/status",

@@ -692,6 +692,15 @@ pub fn FirewallGroups() -> impl IntoView {
     }
 }
 
+/// Firewall › Isolation.
+#[component]
+pub fn FirewallIsolation() -> impl IntoView {
+    view! {
+        <p class="intro">"Devices listed here can still reach the internet and the router's own services (DNS, DHCP, NTP, the web GUI), but not other hosts on the local networks: they cannot see the printer, the NAS, the television or each other. Describe the devices with a MAC alias (Firewall › Aliases) or an address, and pick the interface they are attached to. The rules run before the user rules, so a broad 'allow LAN' rule does not undo them."</p>
+        <Grid<Isolation> title="Isolated devices"/>
+    }
+}
+
 /// Interfaces › Devices › Bridge.
 #[component]
 pub fn Bridges() -> impl IntoView {

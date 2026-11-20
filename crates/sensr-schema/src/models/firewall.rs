@@ -35,6 +35,9 @@ pub struct Firewall {
     /// `Firewall/Group.xml`, Firewall › Groups).
     #[serde(default, skip_serializing_if = "ArrayField::is_empty")]
     pub groups: ArrayField<InterfaceGroup>,
+    /// Clients locked out of the local networks (Firewall › Isolation).
+    #[serde(default, skip_serializing_if = "ArrayField::is_empty")]
+    pub isolation: ArrayField<Isolation>,
     /// Global behaviour.
     #[serde(default)]
     pub settings: FirewallSettings,
@@ -149,6 +152,28 @@ pub struct InterfaceGroup {
     /// still apply.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// Free text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<Description>,
+}
+
+/// One isolation policy: the clients matching `source` on `interface` cannot
+/// reach any other local network, while their traffic to the router itself
+/// (DNS, DHCP, NTP, the web GUI) and out to the internet still passes.
+///
+/// The rules are generated ahead of every user rule, so a broad "allow LAN"
+/// rule does not undo them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Isolation {
+    /// Whether the policy is in force.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// The interface the clients are attached to.
+    pub interface: InterfaceId,
+    /// The clients to lock out: a MAC alias (see Firewall › Aliases), an
+    /// address, a network or an interface network.
+    pub source: Endpoint,
     /// Free text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Description>,
@@ -692,6 +717,27 @@ impl Validate for Firewall {
                 );
             }
             check::interfaces(ctx, &g.members, &p.join("members"), out);
+        }
+
+        let isolation = at.join("isolation");
+        for (id, iso) in &self.isolation {
+            let p = isolation.join(id);
+            check::interface(ctx, &iso.interface, &p.join("interface"), out);
+            check::net_or_alias(ctx, &iso.source.net, &p.join("source"), out);
+            if iso.source.net.is_any() {
+                out.add(
+                    &p.join("source"),
+                    ValidatorKind::Callback,
+                    "Choose the clients to isolate; \"any\" would lock out the whole interface.",
+                );
+            }
+            if iso.source.port.is_some() {
+                out.add(
+                    &p.join("source"),
+                    ValidatorKind::Callback,
+                    "A source port does not select clients; remove it.",
+                );
+            }
         }
 
         let rules = at.join("rules");

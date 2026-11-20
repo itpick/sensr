@@ -1115,7 +1115,14 @@ pub fn seed() -> Value {
                     "description": "Spamhaus DROP"},
                 "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a05": {"enabled": true, "name": "admins",
                     "content": {"type": "host", "entries": ["192.168.1.10", "192.168.1.11"]},
-                    "description": "Admin workstations"}
+                    "description": "Admin workstations"},
+                "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a06": {"enabled": true, "name": "cameras",
+                    "content": {"type": "mac", "addresses": ["b8:27:eb:7d:4e:25", "50:a1:32:3d:42:24"]},
+                    "description": "Guest and IoT cameras"}
+            },
+            "isolation": {
+                "e0000000-0000-4000-a000-000000000001": {"enabled": true, "interface": "lan",
+                    "source": {"net": "alias:cameras"}, "description": "Cameras see the router only"}
             },
             "rules": {
                 "00000000-0000-0000-0000-00005e450001": {"sequence": 1, "action": "pass", "interfaces": ["lan"],

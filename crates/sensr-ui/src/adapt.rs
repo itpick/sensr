@@ -223,6 +223,7 @@ pub fn store(grid: GridId, scope: &str, doc: &Value) -> Store {
         GridId::Loopbacks => Store::Map("devices.loopbacks".into()),
         GridId::VirtualIps => Store::Map("virtual_ips.vips".into()),
         GridId::FirewallGroups => Store::Map("firewall.groups".into()),
+        GridId::FirewallIsolation => Store::Map("firewall.isolation".into()),
         GridId::Users => Store::Map("system.users".into()),
         GridId::UserGroups => Store::Map("system.groups".into()),
         GridId::OidcProviders => Store::Map("system.oidc.providers".into()),
@@ -556,6 +557,15 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
                 // Write-only: the secret never leaves the server.
                 "password": "",
                 "no_bind": b(item, "no_bind", false),
+                "description": s(item, "description"),
+            })
+        }
+        GridId::FirewallIsolation => {
+            let (src, _) = endpoint_to_view(get_path(item, "source").unwrap_or(&Value::Null));
+            json!({
+                "enabled": b(item, "enabled", true),
+                "interface": s(item, "interface"),
+                "source": src,
                 "description": s(item, "description"),
             })
         }
@@ -1127,6 +1137,19 @@ pub fn from_view(
             put(o, "no_bind", view, "no_bind");
             put_opt(o, "description", view, "description");
         }
+        GridId::FirewallIsolation => {
+            let base = item.get("source").cloned();
+            let source = endpoint_from_view(
+                base.as_ref(),
+                view.get("source").and_then(Value::as_str).unwrap_or(""),
+                "",
+            );
+            let o = obj(&mut item);
+            put(o, "enabled", view, "enabled");
+            put(o, "interface", view, "interface");
+            o.insert("source".into(), source);
+            put_opt(o, "description", view, "description");
+        }
         GridId::FirewallGroups => {
             let o = obj(&mut item);
             put(o, "name", view, "name");
@@ -1403,6 +1426,12 @@ pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
             ("mode.password", "password"),
             ("mode", "mode"),
             ("no_bind", "no_bind"),
+            ("description", "description"),
+        ],
+        GridId::FirewallIsolation => &[
+            ("enabled", "enabled"),
+            ("interface", "interface"),
+            ("source", "source"),
             ("description", "description"),
         ],
         GridId::FirewallGroups => &[

@@ -2189,6 +2189,49 @@ impl GridModel for InterfaceGroup {
     const TOGGLE: Option<&'static str> = None;
 }
 
+/// Firewall › Isolation: clients locked out of the local networks.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Isolation {
+    /// Object key.
+    pub uuid: String,
+    /// Whether the policy is in force.
+    pub enabled: bool,
+    /// The interface the clients are attached to.
+    pub interface: String,
+    /// The clients to isolate.
+    pub source: String,
+    /// Free text.
+    pub description: String,
+}
+
+impl FormModel for Isolation {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enabled", K::Checkbox),
+            F::new("interface", "Interface", K::Choice(ChoiceSet::Interfaces)).required(),
+            F::new("source", "Devices", K::Text).required().help(
+                "Who to isolate: an alias such as 'alias:cameras' (a MAC alias on Firewall › Aliases is the usual choice), a host or network (192.168.1.50), or 'net:lan'. Prefix '!' to isolate everyone except the match.",
+            ),
+            F::new("description", "Description", K::Text),
+        ];
+        FIELDS
+    }
+}
+
+impl GridModel for Isolation {
+    const TOGGLE: Option<&'static str> = Some("enabled");
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::bool("enabled", "Enabled"),
+            Column::text("interface", "Interface"),
+            Column::text("source", "Devices"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+}
+
 /// System › Access › Users: a local account.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -3218,6 +3261,8 @@ pub enum GridId {
     VirtualIps,
     /// Firewall › Groups.
     FirewallGroups,
+    /// Firewall › Isolation.
+    FirewallIsolation,
     /// System › Access › Users.
     Users,
     /// System › Access › Groups.
@@ -3357,6 +3402,7 @@ impl GridId {
             Self::Loopbacks => GridMeta::of::<LoopbackDevice>(),
             Self::VirtualIps => GridMeta::of::<VirtualIp>(),
             Self::FirewallGroups => GridMeta::of::<InterfaceGroup>(),
+            Self::FirewallIsolation => GridMeta::of::<Isolation>(),
             Self::Users => GridMeta::of::<User>(),
             Self::UserGroups => GridMeta::of::<UserGroup>(),
             Self::OidcProviders => GridMeta::of::<OidcProvider>(),
@@ -3394,6 +3440,7 @@ impl GridId {
             Self::Loopbacks => go::<LoopbackDevice>(base, inputs),
             Self::VirtualIps => go::<VirtualIp>(base, inputs),
             Self::FirewallGroups => go::<InterfaceGroup>(base, inputs),
+            Self::FirewallIsolation => go::<Isolation>(base, inputs),
             Self::Users => go::<User>(base, inputs),
             Self::UserGroups => go::<UserGroup>(base, inputs),
             Self::OidcProviders => go::<OidcProvider>(base, inputs),
@@ -3540,6 +3587,7 @@ kinds! {
         LoopbackDevice => Loopbacks, "loopback",
         VirtualIp => VirtualIps, "virtual IP",
         InterfaceGroup => FirewallGroups, "group",
+        Isolation => FirewallIsolation, "isolation policy",
         User => Users, "user",
         UserGroup => UserGroups, "group",
         OidcProvider => OidcProviders, "provider",
