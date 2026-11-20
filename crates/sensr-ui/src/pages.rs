@@ -659,6 +659,17 @@ pub fn OidcPage() -> impl IntoView {
     }
 }
 
+/// System › Access › SAML: SP-initiated sign-in through SAML 2.0 identity
+/// providers.
+#[component]
+pub fn SamlPage() -> impl IntoView {
+    view! {
+        <p class="intro">"Sign in through a SAML 2.0 identity provider. sensr is the service provider: it accepts only signed assertions, checks the audience and maps the configured attributes to the privileges of a local group. Paste the identity provider's metadata here, then give its administrator the service provider metadata URL shown in the provider list."</p>
+        <SettingsForm<SamlSettings> title="SAML"/>
+        <Grid<SamlProvider> title="Providers"/>
+    }
+}
+
 /// System › Settings › General.
 #[component]
 pub fn SystemGeneralPage() -> impl IntoView {

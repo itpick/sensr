@@ -191,15 +191,29 @@ fn claim_groups(v: Option<&Value>) -> Vec<String> {
     }
 }
 
-/// The provider object named `id`, from the UUID-keyed map or an array.
-fn provider<'a>(doc: &'a Value, id: &str) -> Option<&'a Value> {
-    match doc.pointer("/system/oidc/providers") {
+/// One provider object by id, from the UUID-keyed map or an array.
+fn find_provider<'a>(section: Option<&'a Value>, id: &str) -> Option<&'a Value> {
+    match section.and_then(|s| s.get("providers")) {
         Some(Value::Object(m)) => m.get(id),
         Some(Value::Array(items)) => items
             .iter()
             .find(|p| first(p, &["uuid", "id", "name"]).and_then(|v| v.as_str()) == Some(id)),
         _ => None,
     }
+}
+
+/// The provider object named `id` and whether its section is enabled. Both
+/// the OpenID Connect and the SAML section share the claim→group fields.
+fn provider<'a>(doc: &'a Value, id: &str) -> Option<(&'a Value, bool)> {
+    for section in ["oidc", "saml"] {
+        let Some(sec) = doc.pointer(&format!("/system/{section}")) else {
+            continue;
+        };
+        if let Some(p) = find_provider(Some(sec), id) {
+            return Some((p, truthy(sec.get("enabled"))));
+        }
+    }
+    None
 }
 
 /// Privileges a group name grants, from the typed or OPNsense group shape,
@@ -240,17 +254,16 @@ fn external(
     claims: &Value,
     remote: Option<IpAddr>,
 ) -> Option<AuthInfo> {
-    if !truthy(doc.pointer("/system/oidc/enabled")) {
-        return None;
-    }
-    let p = provider(doc, provider_id)?;
-    if !truthy(p.get("enabled")) {
+    let (p, section_enabled) = provider(doc, provider_id)?;
+    if !section_enabled || !truthy(p.get("enabled")) {
         return None;
     }
     let kind = text(p.get("kind"));
     let user_claim = text(p.get("username_claim"));
+    // An empty claim name names the subject itself, which is what a SAML
+    // provider without explicit attribute mapping sends.
     let user_claim = if user_claim.is_empty() {
-        "email".to_owned()
+        "sub".to_owned()
     } else {
         user_claim
     };
@@ -532,6 +545,35 @@ mod tests {
         assert_eq!((info.user.as_str(), info.uid), ("ops@example.com", 0));
         assert_eq!(info.groups, ["admins"]);
         assert_eq!(info.privileges, ["page-all"]);
+    }
+
+    #[test]
+    fn saml_provider_uses_the_same_mapping() {
+        let mut doc = oidc_doc(&["fw-admins"]);
+        let mut p = doc["system"]["oidc"]["providers"]["p1"].take();
+        // A SAML provider names the login attribute optionally; empty means
+        // the assertion's NameID (the `sub` claim here).
+        p["username_claim"] = json!("");
+        delete_kind(&mut p);
+        doc["system"]["oidc"] = json!({});
+        doc["system"]["saml"] = json!({"enabled": true, "providers": {"s1": p}});
+        let cred = Credential::External {
+            provider: "s1".into(),
+            claims: Box::new(json!({"sub": "saml@example.com", "groups": ["fw-admins"]})),
+        };
+        let info = authenticate(&doc, &cred, None).unwrap();
+        assert_eq!(info.user, "saml@example.com");
+        assert_eq!(info.privileges, ["page-all"]);
+        // Disabling the section also refuses the provider.
+        doc["system"]["saml"]["enabled"] = json!(false);
+        assert!(authenticate(&doc, &cred, None).is_none());
+    }
+
+    /// Removes the OIDC-only `kind` field from a copied provider object.
+    fn delete_kind(p: &mut Value) {
+        if let Some(o) = p.as_object_mut() {
+            o.remove("kind");
+        }
     }
 
     #[test]

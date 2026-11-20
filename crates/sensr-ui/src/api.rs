@@ -52,10 +52,27 @@ pub type ApiResult<T> = Result<T, ApiError>;
 /// One OpenID Connect provider offered on the login page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginProvider {
-    /// Object id, used in `/ui/oidc/start/{id}`.
+    /// Object id.
     pub id: String,
     /// Button text.
     pub name: String,
+    /// Where the login page sends the browser, for example
+    /// `/ui/oidc/start/{id}` or `/ui/saml/start/{id}`.
+    pub start: String,
+}
+
+/// What the browser should do to reach the identity provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoginStart {
+    /// Follow this URL (HTTP-Redirect binding).
+    Redirect(String),
+    /// POST these hidden fields to this URL (HTTP-POST binding).
+    Form {
+        /// Form action.
+        action: String,
+        /// Hidden fields, in order.
+        fields: Vec<(String, String)>,
+    },
 }
 
 /// One committed configuration revision.
@@ -589,6 +606,39 @@ mod server {
             remote: Option<std::net::IpAddr>,
         ) -> BoxFuture<'a, ApiResult<String>> {
             let _ = (params, remote);
+            Box::pin(async { Err(ApiError::Unauthorized) })
+        }
+        /// SAML providers offered on the login page.
+        fn saml_providers(&self) -> BoxFuture<'_, Vec<LoginProvider>> {
+            Box::pin(async { Vec::new() })
+        }
+        /// Starts a SAML authorization.
+        fn saml_start<'a>(
+            &'a self,
+            provider: &'a str,
+            base: &'a str,
+        ) -> BoxFuture<'a, ApiResult<LoginStart>> {
+            let _ = (provider, base);
+            Box::pin(async { Err(ApiError::Unauthorized) })
+        }
+        /// Completes a SAML authorization and returns the new session token.
+        fn saml_finish<'a>(
+            &'a self,
+            provider: &'a str,
+            fields: &'a std::collections::HashMap<String, String>,
+            base: &'a str,
+            remote: Option<std::net::IpAddr>,
+        ) -> BoxFuture<'a, ApiResult<String>> {
+            let _ = (provider, fields, base, remote);
+            Box::pin(async { Err(ApiError::Unauthorized) })
+        }
+        /// The service provider metadata for `provider`.
+        fn saml_metadata<'a>(
+            &'a self,
+            provider: &'a str,
+            base: &'a str,
+        ) -> BoxFuture<'a, ApiResult<String>> {
+            let _ = (provider, base);
             Box::pin(async { Err(ApiError::Unauthorized) })
         }
     }

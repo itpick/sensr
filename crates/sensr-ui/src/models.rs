@@ -2457,6 +2457,115 @@ impl GridModel for OidcProvider {
     const TOGGLE: Option<&'static str> = Some("enabled");
 }
 
+// ---------------------------------------------------------------- System › Access › SAML
+
+/// The master switch for SAML login.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SamlSettings {
+    /// Offer the configured providers on the login page.
+    pub enabled: bool,
+}
+
+impl FormModel for SamlSettings {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[F::new("enabled", "Enable SAML login", K::Checkbox)
+            .help("Adds a sign-in button for each enabled provider on the login page. Local passwords keep working.")];
+        FIELDS
+    }
+}
+
+/// System › Access › SAML: one service-provider entry.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SamlProvider {
+    /// Object key.
+    pub uuid: String,
+    /// Offered on the login page.
+    pub enabled: bool,
+    /// Button text.
+    pub name: String,
+    /// The identity provider's metadata XML.
+    pub metadata: String,
+    /// Attribute that carries the login name; empty uses the NameID.
+    pub username_claim: String,
+    /// Attribute that lists provider groups.
+    pub groups_claim: String,
+    /// Provider groups allowed to sign in.
+    pub allowed_groups: Vec<String>,
+    /// Local group whose privileges the identity gets.
+    pub local_group: String,
+}
+
+impl FormModel for SamlProvider {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enabled", K::Checkbox),
+            F::new("name", "Button label", K::Text)
+                .required()
+                .help("Text on the login page."),
+            F::new("metadata", "Identity provider metadata", K::Lines)
+                .required()
+                .help("Paste the IdP's SAML metadata XML (the EntityDescriptor)."),
+            F::new("username_claim", "Username attribute", K::Text).help(
+                "SAML attribute that carries the login name; empty uses the assertion's NameID.",
+            ),
+            F::new("groups_claim", "Groups attribute", K::Text)
+                .help("SAML attribute carrying provider groups, for example memberOf."),
+            F::new("allowed_groups", "Allowed provider groups", K::Lines)
+                .help("One group name per line. Empty allows every authenticated identity."),
+            F::new("local_group", "Local group", K::Text)
+                .required()
+                .help("Group in System › Access › Groups whose privileges the signed-in identity gets."),
+        ];
+        FIELDS
+    }
+
+    fn validate(&self) -> Vec<FieldError> {
+        let mut e = Vec::new();
+        if self.name.trim().is_empty() {
+            e.push(FieldError::new(
+                "name",
+                "Enter a label for the login button.",
+            ));
+        }
+        if self.metadata.trim().is_empty() {
+            e.push(FieldError::new(
+                "metadata",
+                "Paste the identity provider metadata.",
+            ));
+        } else if !self.metadata.contains("EntityDescriptor") {
+            e.push(FieldError::new(
+                "metadata",
+                "This is not SAML metadata: the EntityDescriptor element is missing.",
+            ));
+        }
+        if self.local_group.trim().is_empty() {
+            e.push(FieldError::new(
+                "local_group",
+                "Enter the local group whose privileges this provider grants.",
+            ));
+        }
+        e
+    }
+}
+
+impl GridModel for SamlProvider {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("name", "Button label"),
+            Column::text("username_claim", "Username attribute"),
+            Column::text("groups_claim", "Groups attribute"),
+            Column::text("local_group", "Local group"),
+            Column::text("sp_metadata", "Service provider metadata"),
+            Column::bool("enabled", "Enabled"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = Some("enabled");
+}
+
 /// Failure condition of a gateway group.
 pub const GROUP_TRIGGERS: &[(&str, &str)] = &[
     ("down", "Member down"),
@@ -3056,6 +3165,8 @@ pub enum FormId {
     IdsSettings,
     /// [`OidcSettings`].
     OidcSettings,
+    /// [`SamlSettings`].
+    SamlSettings,
 }
 
 /// Serializable stand-in for a grid's row type.
@@ -3113,6 +3224,8 @@ pub enum GridId {
     UserGroups,
     /// System › Access › OpenID Connect.
     OidcProviders,
+    /// System › Access › SAML.
+    SamlProviders,
 }
 
 fn sanitize(scope: &Option<String>, default: &str) -> String {
@@ -3141,6 +3254,7 @@ impl FormId {
             Self::UnboundForwarding => UnboundForwarding::fields(),
             Self::IdsSettings => IdsSettings::fields(),
             Self::OidcSettings => OidcSettings::fields(),
+            Self::SamlSettings => SamlSettings::fields(),
         }
     }
 
@@ -3163,6 +3277,7 @@ impl FormId {
             Self::UnboundForwarding => go::<UnboundForwarding>(),
             Self::IdsSettings => go::<IdsSettings>(),
             Self::OidcSettings => go::<OidcSettings>(),
+            Self::SamlSettings => go::<SamlSettings>(),
         }
     }
 
@@ -3197,6 +3312,7 @@ impl FormId {
             Self::UnboundForwarding => go::<UnboundForwarding>(base, inputs),
             Self::IdsSettings => go::<IdsSettings>(base, inputs),
             Self::OidcSettings => go::<OidcSettings>(base, inputs),
+            Self::SamlSettings => go::<SamlSettings>(base, inputs),
         }
     }
 
@@ -3244,6 +3360,7 @@ impl GridId {
             Self::Users => GridMeta::of::<User>(),
             Self::UserGroups => GridMeta::of::<UserGroup>(),
             Self::OidcProviders => GridMeta::of::<OidcProvider>(),
+            Self::SamlProviders => GridMeta::of::<SamlProvider>(),
         }
     }
 
@@ -3280,6 +3397,7 @@ impl GridId {
             Self::Users => go::<User>(base, inputs),
             Self::UserGroups => go::<UserGroup>(base, inputs),
             Self::OidcProviders => go::<OidcProvider>(base, inputs),
+            Self::SamlProviders => go::<SamlProvider>(base, inputs),
         }
     }
 
@@ -3289,6 +3407,7 @@ impl GridId {
             Self::WgInstances => crate::form::redact::<WgInstance>(row),
             Self::WgPeers => crate::form::redact::<WgPeer>(row),
             Self::OidcProviders => crate::form::redact::<OidcProvider>(row),
+            Self::SamlProviders => crate::form::redact::<SamlProvider>(row),
             _ => row.clone(),
         }
     }
@@ -3329,6 +3448,7 @@ impl GridId {
                 Self::Assignments => &[("ipv4_type", "none"), ("ipv6_type", "none")],
                 Self::IdsUserRules => &[("action", "alert")],
                 Self::OidcProviders => &[("kind", "generic"), ("username_claim", "email")],
+                Self::SamlProviders => &[],
                 _ => &[],
             };
             for (k, val) in defaults {
@@ -3396,7 +3516,7 @@ macro_rules! kinds {
 kinds! {
     forms: SystemGeneral, Interface, SourceNatMode, DhcpSettings, UnboundGeneral, UnboundAdvanced,
         UnboundServeExpired, UnboundLogging, UnboundCache, UnboundAclDefault, UnboundForwarding,
-        IdsSettings, OidcSettings;
+        IdsSettings, OidcSettings, SamlSettings;
     grids: Interface => Assignments, "interface",
         Alias => Aliases, "alias",
         FilterRule => FilterRules, "rule",
@@ -3422,7 +3542,8 @@ kinds! {
         InterfaceGroup => FirewallGroups, "group",
         User => Users, "user",
         UserGroup => UserGroups, "group",
-        OidcProvider => OidcProviders, "provider"
+        OidcProvider => OidcProviders, "provider",
+        SamlProvider => SamlProviders, "provider"
 }
 
 #[cfg(test)]

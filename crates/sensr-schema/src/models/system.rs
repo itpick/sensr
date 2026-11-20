@@ -55,6 +55,10 @@ pub struct System {
     /// Business Edition `system/auth` OIDC fields).
     #[serde(default, skip_serializing_if = "Oidc::is_empty")]
     pub oidc: Oidc,
+    /// Logging in through SAML 2.0 identity providers (no OPNsense counterpart;
+    /// sensr is the service provider).
+    #[serde(default, skip_serializing_if = "Saml::is_empty")]
+    pub saml: Saml,
 }
 
 impl Default for System {
@@ -72,6 +76,7 @@ impl Default for System {
             ssh: Ssh::default(),
             webgui: WebGui::default(),
             oidc: Oidc::default(),
+            saml: Saml::default(),
         }
     }
 }
@@ -464,6 +469,130 @@ impl Validate for Oidc {
     }
 }
 
+/// External SAML 2.0 login. sensr acts as the service provider: the identity
+/// provider signs the assertion, and the configured attributes are mapped to
+/// a local group exactly like OpenID Connect providers.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Saml {
+    /// Offer the configured providers on the login page.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Providers.
+    #[serde(default)]
+    pub providers: ArrayField<SamlProvider>,
+}
+
+impl Saml {
+    /// True while the section is at its defaults.
+    pub fn is_empty(&self) -> bool {
+        !self.enabled && self.providers.is_empty()
+    }
+
+    /// One provider by its object id.
+    pub fn provider(&self, id: &str) -> Option<&SamlProvider> {
+        self.providers
+            .iter()
+            .find(|(k, _)| k.to_string() == id)
+            .map(|(_, p)| p)
+    }
+
+    /// Providers offered on the login page, in name order.
+    pub fn active(&self) -> Vec<(&crate::array::Uuid, &SamlProvider)> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        let mut v: Vec<(&crate::array::Uuid, &SamlProvider)> =
+            self.providers.iter().filter(|(_, p)| p.enabled).collect();
+        v.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+        v
+    }
+}
+
+/// One SAML 2.0 identity provider.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SamlProvider {
+    /// Provider is offered on the login page.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Text on the login button.
+    pub name: String,
+    /// The identity provider's SAML metadata XML (entity descriptor).
+    pub metadata: String,
+    /// Attribute that carries the login name; empty falls back to the
+    /// assertion's NameID.
+    #[serde(default)]
+    pub username_claim: String,
+    /// Attribute that lists the user's provider groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups_claim: Option<String>,
+    /// Provider groups allowed to sign in; empty allows any authenticated
+    /// identity.
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    /// Local group whose privileges the identity gets.
+    pub local_group: GroupName,
+}
+
+impl Validate for Saml {
+    fn validate(&self, ctx: &dyn RefContext, at: &FieldPath, out: &mut Validations) {
+        let providers = at.join("providers");
+        check::unique(
+            self.providers
+                .iter()
+                .map(|(id, p)| (providers.join(id), Some(p.name.clone()))),
+            "name",
+            "Another provider already uses this name.",
+            out,
+        );
+        for (id, p) in &self.providers {
+            let path = providers.join(id);
+            if p.name.trim().is_empty() || p.name.chars().count() > 64 {
+                out.add(
+                    &path.join("name"),
+                    ValidatorKind::Constraint,
+                    "The name must be 1 to 64 characters long.",
+                );
+            }
+            if p.name.chars().any(char::is_control) {
+                out.add(
+                    &path.join("name"),
+                    ValidatorKind::Regex,
+                    "The name cannot contain control characters.",
+                );
+            }
+            let metadata = p.metadata.trim();
+            if metadata.is_empty() {
+                out.add(
+                    &path.join("metadata"),
+                    ValidatorKind::PresenceOf,
+                    "The identity provider metadata is required.",
+                );
+            } else if metadata.len() > 256 * 1024 {
+                out.add(
+                    &path.join("metadata"),
+                    ValidatorKind::Constraint,
+                    "The identity provider metadata is larger than 256 KiB.",
+                );
+            } else if !metadata.contains("EntityDescriptor") {
+                out.add(
+                    &path.join("metadata"),
+                    ValidatorKind::Callback,
+                    "This is not SAML metadata: the EntityDescriptor element is missing.",
+                );
+            }
+            if !ctx.has_group(&p.local_group) {
+                out.add(
+                    &path.join("local_group"),
+                    ValidatorKind::Callback,
+                    format!("Group {} does not exist.", p.local_group),
+                );
+            }
+        }
+    }
+}
+
 /// Port of the HTTP-to-HTTPS redirect listener.
 pub const HTTP_REDIRECT_PORT: u16 = 80;
 
@@ -608,5 +737,6 @@ impl Validate for System {
             );
         }
         self.oidc.validate(ctx, &at.join("oidc"), out);
+        self.saml.validate(ctx, &at.join("saml"), out);
     }
 }

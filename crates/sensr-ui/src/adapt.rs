@@ -226,6 +226,7 @@ pub fn store(grid: GridId, scope: &str, doc: &Value) -> Store {
         GridId::Users => Store::Map("system.users".into()),
         GridId::UserGroups => Store::Map("system.groups".into()),
         GridId::OidcProviders => Store::Map("system.oidc.providers".into()),
+        GridId::SamlProviders => Store::Map("system.saml.providers".into()),
     }
 }
 
@@ -598,6 +599,16 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
             "groups_claim": s(item, "groups_claim"),
             "allowed_groups": strings(item, "allowed_groups"),
             "local_group": s(item, "local_group"),
+        }),
+        GridId::SamlProviders => json!({
+            "enabled": b(item, "enabled", true),
+            "name": s(item, "name"),
+            "metadata": s(item, "metadata"),
+            "username_claim": s(item, "username_claim"),
+            "groups_claim": s(item, "groups_claim"),
+            "allowed_groups": strings(item, "allowed_groups"),
+            "local_group": s(item, "local_group"),
+            "sp_metadata": "",
         }),
         GridId::IdsUserRules => json!({
             "enabled": b(item, "enabled", true),
@@ -1169,6 +1180,16 @@ pub fn from_view(
                 o.insert("private_key".into(), Value::String(s(view, "private_key")));
             }
         }
+        GridId::SamlProviders => {
+            let o = obj(&mut item);
+            put(o, "enabled", view, "enabled");
+            put(o, "name", view, "name");
+            put(o, "metadata", view, "metadata");
+            put(o, "username_claim", view, "username_claim");
+            put_opt(o, "groups_claim", view, "groups_claim");
+            put_list_opt(o, "allowed_groups", view, "allowed_groups");
+            put(o, "local_group", view, "local_group");
+        }
         GridId::IdsUserRules => {
             let o = obj(&mut item);
             put(o, "enabled", view, "enabled");
@@ -1185,6 +1206,10 @@ pub fn from_view(
 
 /// Fills computed, read-only view columns that need the whole document.
 pub fn decorate(grid: GridId, doc: &Value, key: &str, row: &mut Value) {
+    if grid == GridId::SamlProviders {
+        // The URL the identity provider's administrator imports.
+        row["sp_metadata"] = Value::String(format!("/ui/saml/metadata/{key}"));
+    }
     if grid == GridId::WgPeers {
         let names: Vec<Value> = get_path(doc, "wireguard.servers")
             .and_then(Value::as_object)
@@ -1417,6 +1442,15 @@ pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
             ("allowed_groups", "allowed_groups"),
             ("local_group", "local_group"),
         ],
+        GridId::SamlProviders => &[
+            ("enabled", "enabled"),
+            ("name", "name"),
+            ("metadata", "metadata"),
+            ("username_claim", "username_claim"),
+            ("groups_claim", "groups_claim"),
+            ("allowed_groups", "allowed_groups"),
+            ("local_group", "local_group"),
+        ],
         GridId::IdsUserRules => &[
             ("source", "source"),
             ("destination", "destination"),
@@ -1453,6 +1487,10 @@ pub fn form_to_view(form: FormId, doc: &Value, scope: &str) -> Option<Value> {
         FormId::OidcSettings => {
             let sys = get_path(doc, "system").cloned().unwrap_or(Value::Null);
             json!({"enabled": b(&sys, "oidc.enabled", false)})
+        }
+        FormId::SamlSettings => {
+            let sys = get_path(doc, "system").cloned().unwrap_or(Value::Null);
+            json!({"enabled": b(&sys, "saml.enabled", false)})
         }
         FormId::Interface => {
             let item = get_path(doc, "interfaces")?.get(scope)?;
@@ -1556,6 +1594,12 @@ pub fn form_from_view(
             let sys = obj(root.entry("system").or_insert_with(|| json!({})));
             let oidc = obj(sys.entry("oidc").or_insert_with(|| json!({})));
             put(oidc, "enabled", view, "enabled");
+            Ok(vec!["system"])
+        }
+        FormId::SamlSettings => {
+            let sys = obj(root.entry("system").or_insert_with(|| json!({})));
+            let saml = obj(sys.entry("saml").or_insert_with(|| json!({})));
+            put(saml, "enabled", view, "enabled");
             Ok(vec!["system"])
         }
         FormId::Interface => {
@@ -1775,6 +1819,7 @@ pub fn form_view_path(form: FormId, schema: &str) -> Option<&'static str> {
             ("ids.logging.retention_days", "retention_days"),
         ],
         FormId::OidcSettings => &[("system.oidc.enabled", "enabled")],
+        FormId::SamlSettings => &[("system.saml.enabled", "enabled")],
         FormId::UnboundAclDefault => &[("dns.access.default_action", "default_action")],
         FormId::UnboundForwarding => &[],
         f => {

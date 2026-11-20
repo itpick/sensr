@@ -56,6 +56,7 @@ fn is_public(path: &str) -> bool {
     path == "/login"
         || path.starts_with("/ui/fn/login")
         || path.starts_with("/ui/oidc/")
+        || path.starts_with("/ui/saml/")
         || path.starts_with("/pkg/")
         || path == "/favicon.svg"
         || path == "/healthz"
@@ -215,6 +216,103 @@ async fn oidc_callback_post(
     oidc_finish(&sessions, params, remote).await
 }
 
+/// An invisible page that submits the SAML POST form. Providers such as
+/// Entra ID publish only the HTTP-POST SSO binding.
+fn post_page(action: &str, fields: &[(String, String)]) -> String {
+    fn escape(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+    let inputs: String = fields
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "<input type=\"hidden\" name=\"{}\" value=\"{}\">",
+                escape(k),
+                escape(v)
+            )
+        })
+        .collect();
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Redirecting…</title></head>\
+         <body><form method=\"post\" action=\"{}\">{inputs}\
+         <noscript><button type=\"submit\">Continue</button></noscript></form>\
+         <script>document.forms[0].submit()</script></body></html>",
+        escape(action)
+    )
+}
+
+async fn saml_start(
+    State(sessions): State<SessionsHandle>,
+    Path(provider): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    use crate::api::LoginStart;
+    let base = external_base(&headers);
+    match sessions.saml_start(&provider, &base).await {
+        Ok(LoginStart::Redirect(url)) => Redirect::to(&url).into_response(),
+        Ok(LoginStart::Form { action, fields }) => {
+            axum::response::Html(post_page(&action, &fields)).into_response()
+        }
+        Err(e) => {
+            tracing::warn!(provider, error = %e, "cannot start SAML login");
+            Redirect::to("/login?failed=saml").into_response()
+        }
+    }
+}
+
+async fn saml_acs(
+    State(sessions): State<SessionsHandle>,
+    Path(provider): Path<String>,
+    headers: axum::http::HeaderMap,
+    connect: Option<axum::extract::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    axum::Form(fields): axum::Form<HashMap<String, String>>,
+) -> Response {
+    let base = external_base(&headers);
+    let remote = connect.map(|axum::extract::Extension(axum::extract::ConnectInfo(a))| a.ip());
+    match sessions
+        .saml_finish(&provider, &fields, &base, remote)
+        .await
+    {
+        Ok(token) => {
+            let cookie = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict");
+            let mut res = Redirect::to("/").into_response();
+            match axum::http::HeaderValue::from_str(&cookie) {
+                Ok(v) => {
+                    res.headers_mut().insert(header::SET_COOKIE, v);
+                }
+                Err(_) => return Redirect::to("/login?failed=saml").into_response(),
+            }
+            res
+        }
+        Err(e) => {
+            tracing::warn!(provider, error = %e, "SAML login failed");
+            Redirect::to("/login?failed=saml").into_response()
+        }
+    }
+}
+
+async fn saml_metadata(
+    State(sessions): State<SessionsHandle>,
+    Path(provider): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let base = external_base(&headers);
+    match sessions.saml_metadata(&provider, &base).await {
+        Ok(xml) => (
+            [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+            xml,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!(provider, error = %e, "cannot render SAML metadata");
+            (axum::http::StatusCode::NOT_FOUND, "unknown provider").into_response()
+        }
+    }
+}
+
 /// The complete UI: pages, server functions, static assets and the session gate.
 pub fn router(options: LeptosOptions, sessions: SessionsHandle) -> Router {
     let routes = generate_route_list(App);
@@ -230,6 +328,12 @@ pub fn router(options: LeptosOptions, sessions: SessionsHandle) -> Router {
         .route(
             "/ui/oidc/callback",
             axum::routing::get(oidc_callback_get).post(oidc_callback_post),
+        )
+        .route("/ui/saml/start/{provider}", axum::routing::get(saml_start))
+        .route("/ui/saml/acs/{provider}", axum::routing::post(saml_acs))
+        .route(
+            "/ui/saml/metadata/{provider}",
+            axum::routing::get(saml_metadata),
         )
         .with_state(sessions.clone());
     let app = Router::new()

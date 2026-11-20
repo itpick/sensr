@@ -83,6 +83,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/ui/system/user") view=UsersPage/>
                     <Route path=path!("/ui/system/group") view=UserGroupsPage/>
                     <Route path=path!("/ui/system/oidc") view=OidcPage/>
+                    <Route path=path!("/ui/system/saml") view=SamlPage/>
                     <Route path=path!("/ui/system/general") view=SystemGeneralPage/>
                     <Route path=path!("/ui/system/updates") view=UpdatesPage/>
                     <Route path=path!("/ui/core/backup/history") view=History/>
@@ -285,7 +286,7 @@ pub fn Login() -> impl IntoView {
     let failed =
         leptos_router::hooks::use_query_map().with_untracked(|q| q.get("failed").is_some());
     let oidc_failed = leptos_router::hooks::use_query_map()
-        .with_untracked(|q| q.get("failed").as_deref() == Some("oidc"));
+        .with_untracked(|q| matches!(q.get("failed").as_deref(), Some("oidc" | "saml")));
     let load = move || {
         Suspend::new(async move {
             let providers = crate::actions::login_providers().await.unwrap_or_default();
@@ -296,7 +297,7 @@ pub fn Login() -> impl IntoView {
                         .into_iter()
                         .map(|p| {
                             view! {
-                                <a class="btn btn-block" href=format!("/ui/oidc/start/{}", p.id)>
+                                <a class="btn btn-block" href=p.start.clone()>
                                     {format!("Sign in with {}", p.name)}
                                 </a>
                             }

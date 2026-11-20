@@ -1467,3 +1467,47 @@ fn every_validation_message_is_a_sentence_t0361_t0362() {
         );
     }
 }
+
+#[test]
+fn saml_providers_need_metadata_and_an_existing_group() {
+    use sensr_schema::models::system::SamlProvider;
+
+    let mut doc = Document::factory();
+    let mut p = SamlProvider {
+        enabled: true,
+        name: "Entra ID".into(),
+        metadata: String::new(),
+        username_claim: String::new(),
+        groups_claim: Some("memberOf".into()),
+        allowed_groups: vec!["fw-admins".into()],
+        local_group: "admins".parse().unwrap(),
+    };
+    let id = doc.system.saml.providers.push(p.clone());
+    // Disabled globally: nothing is offered.
+    assert!(doc.system.saml.active().is_empty());
+    doc.system.saml.enabled = true;
+    let v = doc.validate();
+    assert_eq!(
+        messages(&v, &format!("system.saml.providers.{id}.metadata")),
+        ["The identity provider metadata is required."]
+    );
+    assert_eq!(
+        messages(&v, &format!("system.saml.providers.{id}.local_group")),
+        ["Group admins does not exist."]
+    );
+
+    doc.system.groups.push(Group {
+        name: "admins".parse().unwrap(),
+        gid: 1999,
+        description: None,
+        privileges: vec!["page-all".into()],
+    });
+    p.metadata = "<md:EntityDescriptor/>".into();
+    doc.system.saml.providers.get_mut(&id).unwrap().metadata = p.metadata;
+    assert!(doc.validate().is_ok());
+    assert_eq!(doc.system.saml.active().len(), 1);
+
+    // A disabled entry never reaches the login page.
+    doc.system.saml.providers.get_mut(&id).unwrap().enabled = false;
+    assert!(doc.system.saml.active().is_empty());
+}

@@ -12,7 +12,7 @@ use futures::future::{BoxFuture, FutureExt};
 use sensr_ipc::{ClientError, ConfigPath, Credential, ErrorKind, Op, Response, Source};
 use sensr_ui::api::{
     ApiError, ApiResult, Backend, ConfirmWindow, DiffKind, DiffLine, FieldError, LoginProvider,
-    Pending, Revision, Session, Sessions, SystemStatus,
+    LoginStart, Pending, Revision, Session, Sessions, SystemStatus,
 };
 use sensr_ui::hoststats::Sampler;
 use sensr_ui::runtime::RuntimeSection;
@@ -400,6 +400,71 @@ impl Sessions for UiSessions {
                 .map_err(|e| ApiError::Backend(e.message))
         }
         .boxed()
+    }
+
+    fn saml_providers(&self) -> BoxFuture<'_, Vec<LoginProvider>> {
+        async move {
+            crate::saml::providers(&self.state)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e.message, "cannot list SAML providers");
+                    Vec::new()
+                })
+        }
+        .boxed()
+    }
+
+    fn saml_start<'a>(
+        &'a self,
+        provider: &'a str,
+        base: &'a str,
+    ) -> BoxFuture<'a, ApiResult<LoginStart>> {
+        async move {
+            crate::saml::begin(&self.state, provider, base)
+                .await
+                .map(saml_started)
+                .map_err(ui_oidc_error)
+        }
+        .boxed()
+    }
+
+    fn saml_finish<'a>(
+        &'a self,
+        provider: &'a str,
+        fields: &'a std::collections::HashMap<String, String>,
+        base: &'a str,
+        remote: Option<std::net::IpAddr>,
+    ) -> BoxFuture<'a, ApiResult<String>> {
+        async move {
+            let caller = crate::saml::finish(&self.state, provider, fields, base, remote)
+                .await
+                .map_err(ui_oidc_error)?;
+            self.state
+                .auth
+                .open_session(caller)
+                .map_err(|e| ApiError::Backend(e.message))
+        }
+        .boxed()
+    }
+
+    fn saml_metadata<'a>(
+        &'a self,
+        provider: &'a str,
+        base: &'a str,
+    ) -> BoxFuture<'a, ApiResult<String>> {
+        async move {
+            crate::saml::metadata(&self.state, provider, base)
+                .await
+                .map_err(ui_oidc_error)
+        }
+        .boxed()
+    }
+}
+
+fn saml_started(started: crate::saml::Started) -> LoginStart {
+    match started {
+        crate::saml::Started::Redirect(url) => LoginStart::Redirect(url),
+        crate::saml::Started::Form { action, fields } => LoginStart::Form { action, fields },
     }
 }
 

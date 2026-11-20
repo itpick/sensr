@@ -11,6 +11,7 @@ pub mod error;
 pub mod insight;
 pub mod native;
 pub mod oidc;
+pub mod saml;
 pub mod tls;
 pub mod ui;
 
@@ -32,6 +33,8 @@ pub struct AppState {
     pub registry: Registry,
     /// In-flight OpenID Connect authorizations and cached signing keys.
     pub oidc: oidc::OidcFlows,
+    /// In-flight SAML authorizations.
+    pub saml: saml::SamlFlows,
 }
 
 impl AppState {
@@ -42,6 +45,7 @@ impl AppState {
             auth: auth::AuthState::default(),
             registry: Registry::builtin(),
             oidc: oidc::OidcFlows::default(),
+            saml: saml::SamlFlows::default(),
         })
     }
 }

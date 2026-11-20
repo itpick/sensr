@@ -295,7 +295,7 @@ mod idp {
     use super::{Fx, http, session_cookie, start_with};
 
     /// A throwaway 2048-bit RSA key; its public half is [`JWKS`].
-    const KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
+    pub(super) const KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDDjvHjtFcwrtGJ\n\
 2SQtDZF1IhyxaEt8ZZ1NsU4/EPHR8gQp8ImWxmS/wG41T/lJl5S4S65h2PrRbIdJ\n\
 W+wOU9le+xcm8ybsKUNJrtLWTi4AibVCCldwvlAiIS33iLANAcP3SUyNyjN5O4VC\n\
@@ -550,5 +550,259 @@ mGWNlURy7cjilln3skSzPHM=\n\
         .await;
         assert_eq!(status, 303, "{head}");
         assert!(session_cookie(&head).is_none(), "{head}");
+    }
+}
+
+// ---------------------------------------------------------------------- SAML
+
+/// A service-provider test against an in-process SAML 2.0 identity provider
+/// built with the same library the API uses, so the wire format is real.
+mod saml_idp {
+    use std::time::SystemTime;
+
+    use risaml::idp::LoginResponseOptions;
+    use risaml::template::{LoginResponseAttribute, LoginResponseTemplate};
+    use risaml::{
+        AuthnRequest, BrowserInput, CertificatePem, Credentials, EntityId, IdpConfig,
+        IdpValidationPolicy, MetadataTrustPolicy, PrivateKeyPem, ReplayPolicy, Saml,
+        SamlValidationContext, SpConfig, SpDescriptor, SsoEndpoint, TemplatePolicy,
+    };
+    use serde_json::json;
+
+    use super::{Fx, http, session_cookie, start_with};
+
+    const PROVIDER: &str = "6f0c6f9e-0000-4000-8000-000000000301";
+    /// The API derives the service-provider URLs from the request; the test
+    /// harness sends no forwarded headers, so it assumes HTTPS on this host.
+    const BASE: &str = "https://test";
+
+    fn credentials() -> Credentials {
+        // Reuse the RSA key the OpenID Connect test already carries: rcgen's
+        // default backend generates only ECDSA keys, but can sign with a
+        // PEM-loaded RSA key.
+        let key = rcgen::KeyPair::from_pem(super::idp::KEY).unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["idp.test".to_owned()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        Credentials {
+            signing_key: Some(PrivateKeyPem::new(super::idp::KEY)),
+            signing_certificate: Some(CertificatePem::new(cert.pem())),
+            ..Credentials::default()
+        }
+    }
+
+    /// An IdP that publishes both HTTP-Redirect and HTTP-POST SSO endpoints
+    /// and signs assertions carrying `username` and `groups`.
+    fn idp() -> Saml<risaml::Idp> {
+        let attributes = vec![
+            LoginResponseAttribute {
+                name: "username".into(),
+                name_format: "urn:oasis:names:tc:SAML:2.0:attrname-format:basic".into(),
+                value_xsi_type: "xs:string".into(),
+                value_tag: "username".into(),
+                value_xmlns_xs: None,
+                value_xmlns_xsi: None,
+            },
+            LoginResponseAttribute {
+                name: "groups".into(),
+                name_format: "urn:oasis:names:tc:SAML:2.0:attrname-format:basic".into(),
+                value_xsi_type: "xs:string".into(),
+                value_tag: "groups".into(),
+                value_xmlns_xs: None,
+                value_xmlns_xsi: None,
+            },
+        ];
+        let templates = TemplatePolicy {
+            login_response_template: Some(LoginResponseTemplate {
+                context: None,
+                attributes,
+            }),
+            ..TemplatePolicy::default()
+        };
+        let config = IdpConfig::builder(EntityId::try_new("https://idp.test/metadata").unwrap())
+            .sso_endpoint(SsoEndpoint::redirect("https://idp.test/sso").unwrap())
+            .sso_endpoint(SsoEndpoint::post("https://idp.test/sso").unwrap())
+            .credentials(credentials())
+            .validation(IdpValidationPolicy::compatibility())
+            .templates(templates)
+            .build()
+            .unwrap();
+        Saml::idp(config).unwrap()
+    }
+
+    fn validation() -> SamlValidationContext<'static> {
+        SamlValidationContext::new(SystemTime::now(), ReplayPolicy::DisabledForCompatibility)
+    }
+
+    async fn fixture(idp: &Saml<risaml::Idp>, allowed: &[&str]) -> Fx {
+        let metadata = idp.metadata_xml();
+        start_with(vec![
+            ("system.saml.enabled", json!(true)),
+            (
+                &format!("system.saml.providers.{PROVIDER}"),
+                json!({
+                    "enabled": true,
+                    "name": "Test SAML",
+                    "metadata": metadata,
+                    "username_claim": "username",
+                    "groups_claim": "groups",
+                    "allowed_groups": allowed,
+                    "local_group": "admins",
+                }),
+            ),
+        ])
+        .await
+    }
+
+    fn location(head: &str) -> String {
+        head.lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                (k.eq_ignore_ascii_case("location")).then(|| v.trim().to_owned())
+            })
+            .expect("redirect Location")
+    }
+
+    fn query(url: &str) -> &str {
+        url.split_once('?').map(|(_, q)| q).expect("query string")
+    }
+
+    fn encode(value: &str) -> String {
+        let mut out = String::new();
+        for b in value.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char)
+                }
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    }
+
+    /// Builds the SP the API configured from the way the API serves its
+    /// metadata, starts the login, and has the IdP answer it.
+    async fn assert_login(
+        fx: &Fx,
+        idp: &Saml<risaml::Idp>,
+        user: &str,
+        groups: &str,
+    ) -> (u16, String, String) {
+        let expected = EntityId::try_new(format!("{BASE}/ui/saml/metadata/{PROVIDER}")).unwrap();
+        let (status, _, metadata) =
+            http(fx, "GET", &format!("/ui/saml/metadata/{PROVIDER}"), &[], "").await;
+        assert_eq!(status, 200, "{metadata}");
+        let sp_descriptor = SpDescriptor::from_metadata_xml_for(
+            expected.clone(),
+            &metadata,
+            MetadataTrustPolicy::UnsignedForCompatibility,
+        )
+        .unwrap();
+
+        // The API builds the same SP config; parsing the served metadata gives
+        // the IdP the audience and ACS the response needs.
+        let sp = Saml::sp(
+            SpConfig::builder(expected)
+                .acs_endpoint(
+                    risaml::AcsEndpoint::post(format!("{BASE}/ui/saml/acs/{PROVIDER}")).unwrap(),
+                )
+                .credentials(Credentials::default())
+                .validation(risaml::SpValidationPolicy {
+                    assertions: risaml::AssertionSignaturePolicy::RequireSigned,
+                    responses: risaml::ResponseSignaturePolicy::RequireForEncryptedCbc,
+                    authn_requests: risaml::AuthnRequestSigningPolicy::DoNotSignForCompatibility,
+                    audience: risaml::AudienceValidationPolicy::Validate,
+                    name_id_creation: risaml::NameIdCreationPolicy::DoNotAllowCreate,
+                    logout: risaml::LogoutPolicy::compatibility(),
+                })
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+
+        let (status, head, _) =
+            http(fx, "GET", &format!("/ui/saml/start/{PROVIDER}"), &[], "").await;
+        assert_eq!(status, 303, "{head}");
+        let url = location(&head);
+        assert!(url.starts_with("https://idp.test/sso?"), "{url}");
+        let request = idp
+            .receive_sso(
+                &sp_descriptor,
+                BrowserInput::<AuthnRequest>::redirect(query(&url)),
+                validation(),
+            )
+            .unwrap();
+
+        // The typed IdP cannot attach attributes, so issue the response
+        // through the raw API with the user's attributes filled in.
+        let response = idp
+            .raw_identity_provider()
+            .create_login_response(
+                sp.raw_service_provider(),
+                risaml::constants::Binding::Post,
+                &risaml::entity::User {
+                    name_id: user.to_owned(),
+                    attributes: vec![
+                        ("username".to_owned(), user.to_owned()),
+                        ("groups".to_owned(), groups.to_owned()),
+                    ],
+                    session_index: None,
+                },
+                &LoginResponseOptions {
+                    in_response_to: Some(request.message().id().as_str()),
+                    relay_state: request.relay_state().as_deref(),
+                    ..LoginResponseOptions::default()
+                },
+            )
+            .unwrap();
+        let body = format!(
+            "RelayState={}&SAMLResponse={}",
+            encode(response.relay_state.as_deref().unwrap_or_default()),
+            encode(&response.context),
+        );
+        http(
+            fx,
+            "POST",
+            &format!("/ui/saml/acs/{PROVIDER}"),
+            &[("Content-Type", "application/x-www-form-urlencoded")],
+            &body,
+        )
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saml_login_opens_a_session_from_a_signed_assertion() {
+        let idp = idp();
+        let fx = fixture(&idp, &["fw-admins"]).await;
+
+        let (status, _, body) = http(&fx, "GET", "/login", &[], "").await;
+        assert_eq!(status, 200);
+        assert!(body.contains("Sign in with Test SAML"), "{body}");
+
+        let (status, head, body) = assert_login(&fx, &idp, "ok@example.com", "fw-admins").await;
+        assert_eq!(status, 303, "{head} {body}");
+        let token = session_cookie(&head).expect("the assertion opens a session");
+        let cookie = format!("sensr_session={token}");
+
+        let (status, _, body) =
+            http(&fx, "GET", "/ui/firewall/alias", &[("Cookie", &cookie)], "").await;
+        assert_eq!(status, 200);
+        assert!(body.contains("File server"), "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saml_login_refuses_identities_outside_the_allowed_groups() {
+        let idp = idp();
+        let fx = fixture(&idp, &["fw-admins"]).await;
+
+        let (status, head, body) = assert_login(&fx, &idp, "guest@example.com", "users").await;
+        assert_eq!(status, 303, "{head} {body}");
+        assert!(session_cookie(&head).is_none(), "{head}");
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("location: /login?failed=saml"),
+            "{head}"
+        );
     }
 }

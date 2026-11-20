@@ -113,6 +113,7 @@ const CORE: &[Node] = &[
             n("Users").order(10).url("/ui/system/user"),
             n("Groups").order(20).url("/ui/system/group"),
             n("OpenID Connect").order(30).url("/ui/system/oidc"),
+            n("SAML").order(40).url("/ui/system/saml"),
         ]),
         n("Settings")
             .order(20)
@@ -507,6 +508,7 @@ mod tests {
             "/ui/system/user",
             "/ui/system/group",
             "/ui/system/oidc",
+            "/ui/system/saml",
             "/ui/system/general",
             "/ui/system/updates",
         ];

@@ -95,7 +95,7 @@ fn now_secs() -> u64 {
 
 /// Reads the whole candidate document as the API's own (read-only) identity.
 /// Login happens before a user is signed in, so this cannot use a session.
-async fn document(state: &AppState) -> Result<Value, ApiError> {
+pub(crate) async fn document(state: &AppState) -> Result<Value, ApiError> {
     let me = Principal {
         user: "sensr-api".into(),
         via: sensr_ipc::AuthMethod::Unix { uid: 0 },
@@ -128,7 +128,7 @@ async fn oidc(state: &AppState) -> Result<Oidc, ApiError> {
         .unwrap_or_default())
 }
 
-fn random_hex(bytes: usize) -> Result<String, ApiError> {
+pub(crate) fn random_hex(bytes: usize) -> Result<String, ApiError> {
     let mut buf = vec![0u8; bytes];
     getrandom::fill(&mut buf)
         .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "no randomness"))?;
@@ -192,6 +192,7 @@ pub async fn providers(state: &AppState) -> Result<Vec<LoginProvider>, ApiError>
         .map(|(id, p)| LoginProvider {
             id: id.to_string(),
             name: p.name.clone(),
+            start: format!("/ui/oidc/start/{id}"),
         })
         .collect())
 }

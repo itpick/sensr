@@ -899,7 +899,11 @@ pub async fn login(username: String, password: String) -> Result<(), ServerFnErr
 /// is disabled or nothing is configured.
 #[server(prefix = "/ui/fn", endpoint = "login/providers", input = Json)]
 pub async fn login_providers() -> Result<Vec<crate::api::LoginProvider>, ServerFnError> {
-    Ok(imp::sessions()?.oidc_providers().await)
+    let sessions = imp::sessions()?;
+    let mut providers = sessions.oidc_providers().await;
+    providers.extend(sessions.saml_providers().await);
+    providers.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(providers)
 }
 
 /// Change the signed-in user's password. A plain form post: works without
