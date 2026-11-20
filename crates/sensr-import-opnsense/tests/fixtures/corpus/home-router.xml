@@ -50,7 +50,7 @@
       <scope>system</scope>
       <expires/>
       <authorizedkeys/>
-      <otp_seed/>
+      <otp_seed>JBSWY3DPEHPK3PXP</otp_seed>
       <shell/>
       <password>$2y$11$synthetic.synthetic.synthetic.synthetic.synthetic.syn</password>
       <pwd_changed_at>1794012000</pwd_changed_at>

@@ -326,11 +326,17 @@ impl UiSessions {
 }
 
 impl Sessions for UiSessions {
-    fn login<'a>(&'a self, user: &'a str, password: &'a str) -> BoxFuture<'a, ApiResult<String>> {
+    fn login<'a>(
+        &'a self,
+        user: &'a str,
+        password: &'a str,
+        otp: Option<&'a str>,
+    ) -> BoxFuture<'a, ApiResult<String>> {
         async move {
             let cred = Credential::Password {
                 user: user.to_owned(),
                 password: password.to_owned(),
+                otp: otp.map(str::to_owned),
             };
             let caller = verify(&self.state, cred, None)
                 .await

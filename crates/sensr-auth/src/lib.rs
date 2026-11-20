@@ -6,7 +6,9 @@
 //!   by `sensr-agent` when it re-checks the declared principal.
 //! - [`password`]: argon2id hashes, bcrypt import.
 //! - [`apikey`]: `key:secret` API keys with OPNsense's storage format.
+//! - [`totp`]: time-based one-time passwords for local accounts.
 
 pub mod acl;
 pub mod apikey;
 pub mod password;
+pub mod totp;

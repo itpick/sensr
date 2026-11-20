@@ -99,6 +99,13 @@ pub struct User {
     /// password login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password_hash: Option<Secret<String>>,
+    /// Base32 TOTP secret (OPNsense `otp_seed`). Present while enrolment is
+    /// pending or complete; [`Self::otp_enabled`] says which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otp_seed: Option<Secret<String>>,
+    /// Require a code from the secret at password login.
+    #[serde(default)]
+    pub otp_enabled: bool,
     /// Keys allowed to log in over SSH.
     #[serde(default)]
     pub authorized_keys: Vec<SshPublicKey>,
@@ -655,6 +662,33 @@ impl Validate for System {
                     &p.join("shell"),
                     ValidatorKind::Regex,
                     "The shell must be an absolute path.",
+                );
+            }
+            if let Some(seed) = &user.otp_seed {
+                let seed = seed.expose();
+                let valid = seed
+                    .bytes()
+                    .filter(|b| !b.is_ascii_whitespace() && *b != b'-' && *b != b'=')
+                    .all(|b| {
+                        b.is_ascii_alphanumeric()
+                            && b != b'0'
+                            && b != b'1'
+                            && b != b'8'
+                            && b != b'9'
+                    });
+                if !valid || seed.trim().is_empty() {
+                    out.add(
+                        &p.join("otp_seed"),
+                        ValidatorKind::Regex,
+                        "The one-time-password secret must be base32.",
+                    );
+                }
+            }
+            if user.otp_enabled && user.otp_seed.is_none() {
+                out.add(
+                    &p.join("otp_seed"),
+                    ValidatorKind::PresenceOf,
+                    "A two-factor login needs a secret; enrol one first.",
                 );
             }
         }

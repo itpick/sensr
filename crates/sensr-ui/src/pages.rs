@@ -4,7 +4,7 @@
 
 use crate::actions::{
     alias_feeds, dns_stats, field_choices, form_load, gateways_status, grid_fetch, ids_alerts,
-    insight_data, live_status, pd_status, revision_diff, revisions, update_status,
+    insight_data, live_status, pd_status, revision_diff, revisions, totp_status, update_status,
 };
 use crate::api::{
     AlertPage, DiffLine, DnsStats, INSIGHT_RANGES, InsightReport, TrafficPoint, TrafficRow,
@@ -724,6 +724,92 @@ pub fn PasswordPage() -> impl IntoView {
                 </div>
                 <button type="submit" class="btn btn-primary">"Change password"</button>
             </form>
+        </section>
+        <TotpCard/>
+    }
+}
+
+/// Lobby › Password › two-factor enrolment for the signed-in account.
+#[component]
+fn TotpCard() -> impl IntoView {
+    let q = use_query_map().get_untracked();
+    let notice = match q.get("otp").as_deref() {
+        Some("scan") => Some(
+            "Scan the code or copy the secret into your authenticator app, then enter the six-digit code it shows.",
+        ),
+        Some("enabled") => {
+            Some("Two-factor authentication is on. Password logins now ask for a code as well.")
+        }
+        Some("disabled") => {
+            Some("Two-factor authentication is off. Password logins no longer ask for a code.")
+        }
+        _ => None,
+    };
+    let error = match q.get("otp").as_deref() {
+        Some("bad") => {
+            Some("That code was not accepted. Check the time on your phone and try again.")
+        }
+        Some("expired") => {
+            Some("The enrolment expired before it was confirmed. Show a new secret.")
+        }
+        Some("nouser") => Some("Could not find your account in the configuration."),
+        _ => None,
+    };
+    let load = move || {
+        Suspend::new(async move {
+            let status = match totp_status().await {
+                Ok(s) => s,
+                Err(e) => return load_error(e),
+            };
+            let body = if status.enabled {
+                view! {
+                    <p class="notice" role="status">"Two-factor authentication is enabled for this account."</p>
+                    <form method="post" action="/ui/fn/totp/disable">
+                        <button type="submit" class="btn">"Turn off two-factor authentication"</button>
+                    </form>
+                }.into_any()
+            } else if let Some(secret) = status.secret {
+                let uri = status.uri.unwrap_or_default();
+                view! {
+                    <p>"Add this account to an authenticator app (Aegis, 1Password, Google Authenticator):"</p>
+                    <p><code class="secret">{secret}</code></p>
+                    <p class="muted small">"Or import the provisioning URI:"</p>
+                    <p class="wrap"><code class="secret small">{uri}</code></p>
+                    <form method="post" action="/ui/fn/totp/confirm">
+                        <div class="field-stack">
+                            <label for="otp_code">"Code from the app"</label>
+                            <input id="otp_code" name="code" type="text" inputmode="numeric"
+                                autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required/>
+                        </div>
+                        <button type="submit" class="btn btn-primary">"Enable two-factor authentication"</button>
+                    </form>
+                    <form method="post" action="/ui/fn/totp/start">
+                        <button type="submit" class="btn">"Show a new secret"</button>
+                    </form>
+                }.into_any()
+            } else {
+                view! {
+                    <p>"Ask for a six-digit code from an authenticator app in addition to your password."</p>
+                    {status.uri.is_none().then(|| view! {
+                        <p class="muted small">"The secret is only shown while you enrol. If it is not here, show a new one."</p>
+                    })}
+                    <form method="post" action="/ui/fn/totp/start">
+                        <button type="submit" class="btn btn-primary">"Set up two-factor authentication"</button>
+                    </form>
+                }.into_any()
+            };
+            view! {
+                {notice.map(|n| view! { <p class="notice" role="status">{n}</p> })}
+                {error.map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
+                {body}
+            }
+            .into_any()
+        })
+    };
+    view! {
+        <section class="card">
+            <h2>"Two-factor authentication"</h2>
+            <Suspense fallback=|| ()>{load}</Suspense>
         </section>
     }
 }

@@ -21,6 +21,7 @@
         "description": "System Administrator",
         "disabled": false,
         "password_hash": "$2y$11$synthetic.synthetic.synthetic.synthetic.synthetic.syn",
+        "otp_enabled": false,
         "authorized_keys": [],
         "groups": [
           "admins"

@@ -1186,6 +1186,8 @@ fn system_rules() {
         description: None,
         disabled: false,
         password_hash: Some("$2y$10$abc".to_owned().into()),
+        otp_seed: None,
+        otp_enabled: false,
         authorized_keys: vec![],
         groups: vec!["admins".parse().unwrap()],
         shell: Some("bin/sh".into()),
@@ -1510,4 +1512,42 @@ fn saml_providers_need_metadata_and_an_existing_group() {
     // A disabled entry never reaches the login page.
     doc.system.saml.providers.get_mut(&id).unwrap().enabled = false;
     assert!(doc.system.saml.active().is_empty());
+}
+
+#[test]
+fn two_factor_login_needs_a_base32_seed() {
+    let mut doc = Document::factory();
+    let user = User {
+        name: "root".parse().unwrap(),
+        uid: 0,
+        description: None,
+        disabled: false,
+        password_hash: Some("$2y$10$abc".to_owned().into()),
+        otp_seed: Some("not base32!".to_owned().into()),
+        otp_enabled: false,
+        authorized_keys: vec![],
+        groups: vec![],
+        shell: None,
+        api_keys: vec![],
+    };
+    let id = doc.system.users.push(user);
+    let v = doc.validate();
+    assert_eq!(
+        messages(&v, &format!("system.users.{id}.otp_seed")),
+        ["The one-time-password secret must be base32."]
+    );
+
+    // Enabling the second factor requires a secret at all.
+    let u = doc.system.users.get_mut(&id).unwrap();
+    u.otp_seed = None;
+    u.otp_enabled = true;
+    let v = doc.validate();
+    assert_eq!(
+        messages(&v, &format!("system.users.{id}.otp_seed")),
+        ["A two-factor login needs a secret; enrol one first."]
+    );
+
+    let u = doc.system.users.get_mut(&id).unwrap();
+    u.otp_seed = Some("JBSWY3DPEHPK3PXP".to_owned().into());
+    assert!(doc.validate().is_ok());
 }

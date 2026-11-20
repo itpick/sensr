@@ -4483,10 +4483,12 @@ dependencies = [
  "base64 0.23.1",
  "bcrypt",
  "getrandom 0.4.3",
+ "hmac 0.12.1",
  "proptest",
  "quick-xml 0.42.0",
  "serde",
  "sha-crypt",
+ "sha1",
  "thiserror 2.0.21",
 ]
 

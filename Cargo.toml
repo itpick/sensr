@@ -30,6 +30,7 @@ sensr-feeds = { path = "crates/sensr-feeds" }
 sensr-flow = { path = "crates/sensr-flow", default-features = false }
 
 anyhow = "1.0.104"
+hmac = "0.12.1"
 argon2 = "0.6.0"
 axum = "0.8.9"
 base64 = "0.23.1"
@@ -76,6 +77,7 @@ sd-notify = "0.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_path_to_error = "0.1.20"
+sha1 = "0.10.6"
 sha2 = "0.10.9"
 sha-crypt = { version = "0.6.0", features = ["getrandom"] }
 similar = "3.2.1"

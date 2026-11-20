@@ -216,6 +216,7 @@ pub async fn require(
                     Credential::Password {
                         user,
                         password: secret,
+                        otp: None,
                     }
                 };
                 let c = verify(&state, cred, remote).await.map_err(|e| {

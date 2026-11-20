@@ -430,7 +430,12 @@ pub fn simulated_dns_stats() -> DnsStats {
 pub struct MockSessions(pub std::sync::Arc<MockBackend>);
 
 impl Sessions for MockSessions {
-    fn login<'a>(&'a self, user: &'a str, password: &'a str) -> BoxFuture<'a, ApiResult<String>> {
+    fn login<'a>(
+        &'a self,
+        user: &'a str,
+        password: &'a str,
+        _otp: Option<&'a str>,
+    ) -> BoxFuture<'a, ApiResult<String>> {
         let ok = self.0.users.iter().any(|(u, p)| u == user && p == password);
         ready(self.0.with(|s| {
             if !ok {
@@ -1293,8 +1298,11 @@ mod tests {
     fn sessions() {
         let (m, _) = mock_with_clock();
         let m = MockSessions(Arc::new(m));
-        assert_eq!(block(m.login("root", "nope")), Err(ApiError::Unauthorized));
-        let tok = block(m.login("root", "sensr")).unwrap();
+        assert_eq!(
+            block(m.login("root", "nope", None)),
+            Err(ApiError::Unauthorized)
+        );
+        let tok = block(m.login("root", "sensr", None)).unwrap();
         assert_eq!(block(m.open(&tok)).map(|s| s.user).as_deref(), Some("root"));
         block(m.logout(&tok));
         assert!(block(m.open(&tok)).is_none());

@@ -53,6 +53,54 @@ mod imp {
         ServerFnError::new(e.to_string())
     }
 
+    /// Cookie carrying the secret while enrolment is pending: the API masks
+    /// secrets on reads, so the browser that generated it is the only one
+    /// that can show it before the first code arms the account.
+    pub const TOTP_COOKIE: &str = "sensr_totp_pending";
+
+    /// The pending enrolment secret from the request cookie, if any.
+    pub fn pending_seed() -> Option<String> {
+        let parts = use_context::<axum::http::request::Parts>()?;
+        parts
+            .headers
+            .get_all(axum::http::header::COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find_map(|header| {
+                header.split(';').find_map(|kv| {
+                    let (k, v) = kv.trim().split_once('=')?;
+                    (k == TOTP_COOKIE).then(|| v.to_owned())
+                })
+            })
+    }
+
+    /// Sets or clears the pending enrolment cookie on the response.
+    pub fn set_pending_seed(value: Option<&str>) {
+        use axum::http::{HeaderValue, header::SET_COOKIE};
+        let opts = expect_context::<leptos_axum::ResponseOptions>();
+        let cookie = match value {
+            Some(seed) => {
+                format!("{TOTP_COOKIE}={seed}; Path=/; HttpOnly; SameSite=Strict; Max-Age=600")
+            }
+            None => format!("{TOTP_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"),
+        };
+        if let Ok(v) = HeaderValue::from_str(&cookie) {
+            opts.append_header(SET_COOKIE, v);
+        }
+    }
+
+    /// Finds `name` in the account list and returns its object id.
+    pub fn user_uuid(system: &Value, name: &str) -> Option<String> {
+        system
+            .get("users")
+            .and_then(Value::as_object)
+            .and_then(|users| {
+                users.iter().find_map(|(uuid, user)| {
+                    (user.get("name").and_then(Value::as_str) == Some(name)).then(|| uuid.clone())
+                })
+            })
+    }
+
     pub async fn doc() -> Result<Value, ServerFnError> {
         backend()?.get("").await.map_err(err)
     }
@@ -878,10 +926,15 @@ pub const SESSION_COOKIE: &str = "sensr_session";
 
 /// Login form target. A plain form post: works without JavaScript.
 #[server(prefix = "/ui/fn", endpoint = "login")]
-pub async fn login(username: String, password: String) -> Result<(), ServerFnError> {
+pub async fn login(
+    username: String,
+    password: String,
+    otp: Option<String>,
+) -> Result<(), ServerFnError> {
     use axum::http::{HeaderValue, header::SET_COOKIE};
     let sessions = imp::sessions()?;
-    match sessions.login(username.trim(), &password).await {
+    let otp = otp.as_deref().map(str::trim).filter(|c| !c.is_empty());
+    match sessions.login(username.trim(), &password, otp).await {
         Ok(token) => {
             let opts = expect_context::<leptos_axum::ResponseOptions>();
             let cookie = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict");
@@ -924,16 +977,7 @@ pub async fn change_password(
     let name = imp::user();
     let b = imp::backend()?;
     let system = b.get("system").await.map_err(imp::err)?;
-    let Some(uuid) = system
-        .get("users")
-        .and_then(serde_json::Value::as_object)
-        .and_then(|users| {
-            users.iter().find_map(|(uuid, user)| {
-                (user.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str()))
-                    .then(|| uuid.clone())
-            })
-        })
-    else {
+    let Some(uuid) = imp::user_uuid(&system, &name) else {
         leptos_axum::redirect("/ui/core/password?error=nouser");
         return Ok(());
     };
@@ -949,6 +993,144 @@ pub async fn change_password(
         .await
         .map_err(imp::err)?;
     leptos_axum::redirect("/ui/core/password?changed=1");
+    Ok(())
+}
+
+/// Two-factor enrolment state for the signed-in account.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TotpState {
+    /// A code is required at password login.
+    pub enabled: bool,
+    /// The base32 secret, while enrolment is pending or complete.
+    pub secret: Option<String>,
+    /// The `otpauth://` URI an authenticator app imports.
+    pub uri: Option<String>,
+}
+
+/// Reads the signed-in account's two-factor state.
+#[server(prefix = "/ui/fn", endpoint = "totp/status")]
+pub async fn totp_status() -> Result<TotpState, ServerFnError> {
+    use serde_json::Value;
+    let b = imp::backend()?;
+    let name = imp::user();
+    let system = b.get("system").await.map_err(imp::err)?;
+    let Some(uuid) = imp::user_uuid(&system, &name) else {
+        return Err(ServerFnError::new("could not find your account"));
+    };
+    let user = system
+        .get("users")
+        .and_then(|u| u.get(&uuid))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let enabled = user
+        .get("otp_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // Secrets are masked on reads; while enrolment is pending the browser
+    // holds the real one in a short-lived cookie.
+    let secret = (!enabled).then(imp::pending_seed).flatten();
+    Ok(TotpState {
+        enabled,
+        uri: secret
+            .as_ref()
+            .map(|s| sensr_auth::totp::provisioning_uri("sensr", &name, s)),
+        secret,
+    })
+}
+
+/// Generates a new secret for the signed-in account and shows it for
+/// enrolment. The account keeps password-only login until the first code is
+/// confirmed.
+#[server(prefix = "/ui/fn", endpoint = "totp/start")]
+pub async fn totp_start() -> Result<(), ServerFnError> {
+    let b = imp::backend()?;
+    let name = imp::user();
+    let system = b.get("system").await.map_err(imp::err)?;
+    let Some(uuid) = imp::user_uuid(&system, &name) else {
+        leptos_axum::redirect("/ui/core/password?otp=nouser");
+        return Ok(());
+    };
+    let secret = sensr_auth::totp::generate_seed();
+    imp::set_pending_seed(Some(&secret));
+    b.set(
+        &format!("system.users.{uuid}.otp_seed"),
+        serde_json::Value::String(secret),
+    )
+    .await
+    .map_err(imp::err)?;
+    b.set(
+        &format!("system.users.{uuid}.otp_enabled"),
+        serde_json::Value::Bool(false),
+    )
+    .await
+    .map_err(imp::err)?;
+    b.commit(&name, "start two-factor authentication", None)
+        .await
+        .map_err(imp::err)?;
+    leptos_axum::redirect("/ui/core/password?otp=scan");
+    Ok(())
+}
+
+/// Confirms the first code from the new secret and turns two-factor login on.
+#[server(prefix = "/ui/fn", endpoint = "totp/confirm")]
+pub async fn totp_confirm(code: String) -> Result<(), ServerFnError> {
+    use serde_json::Value;
+    let b = imp::backend()?;
+    let name = imp::user();
+    let system = b.get("system").await.map_err(imp::err)?;
+    let Some(uuid) = imp::user_uuid(&system, &name) else {
+        leptos_axum::redirect("/ui/core/password?otp=nouser");
+        return Ok(());
+    };
+    let Some(secret) = imp::pending_seed() else {
+        leptos_axum::redirect("/ui/core/password?otp=expired");
+        return Ok(());
+    };
+    if !sensr_auth::totp::verify(&secret, &code, std::time::SystemTime::now()) {
+        leptos_axum::redirect("/ui/core/password?otp=bad");
+        return Ok(());
+    }
+    imp::set_pending_seed(None);
+    b.set(
+        &format!("system.users.{uuid}.otp_enabled"),
+        Value::Bool(true),
+    )
+    .await
+    .map_err(imp::err)?;
+    b.commit(&name, "enable two-factor authentication", None)
+        .await
+        .map_err(imp::err)?;
+    leptos_axum::redirect("/ui/core/password?otp=enabled");
+    Ok(())
+}
+
+/// Turns two-factor login off and drops the secret.
+#[server(prefix = "/ui/fn", endpoint = "totp/disable")]
+pub async fn totp_disable() -> Result<(), ServerFnError> {
+    let b = imp::backend()?;
+    let name = imp::user();
+    let system = b.get("system").await.map_err(imp::err)?;
+    let Some(uuid) = imp::user_uuid(&system, &name) else {
+        leptos_axum::redirect("/ui/core/password?otp=nouser");
+        return Ok(());
+    };
+    b.set(
+        &format!("system.users.{uuid}.otp_enabled"),
+        serde_json::Value::Bool(false),
+    )
+    .await
+    .map_err(imp::err)?;
+    b.set(
+        &format!("system.users.{uuid}.otp_seed"),
+        serde_json::Value::Null,
+    )
+    .await
+    .map_err(imp::err)?;
+    b.commit(&name, "disable two-factor authentication", None)
+        .await
+        .map_err(imp::err)?;
+    imp::set_pending_seed(None);
+    leptos_axum::redirect("/ui/core/password?otp=disabled");
     Ok(())
 }
 

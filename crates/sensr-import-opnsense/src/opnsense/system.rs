@@ -182,12 +182,16 @@ fn map_user<'doc>(
     let uid_el = ctx.child(u, "uid")?;
     let uid: u32 = parse_or_warn(ctx, uid_el, &uid_el.text(), "uid")?;
     let descr = ctx.text(u, "descr");
+    // OPNsense enables TOTP whenever a seed is present.
+    let otp_seed = ctx.non_empty(u, "otp_seed").map(Secret::new);
     let mut user = User {
         name,
         uid,
         description: description(ctx, u, descr),
         disabled: ctx.flag(u, "disabled"),
         password_hash: ctx.non_empty(u, "password").map(Secret::new),
+        otp_enabled: otp_seed.is_some(),
+        otp_seed,
         authorized_keys: Vec::new(),
         groups: Vec::new(),
         shell: ctx.non_empty(u, "shell"),

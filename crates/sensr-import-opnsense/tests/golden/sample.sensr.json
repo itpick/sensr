@@ -20,6 +20,7 @@
         "description": "System Administrator",
         "disabled": false,
         "password_hash": "$2y$10$YRVoF4SgskIsrXOvOQjGieB9XqHPRra9R7d80B3BZdbY/j21TwBfS",
+        "otp_enabled": false,
         "authorized_keys": [],
         "groups": [
           "admins"

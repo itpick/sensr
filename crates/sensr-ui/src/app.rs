@@ -314,7 +314,7 @@ pub fn Login() -> impl IntoView {
                 <h1 class="login-brand"><Wordmark/></h1>
                 {failed.then(|| view! {
                     <p class="field-error" role="alert" id="login-error">
-                        {if oidc_failed { "The single sign-on login did not complete. Please try again." } else { "Wrong username or password." }}
+                        {if oidc_failed { "The single sign-on login did not complete. Please try again." } else { "Wrong username, password or one-time password." }}
                     </p>
                 })}
                 <div class="field-stack">
@@ -325,6 +325,13 @@ pub fn Login() -> impl IntoView {
                 <div class="field-stack">
                     <label for="password">"Password"</label>
                     <input id="password" name="password" type="password" autocomplete="current-password" required/>
+                </div>
+                <div class="field-stack">
+                    <label for="otp">"One-time password"</label>
+                    <input id="otp" name="otp" type="text" inputmode="numeric"
+                        autocomplete="one-time-code" maxlength="6" pattern="[0-9]*"
+                        aria-describedby="otp-help"/>
+                    <p id="otp-help" class="muted small">"Six digits from your authenticator app, when two-factor login is enabled."</p>
                 </div>
                 <button type="submit" class="btn btn-primary btn-block">"Login"</button>
                 <Suspense fallback=|| ()>{load}</Suspense>

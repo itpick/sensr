@@ -806,3 +806,130 @@ mod saml_idp {
         );
     }
 }
+
+// --------------------------------------------------------------- two-factor
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_factor_login_needs_the_code() {
+    let seed = sensr_auth::totp::generate_seed();
+    let fx = start_with(vec![
+        (
+            "system.users.6f0c6f9e-0000-4000-8000-000000000001.otp_seed",
+            json!(seed),
+        ),
+        (
+            "system.users.6f0c6f9e-0000-4000-8000-000000000001.otp_enabled",
+            json!(true),
+        ),
+    ])
+    .await;
+    let code = sensr_auth::totp::code(&seed, std::time::SystemTime::now()).unwrap();
+
+    let (status, head) = login(&fx, "admin", "adminpw").await;
+    assert!(matches!(status, 302 | 303), "{head}");
+    assert!(
+        session_cookie(&head).is_none(),
+        "the password alone is not enough"
+    );
+
+    let body = format!("username=admin&password=adminpw&otp={code}");
+    let (status, head, _) = http(
+        &fx,
+        "POST",
+        "/ui/fn/login",
+        &[
+            ("Content-Type", "application/x-www-form-urlencoded"),
+            ("Accept", "text/html"),
+        ],
+        &body,
+    )
+    .await;
+    assert!(matches!(status, 302 | 303), "{head}");
+    assert!(session_cookie(&head).is_some(), "{head}");
+
+    // The login page offers the code field.
+    let (_, _, page) = http(&fx, "GET", "/login", &[], "").await;
+    assert!(page.contains("One-time password"), "{page}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_factor_enrolment_shows_the_secret_and_arms_login() {
+    let fx = start().await;
+    let (status, head) = login(&fx, "admin", "adminpw").await;
+    assert!(matches!(status, 302 | 303), "{head}");
+    let token = session_cookie(&head).unwrap();
+    let cookie = format!("sensr_session={token}");
+
+    let (status, head, _) = http(
+        &fx,
+        "POST",
+        "/ui/fn/totp/start",
+        &[("Cookie", &cookie), ("Accept", "text/html")],
+        "",
+    )
+    .await;
+    assert!(matches!(status, 302 | 303), "{head}");
+    let pending = head
+        .lines()
+        .filter_map(|l| l.strip_prefix("set-cookie: "))
+        .find_map(|c| c.strip_prefix("sensr_totp_pending="))
+        .and_then(|v| v.split(';').next())
+        .expect("pending enrolment cookie")
+        .to_owned();
+    let both = format!("sensr_session={token}; sensr_totp_pending={pending}");
+
+    let (status, _, page) = http(
+        &fx,
+        "GET",
+        "/ui/core/password?otp=scan",
+        &[("Cookie", &both)],
+        "",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(page.contains("otpauth://totp/sensr:admin"), "{page}");
+    let start = page.find("<code class=\"secret\">").expect("secret shown") + 21;
+    let end = start + page[start..].find("</code>").expect("secret ends");
+    let seed = page[start..end].to_owned();
+
+    let code = sensr_auth::totp::code(&seed, std::time::SystemTime::now()).unwrap();
+    let body = format!("code={code}");
+    let (status, head, _) = http(
+        &fx,
+        "POST",
+        "/ui/fn/totp/confirm",
+        &[
+            ("Cookie", &both),
+            ("Content-Type", "application/x-www-form-urlencoded"),
+            ("Accept", "text/html"),
+        ],
+        &body,
+    )
+    .await;
+    assert!(matches!(status, 302 | 303), "{head}");
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("location: /ui/core/password?otp=enabled"),
+        "{head}"
+    );
+
+    // A new login now needs a code from the same secret.
+    let (status, head) = login(&fx, "admin", "adminpw").await;
+    assert!(matches!(status, 302 | 303), "{head}");
+    assert!(session_cookie(&head).is_none(), "{head}");
+    let code = sensr_auth::totp::code(&seed, std::time::SystemTime::now()).unwrap();
+    let body = format!("username=admin&password=adminpw&otp={code}");
+    let (status, head, _) = http(
+        &fx,
+        "POST",
+        "/ui/fn/login",
+        &[
+            ("Content-Type", "application/x-www-form-urlencoded"),
+            ("Accept", "text/html"),
+        ],
+        &body,
+    )
+    .await;
+    assert!(matches!(status, 302 | 303), "{head}");
+    assert!(session_cookie(&head).is_some(), "{head}");
+}

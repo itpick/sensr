@@ -306,6 +306,9 @@ pub async fn runtime(
 pub struct LoginBody {
     user: String,
     password: String,
+    /// TOTP code for accounts with two-factor login.
+    #[serde(default)]
+    otp: Option<String>,
 }
 
 /// `POST /api/v1/session`: password login, returns a bearer token.
@@ -320,6 +323,7 @@ pub async fn login(
         Credential::Password {
             user: b.user,
             password: b.password,
+            otp: b.otp,
         },
         remote,
     )

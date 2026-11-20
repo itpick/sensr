@@ -446,6 +446,7 @@ async fn untrusted_peer_is_read_only() {
             credential: Credential::Password {
                 user: "root".into(),
                 password: "x".into(),
+                otp: None,
             },
             remote_addr: None,
         })
@@ -504,6 +505,7 @@ async fn authenticate_against_head_document() {
         credential: Credential::Password {
             user: "admin".into(),
             password: pw.into(),
+            otp: None,
         },
         remote_addr: None,
     };

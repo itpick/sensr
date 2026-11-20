@@ -176,6 +176,11 @@ fn system(doc: &Document) -> Element {
             "password",
             u.password_hash.as_ref().map(|p| p.expose().clone()),
         );
+        // OPNsense has no separate switch: a seed means two-factor login.
+        ue.put_opt(
+            "otp_seed",
+            u.otp_seed.as_ref().map(|seed| seed.expose().clone()),
+        );
         if !u.api_keys.is_empty() {
             let lines: Vec<String> = u
                 .api_keys

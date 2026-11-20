@@ -216,6 +216,17 @@ fn provider<'a>(doc: &'a Value, id: &str) -> Option<(&'a Value, bool)> {
     None
 }
 
+/// Splits a password with the one-time code appended (`secret123456`), the
+/// form OPNsense accepts on Basic-auth logins.
+fn split_otp(password: &str) -> Option<(&str, &str)> {
+    let bytes = password.as_bytes();
+    if bytes.len() <= sensr_auth::totp::DIGITS as usize {
+        return None;
+    }
+    let (pass, code) = password.split_at(bytes.len() - sensr_auth::totp::DIGITS as usize);
+    (code.bytes().all(|b| b.is_ascii_digit()) && !pass.is_empty()).then_some((pass, code))
+}
+
 /// Privileges a group name grants, from the typed or OPNsense group shape,
 /// honouring a group's source-network restriction.
 fn group_privileges(doc: &Value, names: &[String], remote: Option<IpAddr>) -> Vec<String> {
@@ -327,12 +338,36 @@ pub fn authenticate(doc: &Value, cred: &Credential, remote: Option<IpAddr>) -> O
         return external(doc, provider, claims.as_ref(), remote);
     }
     let user = match cred {
-        Credential::Password { user, password: pw } => {
+        Credential::Password {
+            user,
+            password: pw,
+            otp,
+        } => {
             let u = users(doc)
                 .into_iter()
                 .find(|u| text(u.get("name")) == *user)?;
-            if !password::verify_password(pw, &text(first(u, &["password_hash", "password"]))) {
+            let stored = text(first(u, &["password_hash", "password"]));
+            // A dedicated field is the current way; OPNsense appends the
+            // token to the password, which Basic auth has to keep working.
+            let mut code = otp.as_deref().map(str::trim).filter(|c| !c.is_empty());
+            let mut ok = password::verify_password(pw, &stored);
+            if !ok
+                && code.is_none()
+                && let Some((pass, appended)) = split_otp(pw)
+                && password::verify_password(pass, &stored)
+            {
+                ok = true;
+                code = Some(appended);
+            }
+            if !ok {
                 return None;
+            }
+            if truthy(u.get("otp_enabled")) {
+                let seed = text(u.get("otp_seed"));
+                let code = code?;
+                if !sensr_auth::totp::verify(&seed, code, std::time::SystemTime::now()) {
+                    return None;
+                }
             }
             u
         }
@@ -391,6 +426,7 @@ mod tests {
         Credential::Password {
             user: user.into(),
             password: password.into(),
+            otp: None,
         }
     }
 
@@ -403,6 +439,39 @@ mod tests {
         assert_eq!(info.privileges, ["page-all"]);
         let ro = authenticate(&doc, &pw("ro", "pw"), None).unwrap();
         assert_eq!(ro.privileges, ["page-sensr-status", "user-config-readonly"]);
+    }
+
+    #[test]
+    fn two_factor_login_needs_a_current_code() {
+        let (mut doc, _) = doc();
+        let seed = sensr_auth::totp::generate_seed();
+        doc["system"]["user"][0]["otp_seed"] = json!(seed);
+        doc["system"]["user"][0]["otp_enabled"] = json!(true);
+        let now = std::time::SystemTime::now();
+        let code = sensr_auth::totp::code(&seed, now).unwrap();
+
+        let with = Credential::Password {
+            user: "root".into(),
+            password: "opnsense".into(),
+            otp: Some(code.clone()),
+        };
+        assert_eq!(authenticate(&doc, &with, None).unwrap().user, "root");
+        // The code is required, and a stale one is refused.
+        assert!(authenticate(&doc, &pw("root", "opnsense"), None).is_none());
+        let stale = Credential::Password {
+            user: "root".into(),
+            password: "opnsense".into(),
+            otp: Some("000000".into()),
+        };
+        assert!(authenticate(&doc, &stale, None).is_none());
+        // Basic auth may append the code to the password, as OPNsense does.
+        let appended = pw("root", &format!("opnsense{code}"));
+        assert_eq!(authenticate(&doc, &appended, None).unwrap().user, "root");
+        // The password alone still wins when the account has no second factor.
+        assert_eq!(
+            authenticate(&doc, &pw("ro", "pw"), None).unwrap().user,
+            "ro"
+        );
     }
 
     #[test]

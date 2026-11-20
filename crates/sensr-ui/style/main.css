@@ -315,3 +315,14 @@ span.btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
   .grid-toolbar .search, .grid-toolbar .search input { width: 100%; max-width: none; }
 }
 @media (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }
+
+/* Two-factor enrolment: a secret and its otpauth URI must wrap, not widen the card. */
+.secret {
+    display: inline-block;
+    padding: 4px 8px;
+    border-radius: 4px;
+    background: var(--surface-2, rgba(127, 127, 127, .12));
+    letter-spacing: .08em;
+    word-break: break-all;
+}
+.wrap { overflow-wrap: anywhere; }

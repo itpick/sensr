@@ -22,6 +22,8 @@
         "description": "System Administrator",
         "disabled": false,
         "password_hash": "$2y$11$synthetic.synthetic.synthetic.synthetic.synthetic.syn",
+        "otp_seed": "JBSWY3DPEHPK3PXP",
+        "otp_enabled": true,
         "authorized_keys": [],
         "groups": [
           "admins"
@@ -33,6 +35,7 @@
         "description": "Automation (API only)",
         "disabled": false,
         "password_hash": "$2y$11$synthetic.synthetic.synthetic.synthetic.synthetic.syn",
+        "otp_enabled": false,
         "authorized_keys": [],
         "groups": [
           "admins"

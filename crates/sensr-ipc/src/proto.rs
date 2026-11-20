@@ -111,6 +111,10 @@ pub enum Credential {
         user: String,
         /// Clear-text password (only ever inside the local socket).
         password: String,
+        /// TOTP code, when the account has two-factor login enabled. Old
+        /// clients may instead append it to `password`, as OPNsense does.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        otp: Option<String>,
     },
     /// OPNsense-style API key pair.
     ApiKey {

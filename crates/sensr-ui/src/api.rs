@@ -581,6 +581,7 @@ mod server {
             &'a self,
             user: &'a str,
             password: &'a str,
+            otp: Option<&'a str>,
         ) -> BoxFuture<'a, ApiResult<String>>;
         /// The session behind `token`, if it is valid.
         fn open<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Option<Session>>;
