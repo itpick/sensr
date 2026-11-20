@@ -10,6 +10,7 @@ pub mod compat;
 pub mod error;
 pub mod insight;
 pub mod native;
+pub mod oidc;
 pub mod tls;
 pub mod ui;
 
@@ -29,6 +30,8 @@ pub struct AppState {
     pub auth: auth::AuthState,
     /// Privilege → URL patterns.
     pub registry: Registry,
+    /// In-flight OpenID Connect authorizations and cached signing keys.
+    pub oidc: oidc::OidcFlows,
 }
 
 impl AppState {
@@ -38,6 +41,7 @@ impl AppState {
             agent: agent::AgentPool::new(socket),
             auth: auth::AuthState::default(),
             registry: Registry::builtin(),
+            oidc: oidc::OidcFlows::default(),
         })
     }
 }

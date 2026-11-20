@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use super::{check, yes};
 use crate::array::{ArrayField, Relation};
 use crate::fields::{
-    Description, DomainName, GroupName, Host, Hostname, InterfaceId, Port, Secret, SshPublicKey,
-    Timezone, Username,
+    Description, DomainName, GroupName, Host, Hostname, HttpUrl, InterfaceId, Pem, Port, Secret,
+    SshPublicKey, Timezone, Username,
 };
 use crate::models::trust::Certificate;
 use crate::refs::{RefContext, Validate};
@@ -51,6 +51,10 @@ pub struct System {
     /// The web GUI and API listener (OPNsense `system/webgui`).
     #[serde(default)]
     pub webgui: WebGui,
+    /// Logging in through external OpenID Connect providers (OPNsense
+    /// Business Edition `system/auth` OIDC fields).
+    #[serde(default, skip_serializing_if = "Oidc::is_empty")]
+    pub oidc: Oidc,
 }
 
 impl Default for System {
@@ -67,6 +71,7 @@ impl Default for System {
             groups: ArrayField::new(),
             ssh: Ssh::default(),
             webgui: WebGui::default(),
+            oidc: Oidc::default(),
         }
     }
 }
@@ -221,6 +226,244 @@ impl Default for WebGui {
     }
 }
 
+/// External OpenID Connect login (OPNsense Business Edition adds this to
+/// the community GUI; sensr implements the relying-party side only).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Oidc {
+    /// Offer the configured providers on the login page.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Providers.
+    #[serde(default)]
+    pub providers: ArrayField<OidcProvider>,
+}
+
+impl Oidc {
+    /// True while the section is at its defaults (kept out of documents that
+    /// never used it).
+    pub fn is_empty(&self) -> bool {
+        !self.enabled && self.providers.is_empty()
+    }
+
+    /// One provider by its object id.
+    pub fn provider(&self, id: &str) -> Option<&OidcProvider> {
+        self.providers
+            .iter()
+            .find(|(k, _)| k.to_string() == id)
+            .map(|(_, p)| p)
+    }
+
+    /// Providers offered on the login page, in name order.
+    pub fn active(&self) -> Vec<(&crate::array::Uuid, &OidcProvider)> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        let mut v: Vec<(&crate::array::Uuid, &OidcProvider)> =
+            self.providers.iter().filter(|(_, p)| p.enabled).collect();
+        v.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+        v
+    }
+}
+
+/// Which identity provider this entry is for. The presets only supply
+/// defaults an admin may override; the protocol is the same.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OidcProviderKind {
+    /// Any standards-compliant provider (discovery metadata is fetched).
+    #[default]
+    Generic,
+    /// Zitadel (`https://<instance>`), including its project-role claim.
+    Zitadel,
+    /// Google Workspace / consumer Google accounts.
+    Google,
+    /// Sign in with Apple (`form_post`, client secret generated from a key).
+    Apple,
+}
+
+/// One OpenID Connect provider.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OidcProvider {
+    /// Preset.
+    #[serde(default)]
+    pub kind: OidcProviderKind,
+    /// Provider is offered on the login page.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Text on the login button (`Zitadel`, `Google`, …).
+    pub name: String,
+    /// Issuer identifier; discovery is `{issuer}/.well-known/openid-configuration`.
+    pub issuer: HttpUrl,
+    /// Client id registered with the provider.
+    pub client_id: String,
+    /// Client secret. Optional for public clients that use PKCE, and unused
+    /// by the Apple preset when a signing key is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<Secret<String>>,
+    /// Apple only: the ten-character team identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
+    /// Apple only: the key identifier of the `Sign in with Apple` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    /// Apple only: the `.p8` private key, used to sign the client-secret JWT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key: Option<Secret<Pem>>,
+    /// Extra scopes. `openid` is always requested; `email` and `profile` are
+    /// added by the preset unless listed here.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Claim that carries the login name shown in the GUI.
+    #[serde(default = "default_username_claim")]
+    pub username_claim: String,
+    /// Claim that lists the user's provider groups (array, object keys or a
+    /// space/comma separated string). Empty means the provider has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups_claim: Option<String>,
+    /// Provider groups allowed to sign in; empty allows any authenticated
+    /// identity.
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    /// Local group whose privileges the signed-in identity gets.
+    pub local_group: GroupName,
+}
+
+fn default_username_claim() -> String {
+    "email".to_owned()
+}
+
+impl OidcProvider {
+    /// The scopes actually requested.
+    pub fn effective_scopes(&self) -> Vec<String> {
+        let mut v = vec!["openid".to_owned()];
+        let preset = match self.kind {
+            OidcProviderKind::Apple => ["email", "name"].as_slice(),
+            _ => ["email", "profile"].as_slice(),
+        };
+        for s in preset {
+            if !self.scopes.iter().any(|x| x == s) {
+                v.push((*s).to_owned());
+            }
+        }
+        for s in &self.scopes {
+            if !v.contains(s) {
+                v.push(s.clone());
+            }
+        }
+        v
+    }
+
+    /// The group claim the preset expects when none is configured.
+    pub fn effective_groups_claim(&self) -> Option<&str> {
+        self.groups_claim.as_deref().or(match self.kind {
+            OidcProviderKind::Zitadel => Some("urn:zitadel:iam:org:project:roles"),
+            _ => None,
+        })
+    }
+}
+
+/// External auth is configured but the provider cannot work as written.
+fn oidc_https(u: &HttpUrl) -> bool {
+    let s = u.as_str();
+    if s.starts_with("https://") {
+        return true;
+    }
+    let host = s
+        .strip_prefix("http://")
+        .and_then(|r| r.split(['/', '?', '#']).next())
+        .unwrap_or_default();
+    // A bracketed IPv6 literal keeps its brackets; only a port is stripped.
+    let host = if host.starts_with('[') {
+        host.split(']')
+            .next()
+            .map_or(host, |h| &host[..h.len() + 1])
+    } else {
+        host.rsplit_once(':').map_or(host, |(h, _)| h)
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+}
+
+impl Validate for Oidc {
+    fn validate(&self, ctx: &dyn RefContext, at: &FieldPath, out: &mut Validations) {
+        let providers = at.join("providers");
+        check::unique(
+            self.providers
+                .iter()
+                .map(|(id, p)| (providers.join(id), Some(p.name.clone()))),
+            "name",
+            "Another provider already uses this name.",
+            out,
+        );
+        for (id, p) in &self.providers {
+            let path = providers.join(id);
+            if p.name.trim().is_empty() || p.name.chars().count() > 64 {
+                out.add(
+                    &path.join("name"),
+                    ValidatorKind::Constraint,
+                    "The name must be 1 to 64 characters long.",
+                );
+            }
+            if p.name.chars().any(char::is_control) {
+                out.add(
+                    &path.join("name"),
+                    ValidatorKind::Regex,
+                    "The name cannot contain control characters.",
+                );
+            }
+            if !oidc_https(&p.issuer) {
+                out.add(
+                    &path.join("issuer"),
+                    ValidatorKind::Callback,
+                    "The issuer must use https (http is allowed only for localhost).",
+                );
+            }
+            if p.client_id.trim().is_empty() {
+                out.add(
+                    &path.join("client_id"),
+                    ValidatorKind::PresenceOf,
+                    "The client id is required.",
+                );
+            }
+            if p.username_claim.trim().is_empty() {
+                out.add(
+                    &path.join("username_claim"),
+                    ValidatorKind::PresenceOf,
+                    "A claim that carries the login name is required.",
+                );
+            }
+            if !ctx.has_group(&p.local_group) {
+                out.add(
+                    &path.join("local_group"),
+                    ValidatorKind::Callback,
+                    format!("Group {} does not exist.", p.local_group),
+                );
+            }
+            if p.kind == OidcProviderKind::Apple {
+                let generated =
+                    p.team_id.is_some() || p.key_id.is_some() || p.private_key.is_some();
+                if generated
+                    && (p.team_id.is_none() || p.key_id.is_none() || p.private_key.is_none())
+                {
+                    out.add(
+                        &path.join("private_key"),
+                        ValidatorKind::PresenceOf,
+                        "Apple needs the team id, key id and private key together (or a pasted client secret).",
+                    );
+                }
+                if !generated && p.client_secret.is_none() {
+                    out.add(
+                        &path.join("client_secret"),
+                        ValidatorKind::PresenceOf,
+                        "Apple needs a signing key or a client secret.",
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Port of the HTTP-to-HTTPS redirect listener.
 pub const HTTP_REDIRECT_PORT: u16 = 80;
 
@@ -364,5 +607,6 @@ impl Validate for System {
                 format!("Group {g} does not exist."),
             );
         }
+        self.oidc.validate(ctx, &at.join("oidc"), out);
     }
 }

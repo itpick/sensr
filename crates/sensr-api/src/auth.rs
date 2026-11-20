@@ -147,6 +147,9 @@ pub async fn verify(
     let via = match &cred {
         Credential::Password { .. } => AuthMethod::Password,
         Credential::ApiKey { key, .. } => AuthMethod::ApiKey { key: key.clone() },
+        Credential::External { provider, .. } => AuthMethod::External {
+            provider: provider.clone(),
+        },
     };
     // The API's own identity on the socket; the agent trusts it by peer uid.
     let me = Principal {

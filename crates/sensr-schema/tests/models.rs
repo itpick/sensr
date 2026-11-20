@@ -9,7 +9,7 @@ use sensr_schema::models::dns::{DnsRecord, HostOverride};
 use sensr_schema::models::firewall::{Alias, FilterRule};
 use sensr_schema::models::interfaces::{Ipv4Config, Ipv6Config};
 use sensr_schema::models::nat::{ForwardFilter, OneToOneRule, PortForward};
-use sensr_schema::models::system::{Group, User};
+use sensr_schema::models::system::{Group, OidcProvider, OidcProviderKind, User};
 use sensr_schema::models::wireguard::{WgPeer, WgServer};
 use sensr_schema::{Document, PathAccess, Relation, Section, Uuid, Validations};
 use serde_json::json;
@@ -1249,6 +1249,131 @@ fn system_rules() {
         doc.validate()
             .get(&format!("system.users.{u1}.groups"))
             .is_none()
+    );
+}
+
+#[test]
+fn oidc_providers_validate_and_sort() {
+    let mut doc = Document::factory();
+    let mut p = OidcProvider {
+        kind: OidcProviderKind::Generic,
+        enabled: true,
+        name: "Zitadel".into(),
+        issuer: "https://id.example.com".parse().unwrap(),
+        client_id: "client".into(),
+        client_secret: None,
+        team_id: None,
+        key_id: None,
+        private_key: None,
+        scopes: vec![],
+        username_claim: "email".into(),
+        groups_claim: None,
+        allowed_groups: vec![],
+        local_group: "admins".parse().unwrap(),
+    };
+    let id = doc.system.oidc.providers.push(p.clone());
+    // Disabled globally: nothing is offered.
+    assert!(doc.system.oidc.active().is_empty());
+    doc.system.oidc.enabled = true;
+    let v = doc.validate();
+    assert_eq!(
+        messages(&v, &format!("system.oidc.providers.{id}.local_group")),
+        ["Group admins does not exist."]
+    );
+
+    doc.system.groups.push(Group {
+        name: "admins".parse().unwrap(),
+        gid: 1999,
+        description: None,
+        privileges: vec!["page-all".into()],
+    });
+    assert!(doc.validate().is_ok());
+
+    p.name = "Google".into();
+    p.issuer = "http://accounts.example.com".parse().unwrap();
+    p.client_id = " ".into();
+    p.username_claim = String::new();
+    let id2 = doc.system.oidc.providers.push(p);
+    let v = doc.validate();
+    for (path, message) in [
+        (
+            format!("system.oidc.providers.{id2}.issuer"),
+            "The issuer must use https (http is allowed only for localhost).",
+        ),
+        (
+            format!("system.oidc.providers.{id2}.client_id"),
+            "The client id is required.",
+        ),
+        (
+            format!("system.oidc.providers.{id2}.username_claim"),
+            "A claim that carries the login name is required.",
+        ),
+    ] {
+        assert_eq!(messages(&v, &path), [message]);
+    }
+    // localhost is the one plain-HTTP exception.
+    doc.system.oidc.providers.get_mut(&id2).unwrap().issuer =
+        "http://localhost:8080".parse().unwrap();
+    assert!(
+        doc.validate()
+            .get(&format!("system.oidc.providers.{id2}.issuer"))
+            .is_none()
+    );
+
+    // The login page gets enabled providers in name order.
+    let mut names: Vec<_> = doc
+        .system
+        .oidc
+        .active()
+        .iter()
+        .map(|(_, p)| p.name.clone())
+        .collect();
+    names.sort();
+    assert_eq!(
+        doc.system
+            .oidc
+            .active()
+            .iter()
+            .map(|(_, p)| &p.name)
+            .collect::<Vec<_>>(),
+        names.iter().collect::<Vec<_>>()
+    );
+    // A disabled entry never reaches the login page.
+    doc.system.oidc.providers.get_mut(&id).unwrap().enabled = false;
+    assert_eq!(doc.system.oidc.active().len(), 1);
+}
+
+#[test]
+fn apple_provider_needs_a_complete_key_or_secret() {
+    let mut doc = Document::factory();
+    doc.system.groups.push(Group {
+        name: "admins".parse().unwrap(),
+        gid: 1999,
+        description: None,
+        privileges: vec!["page-all".into()],
+    });
+    doc.system.oidc.enabled = true;
+    let p = OidcProvider {
+        kind: OidcProviderKind::Apple,
+        enabled: true,
+        name: "Apple".into(),
+        issuer: "https://appleid.apple.com".parse().unwrap(),
+        client_id: "com.example.sensr".into(),
+        client_secret: None,
+        team_id: Some("TEAM123456".into()),
+        key_id: None,
+        private_key: None,
+        scopes: vec![],
+        username_claim: "email".into(),
+        groups_claim: None,
+        allowed_groups: vec![],
+        local_group: "admins".parse().unwrap(),
+    };
+    let id = doc.system.oidc.providers.push(p);
+    let v = doc.validate();
+    assert_eq!(
+        messages(&v, &format!("system.oidc.providers.{id}.private_key")),
+        ["Apple needs the team id, key id and private key together (or a pasted client secret)."]
     );
 }
 

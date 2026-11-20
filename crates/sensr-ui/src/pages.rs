@@ -649,6 +649,16 @@ pub fn UserGroupsPage() -> impl IntoView {
     }
 }
 
+/// System › Access › OpenID Connect: external sign-in providers.
+#[component]
+pub fn OidcPage() -> impl IntoView {
+    view! {
+        <p class="intro">"Sign in through an identity provider instead of a local password. sensr is the relying party: it validates the provider's ID token and maps the identity to the privileges of the configured local group. Zitadel, Google, Apple and any standards-compliant OpenID Connect issuer work; the login page keeps offering local accounts."</p>
+        <SettingsForm<OidcSettings> title="OpenID Connect"/>
+        <Grid<OidcProvider> title="Providers"/>
+    }
+}
+
 /// System › Settings › General.
 #[component]
 pub fn SystemGeneralPage() -> impl IntoView {

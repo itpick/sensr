@@ -288,6 +288,12 @@ span.btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
 .field-stack { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
 .field-stack label { font-weight: 600; }
 .field-stack input { max-width: none; min-height: 38px; }
+.login-divider {
+  display: flex; align-items: center; gap: 10px; margin: 16px 0 12px;
+  color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+}
+.login-divider::before, .login-divider::after { content: ""; flex: 1; height: 1px; background: var(--line, #3a3f47); }
+.login-card .btn-block + .btn-block { margin-top: 8px; }
 
 /* ------------------------------------------------------------ narrow screens */
 @media (max-width: 860px) {

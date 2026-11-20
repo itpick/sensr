@@ -47,6 +47,7 @@ impl Principal {
             AuthMethod::Unix { .. } => "unix",
             AuthMethod::Password => "ui",
             AuthMethod::ApiKey { .. } => "api",
+            AuthMethod::External { .. } => "oidc",
             AuthMethod::System => "system",
         };
         format!("{}@{via}", self.user)
@@ -67,6 +68,11 @@ pub enum AuthMethod {
     ApiKey {
         /// The public key half (never the secret).
         key: String,
+    },
+    /// An external identity (OpenID Connect), after the ID token was checked.
+    External {
+        /// Provider object id.
+        provider: String,
     },
     /// The agent itself (boot apply, confirm-timeout rollback).
     System,
@@ -113,6 +119,15 @@ pub enum Credential {
         /// Secret.
         secret: String,
     },
+    /// An identity an OpenID Connect provider authenticated for us. The API
+    /// has already validated the ID token; the agent applies the provider's
+    /// claim→group mapping from the configuration.
+    External {
+        /// Provider object id in `system.oidc.providers`.
+        provider: String,
+        /// Verified ID-token claims (boxed: the request frame stays small).
+        claims: Box<serde_json::Value>,
+    },
 }
 
 impl std::fmt::Debug for Credential {
@@ -121,6 +136,9 @@ impl std::fmt::Debug for Credential {
         match self {
             Self::Password { user, .. } => write!(f, "Password {{ user: {user:?}, .. }}"),
             Self::ApiKey { key, .. } => write!(f, "ApiKey {{ key: {key:?}, .. }}"),
+            Self::External { provider, .. } => {
+                write!(f, "External {{ provider: {provider:?} }}")
+            }
         }
     }
 }

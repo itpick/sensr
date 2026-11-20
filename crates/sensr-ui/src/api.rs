@@ -49,6 +49,15 @@ pub enum ApiError {
 /// Result alias for backend calls.
 pub type ApiResult<T> = Result<T, ApiError>;
 
+/// One OpenID Connect provider offered on the login page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginProvider {
+    /// Object id, used in `/ui/oidc/start/{id}`.
+    pub id: String,
+    /// Button text.
+    pub name: String,
+}
+
 /// One committed configuration revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revision {
@@ -560,6 +569,28 @@ mod server {
         fn open<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Option<Session>>;
         /// Ends session `token`.
         fn logout<'a>(&'a self, token: &'a str) -> BoxFuture<'a, ()>;
+        /// OpenID Connect providers offered on the login page.
+        fn oidc_providers(&self) -> BoxFuture<'_, Vec<LoginProvider>> {
+            Box::pin(async { Vec::new() })
+        }
+        /// Starts an authorization; returns the provider URL to send the browser to.
+        fn oidc_start<'a>(
+            &'a self,
+            provider: &'a str,
+            callback: &'a str,
+        ) -> BoxFuture<'a, ApiResult<String>> {
+            let _ = (provider, callback);
+            Box::pin(async { Err(ApiError::Unauthorized) })
+        }
+        /// Completes an authorization and returns the new session token.
+        fn oidc_finish<'a>(
+            &'a self,
+            params: &'a std::collections::HashMap<String, String>,
+            remote: Option<std::net::IpAddr>,
+        ) -> BoxFuture<'a, ApiResult<String>> {
+            let _ = (params, remote);
+            Box::pin(async { Err(ApiError::Unauthorized) })
+        }
     }
 
     /// Shared handle the server finds in Leptos context.

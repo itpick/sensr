@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::future::{BoxFuture, FutureExt};
 use sensr_ipc::{ClientError, ConfigPath, Credential, ErrorKind, Op, Response, Source};
 use sensr_ui::api::{
-    ApiError, ApiResult, Backend, ConfirmWindow, DiffKind, DiffLine, FieldError, Pending, Revision,
-    Session, Sessions, SystemStatus,
+    ApiError, ApiResult, Backend, ConfirmWindow, DiffKind, DiffLine, FieldError, LoginProvider,
+    Pending, Revision, Session, Sessions, SystemStatus,
 };
 use sensr_ui::hoststats::Sampler;
 use sensr_ui::runtime::RuntimeSection;
@@ -358,6 +358,58 @@ impl Sessions for UiSessions {
     fn logout<'a>(&'a self, token: &'a str) -> BoxFuture<'a, ()> {
         self.state.auth.close_session(token);
         futures::future::ready(()).boxed()
+    }
+
+    fn oidc_providers(&self) -> BoxFuture<'_, Vec<LoginProvider>> {
+        async move {
+            crate::oidc::providers(&self.state)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e.message, "cannot list OpenID Connect providers");
+                    Vec::new()
+                })
+        }
+        .boxed()
+    }
+
+    fn oidc_start<'a>(
+        &'a self,
+        provider: &'a str,
+        callback: &'a str,
+    ) -> BoxFuture<'a, ApiResult<String>> {
+        async move {
+            crate::oidc::begin(&self.state, provider, callback)
+                .await
+                .map_err(ui_oidc_error)
+        }
+        .boxed()
+    }
+
+    fn oidc_finish<'a>(
+        &'a self,
+        params: &'a std::collections::HashMap<String, String>,
+        remote: Option<std::net::IpAddr>,
+    ) -> BoxFuture<'a, ApiResult<String>> {
+        async move {
+            let caller = crate::oidc::finish(&self.state, params, remote)
+                .await
+                .map_err(ui_oidc_error)?;
+            self.state
+                .auth
+                .open_session(caller)
+                .map_err(|e| ApiError::Backend(e.message))
+        }
+        .boxed()
+    }
+}
+
+/// An OIDC failure as the UI's error type: a refused login stays
+/// `Unauthorized`, everything else is reported as a backend failure.
+fn ui_oidc_error(e: crate::error::ApiError) -> ApiError {
+    if e.status == axum::http::StatusCode::UNAUTHORIZED {
+        ApiError::Unauthorized
+    } else {
+        ApiError::Backend(e.message)
     }
 }
 

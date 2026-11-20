@@ -6,12 +6,13 @@ use crate::api::SessionsHandle;
 use crate::app::{App, shell};
 use axum::Router;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Path, Query, State};
 use axum::http::{Request, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use leptos::prelude::*;
 use leptos_axum::{LeptosRoutes, generate_route_list};
+use std::collections::HashMap;
 
 /// Reads one cookie from a `Cookie` header value.
 pub fn cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
@@ -53,7 +54,8 @@ pub fn current_user() -> Option<String> {
 
 fn is_public(path: &str) -> bool {
     path == "/login"
-        || path == "/ui/fn/login"
+        || path.starts_with("/ui/fn/login")
+        || path.starts_with("/ui/oidc/")
         || path.starts_with("/pkg/")
         || path == "/favicon.svg"
         || path == "/healthz"
@@ -130,6 +132,89 @@ fn ui_wasm(pkg_dir: &std::path::Path, output_name: &str) -> std::path::PathBuf {
     }
 }
 
+/// The public base URL of this GUI, as the browser (or a reverse proxy in
+/// front of it) sees it. OIDC redirect URIs must match what the provider has
+/// registered, so forwarded headers win over the connection's own.
+fn external_base(headers: &axum::http::HeaderMap) -> String {
+    let value = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    let host = value("x-forwarded-host")
+        .or_else(|| value("host"))
+        .unwrap_or("localhost");
+    let scheme = value("x-forwarded-proto").unwrap_or_else(|| {
+        if host.ends_with(":80") || host.ends_with(":8080") {
+            "http"
+        } else {
+            "https"
+        }
+    });
+    format!("{scheme}://{host}")
+}
+
+async fn oidc_start(
+    State(sessions): State<SessionsHandle>,
+    Path(provider): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let callback = format!("{}/ui/oidc/callback", external_base(&headers));
+    match sessions.oidc_start(&provider, &callback).await {
+        Ok(url) => Redirect::to(&url).into_response(),
+        Err(e) => {
+            tracing::warn!(provider, error = %e, "cannot start OpenID Connect login");
+            Redirect::to("/login?failed=oidc").into_response()
+        }
+    }
+}
+
+/// Finishes a login. Apple posts the response (`form_post`); every other
+/// provider redirects with a query string, so both routes exist.
+async fn oidc_finish(
+    sessions: &SessionsHandle,
+    params: HashMap<String, String>,
+    remote: Option<std::net::IpAddr>,
+) -> Response {
+    match sessions.oidc_finish(&params, remote).await {
+        Ok(token) => {
+            let cookie = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict");
+            let mut res = Redirect::to("/").into_response();
+            match axum::http::HeaderValue::from_str(&cookie) {
+                Ok(v) => {
+                    res.headers_mut().insert(header::SET_COOKIE, v);
+                }
+                Err(_) => return Redirect::to("/login?failed=oidc").into_response(),
+            }
+            res
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "OpenID Connect login failed");
+            Redirect::to("/login?failed=oidc").into_response()
+        }
+    }
+}
+
+async fn oidc_callback_get(
+    State(sessions): State<SessionsHandle>,
+    Query(params): Query<HashMap<String, String>>,
+    connect: Option<axum::extract::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+) -> Response {
+    let remote = connect.map(|axum::extract::Extension(axum::extract::ConnectInfo(a))| a.ip());
+    oidc_finish(&sessions, params, remote).await
+}
+
+async fn oidc_callback_post(
+    State(sessions): State<SessionsHandle>,
+    connect: Option<axum::extract::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    axum::Form(params): axum::Form<HashMap<String, String>>,
+) -> Response {
+    let remote = connect.map(|axum::extract::Extension(axum::extract::ConnectInfo(a))| a.ip());
+    oidc_finish(&sessions, params, remote).await
+}
+
 /// The complete UI: pages, server functions, static assets and the session gate.
 pub fn router(options: LeptosOptions, sessions: SessionsHandle) -> Router {
     let routes = generate_route_list(App);
@@ -140,16 +225,20 @@ pub fn router(options: LeptosOptions, sessions: SessionsHandle) -> Router {
     let pkg_dir = site.join(options.site_pkg_dir.as_ref());
     let pkg = tower_http::services::ServeDir::new(&pkg_dir);
     let wasm = ui_wasm(&pkg_dir, &options.output_name);
-    Router::new()
+    let oidc = Router::new()
+        .route("/ui/oidc/start/{provider}", axum::routing::get(oidc_start))
+        .route(
+            "/ui/oidc/callback",
+            axum::routing::get(oidc_callback_get).post(oidc_callback_post),
+        )
+        .with_state(sessions.clone());
+    let app = Router::new()
         .route("/healthz", axum::routing::get(|| async { "ok" }))
         // Leptos names the wasm `<output>_bg.wasm` unless LEPTOS_OUTPUT_NAME was set when the
         // *server* was compiled (cargo-leptos does that; a plain `cargo build` of sensr-api
         // does not). Serve both names from the one file cargo-leptos writes.
         .route_service(
-            &format!(
-                "/{}/{}_bg.wasm",
-                options.site_pkg_dir, options.output_name
-            ),
+            &format!("/{}/{}_bg.wasm", options.site_pkg_dir, options.output_name),
             tower_http::services::ServeFile::new(wasm.clone()),
         )
         .route_service(
@@ -171,10 +260,11 @@ pub fn router(options: LeptosOptions, sessions: SessionsHandle) -> Router {
             },
         )
         .fallback(leptos_axum::file_and_error_handler(shell))
-        .with_state(options)
         .layer(middleware::from_fn_with_state(sessions, session_gate))
         .layer(middleware::from_fn(security_headers))
         .layer(tower_http::compression::CompressionLayer::new())
+        .with_state(options);
+    app.merge(oidc)
 }
 
 #[cfg(test)]

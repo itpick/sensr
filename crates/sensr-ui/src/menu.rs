@@ -112,6 +112,7 @@ const CORE: &[Node] = &[
         n("Access").order(15).kids(&[
             n("Users").order(10).url("/ui/system/user"),
             n("Groups").order(20).url("/ui/system/group"),
+            n("OpenID Connect").order(30).url("/ui/system/oidc"),
         ]),
         n("Settings")
             .order(20)
@@ -505,6 +506,7 @@ mod tests {
             "/ui/wireguard/peers",
             "/ui/system/user",
             "/ui/system/group",
+            "/ui/system/oidc",
             "/ui/system/general",
             "/ui/system/updates",
         ];
@@ -578,9 +580,7 @@ mod tests {
     #[test]
     fn a_section_holding_one_page_is_that_page() {
         let m = build(&[]);
-        let sole = |path: &[&str]| {
-            sole_page(find(&m, path)).and_then(|page| page.url.clone())
-        };
+        let sole = |path: &[&str]| sole_page(find(&m, path)).and_then(|page| page.url.clone());
         assert_eq!(
             sole(&["System", "Settings"]).as_deref(),
             Some("/ui/system/general")

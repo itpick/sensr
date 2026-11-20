@@ -157,9 +157,162 @@ fn api_keys(user: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A claim by simple name or dotted path (`address.email`).
+fn claim<'a>(claims: &'a Value, name: &str) -> Option<&'a Value> {
+    let mut v = claims;
+    for part in name.split('.').filter(|p| !p.is_empty()) {
+        v = v.get(part)?;
+    }
+    Some(v)
+}
+
+/// A claim value as one string; numbers are accepted, arrays/objects are not.
+fn claim_text(v: Option<&Value>) -> Option<String> {
+    match v {
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
+        Some(Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// The group names in a claim: an array of strings, an object's keys
+/// (Zitadel roles), or one space/comma separated string.
+fn claim_groups(v: Option<&Value>) -> Vec<String> {
+    match v {
+        Some(Value::Array(items)) => items.iter().filter_map(|i| claim_text(Some(i))).collect(),
+        Some(Value::Object(m)) => m.keys().cloned().collect(),
+        Some(Value::String(s)) => s
+            .split([',', ' ', ';'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The provider object named `id`, from the UUID-keyed map or an array.
+fn provider<'a>(doc: &'a Value, id: &str) -> Option<&'a Value> {
+    match doc.pointer("/system/oidc/providers") {
+        Some(Value::Object(m)) => m.get(id),
+        Some(Value::Array(items)) => items
+            .iter()
+            .find(|p| first(p, &["uuid", "id", "name"]).and_then(|v| v.as_str()) == Some(id)),
+        _ => None,
+    }
+}
+
+/// Privileges a group name grants, from the typed or OPNsense group shape,
+/// honouring a group's source-network restriction.
+fn group_privileges(doc: &Value, names: &[String], remote: Option<IpAddr>) -> Vec<String> {
+    use sensr_auth::acl::Cidr;
+    let mut groups = items(doc.pointer("/system/groups"));
+    groups.extend(list(doc.pointer("/system/group")));
+    let mut out = Vec::new();
+    for g in groups {
+        let name = text(g.get("name"));
+        if !names.contains(&name) {
+            continue;
+        }
+        let nets: Vec<Cidr> = csv(g.get("source_networks"))
+            .iter()
+            .filter_map(|n| n.parse().ok())
+            .collect();
+        if !nets.is_empty() && !remote.is_some_and(|ip| nets.iter().any(|n| n.contains(ip))) {
+            continue;
+        }
+        for p in csv(first(g, &["privileges", "priv"])) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Resolves a verified external identity against `system.oidc`: the username
+/// claim names the identity, the provider's groups claim gates access, and
+/// `local_group` decides its privileges. A local account with the same name
+/// (when there is one) contributes its own groups and privileges too.
+fn external(
+    doc: &Value,
+    provider_id: &str,
+    claims: &Value,
+    remote: Option<IpAddr>,
+) -> Option<AuthInfo> {
+    if !truthy(doc.pointer("/system/oidc/enabled")) {
+        return None;
+    }
+    let p = provider(doc, provider_id)?;
+    if !truthy(p.get("enabled")) {
+        return None;
+    }
+    let kind = text(p.get("kind"));
+    let user_claim = text(p.get("username_claim"));
+    let user_claim = if user_claim.is_empty() {
+        "email".to_owned()
+    } else {
+        user_claim
+    };
+    let name = claim_text(claim(claims, &user_claim))?;
+    if name.chars().count() > 128 || name.chars().any(char::is_control) {
+        return None;
+    }
+    // Require a subject: an ID token without one names nobody.
+    claim_text(claim(claims, "sub"))?;
+
+    let idp_groups = {
+        let configured = text(p.get("groups_claim"));
+        let claim_name = if !configured.is_empty() {
+            configured
+        } else if kind == "zitadel" {
+            "urn:zitadel:iam:org:project:roles".to_owned()
+        } else {
+            String::new()
+        };
+        if claim_name.is_empty() {
+            Vec::new()
+        } else {
+            claim_groups(claim(claims, &claim_name))
+        }
+    };
+    let allowed = csv(p.get("allowed_groups"));
+    if !allowed.is_empty() && !allowed.iter().any(|g| idp_groups.contains(g)) {
+        return None;
+    }
+
+    let local_group = text(p.get("local_group"));
+    if local_group.is_empty() {
+        return None;
+    }
+    let local = users(doc).into_iter().find(|u| text(u.get("name")) == name);
+    if local.is_some_and(|u| truthy(u.get("disabled"))) {
+        return None;
+    }
+    let mut groups: Vec<String> = csv(local.and_then(|u| first(u, &["groups"])));
+    if !groups.contains(&local_group) {
+        groups.push(local_group);
+    }
+    let mut privileges: Vec<String> = csv(local.and_then(|u| first(u, &["priv", "privileges"])));
+    for p in group_privileges(doc, &groups, remote) {
+        if !privileges.contains(&p) {
+            privileges.push(p);
+        }
+    }
+    Some(AuthInfo {
+        user: name,
+        uid: text(local.and_then(|u| u.get("uid"))).parse().unwrap_or(0),
+        groups,
+        privileges,
+    })
+}
+
 /// Checks `cred` against `doc`; `None` for any failure (unknown user, bad
 /// secret, disabled account), so callers cannot tell which.
 pub fn authenticate(doc: &Value, cred: &Credential, remote: Option<IpAddr>) -> Option<AuthInfo> {
+    if let Credential::External { provider, claims } = cred {
+        return external(doc, provider, claims.as_ref(), remote);
+    }
     let user = match cred {
         Credential::Password { user, password: pw } => {
             let u = users(doc)
@@ -175,6 +328,7 @@ pub fn authenticate(doc: &Value, cred: &Credential, remote: Option<IpAddr>) -> O
                 .iter()
                 .any(|(k, s)| k == key && apikey::verify_secret(secret, s))
         })?,
+        Credential::External { .. } => unreachable!("handled above"),
     };
     if truthy(user.get("disabled")) {
         return None;
@@ -298,5 +452,104 @@ mod tests {
         assert!(authenticate(&doc, &pw("ghost", "x"), None).is_none());
         assert!(authenticate(&doc, &pw("off", "pw"), None).is_none());
         assert!(authenticate(&json!({}), &pw("root", "opnsense"), None).is_none());
+    }
+
+    fn oidc_doc(allowed: &[&str]) -> Value {
+        json!({"system": {
+            "users": {
+                "u1": {"name": "alice@example.com", "uid": 2100, "groups": ["staff"],
+                       "password_hash": password::hash_password("pw").unwrap()}
+            },
+            "groups": {
+                "g1": {"name": "staff", "gid": 2100, "privileges": ["page-firewall-rules"]},
+                "g2": {"name": "admins", "gid": 2000, "privileges": ["page-all"]},
+                "g3": {"name": "readers", "gid": 2001, "privileges": ["user-config-readonly"]}
+            },
+            "oidc": {
+                "enabled": true,
+                "providers": {
+                    "p1": {
+                        "kind": "zitadel", "enabled": true, "name": "Zitadel",
+                        "issuer": "https://id.example.com", "client_id": "c",
+                        "username_claim": "email", "groups_claim": "groups",
+                        "allowed_groups": allowed, "local_group": "admins"
+                    }
+                }
+            }
+        }})
+    }
+
+    fn external(claims: Value) -> Credential {
+        Credential::External {
+            provider: "p1".into(),
+            claims: Box::new(claims),
+        }
+    }
+
+    #[test]
+    fn external_identity_gets_the_mapped_group() {
+        let doc = oidc_doc(&["fw-admins"]);
+        let ok = authenticate(
+            &doc,
+            &external(json!({"sub": "s-1", "email": "alice@example.com", "groups": ["fw-admins"]})),
+            None,
+        )
+        .unwrap();
+        assert_eq!(ok.user, "alice@example.com");
+        assert_eq!(ok.uid, 2100);
+        assert_eq!(ok.groups, ["staff", "admins"]);
+        // The mapped group's privilege plus the local account's own group.
+        assert_eq!(ok.privileges, ["page-firewall-rules", "page-all"]);
+        // Not in an allowed provider group: refused.
+        assert!(
+            authenticate(
+                &doc,
+                &external(json!({"sub": "s-2", "email": "bob@example.com", "groups": ["users"]})),
+                None
+            )
+            .is_none()
+        );
+        // No subject: refused even when the e-mail claim is there.
+        assert!(
+            authenticate(
+                &doc,
+                &external(json!({"email": "alice@example.com", "groups": ["fw-admins"]})),
+                None
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn external_identity_without_a_local_account_still_works() {
+        let doc = oidc_doc(&[]);
+        let info = authenticate(
+            &doc,
+            &external(json!({"sub": "s-9", "email": "ops@example.com"})),
+            None,
+        )
+        .unwrap();
+        assert_eq!((info.user.as_str(), info.uid), ("ops@example.com", 0));
+        assert_eq!(info.groups, ["admins"]);
+        assert_eq!(info.privileges, ["page-all"]);
+    }
+
+    #[test]
+    fn external_identity_respects_group_source_networks() {
+        let mut doc = oidc_doc(&[]);
+        doc["system"]["groups"]["g2"]["source_networks"] = json!(["10.0.0.0/8"]);
+        let cred = external(json!({"sub": "s-1", "email": "x@example.com"}));
+        assert!(
+            authenticate(&doc, &cred, Some("192.168.1.5".parse().unwrap()))
+                .unwrap()
+                .privileges
+                .is_empty()
+        );
+        assert_eq!(
+            authenticate(&doc, &cred, Some("10.1.2.3".parse().unwrap()))
+                .unwrap()
+                .privileges,
+            ["page-all"]
+        );
     }
 }

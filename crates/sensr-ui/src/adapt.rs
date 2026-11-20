@@ -225,6 +225,7 @@ pub fn store(grid: GridId, scope: &str, doc: &Value) -> Store {
         GridId::FirewallGroups => Store::Map("firewall.groups".into()),
         GridId::Users => Store::Map("system.users".into()),
         GridId::UserGroups => Store::Map("system.groups".into()),
+        GridId::OidcProviders => Store::Map("system.oidc.providers".into()),
     }
 }
 
@@ -581,6 +582,22 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
             "gid": get_path(item, "gid").cloned().unwrap_or(Value::Null),
             "description": s(item, "description"),
             "privileges": strings(item, "privileges"),
+        }),
+        GridId::OidcProviders => json!({
+            "enabled": b(item, "enabled", true),
+            "kind": or_default(s(item, "kind"), "generic"),
+            "name": s(item, "name"),
+            "issuer": s(item, "issuer"),
+            "client_id": s(item, "client_id"),
+            "client_secret": "",
+            "team_id": s(item, "team_id"),
+            "key_id": s(item, "key_id"),
+            "private_key": "",
+            "scopes": strings(item, "scopes"),
+            "username_claim": or_default(s(item, "username_claim"), "email"),
+            "groups_claim": s(item, "groups_claim"),
+            "allowed_groups": strings(item, "allowed_groups"),
+            "local_group": s(item, "local_group"),
         }),
         GridId::IdsUserRules => json!({
             "enabled": b(item, "enabled", true),
@@ -1127,6 +1144,31 @@ pub fn from_view(
             put_opt(o, "description", view, "description");
             put(o, "privileges", view, "privileges");
         }
+        GridId::OidcProviders => {
+            let o = obj(&mut item);
+            put(o, "enabled", view, "enabled");
+            put(o, "kind", view, "kind");
+            put(o, "name", view, "name");
+            put(o, "issuer", view, "issuer");
+            put(o, "client_id", view, "client_id");
+            put_opt(o, "team_id", view, "team_id");
+            put_opt(o, "key_id", view, "key_id");
+            put_list_opt(o, "scopes", view, "scopes");
+            put(o, "username_claim", view, "username_claim");
+            put_opt(o, "groups_claim", view, "groups_claim");
+            put_list_opt(o, "allowed_groups", view, "allowed_groups");
+            put(o, "local_group", view, "local_group");
+            // Write-only fields: an empty input keeps what is stored.
+            if !s(view, "client_secret").is_empty() {
+                o.insert(
+                    "client_secret".into(),
+                    Value::String(s(view, "client_secret")),
+                );
+            }
+            if !s(view, "private_key").is_empty() {
+                o.insert("private_key".into(), Value::String(s(view, "private_key")));
+            }
+        }
         GridId::IdsUserRules => {
             let o = obj(&mut item);
             put(o, "enabled", view, "enabled");
@@ -1361,6 +1403,20 @@ pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
             ("description", "description"),
             ("privileges", "privileges"),
         ],
+        GridId::OidcProviders => &[
+            ("enabled", "enabled"),
+            ("kind", "kind"),
+            ("name", "name"),
+            ("issuer", "issuer"),
+            ("client_id", "client_id"),
+            ("team_id", "team_id"),
+            ("key_id", "key_id"),
+            ("scopes", "scopes"),
+            ("username_claim", "username_claim"),
+            ("groups_claim", "groups_claim"),
+            ("allowed_groups", "allowed_groups"),
+            ("local_group", "local_group"),
+        ],
         GridId::IdsUserRules => &[
             ("source", "source"),
             ("destination", "destination"),
@@ -1393,6 +1449,10 @@ pub fn form_to_view(form: FormId, doc: &Value, scope: &str) -> Option<Value> {
                 "dns_allow_override": b(sys, "dns_allow_override", true),
                 "ipv6_allow": b(sys, "ipv6_allow", true),
             })
+        }
+        FormId::OidcSettings => {
+            let sys = get_path(doc, "system").cloned().unwrap_or(Value::Null);
+            json!({"enabled": b(&sys, "oidc.enabled", false)})
         }
         FormId::Interface => {
             let item = get_path(doc, "interfaces")?.get(scope)?;
@@ -1490,6 +1550,12 @@ pub fn form_from_view(
                 put(sys, k, view, k);
             }
             put_list(sys, "dns_servers", view, "dns_servers");
+            Ok(vec!["system"])
+        }
+        FormId::OidcSettings => {
+            let sys = obj(root.entry("system").or_insert_with(|| json!({})));
+            let oidc = obj(sys.entry("oidc").or_insert_with(|| json!({})));
+            put(oidc, "enabled", view, "enabled");
             Ok(vec!["system"])
         }
         FormId::Interface => {
@@ -1708,6 +1774,7 @@ pub fn form_view_path(form: FormId, schema: &str) -> Option<&'static str> {
             ("ids.updates.minute", "update_minute"),
             ("ids.logging.retention_days", "retention_days"),
         ],
+        FormId::OidcSettings => &[("system.oidc.enabled", "enabled")],
         FormId::UnboundAclDefault => &[("dns.access.default_action", "default_action")],
         FormId::UnboundForwarding => &[],
         f => {

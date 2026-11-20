@@ -895,6 +895,13 @@ pub async fn login(username: String, password: String) -> Result<(), ServerFnErr
     Ok(())
 }
 
+/// The OpenID Connect buttons the login page offers. Empty when the service
+/// is disabled or nothing is configured.
+#[server(prefix = "/ui/fn", endpoint = "login/providers", input = Json)]
+pub async fn login_providers() -> Result<Vec<crate::api::LoginProvider>, ServerFnError> {
+    Ok(imp::sessions()?.oidc_providers().await)
+}
+
 /// Change the signed-in user's password. A plain form post: works without
 /// JavaScript, like the login form.
 #[server(prefix = "/ui/fn", endpoint = "password")]

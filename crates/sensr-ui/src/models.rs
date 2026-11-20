@@ -2313,6 +2313,150 @@ impl GridModel for UserGroup {
     const TOGGLE: Option<&'static str> = None;
 }
 
+// ---------------------------------------------------------------- System › Access › OpenID Connect
+
+/// The master switch for OpenID Connect login.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OidcSettings {
+    /// Offer the configured providers on the login page.
+    pub enabled: bool,
+}
+
+impl FormModel for OidcSettings {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[F::new("enabled", "Enable OpenID Connect login", K::Checkbox)
+            .help("Adds a sign-in button for each enabled provider on the login page. Local passwords keep working.")];
+        FIELDS
+    }
+}
+
+/// Provider presets.
+pub const OIDC_KINDS: &[(&str, &str)] = &[
+    ("generic", "Generic OpenID Connect"),
+    ("zitadel", "Zitadel"),
+    ("google", "Google"),
+    ("apple", "Apple"),
+];
+
+/// System › Access › OpenID Connect: one relying-party entry.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OidcProvider {
+    /// Object key.
+    pub uuid: String,
+    /// Offered on the login page.
+    pub enabled: bool,
+    /// Provider preset.
+    pub kind: String,
+    /// Button text.
+    pub name: String,
+    /// Issuer identifier (discovery is fetched from it).
+    pub issuer: String,
+    /// Client id.
+    pub client_id: String,
+    /// Client secret (write-only; empty keeps the stored one).
+    pub client_secret: String,
+    /// Apple: team identifier.
+    pub team_id: String,
+    /// Apple: key identifier.
+    pub key_id: String,
+    /// Apple: `.p8` signing key (write-only; empty keeps the stored one).
+    pub private_key: String,
+    /// Extra scopes.
+    pub scopes: Vec<String>,
+    /// Claim that carries the login name.
+    pub username_claim: String,
+    /// Claim that lists provider groups.
+    pub groups_claim: String,
+    /// Provider groups allowed to sign in.
+    pub allowed_groups: Vec<String>,
+    /// Local group whose privileges the identity gets.
+    pub local_group: String,
+}
+
+impl FormModel for OidcProvider {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enabled", K::Checkbox),
+            F::new("name", "Button label", K::Text)
+                .required()
+                .help("Text on the login page, for example Zitadel."),
+            F::new("kind", "Provider", K::Select(OIDC_KINDS))
+                .help("Supplies defaults for scopes and claims; the protocol is the same."),
+            F::new("issuer", "Issuer", K::Text)
+                .required()
+                .help("The provider's issuer identifier, for example https://id.example.com or https://accounts.google.com. Must use https (http only for localhost)."),
+            F::new("client_id", "Client ID", K::Text).required(),
+            F::new("client_secret", "Client secret", K::Secret).help(
+                "Write-only: leave empty to keep the stored secret. Optional for public clients that use PKCE.",
+            ),
+            F::new("username_claim", "Username claim", K::Text)
+                .help("Claim shown as the login name, for example email or preferred_username."),
+            F::new("groups_claim", "Groups claim", K::Text).help(
+                "Claim carrying the provider groups, for example groups. Leave empty when the provider has none.",
+            ),
+            F::new("allowed_groups", "Allowed provider groups", K::Lines)
+                .help("One group name per line. Empty allows every authenticated identity."),
+            F::new("local_group", "Local group", K::Text)
+                .required()
+                .help("Group in System › Access › Groups whose privileges the signed-in identity gets."),
+            F::new("scopes", "Extra scopes", K::Lines)
+                .help("openid, email and profile are requested automatically."),
+            F::new("team_id", "Apple team ID", K::Text),
+            F::new("key_id", "Apple key ID", K::Text),
+            F::new("private_key", "Apple private key", K::Secret).help(
+                "The .p8 key; with the team and key id it generates the short-lived client secret. Leave empty when a client secret is pasted instead.",
+            ),
+        ];
+        FIELDS
+    }
+
+    fn validate(&self) -> Vec<FieldError> {
+        let mut e = Vec::new();
+        if self.name.trim().is_empty() {
+            e.push(FieldError::new(
+                "name",
+                "Enter a label for the login button.",
+            ));
+        }
+        if !self.issuer.starts_with("https://") && !self.issuer.starts_with("http://") {
+            e.push(FieldError::new("issuer", "Enter an http or https URL."));
+        }
+        if self.client_id.trim().is_empty() {
+            e.push(FieldError::new("client_id", "Enter the client id."));
+        }
+        if self.local_group.trim().is_empty() {
+            e.push(FieldError::new(
+                "local_group",
+                "Enter the local group whose privileges this provider grants.",
+            ));
+        }
+        if self.username_claim.trim().is_empty() {
+            e.push(FieldError::new(
+                "username_claim",
+                "Enter the claim that carries the login name.",
+            ));
+        }
+        e
+    }
+}
+
+impl GridModel for OidcProvider {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::text("name", "Button label"),
+            Column::text("kind", "Provider"),
+            Column::text("issuer", "Issuer"),
+            Column::text("local_group", "Local group"),
+            Column::bool("enabled", "Enabled"),
+        ];
+        C
+    }
+
+    const TOGGLE: Option<&'static str> = Some("enabled");
+}
+
 /// Failure condition of a gateway group.
 pub const GROUP_TRIGGERS: &[(&str, &str)] = &[
     ("down", "Member down"),
@@ -2910,6 +3054,8 @@ pub enum FormId {
     UnboundForwarding,
     /// [`IdsSettings`].
     IdsSettings,
+    /// [`OidcSettings`].
+    OidcSettings,
 }
 
 /// Serializable stand-in for a grid's row type.
@@ -2965,6 +3111,8 @@ pub enum GridId {
     Users,
     /// System › Access › Groups.
     UserGroups,
+    /// System › Access › OpenID Connect.
+    OidcProviders,
 }
 
 fn sanitize(scope: &Option<String>, default: &str) -> String {
@@ -2992,6 +3140,7 @@ impl FormId {
             Self::UnboundAclDefault => UnboundAclDefault::fields(),
             Self::UnboundForwarding => UnboundForwarding::fields(),
             Self::IdsSettings => IdsSettings::fields(),
+            Self::OidcSettings => OidcSettings::fields(),
         }
     }
 
@@ -3013,6 +3162,7 @@ impl FormId {
             Self::UnboundAclDefault => go::<UnboundAclDefault>(),
             Self::UnboundForwarding => go::<UnboundForwarding>(),
             Self::IdsSettings => go::<IdsSettings>(),
+            Self::OidcSettings => go::<OidcSettings>(),
         }
     }
 
@@ -3046,6 +3196,7 @@ impl FormId {
             Self::UnboundAclDefault => go::<UnboundAclDefault>(base, inputs),
             Self::UnboundForwarding => go::<UnboundForwarding>(base, inputs),
             Self::IdsSettings => go::<IdsSettings>(base, inputs),
+            Self::OidcSettings => go::<OidcSettings>(base, inputs),
         }
     }
 
@@ -3092,6 +3243,7 @@ impl GridId {
             Self::FirewallGroups => GridMeta::of::<InterfaceGroup>(),
             Self::Users => GridMeta::of::<User>(),
             Self::UserGroups => GridMeta::of::<UserGroup>(),
+            Self::OidcProviders => GridMeta::of::<OidcProvider>(),
         }
     }
 
@@ -3127,6 +3279,7 @@ impl GridId {
             Self::FirewallGroups => go::<InterfaceGroup>(base, inputs),
             Self::Users => go::<User>(base, inputs),
             Self::UserGroups => go::<UserGroup>(base, inputs),
+            Self::OidcProviders => go::<OidcProvider>(base, inputs),
         }
     }
 
@@ -3135,6 +3288,7 @@ impl GridId {
         match self {
             Self::WgInstances => crate::form::redact::<WgInstance>(row),
             Self::WgPeers => crate::form::redact::<WgPeer>(row),
+            Self::OidcProviders => crate::form::redact::<OidcProvider>(row),
             _ => row.clone(),
         }
     }
@@ -3174,6 +3328,7 @@ impl GridId {
                 Self::SourceNat => &[("interface", "wan"), ("protocol", "any"), ("source", "any")],
                 Self::Assignments => &[("ipv4_type", "none"), ("ipv6_type", "none")],
                 Self::IdsUserRules => &[("action", "alert")],
+                Self::OidcProviders => &[("kind", "generic"), ("username_claim", "email")],
                 _ => &[],
             };
             for (k, val) in defaults {
@@ -3241,7 +3396,7 @@ macro_rules! kinds {
 kinds! {
     forms: SystemGeneral, Interface, SourceNatMode, DhcpSettings, UnboundGeneral, UnboundAdvanced,
         UnboundServeExpired, UnboundLogging, UnboundCache, UnboundAclDefault, UnboundForwarding,
-        IdsSettings;
+        IdsSettings, OidcSettings;
     grids: Interface => Assignments, "interface",
         Alias => Aliases, "alias",
         FilterRule => FilterRules, "rule",
@@ -3266,7 +3421,8 @@ kinds! {
         VirtualIp => VirtualIps, "virtual IP",
         InterfaceGroup => FirewallGroups, "group",
         User => Users, "user",
-        UserGroup => UserGroups, "group"
+        UserGroup => UserGroups, "group",
+        OidcProvider => OidcProviders, "provider"
 }
 
 #[cfg(test)]
