@@ -210,6 +210,7 @@ struct View<'a> {
     private_domains: Vec<String>,
     insecure_domains: Vec<String>,
     tuning: Vec<(&'static str, String)>,
+    logfile: &'static str,
     module_config: String,
     runtime_json: String,
 }
@@ -537,6 +538,11 @@ impl UnboundModel {
             private_domains,
             insecure_domains,
             tuning: tuning_lines(&self.tuning),
+            logfile: if self.tuning.log_queries {
+                dns_runtime::QUERY_LOG
+            } else {
+                ""
+            },
             module_config: modules.join(" "),
             runtime_json,
         })

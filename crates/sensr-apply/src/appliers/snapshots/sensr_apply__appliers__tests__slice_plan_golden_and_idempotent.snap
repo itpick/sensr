@@ -14,7 +14,7 @@ expression: "p.diff(&Plan::default()).dry_run(&Plan::default())"
   [Files] create /run/sensr/kea/kea-dhcp4.conf (2258 bytes)
   [Files] create /run/sensr/ntp/ntp.toml (701 bytes)
   [Files] create /run/sensr/unbound/control.conf (277 bytes)
-  [Files] create /run/sensr/unbound/sensr-dns.json (1869 bytes)
+  [Files] create /run/sensr/unbound/sensr-dns.json (1893 bytes)
   [Files] create /run/sensr/unbound/unbound.conf (3497 bytes)
   [Files] create /run/systemd/network/50-sensr-wg0.netdev (550 bytes)
   [Files] create /run/systemd/network/50-sensr-wg0.network (103 bytes)

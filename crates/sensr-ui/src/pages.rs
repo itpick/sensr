@@ -448,7 +448,7 @@ fn duration(secs: u64) -> String {
 
 /// The statistics card of the Blocklist page (server-rendered, no island).
 #[component]
-pub fn DnsStatsPanel(stats: DnsStats) -> impl IntoView {
+pub fn DnsStatsPanel(#[prop(default = 100)] top: usize, stats: DnsStats) -> impl IntoView {
     let problems = stats
         .problems
         .iter()
@@ -524,6 +524,95 @@ pub fn DnsStatsPanel(stats: DnsStats) -> impl IntoView {
             } else {
                 String::new()
             };
+            let domains = u
+                .top_domains
+                .iter()
+                .take(top)
+                .map(|h| {
+                    view! {
+                        <tr><td class="wrap">{h.name.clone()}</td><td class="num">{thousands(h.count)}</td></tr>
+                    }
+                })
+                .collect_view();
+            let clients = u
+                .top_clients
+                .iter()
+                .take(top)
+                .map(|h| {
+                    view! {
+                        <tr><td class="num">{h.name.clone()}</td><td class="num">{thousands(h.count)}</td></tr>
+                    }
+                })
+                .collect_view();
+            let recent = u
+                .recent
+                .iter()
+                .map(|q| {
+                    view! {
+                        <tr>
+                            <td class="num">{rfc3339_display(&q.at)}</td>
+                            <td class="num">{q.client.clone()}</td>
+                            <td class="wrap">{q.name.clone()}</td>
+                            <td>{q.kind.clone()}</td>
+                        </tr>
+                    }
+                })
+                .collect_view();
+            let hits = (!domains.is_empty() || !clients.is_empty()).then(|| {
+                view! {
+                    <div class="dns-cols">
+                        <section aria-labelledby="top-domains-title">
+                            <h3 class="stats-policy" id="top-domains-title">{format!("Top {top} names")}</h3>
+                            <div class="table-wrap">
+                                <table>
+                                    <thead><tr><th scope="col">"Name"</th><th scope="col">"Queries"</th></tr></thead>
+                                    <tbody>{domains}</tbody>
+                                </table>
+                            </div>
+                        </section>
+                        <section aria-labelledby="top-clients-title">
+                            <h3 class="stats-policy" id="top-clients-title">{format!("Top {top} clients")}</h3>
+                            <div class="table-wrap">
+                                <table>
+                                    <thead><tr><th scope="col">"Client"</th><th scope="col">"Queries"</th></tr></thead>
+                                    <tbody>{clients}</tbody>
+                                </table>
+                            </div>
+                        </section>
+                    </div>
+                }
+            });
+            let recent = (!recent.is_empty()).then(|| {
+                view! {
+                    <h3 class="stats-policy" id="recent-queries-title">"Recent queries"</h3>
+                    <div class="table-wrap">
+                        <table aria-labelledby="recent-queries-title">
+                            <thead><tr>
+                                <th scope="col">"Seen"</th><th scope="col">"Client"</th>
+                                <th scope="col">"Name"</th><th scope="col">"Type"</th>
+                            </tr></thead>
+                            <tbody>{recent}</tbody>
+                        </table>
+                    </div>
+                }
+            });
+            let log_state = if !u.log_queries {
+                view! {
+                    <p class="muted small" id="unbound-log-off">
+                        "Query logging is off, so top names, top clients and recent queries are not collected. Turn on "
+                        <a href="/ui/unbound/advanced">"Log queries"</a>
+                        " under Services › Unbound DNS › Advanced."
+                    </p>
+                }
+                .into_any()
+            } else if u.logged_queries == 0 {
+                view! {
+                    <p class="muted small" id="unbound-log-none">"Query logging is on. No queries have been logged since the sampler started."</p>
+                }
+                .into_any()
+            } else {
+                ().into_any()
+            };
             view! {
                 <dl class="stat-tiles" aria-label="Resolver">
                     <div><dt>"Total queries"</dt><dd id="unbound-queries">{thousands(u.queries)}</dd></div>
@@ -532,6 +621,12 @@ pub fn DnsStatsPanel(stats: DnsStats) -> impl IntoView {
                     <div><dt>"Resolver uptime"</dt><dd>{duration(u.uptime_seconds.max(0.0) as u64)}</dd></div>
                 </dl>
                 <p class="muted small">{format!("Sampled {}.", rfc3339_display(&u.at))}</p>
+                {log_state}
+                {hits}
+                {recent}
+                <p class="muted small">
+                    "Counts cover the period since the DNS sampler last started. Recent queries are kept in memory only."
+                </p>
             }
             .into_any()
         }
@@ -1486,11 +1581,19 @@ pub fn Traffic() -> impl IntoView {
 /// Reporting › Unbound DNS: resolver counters and blocklist state.
 #[component]
 pub fn UnboundOverview() -> impl IntoView {
-    let load = || {
+    // The list length is a query parameter so the page stays a plain GET and
+    // works without scripting.
+    let top =
+        leptos_router::hooks::use_query_map().with_untracked(|q| match q.get("top").as_deref() {
+            Some("20") => 20,
+            Some("50") => 50,
+            _ => 100,
+        });
+    let load = move || {
         Suspend::new(async move {
             match dns_stats().await {
                 Ok(stats) => view! {
-                    <DnsStatsPanel stats/>
+                    <DnsStatsPanel top stats/>
                     <p class="muted small">
                         "Configuration is under "
                         <a href="/ui/unbound/general">"Services › Unbound DNS"</a> "."</p>
@@ -1500,7 +1603,21 @@ pub fn UnboundOverview() -> impl IntoView {
             }
         })
     };
-    view! { <Suspense fallback=|| ()>{load}</Suspense> }
+    let pick = move |n: usize| {
+        view! {
+            <a class="btn btn-sm" href=if n == 100 { "/ui/unbound/overview".to_owned() } else { format!("/ui/unbound/overview?top={n}") }
+                aria-current=(n == top).then_some("page")>{n.to_string()}</a>
+        }
+    };
+    view! {
+        <div class="graph-head">
+            <p class="intro">"Top queried names, the clients asking, and the most recent resolutions. Change the list length, or enable query logging under Services › Unbound DNS › Advanced to collect them."</p>
+            <nav class="seg" aria-label="Rows to show">
+                {pick(20)}{pick(50)}{pick(100)}
+            </nav>
+        </div>
+        <Suspense fallback=|| ()>{load}</Suspense>
+    }
 }
 
 /// Menu entries sensr does not implement yet.

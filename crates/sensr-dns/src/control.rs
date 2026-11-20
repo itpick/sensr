@@ -115,6 +115,11 @@ impl<'a> Control<'a> {
         }
     }
 
+    /// Reopens the log file after it was rotated or removed.
+    pub fn log_reopen(&self) -> Result<(), ControlError> {
+        self.run(&["log_reopen"], None).map(|_| ())
+    }
+
     /// `stats_noreset` as key → value.
     pub fn stats(&self) -> Result<BTreeMap<String, f64>, ControlError> {
         Ok(parse_stats(&self.run(&["stats_noreset"], None)?))

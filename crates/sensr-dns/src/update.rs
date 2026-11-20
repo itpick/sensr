@@ -471,6 +471,7 @@ mod tests {
         b.urls = vec!["https://down.example/list.txt".parse().unwrap()];
         b.block = vec!["tracker.example.net".parse().unwrap()];
         DnsRuntime {
+            log_queries: false,
             control_conf: dir.join("control.conf"),
             state_dir: dir.to_owned(),
             statistics: false,

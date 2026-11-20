@@ -21,6 +21,43 @@ pub struct UnboundStats {
     pub nxdomain: u64,
     /// Resolver uptime.
     pub uptime_seconds: f64,
+    /// Most frequently queried names since the sampler started.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_domains: Vec<DnsHit>,
+    /// Most active clients since the sampler started.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_clients: Vec<DnsHit>,
+    /// The most recent queries, newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent: Vec<RecentQuery>,
+    /// Queries read from the query log since the sampler started.
+    #[serde(default)]
+    pub logged_queries: u64,
+    /// Whether the sampler reads the query log (Unbound `log-queries`).
+    #[serde(default)]
+    pub log_queries: bool,
+}
+
+/// A name or client and how often it was seen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsHit {
+    /// Domain name (with its trailing dot) or client address.
+    pub name: String,
+    /// Queries counted.
+    pub count: u64,
+}
+
+/// One logged query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentQuery {
+    /// When the sampler saw it (RFC 3339).
+    pub at: String,
+    /// Client address.
+    pub client: String,
+    /// Queried name.
+    pub name: String,
+    /// Query type.
+    pub kind: String,
 }
 
 impl UnboundStats {
@@ -33,6 +70,11 @@ impl UnboundStats {
             cache_hits: n("total.num.cachehits"),
             nxdomain: n("num.answer.rcode.NXDOMAIN"),
             uptime_seconds: c.get("time.up").copied().unwrap_or(0.0),
+            top_domains: Vec::new(),
+            top_clients: Vec::new(),
+            recent: Vec::new(),
+            logged_queries: 0,
+            log_queries: false,
         }
     }
 }

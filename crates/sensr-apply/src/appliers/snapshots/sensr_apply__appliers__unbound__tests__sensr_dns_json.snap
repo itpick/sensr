@@ -6,6 +6,7 @@ expression: json
   "control_conf": "/run/sensr/unbound/control.conf",
   "state_dir": "/var/lib/sensr-dns",
   "statistics": true,
+  "log_queries": false,
   "blocklist": {
     "policies": [
       {

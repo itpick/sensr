@@ -27,6 +27,9 @@ pub const BLOCKLIST_INCLUDE: &str = "/var/lib/sensr-dns/blocklist.conf";
 pub const LEASES_INCLUDE: &str = "/var/lib/sensr-dns/leases.conf";
 /// Runtime statistics for the web UI.
 pub const STATS_FILE: &str = "/run/sensr-dns/unbound-stats.json";
+/// The query log Unbound writes when `log-queries` is on; it lives in the
+/// resolver's runtime directory, which its dynamic user can write.
+pub const QUERY_LOG: &str = "/run/unbound/query.log";
 /// Where the runtime configuration is rendered (`sensr-dns --config`).
 pub const RUNTIME_CONF: &str = "/run/sensr/unbound/sensr-dns.json";
 /// A minimal `unbound-control` configuration: the full `unbound.conf`
@@ -42,6 +45,9 @@ pub struct DnsRuntime {
     pub state_dir: PathBuf,
     /// Collect resolver statistics for the web UI.
     pub statistics: bool,
+    /// Read the query log for top names/clients and the recent list.
+    #[serde(default)]
+    pub log_queries: bool,
     /// Blocklists, when any policy is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocklist: Option<BlocklistRuntime>,

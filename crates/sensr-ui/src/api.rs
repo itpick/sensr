@@ -475,6 +475,43 @@ pub struct UnboundCounters {
     pub nxdomain: u64,
     /// Resolver uptime.
     pub uptime_seconds: f64,
+    /// Whether query logging is on, so the page can explain an empty list.
+    #[serde(default)]
+    pub log_queries: bool,
+    /// Most frequently queried names since the sampler started.
+    #[serde(default)]
+    pub top_domains: Vec<DnsHit>,
+    /// Most active clients since the sampler started.
+    #[serde(default)]
+    pub top_clients: Vec<DnsHit>,
+    /// The most recent queries, newest first.
+    #[serde(default)]
+    pub recent: Vec<RecentQuery>,
+    /// Queries read from the query log since the sampler started.
+    #[serde(default)]
+    pub logged_queries: u64,
+}
+
+/// A name or client and how often it was seen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsHit {
+    /// Domain name (with its trailing dot) or client address.
+    pub name: String,
+    /// Queries counted.
+    pub count: u64,
+}
+
+/// One logged query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentQuery {
+    /// When the sampler saw it (RFC 3339).
+    pub at: String,
+    /// Client address.
+    pub client: String,
+    /// Queried name.
+    pub name: String,
+    /// Query type.
+    pub kind: String,
 }
 
 /// Everything the blocklist page shows about the running resolver. `None` means the file

@@ -311,9 +311,19 @@ fn dns_stats_panel_shows_no_data_then_figures() {
     assert!(all.contains("2026-11-16 03:00:15 UTC"));
     assert!(all.contains("HTTP 503"), "source errors are shown");
     assert!(all.contains("does not count blocked queries per blocklist"));
-    // Four sources across two policies, each table with column headers.
-    assert_eq!(doc.select(&sel("tbody tr")).count(), 4);
-    assert_eq!(doc.select(&sel("thead th[scope=col]")).count(), 10);
+    // Four sources, five top names, three top clients and three recent queries.
+    assert_eq!(doc.select(&sel("tbody tr")).count(), 15);
+    // Each of the four tables carries its column headers.
+    assert_eq!(doc.select(&sel("thead th[scope=col]")).count(), 18);
+    assert!(all.contains("connectivity-check.ubuntu.com."), "{all}");
+    assert!(all.contains("api.github.com."), "{all}");
+
+    let mut off = sensr_ui::mock::simulated_dns_stats();
+    if let Some(u) = off.unbound.as_mut() {
+        u.log_queries = false;
+    }
+    let doc = render(|| view! { <DnsStatsPanel stats=off/> }.into_any());
+    assert!(doc.select(&sel("#unbound-log-off")).next().is_some());
 
     let broken = sensr_ui::api::DnsStats {
         problems: vec!["/run/sensr-dns/unbound-stats.json: expected value".into()],

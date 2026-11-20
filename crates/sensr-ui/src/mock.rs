@@ -421,6 +421,64 @@ pub fn simulated_dns_stats() -> DnsStats {
             cache_hits: 1_002_115,
             nxdomain: 58_230,
             uptime_seconds: 86_400.0 * 3.0 + 7_260.0,
+            log_queries: true,
+            top_domains: vec![
+                DnsHit {
+                    name: "connectivity-check.ubuntu.com.".into(),
+                    count: 18_421,
+                },
+                DnsHit {
+                    name: "www.google.com.".into(),
+                    count: 9_004,
+                },
+                DnsHit {
+                    name: "api.github.com.".into(),
+                    count: 6_213,
+                },
+                DnsHit {
+                    name: "gateway.icloud.com.".into(),
+                    count: 4_882,
+                },
+                DnsHit {
+                    name: "time.cloudflare.com.".into(),
+                    count: 3_119,
+                },
+            ],
+            top_clients: vec![
+                DnsHit {
+                    name: "192.168.1.23".into(),
+                    count: 31_882,
+                },
+                DnsHit {
+                    name: "192.168.1.42".into(),
+                    count: 12_440,
+                },
+                DnsHit {
+                    name: "2001:db8:1::7".into(),
+                    count: 5_019,
+                },
+            ],
+            recent: vec![
+                RecentQuery {
+                    at: "2026-11-16T09:40:58Z".into(),
+                    client: "192.168.1.23".into(),
+                    name: "api.github.com.".into(),
+                    kind: "HTTPS".into(),
+                },
+                RecentQuery {
+                    at: "2026-11-16T09:40:55Z".into(),
+                    client: "192.168.1.42".into(),
+                    name: "www.google.com.".into(),
+                    kind: "A".into(),
+                },
+                RecentQuery {
+                    at: "2026-11-16T09:40:52Z".into(),
+                    client: "2001:db8:1::7".into(),
+                    name: "gateway.icloud.com.".into(),
+                    kind: "AAAA".into(),
+                },
+            ],
+            logged_queries: 1_204_882,
         }),
         problems: vec![],
     }

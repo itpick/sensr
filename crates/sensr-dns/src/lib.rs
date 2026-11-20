@@ -18,5 +18,6 @@ pub mod fetch;
 pub mod leases;
 pub mod name;
 pub mod parse;
+pub mod querylog;
 pub mod stats;
 pub mod update;

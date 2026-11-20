@@ -395,6 +395,7 @@ pub fn unbound(doc: &Document) -> Result<Option<UnboundModel>, ConvertError> {
             control_conf: dns_runtime::CONTROL_CONF.into(),
             state_dir: dns_runtime::STATE_DIR.into(),
             statistics: d.statistics,
+            log_queries: d.tuning.log_queries,
             blocklist,
             leases,
         },

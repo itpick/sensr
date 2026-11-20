@@ -16,6 +16,7 @@ use sensr_dns::control::Control;
 use sensr_dns::fetch::HttpFetcher;
 use sensr_dns::leases;
 use sensr_dns::parse::parse_reader;
+use sensr_dns::querylog::{self, Tally};
 use sensr_dns::stats::UnboundStats;
 use sensr_dns::update::{self, Paths, rfc3339, write_atomic};
 
@@ -212,10 +213,34 @@ fn watch(config: &PathBuf) -> Result<()> {
     let mut last_stamp = None;
     let mut last_uptime = f64::MAX;
     let mut last_stats = Instant::now() - Duration::from_secs(3600);
+    let query_log = std::path::Path::new(dns_runtime::QUERY_LOG);
+    let mut query_offset = 0u64;
+    let mut tally = Tally::default();
+    let mut last_log = Instant::now() - Duration::from_secs(3600);
     if cfg.leases.is_none() {
         let _ = fs::remove_file(&include);
     }
     loop {
+        // Read the query log more often than the counters so the recent list
+        // has a useful time resolution.
+        if cfg.log_queries && last_log.elapsed() >= Duration::from_secs(5) {
+            last_log = Instant::now();
+            let at = rfc3339(now());
+            for line in querylog::read_new(query_log, &mut query_offset) {
+                if let Some(q) = querylog::parse_line(&line) {
+                    tally.record(&q, &at);
+                }
+            }
+            // Keeps the download bounded; Unbound reopens the file on the
+            // control command, so it starts writing the new one.
+            if fs::metadata(query_log).is_ok_and(|m| m.len() > querylog::MAX_LOG_BYTES) {
+                let _ = fs::remove_file(query_log);
+                query_offset = 0;
+                if let Err(e) = control.log_reopen() {
+                    tracing::debug!("reopening the query log: {e}");
+                }
+            }
+        }
         // Unbound restarted (uptime went down): what was pushed is gone,
         // except what the include file restored. Push everything again.
         if last_stats.elapsed() >= Duration::from_secs(60) {
@@ -228,7 +253,9 @@ fn watch(config: &PathBuf) -> Result<()> {
                     }
                     last_uptime = up;
                     if cfg.statistics {
-                        let s = UnboundStats::from_counters(&c, rfc3339(now()));
+                        let mut s = UnboundStats::from_counters(&c, rfc3339(now()));
+                        s.log_queries = cfg.log_queries;
+                        tally.fill(&mut s, 100);
                         if let Err(e) = write_atomic(
                             &stats_file,
                             &serde_json::to_vec_pretty(&s).unwrap_or_default(),
