@@ -1194,6 +1194,7 @@ pub fn DashboardLive(initial: SystemStatus) -> impl IntoView {
                 <h2 id="w-sys">"System information"</h2>
                 <dl class="kv">
                     <dt>"Name"</dt><dd>{move || st.with(|s| s.hostname.clone())}</dd>
+                    <dt>"WAN address"</dt><dd class="wan-addr">{move || st.with(|s| s.wan_ipv4().map_or_else(|| "none".to_owned(), str::to_owned))}</dd>
                     <dt>"Version"</dt><dd>{move || st.with(|s| s.version.clone())}</dd>
                     <dt>"Kernel"</dt><dd>{move || st.with(|s| s.kernel.clone())}</dd>
                     <dt>"CPU type"</dt><dd>{move || st.with(|s| s.cpu_model.clone())}</dd>
