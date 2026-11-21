@@ -1,5 +1,8 @@
 //! Live host figures for the dashboard, read from procfs and sysfs (no privileges needed).
 //!
+//! Interface addresses are the ones the kernel holds, so a DHCP or SLAAC uplink shows what
+//! it was given; the configured address is only a fallback for a link that has none.
+//!
 //! CPU usage and interface rates are deltas between calls, so a [`Sampler`] keeps the
 //! previous counters and the last two minutes of traffic per device.
 
@@ -7,6 +10,7 @@ use crate::api::{InterfaceStatus, SystemStatus, TrafficSeries};
 use crate::form::get_path;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -60,6 +64,92 @@ fn meminfo(text: &str, key: &str) -> Option<u64> {
         .map(|kib| kib * 1024)
 }
 
+/// Local IPv4 addresses per device, `a.b.c.d/len`, from `proc/net/fib_trie` (the kernel's
+/// local addresses) and `proc/net/route` (which device and subnet each one sits on).
+/// Loopback is skipped; an address without a connected route (a /32 point-to-point) too.
+fn live_ipv4(root: &Path) -> HashMap<String, String> {
+    let mut locals: Vec<Ipv4Addr> = Vec::new();
+    let mut leaf: Option<Ipv4Addr> = None;
+    for line in read(root, "proc/net/fib_trie").unwrap_or_default().lines() {
+        let t = line.trim_start();
+        if let Some(a) = t.strip_prefix("|-- ") {
+            leaf = a.trim().parse().ok();
+        } else if t.starts_with("/32 host LOCAL")
+            && let Some(a) = leaf.filter(|a| !a.is_loopback() && !locals.contains(a))
+        {
+            locals.push(a);
+        }
+    }
+    // Connected routes: (device, network, mask). The hex fields are the kernel's
+    // network-order word printed in host order, i.e. little-endian on the Pi and x86.
+    let hex = |h: &str| {
+        u32::from_str_radix(h, 16)
+            .ok()
+            .map(u32::to_le_bytes)
+            .map(u32::from_be_bytes)
+    };
+    let routes: Vec<(String, u32, u32)> = read(root, "proc/net/route")
+        .unwrap_or_default()
+        .lines()
+        .skip(1)
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let (dev, dst, gw, mask) = (
+                f.first()?,
+                hex(f.get(1)?)?,
+                hex(f.get(2)?)?,
+                hex(f.get(7)?)?,
+            );
+            (gw == 0 && mask != 0).then(|| ((*dev).to_owned(), dst, mask))
+        })
+        .collect();
+    let mut out = HashMap::new();
+    for a in locals {
+        let ip = u32::from(a);
+        if let Some((dev, _, mask)) = routes
+            .iter()
+            .filter(|(_, dst, mask)| ip & mask == *dst)
+            .max_by_key(|(_, _, mask)| mask.count_ones())
+        {
+            out.entry(dev.clone())
+                .or_insert_with(|| format!("{a}/{}", mask.count_ones()));
+        }
+    }
+    out
+}
+
+/// The preferred global IPv6 address per device, `addr/len`, from `proc/net/if_inet6`:
+/// global scope, not tentative, deprecated or temporary; else any global one.
+fn live_ipv6(root: &Path) -> HashMap<String, String> {
+    const TEMPORARY: u32 = 0x01;
+    const DEPRECATED: u32 = 0x20;
+    const TENTATIVE: u32 = 0x40;
+    let mut best: HashMap<String, (bool, String)> = HashMap::new();
+    for line in read(root, "proc/net/if_inet6").unwrap_or_default().lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let [addr, _, plen, scope, flags, dev] = f[..] else {
+            continue;
+        };
+        let (Ok(a), Ok(plen), Ok(scope), Ok(flags)) = (
+            u128::from_str_radix(addr, 16).map(Ipv6Addr::from),
+            u8::from_str_radix(plen, 16),
+            u8::from_str_radix(scope, 16),
+            u32::from_str_radix(flags, 16),
+        ) else {
+            continue;
+        };
+        if scope != 0 {
+            continue;
+        }
+        let preferred = flags & (TEMPORARY | DEPRECATED | TENTATIVE) == 0;
+        let slot = best.entry(dev.to_owned()).or_insert((false, String::new()));
+        if slot.1.is_empty() || (preferred && !slot.0) {
+            *slot = (preferred, format!("{a}/{plen}"));
+        }
+    }
+    best.into_iter().map(|(d, (_, a))| (d, a)).collect()
+}
+
 impl Sampler {
     /// A sampler reading `<root>/proc` and `<root>/sys` (tests point it at a fixture tree).
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -69,8 +159,9 @@ impl Sampler {
         }
     }
 
-    /// Current status. Interface names, devices and configured addresses come from `doc`
-    /// (the sensr-schema document); counters and link state from the kernel.
+    /// Current status. Interface names and devices come from `doc` (the sensr-schema
+    /// document); counters, link state and addresses from the kernel, falling back to the
+    /// configured address for a link that holds none.
     pub fn sample(&self, doc: &Value, version: &str) -> SystemStatus {
         let root = self.root.as_path();
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -129,6 +220,7 @@ impl Sampler {
                 .unwrap_or_default()
                 .to_owned()
         };
+        let (live4, live6) = (live_ipv4(root), live_ipv6(root));
         let mut interfaces = Vec::new();
         let mut traffic = Vec::new();
         for (id, iface) in get_path(doc, "interfaces")
@@ -169,13 +261,15 @@ impl Sampler {
                 tx: hist.iter().map(|(_, t)| *t).collect(),
             });
             let addr = |p: &str| Some(text(iface, p)).filter(|a| !a.is_empty());
+            let ipv4 = live4.get(&dev).cloned().or_else(|| addr("ipv4.address"));
+            let ipv6 = live6.get(&dev).cloned().or_else(|| addr("ipv6.address"));
             interfaces.push(InterfaceStatus {
                 name,
                 device: dev,
                 up,
                 speed_mbps: speed,
-                ipv4: addr("ipv4.address"),
-                ipv6: addr("ipv6.address"),
+                ipv4,
+                ipv6,
                 rx_bps,
                 tx_bps,
             });
@@ -237,6 +331,69 @@ mod tests {
         w("sys/class/net/eth1/speed", "1000\n");
         w("sys/class/net/eth1/statistics/rx_bytes", &format!("{rx}\n"));
         w("sys/class/net/eth1/statistics/tx_bytes", "0\n");
+    }
+
+    /// Live addresses as the kernel reports them: the DHCP WAN `eth0` holds
+    /// 203.0.113.45/22 (fib_trie + route) and a global v6 next to a deprecated one;
+    /// the LAN `eth1` holds its static 192.168.1.1/24.
+    fn live_addr_fixture(dir: &Path) {
+        let w = |rel: &str, body: &str| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        w(
+            "proc/net/fib_trie",
+            "Main:\n  +-- 0.0.0.0/0 3 0 5\n     |-- 0.0.0.0\n        /0 universe UNICAST\n     +-- 127.0.0.0/8 2 0 2\n        |-- 127.0.0.1\n           /32 host LOCAL\n     +-- 192.168.1.0/24 2 0 2\n        |-- 192.168.1.0\n           /24 link UNICAST\n        |-- 192.168.1.1\n           /32 host LOCAL\n     +-- 203.0.112.0/22 2 0 2\n        |-- 203.0.112.0\n           /22 link UNICAST\n        |-- 203.0.113.45\n           /32 host LOCAL\nLocal:\n  +-- 0.0.0.0/0 3 0 5\n        |-- 203.0.113.45\n           /32 host LOCAL\n",
+        );
+        // Destination/Gateway/Mask are little-endian hex, as on the Pi and x86.
+        w(
+            "proc/net/route",
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+eth0\t00000000\t017000CB\t0003\t0\t0\t100\t00000000\t0\t0\t0\n\
+eth0\t007000CB\t00000000\t0001\t0\t0\t100\t00FCFFFF\t0\t0\t0\n\
+eth1\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n",
+        );
+        w(
+            "proc/net/if_inet6",
+            "20010db8000000010000000000000099 02 40 00 20     eth0\n\
+20010db8000000010000000000000045 02 40 00 00     eth0\n\
+fe800000000000000000000000000045 02 40 20 80     eth0\n\
+00000000000000000000000000000001 01 80 10 80       lo\n",
+        );
+        w("sys/class/net/eth0/operstate", "up\n");
+    }
+
+    #[test]
+    fn dhcp_wan_shows_the_address_it_holds() {
+        let dir =
+            std::env::temp_dir().join(format!("sensr-ui-hoststats-live-{}", std::process::id()));
+        fixture(&dir, 1_000);
+        live_addr_fixture(&dir);
+        let doc = json!({
+            "system": {"hostname": "fw", "domain": "example.org"},
+            "interfaces": {
+                "wan": {"device": "eth0", "description": "WAN", "ipv4": {"mode": "dhcp"}, "ipv6": {"mode": "dhcp6"}},
+                "lan": {"device": "eth1", "description": "LAN", "ipv4": {"mode": "static", "address": "192.168.1.1/24"}},
+                "opt1": {"device": "eth9", "description": "SPARE", "ipv4": {"mode": "static", "address": "10.0.0.1/24"}}
+            }
+        });
+        let s = Sampler::new(&dir);
+        let st = s.sample(&doc, "test");
+        let by = |n: &str| st.interfaces.iter().find(|i| i.name == n).unwrap();
+        assert_eq!(by("WAN").ipv4.as_deref(), Some("203.0.113.45/22"));
+        assert_eq!(
+            by("WAN").ipv6.as_deref(),
+            Some("2001:db8:0:1::45/64"),
+            "skips deprecated and link-local"
+        );
+        assert_eq!(by("LAN").ipv4.as_deref(), Some("192.168.1.1/24"));
+        assert_eq!(
+            by("SPARE").ipv4.as_deref(),
+            Some("10.0.0.1/24"),
+            "a device without a live address falls back to its configured one"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

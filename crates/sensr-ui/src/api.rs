@@ -269,6 +269,74 @@ pub struct SystemStatus {
     pub history: Option<TrafficHistory>,
 }
 
+impl SystemStatus {
+    /// The uplink's current IPv4 address without its prefix length (the public address
+    /// when the ISP's gateway passes it through), or `None` while it holds none. The
+    /// uplink is the interface assigned as WAN.
+    pub fn wan_ipv4(&self) -> Option<&str> {
+        self.interfaces
+            .iter()
+            .find(|i| i.name.eq_ignore_ascii_case("wan"))?
+            .ipv4
+            .as_deref()
+            .map(|a| a.split_once('/').map_or(a, |(ip, _)| ip))
+    }
+}
+
+#[cfg(test)]
+mod wan_tests {
+    use super::*;
+
+    fn iface(name: &str, ipv4: Option<&str>) -> InterfaceStatus {
+        InterfaceStatus {
+            name: name.into(),
+            device: "eth0".into(),
+            up: true,
+            speed_mbps: None,
+            ipv4: ipv4.map(Into::into),
+            ipv6: None,
+            rx_bps: 0,
+            tx_bps: 0,
+        }
+    }
+
+    fn status(interfaces: Vec<InterfaceStatus>) -> SystemStatus {
+        SystemStatus {
+            hostname: String::new(),
+            version: String::new(),
+            kernel: String::new(),
+            cpu_model: String::new(),
+            uptime_secs: 0,
+            cpu_pct: 0.0,
+            load: [0.0; 3],
+            mem_used: 0,
+            mem_total: 0,
+            interfaces,
+            gateways: Vec::new(),
+            traffic: Vec::new(),
+            history: None,
+        }
+    }
+
+    #[test]
+    fn wan_ipv4_is_the_wan_interfaces_address_without_prefix() {
+        let s = status(vec![
+            iface("LAN", Some("192.168.1.1/24")),
+            iface("WAN", Some("203.0.113.45/22")),
+        ]);
+        assert_eq!(s.wan_ipv4(), Some("203.0.113.45"));
+    }
+
+    #[test]
+    fn wan_ipv4_is_none_without_a_wan_or_its_address() {
+        assert_eq!(
+            status(vec![iface("LAN", Some("192.168.1.1/24"))]).wan_ipv4(),
+            None
+        );
+        assert_eq!(status(vec![iface("WAN", None)]).wan_ipv4(), None);
+    }
+}
+
 /// One bucket of a traffic series (bytes in the bucket, not a rate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrafficPoint {
