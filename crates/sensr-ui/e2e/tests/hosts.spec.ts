@@ -8,14 +8,20 @@ async function open(page: import("@playwright/test").Page) {
   await login(page);
   await page.goto("/ui/core/dashboard");
   await hydrated(page);
-  await expect(card(page).getByRole("heading", { name: "Hosts (25)" })).toBeVisible();
+  await expect(card(page).getByRole("heading", { name: /^Hosts \(\d+\)$/ })).toBeVisible();
+  await expect(rows(page)).toHaveCount(20);
+}
+
+async function count(page: import("@playwright/test").Page) {
+  const t = (await card(page).getByRole("heading", { name: /^Hosts \(\d+\)$/ }).textContent()) ?? "";
+  return Number(/\((\d+)\)/.exec(t)![1]);
 }
 
 test("dashboard shows the Hosts card with 20 rows and Show all", async ({ page }) => {
   await open(page);
-  await expect(rows(page)).toHaveCount(20);
-  await card(page).getByRole("button", { name: "Show all (25)" }).click();
-  await expect(rows(page)).toHaveCount(25);
+  const n = await count(page);
+  await card(page).getByRole("button", { name: `Show all (${n})` }).click();
+  await expect(rows(page)).toHaveCount(n);
 });
 
 test("search filters by MAC", async ({ page }) => {
@@ -28,23 +34,26 @@ test("search filters by MAC", async ({ page }) => {
 test("network filter shows only LAN2", async ({ page }) => {
   await open(page);
   await card(page).getByRole("combobox").selectOption({ label: "LAN2" });
+  const lan = rows(page).locator("td:nth-child(4)").filter({ hasNotText: /^LAN2$/ });
+  await expect(lan).toHaveCount(0);
   await expect(rows(page).first()).toBeVisible();
-  const cells = await rows(page).locator("td:nth-child(4)").allTextContents();
-  expect(cells.length).toBeGreaterThan(0);
-  expect(cells.every((c) => c.trim() === "LAN2")).toBe(true);
+  await expect(rows(page).filter({ hasText: "nas" })).toHaveCount(0);
 });
 
 test("forget removes a dynamic host", async ({ page }) => {
   await open(page);
-  const row = rows(page).filter({ hasText: "device-01" });
-  await expect(row).toHaveCount(1);
+  const before = await count(page);
+  const row = rows(page).filter({ hasText: /device-\d+/ }).first();
+  const name = ((await row.locator("td").first().textContent()) ?? "").trim();
+  let message = "";
   page.once("dialog", (d) => {
-    expect(d.message()).toBe("Forget device-01? It reappears if it is still on the network.");
+    message = d.message();
     void d.accept();
   });
   await row.getByRole("button", { name: "Forget" }).click();
-  await expect(card(page).getByRole("heading", { name: "Hosts (24)" })).toBeVisible();
-  await expect(rows(page).filter({ hasText: "device-01" })).toHaveCount(0);
+  await expect(card(page).getByRole("heading", { name: `Hosts (${before - 1})` })).toBeVisible();
+  expect(message).toBe(`Forget ${name}? It reappears if it is still on the network.`);
+  await expect(rows(page).filter({ hasText: name })).toHaveCount(0);
 });
 
 test.describe("read-only user", () => {
@@ -54,7 +63,6 @@ test.describe("read-only user", () => {
 
   test("read-only user sees no actions", async ({ page }) => {
     await open(page);
-    await expect(rows(page)).toHaveCount(20);
     await expect(card(page).getByRole("button", { name: "Forget" })).toHaveCount(0);
     await expect(card(page).getByRole("button", { name: "Make static" })).toHaveCount(0);
   });

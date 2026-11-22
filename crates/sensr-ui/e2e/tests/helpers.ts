@@ -8,7 +8,8 @@ export async function login(page: Page) {
   await page.getByLabel("Username").fill("root");
   await page.getByLabel("Password", { exact: true }).fill("sensr");
   await page.getByRole("button", { name: "Login" }).click();
-  await expect(page.getByRole("navigation", { name: "Main menu" })).toBeVisible();
+  // Attached, not visible: at phone width the menu is off-screen and visibility:hidden.
+  await expect(page.locator('nav[aria-label="Main menu"]')).toBeAttached();
 }
 
 export async function setTheme(page: Page, theme: "light" | "dark") {
