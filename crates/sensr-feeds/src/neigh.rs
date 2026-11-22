@@ -30,6 +30,10 @@ pub fn parse_ip_neigh_json(json: &[u8]) -> Vec<(String, IpAddr)> {
 }
 
 #[cfg(test)]
+const HEADER: &str = "address,hwaddr,client_id,valid_lifetime,expire,subnet_id,\
+                      fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id";
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -52,38 +56,18 @@ mod tests {
 /// `sensr-dns`; records without a MAC are skipped, as are released and
 /// expired ones.
 pub fn parse_kea_lease_csv(text: &str, now: u64, into: &mut BTreeMap<IpAddr, String>) {
-    let mut cols: BTreeMap<&str, usize> = BTreeMap::new();
-    for line in text.lines() {
-        if line.starts_with("address,") {
-            cols = line
-                .split(',')
-                .enumerate()
-                .map(|(i, f)| (f.trim(), i))
-                .collect();
-            continue;
+    for_each_kea_record(text, now, |lease| {
+        let address = IpAddr::V4(lease.address);
+        match (lease.active, lease.mac) {
+            (_, None) => {}
+            (true, Some(mac)) => {
+                into.insert(address, mac);
+            }
+            (false, Some(_)) => {
+                into.remove(&address);
+            }
         }
-        let fields: Vec<&str> = line.split(',').collect();
-        let get = |name: &str| cols.get(name).and_then(|&i| fields.get(i)).copied();
-        let Some(address) = get("address").and_then(|a| a.trim().parse::<IpAddr>().ok()) else {
-            continue;
-        };
-        let mac = get("hwaddr")
-            .unwrap_or_default()
-            .trim_matches('"')
-            .to_ascii_lowercase();
-        if mac.is_empty() {
-            continue;
-        }
-        let num = |name: &str| get(name).and_then(|v| v.parse::<u64>().ok());
-        let active = num("state").unwrap_or(0) == 0
-            && num("valid_lifetime").unwrap_or(0) > 0
-            && num("expire").unwrap_or(0) > now;
-        if active {
-            into.insert(address, mac);
-        } else {
-            into.remove(&address);
-        }
-    }
+    });
 }
 
 /// Leases from every file Kea's memfile backend may have written, in its load
@@ -136,6 +120,7 @@ pub fn parse_ip_neigh_entries(json: &[u8]) -> Vec<NeighEntry> {
     let entries: Vec<Entry> = serde_json::from_slice(json).unwrap_or_default();
     entries
         .into_iter()
+        .filter(|e| e.lladdr.as_deref().is_some_and(|m| !m.is_empty()))
         .filter_map(|e| {
             Some(NeighEntry {
                 mac: e.lladdr?.to_ascii_lowercase(),
@@ -168,13 +153,18 @@ pub fn read_kea_lease_records(base: &Path, now: u64) -> Vec<KeaLease> {
     let mut leases: BTreeMap<Ipv4Addr, KeaLease> = BTreeMap::new();
     for f in kea_lease_files(base) {
         if let Ok(text) = std::fs::read_to_string(&f) {
-            parse_kea_lease_records(&text, now, &mut leases);
+            for_each_kea_record(&text, now, |l| {
+                leases.insert(l.address, l);
+            });
         }
     }
     leases.into_values().collect()
 }
 
-fn parse_kea_lease_records(text: &str, now: u64, into: &mut BTreeMap<Ipv4Addr, KeaLease>) {
+/// Calls `f` for every record of one Kea CSV file, in file order. This is the
+/// one place that knows the columns (located by the header line), the quoting
+/// and the rule for a lease being active.
+fn for_each_kea_record(text: &str, now: u64, mut f: impl FnMut(KeaLease)) {
     let mut cols: BTreeMap<&str, usize> = BTreeMap::new();
     for line in text.lines() {
         if line.starts_with("address,") {
@@ -198,29 +188,23 @@ fn parse_kea_lease_records(text: &str, now: u64, into: &mut BTreeMap<Ipv4Addr, K
         let num = |name: &str| get(name).and_then(|v| v.trim().parse::<u64>().ok());
         let lifetime = num("valid_lifetime").unwrap_or(0);
         let expire = num("expire").unwrap_or(0);
-        into.insert(
+        f(KeaLease {
             address,
-            KeaLease {
-                address,
-                mac: unquoted("hwaddr").map(str::to_ascii_lowercase),
-                client_id: unquoted("client_id").map(str::to_ascii_lowercase),
-                hostname: unquoted("hostname").map(str::to_owned),
-                subnet_id: num("subnet_id")
-                    .and_then(|n| u32::try_from(n).ok())
-                    .unwrap_or(0),
-                expire,
-                active: num("state").unwrap_or(0) == 0 && lifetime > 0 && expire > now,
-            },
-        );
+            mac: unquoted("hwaddr").map(str::to_ascii_lowercase),
+            client_id: unquoted("client_id").map(str::to_ascii_lowercase),
+            hostname: unquoted("hostname").map(str::to_owned),
+            subnet_id: num("subnet_id")
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(0),
+            expire,
+            active: num("state").unwrap_or(0) == 0 && lifetime > 0 && expire > now,
+        });
     }
 }
 
 #[cfg(test)]
 mod lease_tests {
     use super::*;
-
-    const HEADER: &str = "address,hwaddr,client_id,valid_lifetime,expire,subnet_id,\
-                          fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id";
 
     #[test]
     fn active_leases_become_mac_addresses() {
@@ -264,9 +248,6 @@ mod lease_tests {
 #[cfg(test)]
 mod record_tests {
     use super::*;
-
-    const HEADER: &str = "address,hwaddr,client_id,valid_lifetime,expire,subnet_id,\
-                          fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id";
 
     #[test]
     fn neigh_entries_keep_device_and_state() {
@@ -321,5 +302,83 @@ mod record_tests {
     fn lease_records_missing_file_is_empty() {
         let d = tempfile::tempdir().unwrap();
         assert!(read_kea_lease_records(&d.path().join("dhcp4.leases"), 0).is_empty());
+    }
+
+    fn record(line: &str, now: u64) -> KeaLease {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().join("dhcp4.leases");
+        std::fs::write(&base, format!("{HEADER}\n{line}\n")).unwrap();
+        read_kea_lease_records(&base, now).remove(0)
+    }
+
+    #[test]
+    fn declined_and_reclaimed_are_not_active() {
+        assert!(!record("10.0.0.5,aa:bb:cc:00:00:05,,3600,2000,1,0,0,h,1,,0", 1000).active);
+        assert!(!record("10.0.0.5,aa:bb:cc:00:00:05,,3600,2000,1,0,0,h,2,,0", 1000).active);
+        assert!(record("10.0.0.5,aa:bb:cc:00:00:05,,3600,2000,1,0,0,h,0,,0", 1000).active);
+    }
+
+    #[test]
+    fn expiry_must_be_after_now() {
+        assert!(!record("10.0.0.6,aa:bb:cc:00:00:06,,3600,1000,1,0,0,h,0,,0", 1000).active);
+        assert!(!record("10.0.0.6,aa:bb:cc:00:00:06,,3600,999,1,0,0,h,0,,0", 1000).active);
+        assert!(record("10.0.0.6,aa:bb:cc:00:00:06,,3600,1001,1,0,0,h,0,,0", 1000).active);
+    }
+
+    #[test]
+    fn client_id_is_lowercased() {
+        let l = record(
+            "10.0.0.7,AA:BB:CC:00:00:07,\"01:AA:BB:CC:00:00:07\",3600,2000,1,0,0,,0,,0",
+            0,
+        );
+        assert_eq!(l.client_id.as_deref(), Some("01:aa:bb:cc:00:00:07"));
+        assert_eq!(l.hostname, None);
+    }
+
+    #[test]
+    fn missing_header_or_columns_do_not_panic() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().join("dhcp4.leases");
+        std::fs::write(
+            &base,
+            "10.0.0.8,aa:bb:cc:00:00:08,,3600,2000,1,0,0,h,0,,0\n",
+        )
+        .unwrap();
+        assert!(read_kea_lease_records(&base, 0).is_empty());
+        std::fs::write(&base, "address,hwaddr\n10.0.0.9,aa:bb:cc:00:00:09\n").unwrap();
+        let v = read_kea_lease_records(&base, 0);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].mac.as_deref(), Some("aa:bb:cc:00:00:09"));
+        assert!(!v[0].active);
+        assert_eq!(
+            (v[0].subnet_id, v[0].expire, v[0].hostname.clone()),
+            (0, 0, None)
+        );
+    }
+
+    #[test]
+    fn main_file_overrides_completed() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().join("dhcp4.leases");
+        std::fs::write(
+            d.path().join("dhcp4.leases.completed"),
+            format!("{HEADER}\n10.0.0.10,aa:bb:cc:00:00:0a,,3600,9000,1,0,0,old,0,,0\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            &base,
+            format!("{HEADER}\n10.0.0.10,aa:bb:cc:00:00:0b,,3600,9000,1,0,0,new,0,,0\n"),
+        )
+        .unwrap();
+        let v = read_kea_lease_records(&base, 1000);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].hostname.as_deref(), Some("new"));
+        assert_eq!(v[0].mac.as_deref(), Some("aa:bb:cc:00:00:0b"));
+    }
+
+    #[test]
+    fn neigh_entries_skip_empty_lladdr() {
+        let j = br#"[{"dst":"10.0.0.1","dev":"x","lladdr":"","state":["STALE"]}]"#;
+        assert!(parse_ip_neigh_entries(j).is_empty());
     }
 }
