@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
+use sensr_rules::document::internal_interfaces;
 use sensr_schema::Document;
 use sensr_schema::array::Uuid;
 use sensr_schema::fields::{DeviceName, DomainName, Host, HostOverrideName, InterfaceId};
@@ -543,11 +544,30 @@ pub fn qdisc(doc: &Document) -> QdiscModel {
     }
 }
 
+/// Kernel tunables. While any host is locked and ARP interception routes
+/// same-LAN traffic through us, the internal links must not send ICMP
+/// redirects telling devices to go direct.
+fn sysctl(doc: &Document) -> SysctlModel {
+    let fw = &doc.firewall;
+    let locked = fw.host_mode_settings.arp_intercept && fw.host_modes.values().any(|h| h.enabled);
+    SysctlModel {
+        send_redirects_off: if locked {
+            internal_interfaces(doc)
+                .into_iter()
+                .map(|i| i.device)
+                .collect()
+        } else {
+            Vec::new()
+        },
+        ..SysctlModel::default()
+    }
+}
+
 impl SliceModels {
     /// Every slice applier's input from one document.
     pub fn from_document(doc: &Document, secrets: &SecretsDir) -> Result<Self, ConvertError> {
         Ok(SliceModels {
-            sysctl: SysctlModel::default(),
+            sysctl: sysctl(doc),
             qdisc: qdisc(doc),
             kea: kea(doc)?,
             unbound: unbound(doc)?,
@@ -571,6 +591,35 @@ pub(crate) mod tests {
 
     pub(crate) fn slice_models() -> SliceModels {
         SliceModels::from_document(&document(), &SecretsDir::default()).expect("converts")
+    }
+
+    fn with_host(arp_intercept: bool, enabled: bool) -> Document {
+        use sensr_schema::models::firewall::{HostMode, HostModeKind};
+        let mut doc = Document::factory();
+        doc.firewall.host_mode_settings.arp_intercept = arp_intercept;
+        doc.firewall.host_modes.push(HostMode {
+            enabled,
+            mac: "aa:bb:cc:dd:ee:ff".parse().unwrap(),
+            mode: HostModeKind::Isolated,
+            description: None,
+        });
+        doc
+    }
+
+    fn redirects_off(doc: &Document) -> Vec<String> {
+        SliceModels::from_document(doc, &SecretsDir::default())
+            .unwrap()
+            .sysctl
+            .send_redirects_off
+    }
+
+    #[test]
+    fn host_modes_disable_redirects() {
+        assert_eq!(redirects_off(&with_host(true, true)), ["eth1"]);
+        assert!(redirects_off(&with_host(false, true)).is_empty());
+        // Only disabled entries: nothing is locked.
+        assert!(redirects_off(&with_host(true, false)).is_empty());
+        assert!(redirects_off(&Document::factory()).is_empty());
     }
 
     #[test]

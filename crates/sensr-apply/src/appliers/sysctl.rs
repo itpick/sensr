@@ -50,6 +50,10 @@ pub struct SysctlModel {
     pub conntrack_max: Option<u32>,
     /// Extra operator tunables (OPNsense "System: Settings: Tunables").
     pub extra: BTreeMap<String, String>,
+    /// Devices that must not send ICMP redirects (internal links while
+    /// hosts are locked: same-LAN traffic is routed through us on purpose).
+    /// Non-empty also turns redirects off for `all` and `default`.
+    pub send_redirects_off: Vec<String>,
 }
 
 impl Default for SysctlModel {
@@ -60,6 +64,7 @@ impl Default for SysctlModel {
             rp_filter: RpFilter::Loose,
             conntrack_max: None,
             extra: BTreeMap::new(),
+            send_redirects_off: Vec::new(),
         }
     }
 }
@@ -100,6 +105,18 @@ impl SysctlModel {
         m.insert("net.ipv4.conf.default.rp_filter".into(), rp);
         if let Some(max) = self.conntrack_max {
             m.insert("net.netfilter.nf_conntrack_max".into(), max.to_string());
+        }
+        if !self.send_redirects_off.is_empty() {
+            for scope in ["all", "default"] {
+                m.insert(format!("net.ipv4.conf.{scope}.send_redirects"), "0".into());
+            }
+            for dev in &self.send_redirects_off {
+                let k = format!("net.ipv4.conf.{dev}.send_redirects");
+                if !valid_key(&k) {
+                    return Err(SysctlError::BadKey(k));
+                }
+                m.insert(k, "0".into());
+            }
         }
         for (k, v) in &self.extra {
             if !valid_key(k) {
@@ -228,6 +245,25 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, format!("{v}\n")).unwrap();
         }
+    }
+
+    #[test]
+    fn send_redirects_off_when_hosts_locked() {
+        let m = SysctlModel {
+            send_redirects_off: vec!["eth1".into()],
+            ..Default::default()
+        }
+        .to_map()
+        .unwrap();
+        for k in ["all", "default", "eth1"] {
+            assert_eq!(m[&format!("net.ipv4.conf.{k}.send_redirects")], "0");
+        }
+    }
+
+    #[test]
+    fn no_redirect_keys_by_default() {
+        let m = SysctlModel::default().to_map().unwrap();
+        assert!(m.keys().all(|k| !k.contains("send_redirects")));
     }
 
     #[test]
