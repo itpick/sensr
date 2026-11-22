@@ -174,7 +174,17 @@ let
           ''row T-0401 pending "sensr config get waits on sensr-ipc/sensr-config (nix/pending.nix)"''
         else
           ''
-            if sensr config get --json | jq -e 'type == "object"' >/dev/null; then
+            # After a switch the agent restarts alongside this unit and may
+            # not be listening yet: give it up to 30 s before failing.
+            ok=0
+            for _ in $(seq 1 30); do
+              if sensr config get --json 2>/dev/null | jq -e 'type == "object"' >/dev/null; then
+                ok=1
+                break
+              fi
+              sleep 1
+            done
+            if [ "$ok" = 1 ]; then
               row T-0401 pass "sensr config get returned an object"
             else
               row T-0401 fail "sensr config get --json did not return an object"
