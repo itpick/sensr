@@ -183,6 +183,7 @@ Register quarantine entries *before* `system_rules::register`'s anti-lockout wit
   5. If `other_changes || pending`: `self.stage(inner, &base, doc)?;` return `Response::Value(Some(json!({"result":"staged"})))`.
   6. Else: `self.stage(inner, &inner.head.1.clone(), doc.clone())?;` then `self.commit(inner, principal, Some("set host mode".into()), None).await?;` return `Response::Value(Some(json!({"result":"applied"})))`.
 - `Applier::client_mac` as above. `SliceApplier::client_mac` queries the collector: add `HostCollector::mac_for_ip(&self, ip: IpAddr) -> Option<String>` scanning `inv.hosts()` for a host whose `ipv4`/`ipv6` equals `ip`, returning its `mac`.
+- `host_locked_v4/v6` refresh: besides each apply, refresh the IP sets (via `engine.update_host_mode_sets`) on every `FEED_TICK` (10 s) from the neighbour table and leases, as MAC aliases refresh, so a locked host's new address is covered within 10 s and a released one drops out.
 - `hosts.rs` view: after serialising each `Host`, set `v["mode"]` from a `BTreeMap<String, &'static str>` the collector keeps (`mac -> "isolated"|"quarantine"`) built in `set_document` from `doc.firewall.host_modes`. Omit `mode` when Normal.
 
 - [ ] **Step 1: Write failing tests:**
@@ -241,6 +242,14 @@ Register quarantine entries *before* `system_rules::register`'s anti-lockout wit
   - emit `PoisonMsg{ iface:I, target:T, claim_ip:X.ip, claim_mac:router_mac }` (tell T that X is at the router);
   - emit `PoisonMsg{ iface:I, target:X, claim_ip:T.ip, claim_mac:router_mac }` (tell X that T is at the router).
 - never target the router; never claim the router's own IP; skip interfaces not in the view (callers pass only `internal_interfaces`).
+
+**Timing and gating (pin exactly, from the spec):**
+- The interceptor is active only when `firewall.host_mode_settings.arp_intercept` is true and at least one enabled Isolated/Quarantine entry exists; otherwise it is idle (and heals if it was active).
+- Seeding: every **2 s**, send for each `PoisonMsg` a unicast ARP **request** (`build_request`) whose sender fields are (`claim_ip`, `claim_mac`), addressed to the target.
+- Answering: on an observed request matched by `answer`, send the reply immediately and again **50 ms** later.
+- Heal: **three rounds, 1 s apart**, of `heal_plan` replies, on: a host leaving the locked set, `arp_intercept` turned off, and agent shutdown.
+- Inputs refresh on each apply, each `HostCollector` poll, and every `FEED_TICK` (10 s) from a direct neighbour-table read; `live` = kernel state REACHABLE/DELAY/PROBE/STALE or inventory `last_seen` within `ONLINE_SECS`.
+- Tests for timing use an injectable clock/tick (no real sleeps over 100 ms).
 
 **ARP/Ethernet frame layout (`build_reply`, 42 bytes):** Ethernet: dst = `target_mac` (6), src = `router_mac` (6), ethertype `0x0806` (2). ARP: htype `0x0001`, ptype `0x0800`, hlen `6`, plen `4`, op `0x0002` (reply) or `0x0001` (request), sender_mac = `claim_mac`, sender_ip = `claim_ip`, target_mac = `target_mac`, target_ip = `target_ip` (= the receiver's own IP). All multi-byte fields big-endian.
 
