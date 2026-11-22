@@ -1,0 +1,53 @@
+{
+  "now": 1010,
+  "hosts": [
+    {
+      "key": "aa:bb:cc:dd:ee:01",
+      "mac": "aa:bb:cc:dd:ee:01",
+      "reserved_name": null,
+      "lease_hostname": null,
+      "interface": "lan",
+      "ipv4": "192.168.68.50",
+      "ipv6": [],
+      "sources": [
+        "neighbour"
+      ],
+      "first_seen": 1000,
+      "last_seen": 1000,
+      "interface_name": "LAN",
+      "online": true
+    },
+    {
+      "key": "aa:bb:cc:dd:ee:09",
+      "mac": "aa:bb:cc:dd:ee:09",
+      "name": "camera",
+      "reserved_name": "camera",
+      "lease_hostname": null,
+      "interface": "opt9",
+      "ipv4": "10.9.0.5",
+      "ipv6": [],
+      "sources": [
+        "reserved"
+      ],
+      "first_seen": 1000,
+      "interface_name": "OPT9",
+      "online": false
+    },
+    {
+      "key": "id:01:cc",
+      "client_id": "01:cc",
+      "name": "orphan",
+      "reserved_name": "orphan",
+      "lease_hostname": null,
+      "interface": "",
+      "ipv4": "192.168.68.40",
+      "ipv6": [],
+      "sources": [
+        "reserved"
+      ],
+      "first_seen": 1000,
+      "interface_name": "",
+      "online": false
+    }
+  ]
+}

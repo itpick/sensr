@@ -153,6 +153,12 @@ impl Host {
         self.last_seen.unwrap_or(self.first_seen)
     }
 
+    /// Activity at `now`. Never moves `last_seen` back: without an RTC the
+    /// clock reads early until NTP syncs.
+    fn seen(&mut self, now: u64) {
+        self.last_seen = Some(self.last_seen.map_or(now, |t| t.max(now)));
+    }
+
     fn add_ipv6(&mut self, a: Ipv6Addr) {
         self.ipv6.retain(|x| *x != a);
         self.ipv6.insert(0, a);
@@ -181,10 +187,16 @@ impl Host {
 
     /// Equal apart from the fields that move without a structural change.
     fn same_structure(&self, other: &Host) -> bool {
-        let strip = |h: &Host| Host {
-            last_seen: None,
-            lease: None,
-            ..h.clone()
+        // the kernel dumps addresses in any order; only the set matters
+        let strip = |h: &Host| {
+            let mut ipv6 = h.ipv6.clone();
+            ipv6.sort();
+            Host {
+                last_seen: None,
+                lease: None,
+                ipv6,
+                ..h.clone()
+            }
         };
         strip(self) == strip(other)
     }
@@ -259,9 +271,10 @@ pub fn reservations(doc: &Document) -> Vec<ReservationView> {
 pub struct Inventory {
     hosts: BTreeMap<String, Host>,
     /// The previous poll's active lease expiries, by the lease's own client
-    /// (MAC, else `id:<client id>`). Kept apart from the rows so forgetting
-    /// or re-keying a row does not make an unchanged lease look renewed.
-    expires: BTreeMap<String, u64>,
+    /// (MAC, else `id:<client id>`) and Kea subnet: one device can hold a
+    /// lease on each network. Kept apart from the rows so forgetting or
+    /// re-keying a row does not make an unchanged lease look renewed.
+    expires: BTreeMap<(String, u32), u64>,
     /// Set after the first poll; until then lease expiries are only recorded,
     /// so leases existing at start-up are not mistaken for activity.
     primed: bool,
@@ -346,8 +359,9 @@ impl Inventory {
             let Some(key) = key_of(l.mac.as_deref(), l.client_id.as_deref()) else {
                 continue;
             };
-            let renewed = self.primed && previous.get(&client) != Some(&l.expire);
-            self.expires.insert(client, l.expire);
+            let id = (client, l.subnet_id);
+            let renewed = self.primed && previous.get(&id) != Some(&l.expire);
+            self.expires.insert(id, l.expire);
             let h = self.row(&key, now);
             if l.mac.is_some() && l.client_id.is_some() {
                 h.client_id = l.client_id.clone();
@@ -366,7 +380,7 @@ impl Inventory {
             });
             // issued or renewed since the last poll
             if renewed {
-                h.last_seen = Some(now);
+                h.seen(now);
             }
             leased.insert(key);
         }
@@ -381,15 +395,20 @@ impl Inventory {
             let Some(iface) = snap.internal.iter().find(|i| i.device == n.dev) else {
                 continue;
             };
+            let active = n.state.iter().any(|s| ACTIVE_STATES.contains(&s.as_str()));
+            let has_lease = leased.contains(&n.mac);
             let h = self.row(&n.mac, now);
             h.sources.insert(Source::Neighbour);
             h.interface = Some(iface.id.clone());
             match n.ip {
-                IpAddr::V4(a) => h.ipv4 = Some(a),
+                // the active lease's address wins (Make static reserves it); a
+                // STALE entry only fills a gap, as it can outlive a move
+                IpAddr::V4(a) if !has_lease && (active || h.ipv4.is_none()) => h.ipv4 = Some(a),
+                IpAddr::V4(_) => {}
                 IpAddr::V6(a) => h.add_ipv6(a),
             }
-            if n.state.iter().any(|s| ACTIVE_STATES.contains(&s.as_str())) {
-                h.last_seen = Some(now);
+            if active {
+                h.seen(now);
             }
         }
 
@@ -437,10 +456,21 @@ impl Inventory {
 
     /// Drops unreserved hosts idle for [`RETENTION_SECS`], then the oldest
     /// unreserved beyond [`MAX_HOSTS`]. Returns whether any went.
+    ///
+    /// Retention is skipped while `now` is behind the newest stamp in the
+    /// inventory: the clock has not synced yet and cannot age anything.
     pub fn prune(&mut self, now: u64) -> bool {
         let before = self.hosts.len();
-        self.hosts
-            .retain(|_, h| h.reserved() || now.saturating_sub(h.age_from()) <= RETENTION_SECS);
+        let newest = self
+            .hosts
+            .values()
+            .map(|h| h.age_from().max(h.first_seen))
+            .max()
+            .unwrap_or(0);
+        if now >= newest {
+            self.hosts
+                .retain(|_, h| h.reserved() || now.saturating_sub(h.age_from()) <= RETENTION_SECS);
+        }
         if self.hosts.len() > MAX_HOSTS {
             let mut unreserved: Vec<(u64, String)> = self
                 .hosts
@@ -479,11 +509,14 @@ impl Inventory {
             .into_iter()
             .map(|h| {
                 let mut v = serde_json::to_value(h).expect("host serialises");
-                let name = h
-                    .interface
-                    .as_deref()
-                    .and_then(|id| internal.iter().find(|i| i.id == id))
-                    .map(|i| i.descr.clone());
+                // always strings: the interface id (empty if unknown) and its
+                // description, else the id in capitals for one no longer internal
+                let id = h.interface.as_deref().unwrap_or_default();
+                let name = match internal.iter().find(|i| i.id == id) {
+                    Some(i) => i.descr.clone(),
+                    None => id.to_uppercase(),
+                };
+                v["interface"] = id.into();
                 v["interface_name"] = name.into();
                 v["online"] = online(h).into();
                 v
@@ -529,7 +562,8 @@ impl HostStore {
     }
 
     /// The saved hosts; empty (with a warning) when the file is missing,
-    /// unparsable or of another version.
+    /// unparsable or of another version. An unusable file is renamed to
+    /// `hosts.json.bad` (replacing an older one) so the next flush keeps it.
     pub fn load(&self) -> Vec<Host> {
         let bytes = match std::fs::read(&self.path) {
             Ok(b) => b,
@@ -541,19 +575,26 @@ impl HostStore {
             }
         };
         match serde_json::from_slice::<FileIn>(&bytes) {
-            Ok(f) if f.version == FILE_VERSION => f.hosts,
+            Ok(f) if f.version == FILE_VERSION => return f.hosts,
             Ok(f) => {
                 tracing::warn!(
                     version = f.version,
                     "host inventory has an unknown version; starting empty"
                 );
-                Vec::new()
             }
             Err(e) => {
                 tracing::warn!(path = %self.path.display(), error = %e, "host inventory is unreadable; starting empty");
-                Vec::new()
             }
         }
+        // the next flush would overwrite it; keep it for a look (or a newer agent)
+        let bad = self.path.with_extension("json.bad");
+        match std::fs::rename(&self.path, &bad) {
+            Ok(()) => tracing::warn!(path = %bad.display(), "kept the old host inventory"),
+            Err(e) => {
+                tracing::warn!(path = %bad.display(), error = %e, "keeping the old host inventory")
+            }
+        }
+        Vec::new()
     }
 
     /// Records a change, keeping the strongest pending one.
@@ -1205,6 +1246,155 @@ mod tests {
         assert_eq!(only(&inv).ipv6, want);
     }
 
+    #[test]
+    fn two_leases_for_one_mac_are_not_activity() {
+        // the same device leased on LAN and LAN2: neither expiry moves
+        let two = |a: u64, b: u64| {
+            let mut s = snap();
+            s.subnet_iface.insert(8, "opt1".into());
+            s.leases.push(lease(Some(MAC), None, a));
+            let mut l2 = lease(Some(MAC), None, b);
+            l2.address = "192.168.72.50".parse().unwrap();
+            l2.subnet_id = 8;
+            s.leases.push(l2);
+            s
+        };
+        let mut inv = Inventory::from_hosts(Vec::new());
+        inv.observe(&two(9000, 9500), 1000);
+        assert_eq!(inv.observe(&two(9000, 9500), 1030), Change::None);
+        assert_eq!(inv.observe(&two(9000, 9500), 1060), Change::None);
+        assert_eq!(only(&inv).last_seen, None);
+        // renewing one of them is activity
+        assert_eq!(inv.observe(&two(9030, 9500), 1090), Change::Seen);
+        assert_eq!(only(&inv).last_seen, Some(1090));
+    }
+
+    #[test]
+    fn stale_neighbour_does_not_override_the_lease_address() {
+        let leased_with = |state: &str| {
+            let mut s = with_lease(9000);
+            s.neigh.push(neigh(MAC, "192.168.68.77", "ue1", state));
+            s
+        };
+        for state in ["STALE", "REACHABLE"] {
+            let mut inv = Inventory::from_hosts(Vec::new());
+            inv.observe(&leased_with(state), 1000);
+            assert_eq!(
+                only(&inv).ipv4,
+                Some("192.168.68.50".parse().unwrap()),
+                "{state}"
+            );
+        }
+        // without a lease, a STALE entry fills a missing address but does not
+        // replace a known one; an active entry does
+        let mut inv = Inventory::from_hosts(Vec::new());
+        inv.observe(&with_neigh("STALE"), 1000);
+        assert_eq!(only(&inv).ipv4, Some("192.168.68.50".parse().unwrap()));
+        let mut s = snap();
+        s.neigh.push(neigh(MAC, "192.168.68.77", "ue1", "STALE"));
+        inv.observe(&s, 1030);
+        assert_eq!(only(&inv).ipv4, Some("192.168.68.50".parse().unwrap()));
+        let mut s = snap();
+        s.neigh
+            .push(neigh(MAC, "192.168.68.77", "ue1", "REACHABLE"));
+        inv.observe(&s, 1060);
+        assert_eq!(only(&inv).ipv4, Some("192.168.68.77".parse().unwrap()));
+    }
+
+    #[test]
+    fn last_seen_never_moves_backwards() {
+        // a poll before NTP sync: the clock reads earlier than what is stored
+        let mut h = host(MAC, 4_000_000, Some(5_000_000));
+        h.ipv4 = Some("192.168.68.50".parse().unwrap());
+        let mut inv = Inventory::from_hosts(vec![h]);
+        assert_eq!(inv.observe(&with_neigh("REACHABLE"), 1000), Change::None);
+        assert_eq!(only(&inv).last_seen, Some(5_000_000));
+        // a renewed lease neither
+        let mut inv = Inventory::from_hosts(vec![host(MAC, 4_000_000, Some(5_000_000))]);
+        inv.observe(&with_lease(9000), 1000);
+        inv.observe(&with_lease(9030), 1030);
+        assert_eq!(only(&inv).last_seen, Some(5_000_000));
+    }
+
+    #[test]
+    fn prune_waits_while_the_clock_is_behind_the_inventory() {
+        let newest = 20_000_000;
+        let mut inv = Inventory::from_hosts(vec![
+            host("aa:bb:cc:dd:ee:02", newest, Some(newest)),
+            host("aa:bb:cc:dd:ee:03", 1000, Some(1000)),
+        ]);
+        // behind the newest stamp: the clock is not trusted to age anything
+        assert!(!inv.prune(newest - 1));
+        assert_eq!(inv.hosts().count(), 2);
+        // once it catches up, retention applies again
+        assert!(inv.prune(newest));
+        assert_eq!(inv.hosts().count(), 1);
+    }
+
+    #[test]
+    fn ipv6_order_alone_is_not_structural() {
+        let both = |a: &str, b: &str| {
+            let mut s = snap();
+            s.neigh.push(neigh(MAC, a, "ue1", "STALE"));
+            s.neigh.push(neigh(MAC, b, "ue1", "STALE"));
+            s
+        };
+        let mut inv = Inventory::from_hosts(Vec::new());
+        inv.observe(&both("2001:db8::1", "2001:db8::2"), 1000);
+        assert_eq!(
+            inv.observe(&both("2001:db8::2", "2001:db8::1"), 1030),
+            Change::None
+        );
+        assert_eq!(
+            inv.observe(&both("2001:db8::1", "2001:db8::2"), 1060),
+            Change::None
+        );
+        // a new address still is
+        assert_eq!(
+            inv.observe(&both("2001:db8::1", "2001:db8::3"), 1090),
+            Change::Structural
+        );
+    }
+
+    /// The `view()` the UI parses: a seen host, a reservation-only host on an
+    /// interface that is no longer internal, and one with no interface at all.
+    /// The UI's tests parse the same file (`tests/golden/hosts-view.json`).
+    #[test]
+    fn view_matches_the_ui_contract() {
+        let mut s = with_neigh("REACHABLE");
+        let mut gone = reservation("aa:bb:cc:dd:ee:09", Some("aa:bb:cc:dd:ee:09"), None);
+        gone.interface = Some("opt9".into());
+        gone.hostname = Some("camera".into());
+        gone.ip = Some("10.9.0.5".parse().unwrap());
+        s.reservations.push(gone);
+        let mut nowhere = reservation("id:01:cc", None, Some("01:cc"));
+        nowhere.interface = None;
+        nowhere.hostname = Some("orphan".into());
+        s.reservations.push(nowhere);
+        let mut inv = Inventory::from_hosts(Vec::new());
+        inv.observe(&s, 1000);
+        let v = inv.view(1010, &lan());
+        let golden = format!(
+            "{}/tests/golden/hosts-view.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let want: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&golden).expect("golden")).unwrap();
+        assert_eq!(
+            v,
+            want,
+            "actual:\n{}",
+            serde_json::to_string_pretty(&v).unwrap()
+        );
+        let hosts = v["hosts"].as_array().unwrap();
+        let camera = hosts.iter().find(|h| h["name"] == "camera").unwrap();
+        assert_eq!(camera["interface"], "opt9");
+        assert_eq!(camera["interface_name"], "OPT9");
+        let orphan = hosts.iter().find(|h| h["name"] == "orphan").unwrap();
+        assert_eq!(orphan["interface"], "");
+        assert_eq!(orphan["interface_name"], "");
+    }
+
     fn home_router() -> Document {
         let path = format!(
             "{}/../sensr-import-opnsense/tests/golden/home-router.sensr.json",
@@ -1320,6 +1510,30 @@ mod store {
         assert!(store(&dir).load().is_empty());
         std::fs::write(dir.path().join("hosts.json"), r#"{"version":2,"hosts":[]}"#).unwrap();
         assert!(store(&dir).load().is_empty());
+    }
+
+    #[test]
+    fn unreadable_file_is_kept_aside() {
+        for bad in [r#"{"version":1,"hosts":["#, r#"{"version":2,"hosts":[]}"#] {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("hosts.json");
+            // a previous .bad is replaced
+            std::fs::write(dir.path().join("hosts.json.bad"), "old").unwrap();
+            std::fs::write(&file, bad).unwrap();
+            let mut s = store(&dir);
+            assert!(s.load().is_empty());
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("hosts.json.bad")).unwrap(),
+                bad
+            );
+            assert!(!file.exists());
+            // the first flush does not destroy it
+            s.flush(&inv_with(&["aa:bb:cc:dd:ee:01"]), 0).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("hosts.json.bad")).unwrap(),
+                bad
+            );
+        }
     }
 
     #[test]
