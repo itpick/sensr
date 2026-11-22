@@ -90,6 +90,20 @@ fn valid_key(k: &str) -> bool {
         })
 }
 
+/// A device name as a sysctl key segment, using the sysctl(8) convention of
+/// swapping `.` and `/` (the kernel's `conf/vlan0.100` is `vlan0/100`).
+/// `None` for names the key syntax cannot carry. Unlike [`valid_key`],
+/// uppercase is fine: device names are not folded.
+fn device_segment(dev: &str) -> Option<String> {
+    let ok = !dev.is_empty()
+        && dev != "."
+        && dev != ".."
+        && dev
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
+    ok.then(|| dev.replace('.', "/"))
+}
+
 impl SysctlModel {
     /// The full key → value map, validated.
     pub fn to_map(&self) -> Result<BTreeMap<String, String>, SysctlError> {
@@ -111,11 +125,11 @@ impl SysctlModel {
                 m.insert(format!("net.ipv4.conf.{scope}.send_redirects"), "0".into());
             }
             for dev in &self.send_redirects_off {
-                let k = format!("net.ipv4.conf.{dev}.send_redirects");
-                if !valid_key(&k) {
-                    return Err(SysctlError::BadKey(k));
-                }
-                m.insert(k, "0".into());
+                let Some(seg) = device_segment(dev) else {
+                    tracing::warn!(device = %dev, "cannot express device as a sysctl key; leaving its redirects alone");
+                    continue;
+                };
+                m.insert(format!("net.ipv4.conf.{seg}.send_redirects"), "0".into());
             }
         }
         for (k, v) in &self.extra {
@@ -138,6 +152,18 @@ pub fn render_conf(map: &BTreeMap<String, String>) -> String {
         let _ = writeln!(s, "{k} = {v}");
     }
     s
+}
+
+/// Swap `.` and `/`: sysctl keys use `.` between segments and `/` inside
+/// them, paths the reverse.
+fn swap_dots_slashes(key: &str) -> String {
+    key.chars()
+        .map(|c| match c {
+            '.' => '/',
+            '/' => '.',
+            c => c,
+        })
+        .collect()
 }
 
 /// The sysctl applier, rooted at `/` in production.
@@ -185,10 +211,12 @@ impl Sysctl {
         Sysctl { root: root.into() }
     }
 
+    /// `/proc/sys` path of a key (dots and slashes swapped, see
+    /// [`device_segment`]).
     fn proc_path(&self, key: &str) -> PathBuf {
         self.root
             .join("proc/sys")
-            .join(Path::new(&key.replace('.', "/")))
+            .join(Path::new(&swap_dots_slashes(key)))
     }
 
     /// Current kernel value.
@@ -258,6 +286,48 @@ mod tests {
         for k in ["all", "default", "eth1"] {
             assert_eq!(m[&format!("net.ipv4.conf.{k}.send_redirects")], "0");
         }
+    }
+
+    #[test]
+    fn dotted_device_maps_to_its_proc_path() {
+        let m = SysctlModel {
+            send_redirects_off: vec!["vlan0.100".into()],
+            ..Default::default()
+        };
+        let map = m.to_map().unwrap();
+        let key = "net.ipv4.conf.vlan0/100.send_redirects";
+        assert_eq!(map[key], "0");
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("proc/sys/net/ipv4/conf/vlan0.100");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("send_redirects"), "1\n").unwrap();
+        for d in ["all", "default"] {
+            let p = root.path().join(format!("proc/sys/net/ipv4/conf/{d}"));
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("send_redirects"), "1\n").unwrap();
+        }
+        let s = Sysctl::new(root.path());
+        assert_eq!(s.read(key).as_deref(), Some("1"));
+        // The live file is found (not a missing `vlan0/100/` tree).
+        assert!(
+            s.diff(&map)
+                .iter()
+                .any(|c| c.key == key && c.current.as_deref() == Some("1"))
+        );
+    }
+
+    #[test]
+    fn uppercase_device_does_not_fail_and_odd_device_is_skipped() {
+        let m = SysctlModel {
+            send_redirects_off: vec!["ETH1".into(), "we!rd".into(), "..".into()],
+            ..Default::default()
+        };
+        let map = m.to_map().unwrap();
+        assert_eq!(map["net.ipv4.conf.ETH1.send_redirects"], "0");
+        assert!(
+            map.keys()
+                .all(|k| !k.contains("we!rd") && !k.contains(".."))
+        );
     }
 
     #[test]
