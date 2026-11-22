@@ -49,7 +49,7 @@ pub struct HostModeEntry<'a> {
     pub mac: &'a MacAddr,
     /// how it is contained
     pub kind: HostModeKind,
-    /// free text for rule labels
+    /// free text; kept out of rule descriptions so labels stay stable
     pub description: &'a str,
 }
 
@@ -147,30 +147,14 @@ pub fn register(rs: &mut Ruleset, entries: &[HostModeEntry<'_>], ctx: &Context<'
     let internal: Vec<&str> = ctx
         .interfaces
         .iter()
-        .filter(|(_, i)| !i.r#virtual && !i.gateway_v4 && !i.gateway_v6)
+        .filter(|(_, i)| i.is_internal())
         .map(|(name, _)| name.as_str())
         .collect();
-    let label = |kind| {
-        let hosts: Vec<String> = entries
-            .iter()
-            .filter(|e| e.kind == kind)
-            .map(|e| {
-                if e.description.is_empty() {
-                    e.mac.to_string()
-                } else {
-                    e.description.to_owned()
-                }
-            })
-            .collect();
-        let name = match kind {
-            HostModeKind::Isolated => "isolated",
-            HostModeKind::Quarantine => "quarantine",
-        };
-        (!hosts.is_empty()).then(|| format!("host mode {name} ({})", hosts.join(", ")))
-    };
-
-    let quarantine = label(HostModeKind::Quarantine);
-    let isolated = label(HostModeKind::Isolated);
+    // Fixed descriptions: the label is a hash of the rule, so it must not
+    // change when hosts are added, removed or renamed.
+    let any = |kind| entries.iter().any(|e| e.kind == kind);
+    let quarantine = any(HostModeKind::Quarantine).then_some("host mode quarantine");
+    let isolated = any(HostModeKind::Isolated).then_some("host mode isolated");
     for iface in &internal {
         let rule = |action: &str, descr: String| {
             conf! {
@@ -182,65 +166,75 @@ pub fn register(rs: &mut Ruleset, entries: &[HostModeEntry<'_>], ctx: &Context<'
                 "descr" => descr,
             }
         };
-        if let Some(l) = &quarantine {
-            let src = Addr::MacSet(QUARANTINE_SET.into());
-            for (proto, port, what) in [
-                ("udp", 67i64, "DHCP"),
-                ("tcp/udp", 53, "DNS"),
-                ("udp", 123, "NTP"),
+        if let Some(l) = quarantine {
+            let src = QUARANTINE_SET;
+            for (proto, to, port, what) in [
+                ("udp", "(self)", 67i64, "DHCP"),
+                // DISCOVER/REQUEST go to the broadcast address, which
+                // `(self)` (fib daddr type local) does not match
+                ("udp", "255.255.255.255", 67, "DHCP broadcast"),
+                ("tcp/udp", "(self)", 53, "DNS"),
+                ("udp", "(self)", 123, "NTP"),
             ] {
                 let mut c = rule("pass", format!("{l}: allow {what} to the router"));
                 c.set("protocol", proto);
-                c.set("to", "(self)");
+                c.set("to", to);
                 c.set("to_port", port);
-                register_from(rs, QUARANTINE_PRIO, &c, ctx, &src);
+                register_from(rs, QUARANTINE_PRIO, &c, ctx, src);
             }
             let c = rule("block", format!("{l}: block everything else"));
-            register_from(rs, QUARANTINE_PRIO, &c, ctx, &src);
+            register_from(rs, QUARANTINE_PRIO, &c, ctx, src);
         }
 
-        // reverse: nobody on this network reaches a locked host
+        // reverse: nothing arriving on an internal interface (local,
+        // routed or tunnelled sources alike) reaches a locked host
         let mut c = rule(
             "pass",
             "host modes: allow the router to locked hosts".into(),
         );
+        // Defensive: the router's own traffic leaves through output, never
+        // an `in` chain; this keeps a router-sourced packet seen here (a
+        // hairpin, a future chain layout) from being caught by the block.
         c.set("from", "(self)");
         register_to_locked(rs, &c, ctx);
-        let mut c = rule(
-            "block",
-            format!("host modes: block {iface} to locked hosts"),
-        );
-        c.set("from", *iface);
+        let c = rule("block", "host modes: block traffic to locked hosts".into());
         register_to_locked(rs, &c, ctx);
 
-        if let Some(l) = &isolated {
-            let src = Addr::MacSet(ISOLATED_SET.into());
+        if let Some(l) = isolated {
+            let src = ISOLATED_SET;
             let mut c = rule("pass", format!("{l}: allow the router's own services"));
             c.set("to", "(self)");
-            register_from(rs, ISOLATED_PRIO, &c, ctx, &src);
+            register_from(rs, ISOLATED_PRIO, &c, ctx, src);
             for net in &internal {
                 let mut c = rule("block", format!("{l}: block {net}"));
                 c.set("to", *net);
-                register_from(rs, ISOLATED_PRIO, &c, ctx, &src);
+                register_from(rs, ISOLATED_PRIO, &c, ctx, src);
             }
         }
     }
 }
 
-/// Registers `c` with its source replaced by a MAC set (rule arrays have no
-/// MAC operand).
-fn register_from(rs: &mut Ruleset, prio: u32, c: &conf::Conf, ctx: &Context<'_>, src: &Addr) {
+/// Registers `c` with its source replaced by the MAC set `set` (rule arrays
+/// have no MAC operand). The set is written into the array as a table token
+/// first so the label hash tells the rule apart from the same rule on
+/// another set.
+fn register_from(rs: &mut Ruleset, prio: u32, c: &conf::Conf, ctx: &Context<'_>, set: &str) {
+    let mut c = c.clone();
+    c.set("from", format!("<{set}>"));
     let start = rs.rules.len();
-    rs.register_filter(prio, c, None, ctx);
+    rs.register_filter(prio, &c, None, ctx);
     for r in &mut rs.rules[start..] {
-        r.src.addr = src.clone();
+        r.src.addr = Addr::MacSet(set.into());
     }
 }
 
-/// Registers `c` with its destination replaced by the locked hosts' sets.
+/// Registers `c` with its destination replaced by the locked hosts' sets
+/// (as a table token in the array, for a distinct label hash).
 fn register_to_locked(rs: &mut Ruleset, c: &conf::Conf, ctx: &Context<'_>) {
+    let mut c = c.clone();
+    c.set("to", format!("<{LOCKED_SET}>"));
     let start = rs.rules.len();
-    rs.register_filter(REVERSE_PRIO, c, None, ctx);
+    rs.register_filter(REVERSE_PRIO, &c, None, ctx);
     for r in &mut rs.rules[start..] {
         r.dst.addr = Addr::IpSet(LOCKED_SET.into());
     }

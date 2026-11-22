@@ -407,6 +407,12 @@ pub struct Interface {
 }
 
 impl Interface {
+    /// A local network the router serves: neither virtual nor a gateway
+    /// (what isolation and host modes treat as internal).
+    pub fn is_internal(&self) -> bool {
+        !self.r#virtual && !self.gateway_v4 && !self.gateway_v6
+    }
+
     /// Addresses of one family.
     pub fn addrs_of(&self, fam: IpFamily) -> impl Iterator<Item = &IfAddr> {
         self.addrs

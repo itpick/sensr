@@ -106,21 +106,27 @@ fn quarantine_allows_only_dhcp_dns_ntp_to_self() {
             .iter()
             .filter(|r| r.interface.as_deref() == Some(iface.as_str()))
             .collect();
-        let passes: Vec<(Option<u8>, Option<PortMatch>)> = on
+        let passes: Vec<(Option<u8>, Option<PortMatch>, &Addr)> = on
             .iter()
             .take_while(|r| r.action == Action::Pass)
-            .inspect(|r| assert_eq!(r.dst.addr, Addr::SelfAddr, "{r:#?}"))
-            .map(|r| (proto(r), port(r)))
+            .map(|r| (proto(r), port(r), &r.dst.addr))
             .collect();
-        let udp = |p| (Some(17), Some(PortMatch::Single(p)));
-        let tcp_udp = |p| (Some(0), Some(PortMatch::Single(p)));
+        let me = Addr::SelfAddr;
+        let bcast = Addr::Host("255.255.255.255".parse().unwrap());
+        let udp = |p, to| (Some(17), Some(PortMatch::Single(p)), to);
+        let tcp_udp = |p, to| (Some(0), Some(PortMatch::Single(p)), to);
         assert_eq!(
             passes,
-            [udp(67), tcp_udp(53), udp(123)],
+            [
+                udp(67, &me),
+                udp(67, &bcast),
+                tcp_udp(53, &me),
+                udp(123, &me)
+            ],
             "{iface}: DHCP, DNS, NTP only"
         );
         let last = on.last().expect("rules");
-        assert_eq!(on.len(), 4, "{iface}: {on:#?}");
+        assert_eq!(on.len(), 5, "{iface}: {on:#?}");
         assert_eq!(last.action, Action::Block);
         assert_eq!(last.dst.addr, Addr::Any);
         assert!(last.proto == ProtoMatch::Any && last.dst.port.is_none());
@@ -261,8 +267,8 @@ fn reverse_block_targets_only_locked_addresses() {
     );
     assert_eq!(updates.len(), 4, "{updates:?}");
 
-    // the compiled reverse rules: a pass from (self), then a block from the
-    // interface's own network to the locked addresses, per internal interface
+    // the compiled reverse rules: a pass from (self), then a block from any
+    // source to the locked addresses, per internal interface
     let c = with_host(HostModeKind::Isolated);
     for iface in internal() {
         let rev: Vec<_> = c
@@ -277,11 +283,8 @@ fn reverse_block_targets_only_locked_addresses() {
         assert_eq!(rev[0].action, Action::Pass);
         assert_eq!(rev[0].src.addr, Addr::SelfAddr);
         assert_eq!(rev[1].action, Action::Block);
-        assert!(
-            matches!(&rev[1].src.addr, Addr::IfaceNet { iface: n, .. } if *n == iface),
-            "{:?}",
-            rev[1].src.addr
-        );
+        // from any: routed and tunnelled sources are blocked too
+        assert_eq!(rev[1].src.addr, Addr::Any);
         assert!(rev.iter().all(|r| r.quick && r.priority == 5));
     }
 
@@ -329,4 +332,60 @@ fn golden_quarantine() {
     let buf = rendered(HostModeKind::Quarantine);
     assert!(String::from_utf8_lossy(&buf).contains(MAC));
     common::golden_json("host-modes-quarantine", &buf);
+}
+
+/// Labels are rule hashes: adding or renaming a host must not change them.
+#[test]
+fn labels_do_not_depend_on_the_hosts() {
+    let labels = |c: &Compiled| -> Vec<String> {
+        c.filter
+            .iter()
+            .filter(|r| r.reference.as_deref() == Some("ui/core/dashboard"))
+            .map(|r| r.label.clone())
+            .collect()
+    };
+    let one = with_host(HostModeKind::Quarantine);
+    let mut doc = home_router();
+    for (mac, d) in [(MAC, "renamed"), ("02:00:00:00:00:43", "second")] {
+        doc.firewall.host_modes.push(HostMode {
+            enabled: true,
+            mac: mac.parse().unwrap(),
+            mode: HostModeKind::Quarantine,
+            description: Some(d.parse().unwrap()),
+        });
+    }
+    let two = document::compile(&doc, &Runtime::default());
+    assert!(!labels(&one).is_empty());
+    assert_eq!(labels(&one), labels(&two));
+    assert!(
+        one.filter
+            .iter()
+            .any(|r| r.descr == "host mode quarantine: allow DNS to the router")
+    );
+}
+
+/// Every host-mode rule has its own label (the log maps labels to rules).
+#[test]
+fn host_mode_labels_are_distinct() {
+    for mode in [HostModeKind::Isolated, HostModeKind::Quarantine] {
+        let c = with_host(mode);
+        let mut seen = std::collections::BTreeMap::new();
+        for r in c
+            .filter
+            .iter()
+            .filter(|r| r.reference.as_deref() == Some("ui/core/dashboard"))
+        {
+            if let Some(other) = seen.insert(r.label.clone(), &r.descr) {
+                // per-family expansions of one rule share its label
+                assert_eq!(other, &r.descr, "label {} shared", r.label);
+            }
+        }
+        let other_labels: Vec<&str> = c
+            .filter
+            .iter()
+            .filter(|r| r.reference.as_deref() != Some("ui/core/dashboard"))
+            .map(|r| r.label.as_str())
+            .collect();
+        assert!(seen.keys().all(|l| !other_labels.contains(&l.as_str())));
+    }
 }

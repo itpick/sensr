@@ -253,11 +253,11 @@ pub struct InternalIf {
 }
 
 /// The interfaces isolation treats as internal networks
-/// (`!virtual && !gateway_v4 && !gateway_v6`), from the configuration alone.
+/// ([`Interface::is_internal`]), from the configuration alone.
 pub fn internal_interfaces(doc: &Document) -> Vec<InternalIf> {
     interfaces(doc, &Runtime::default())
         .into_iter()
-        .filter(|(_, i)| !i.r#virtual && !i.gateway_v4 && !i.gateway_v6)
+        .filter(|(_, i)| i.is_internal())
         .map(|(id, i)| InternalIf {
             id,
             subnets: i
