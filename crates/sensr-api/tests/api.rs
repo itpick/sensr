@@ -513,6 +513,20 @@ async fn hosts_requires_privilege() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn status_hosts_does_not_bypass_hosts_privilege() {
+    let fx = start().await;
+    let watcher = pw("watcher", "pw");
+    let (st, body) = http(&fx, "GET", "/api/v1/status/hosts", Some(&watcher), None).await;
+    assert_eq!(st, 404, "{body}");
+    assert_eq!(
+        http(&fx, "GET", "/api/v1/hosts", Some(&watcher), None)
+            .await
+            .0,
+        403
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn forget_host_readonly_forbidden() {
     let fx = start().await;
     let reader = pw("hostreader", "pw");
@@ -525,4 +539,16 @@ async fn forget_host_readonly_forbidden() {
     )
     .await;
     assert_eq!(st, 403, "{body}");
+    // Positive control: a non-read-only holder reaches the agent, which
+    // answers Conflict for an unknown host.
+    let viewer = pw("hostviewer", "pw");
+    let (st, body) = http(
+        &fx,
+        "POST",
+        "/api/v1/hosts/forget",
+        Some(&viewer),
+        Some(json!({"key": "aa:bb:cc:00:00:01"})),
+    )
+    .await;
+    assert_eq!(st, 409, "{body}");
 }

@@ -288,7 +288,6 @@ pub async fn runtime(
         "gateways" => sensr_ipc::RuntimeSection::Gateways,
         "aliases" => sensr_ipc::RuntimeSection::Aliases,
         "ipv6" => sensr_ipc::RuntimeSection::Ipv6,
-        "hosts" => sensr_ipc::RuntimeSection::Hosts,
         other => {
             return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
