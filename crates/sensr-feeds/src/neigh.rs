@@ -8,7 +8,7 @@
 //! same reason.
 
 use std::collections::BTreeMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 
 /// `(mac, address)` pairs of reachable/stale neighbours; failed and
@@ -90,19 +90,129 @@ pub fn parse_kea_lease_csv(text: &str, now: u64, into: &mut BTreeMap<IpAddr, Str
 /// order (`<file>.completed`, `.2`, `.1`, then `<file>`), as `(mac, address)`
 /// pairs. A missing file is not an error.
 pub fn read_kea_leases(base: &Path, now: u64) -> Vec<(String, IpAddr)> {
-    let s = base.display().to_string();
     let mut leases = BTreeMap::new();
-    for f in [
-        format!("{s}.completed"),
-        format!("{s}.2"),
-        format!("{s}.1"),
-        s.clone(),
-    ] {
+    for f in kea_lease_files(base) {
         if let Ok(text) = std::fs::read_to_string(&f) {
             parse_kea_lease_csv(&text, now, &mut leases);
         }
     }
     leases.into_iter().map(|(ip, mac)| (mac, ip)).collect()
+}
+
+/// The files Kea's memfile backend may have written, in its load order.
+fn kea_lease_files(base: &Path) -> [String; 4] {
+    let s = base.display().to_string();
+    [
+        format!("{s}.completed"),
+        format!("{s}.2"),
+        format!("{s}.1"),
+        s,
+    ]
+}
+
+/// One neighbour-table entry that has a MAC: the address, the interface it was
+/// seen on and the kernel's state words (`REACHABLE`, `STALE`, `DELAY`, ...).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NeighEntry {
+    pub mac: String,
+    pub ip: IpAddr,
+    pub dev: String,
+    pub state: Vec<String>,
+}
+
+/// Every neighbour with a MAC from `ip -j neigh show`, state kept as given.
+/// Unlike [`parse_ip_neigh_json`] this does not judge the state; entries
+/// without a MAC (failed, incomplete) are still skipped.
+pub fn parse_ip_neigh_entries(json: &[u8]) -> Vec<NeighEntry> {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        dst: Option<IpAddr>,
+        #[serde(default)]
+        dev: String,
+        lladdr: Option<String>,
+        #[serde(default)]
+        state: Vec<String>,
+    }
+    let entries: Vec<Entry> = serde_json::from_slice(json).unwrap_or_default();
+    entries
+        .into_iter()
+        .filter_map(|e| {
+            Some(NeighEntry {
+                mac: e.lladdr?.to_ascii_lowercase(),
+                ip: e.dst?,
+                dev: e.dev,
+                state: e.state,
+            })
+        })
+        .collect()
+}
+
+/// A DHCPv4 lease as the newest Kea record describes it, whatever its state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeaLease {
+    pub address: Ipv4Addr,
+    pub mac: Option<String>,
+    pub client_id: Option<String>,
+    pub hostname: Option<String>,
+    pub subnet_id: u32,
+    pub expire: u64,
+    /// State 0, a non-zero lifetime and an expiry still ahead of `now`.
+    pub active: bool,
+}
+
+/// Every lease Kea knows, last record per address across the same files and
+/// in the same order as [`read_kea_leases`], sorted by address. Released and
+/// expired leases are kept with `active == false`. A missing file is not an
+/// error.
+pub fn read_kea_lease_records(base: &Path, now: u64) -> Vec<KeaLease> {
+    let mut leases: BTreeMap<Ipv4Addr, KeaLease> = BTreeMap::new();
+    for f in kea_lease_files(base) {
+        if let Ok(text) = std::fs::read_to_string(&f) {
+            parse_kea_lease_records(&text, now, &mut leases);
+        }
+    }
+    leases.into_values().collect()
+}
+
+fn parse_kea_lease_records(text: &str, now: u64, into: &mut BTreeMap<Ipv4Addr, KeaLease>) {
+    let mut cols: BTreeMap<&str, usize> = BTreeMap::new();
+    for line in text.lines() {
+        if line.starts_with("address,") {
+            cols = line
+                .split(',')
+                .enumerate()
+                .map(|(i, f)| (f.trim(), i))
+                .collect();
+            continue;
+        }
+        let fields: Vec<&str> = line.split(',').collect();
+        let get = |name: &str| cols.get(name).and_then(|&i| fields.get(i)).copied();
+        let Some(address) = get("address").and_then(|a| a.trim().parse::<Ipv4Addr>().ok()) else {
+            continue;
+        };
+        let unquoted = |name: &str| {
+            get(name)
+                .map(|v| v.trim().trim_matches('"'))
+                .filter(|v| !v.is_empty())
+        };
+        let num = |name: &str| get(name).and_then(|v| v.trim().parse::<u64>().ok());
+        let lifetime = num("valid_lifetime").unwrap_or(0);
+        let expire = num("expire").unwrap_or(0);
+        into.insert(
+            address,
+            KeaLease {
+                address,
+                mac: unquoted("hwaddr").map(str::to_ascii_lowercase),
+                client_id: unquoted("client_id").map(str::to_ascii_lowercase),
+                hostname: unquoted("hostname").map(str::to_owned),
+                subnet_id: num("subnet_id")
+                    .and_then(|n| u32::try_from(n).ok())
+                    .unwrap_or(0),
+                expire,
+                active: num("state").unwrap_or(0) == 0 && lifetime > 0 && expire > now,
+            },
+        );
+    }
 }
 
 #[cfg(test)]
@@ -148,5 +258,68 @@ mod lease_tests {
     fn missing_files_are_empty() {
         let d = tempfile::tempdir().unwrap();
         assert!(read_kea_leases(&d.path().join("dhcp4.leases"), 0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+
+    const HEADER: &str = "address,hwaddr,client_id,valid_lifetime,expire,subnet_id,\
+                          fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id";
+
+    #[test]
+    fn neigh_entries_keep_device_and_state() {
+        let j = br#"[
+          {"dst":"192.168.68.10","dev":"ue1","lladdr":"AA:BB:CC:00:00:01","state":["REACHABLE"]},
+          {"dst":"192.168.68.11","dev":"ue1","state":["FAILED"]},
+          {"dst":"fe80::1","dev":"ue0","lladdr":"aa:bb:cc:00:00:02","state":["STALE"]}
+        ]"#;
+        let v = parse_ip_neigh_entries(j);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].mac, "aa:bb:cc:00:00:01");
+        assert_eq!(v[0].ip, "192.168.68.10".parse::<IpAddr>().unwrap());
+        assert_eq!(v[0].dev, "ue1");
+        assert_eq!(v[0].state, vec!["REACHABLE"]);
+        assert_eq!(v[1].dev, "ue0");
+        assert_eq!(v[1].state, vec!["STALE"]);
+        assert!(parse_ip_neigh_entries(b"not json").is_empty());
+    }
+
+    #[test]
+    fn lease_records_take_last_record_and_flag_active() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().join("dhcp4.leases");
+        std::fs::write(
+            &base,
+            format!(
+                "{HEADER}\n\
+                 192.168.68.20,\"AA:BB:CC:00:00:20\",\"01:aa:bb:cc:00:00:20\",3600,1500,1,0,0,,0,,0\n\
+                 192.168.68.20,\"AA:BB:CC:00:00:20\",\"01:aa:bb:cc:00:00:20\",3600,2000,1,0,0,tablet,0,,0\n\
+                 192.168.68.21,\"aa:bb:cc:00:00:21\",,0,2000,1,0,0,old,0,,0\n"
+            ),
+        )
+        .unwrap();
+        let v = read_kea_lease_records(&base, 1000);
+        assert_eq!(v.len(), 2);
+        let a = &v[0];
+        assert_eq!(
+            a.address,
+            "192.168.68.20".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+        assert!(a.active);
+        assert_eq!(a.hostname.as_deref(), Some("tablet"));
+        assert_eq!(a.mac.as_deref(), Some("aa:bb:cc:00:00:20"));
+        assert_eq!(a.client_id.as_deref(), Some("01:aa:bb:cc:00:00:20"));
+        assert_eq!((a.subnet_id, a.expire), (1, 2000));
+        let b = &v[1];
+        assert!(!b.active);
+        assert_eq!(b.client_id, None);
+    }
+
+    #[test]
+    fn lease_records_missing_file_is_empty() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(read_kea_lease_records(&d.path().join("dhcp4.leases"), 0).is_empty());
     }
 }
