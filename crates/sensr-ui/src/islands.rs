@@ -1568,9 +1568,6 @@ pub fn DhcpLeases(initial: LeaseTable) -> impl IntoView {
     }
 }
 
-/// Rows the Hosts card shows before "Show all".
-const HOSTS_SHOWN: usize = 20;
-
 /// Dashboard › Hosts: every client the router knows of, searchable and filterable by
 /// network, with Make static for leased hosts and Forget for unreserved ones. Refreshed
 /// with the other dashboard widgets; renders nothing when the caller may not see hosts.
@@ -1696,20 +1693,10 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
             if c.list.hosts.is_empty() {
                 return Some(view! { <p class="muted">"No hosts seen yet."</p> }.into_any());
             }
-            let q = search.with(|s| s.trim().to_lowercase());
-            let net = network.get();
-            let matching: Vec<&crate::runtime::HostRow> = c
-                .list
-                .hosts
-                .iter()
-                .filter(|h| net.is_empty() || h.interface == net)
-                .filter(|h| h.matches(&q))
-                .collect();
-            let m = matching.len();
             let all = show_all.get();
-            let rows = matching
-                .iter()
-                .take(if all { m } else { HOSTS_SHOWN })
+            let (rows, m) = network.with(|n| search.with(|q| c.visible(n, q, all)));
+            let rows = rows
+                .into_iter()
                 .map(|h| row(h, c.list.now, c.read_only))
                 .collect_view();
             Some(
@@ -1730,7 +1717,7 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
                             <tbody>{rows}</tbody>
                         </table>
                     </div>
-                    {(!all && m > HOSTS_SHOWN).then(|| view! {
+                    {(!all && m > HostCard::SHOWN).then(|| view! {
                         <div class="banner-actions">
                             <button type="button" class="btn" on:click=move |_| show_all.set(true)>
                                 {format!("Show all ({m})")}
@@ -1749,12 +1736,12 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
                     <span class="sr-only">"Search hosts"</span>
                     <input type="search" placeholder="Search name, MAC or IP"
                         prop:value=move || search.get()
-                        on:input=move |ev| search.set(event_target_value(&ev))/>
+                        on:input=move |ev| { search.set(event_target_value(&ev)); show_all.set(false); }/>
                 </label>
                 <label>
                     <span class="sr-only">"Network"</span>
                     <select prop:value=move || network.get()
-                        on:change=move |ev| network.set(event_target_value(&ev))>
+                        on:change=move |ev| { network.set(event_target_value(&ev)); show_all.set(false); }>
                         <option value="">"All networks"</option>
                         {move || card.with(|c| c.as_ref().map(|c| c.networks.clone()).unwrap_or_default())
                             .into_iter()

@@ -657,7 +657,11 @@ fn hosts_card_source_and_seen_labels() {
     // A seen-only host has no name: its MAC stands in.
     let seen = doc
         .select(&sel("tbody tr"))
-        .find(|r| text(*r).contains("seen"))
+        .find(|r| {
+            r.select(&sel("td"))
+                .nth(4)
+                .is_some_and(|c| text(c).trim() == "seen")
+        })
         .expect("seen-only row");
     let seen: Vec<String> = seen
         .select(&sel("td"))
@@ -729,4 +733,99 @@ fn mock_forgets_unreserved_hosts_only() {
             .iter()
             .all(|h| h.name.as_deref() != Some("bench-pi"))
     );
+}
+
+#[test]
+fn hosts_card_empty_list_says_so() {
+    let card = sensr_ui::actions::HostCard {
+        list: sensr_ui::runtime::HostList {
+            now: HOSTS_NOW,
+            hosts: Vec::new(),
+        },
+        ..Default::default()
+    };
+    let doc = render_hosts(Some(card));
+    let all = text(doc.root_element());
+    assert!(
+        all.contains("Hosts (0)") && all.contains("No hosts seen yet."),
+        "{all}"
+    );
+    assert!(doc.select(&sel("table")).next().is_none());
+}
+
+#[test]
+fn hosts_card_make_static_needs_a_lease_a_mac_and_an_ipv4() {
+    let mut card = hosts_from(hosts_mock()).unwrap();
+    let base = card
+        .list
+        .hosts
+        .iter()
+        .find(|h| h.name.as_deref() == Some("bench-pi"))
+        .unwrap()
+        .clone();
+    let no_mac = sensr_ui::runtime::HostRow {
+        key: "id:01aa".into(),
+        mac: None,
+        name: Some("no-mac".into()),
+        ..base.clone()
+    };
+    let no_ip = sensr_ui::runtime::HostRow {
+        key: "02:aa:00:00:00:01".into(),
+        mac: Some("02:aa:00:00:00:01".into()),
+        name: Some("no-ip".into()),
+        ipv4: None,
+        ..base
+    };
+    card.list.hosts.retain(|h| h.sources == ["neighbour"]);
+    card.list.hosts.extend([no_mac, no_ip]);
+    let doc = render_hosts(Some(card));
+    let buttons = |r: scraper::ElementRef<'_>| -> Vec<String> {
+        r.select(&sel("button"))
+            .map(|b| text(b).trim().to_owned())
+            .collect()
+    };
+    let seen = doc
+        .select(&sel("tbody tr"))
+        .find(|r| {
+            r.select(&sel("td"))
+                .nth(4)
+                .is_some_and(|c| text(c).trim() == "seen")
+        })
+        .expect("seen-only row");
+    assert_eq!(
+        buttons(seen),
+        ["Forget"],
+        "no lease: nothing to make static"
+    );
+    assert_eq!(buttons(host_row(&doc, "no-mac")), ["Forget"]);
+    assert_eq!(buttons(host_row(&doc, "no-ip")), ["Forget"]);
+}
+
+#[test]
+fn hosts_card_filter_search_and_show_all() {
+    let card = hosts_from(hosts_mock()).unwrap();
+    // Everything, first 20 of 25.
+    let (rows, m) = card.visible("", "", false);
+    assert_eq!((rows.len(), m), (20, 25));
+    let (rows, m) = card.visible("", "", true);
+    assert_eq!((rows.len(), m), (25, 25));
+    // LAN2 only: few enough that the card offers no Show all.
+    let (rows, m) = card.visible("opt1", "", false);
+    assert!(!rows.is_empty() && rows.iter().all(|h| h.interface_name == "LAN2"));
+    assert_eq!(rows.len(), m);
+    assert!(m <= sensr_ui::actions::HostCard::SHOWN);
+    let lan2 = render_hosts(Some(sensr_ui::actions::HostCard {
+        list: sensr_ui::runtime::HostList {
+            now: card.list.now,
+            hosts: rows.into_iter().cloned().collect(),
+        },
+        ..card.clone()
+    }));
+    assert!(!text(lan2.root_element()).contains("Show all"));
+    // Search by MAC suffix, case-insensitive.
+    let (rows, m) = card.visible("", "A5:FC", false);
+    assert_eq!(m, 1);
+    assert_eq!(rows[0].name.as_deref(), Some("old-router"));
+    // Filter and search combine.
+    assert_eq!(card.visible("lan", "old-router", false).1, 0);
 }

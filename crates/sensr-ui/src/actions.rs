@@ -705,6 +705,36 @@ pub struct HostCard {
     pub networks: Vec<(String, String)>,
 }
 
+impl HostCard {
+    /// Rows the card shows before "Show all".
+    pub const SHOWN: usize = 20;
+
+    /// The rows to render for a `network` filter (interface id, empty for all) and a
+    /// search `query`: the first [`HostCard::SHOWN`] matches, or all with `show_all`,
+    /// plus how many match in total.
+    pub fn visible(
+        &self,
+        network: &str,
+        query: &str,
+        show_all: bool,
+    ) -> (Vec<&crate::runtime::HostRow>, usize) {
+        let q = query.trim().to_lowercase();
+        let matching: Vec<_> = self
+            .list
+            .hosts
+            .iter()
+            .filter(|h| network.is_empty() || h.interface == network)
+            .filter(|h| h.matches(&q))
+            .collect();
+        let m = matching.len();
+        let rows = matching
+            .into_iter()
+            .take(if show_all { m } else { Self::SHOWN })
+            .collect();
+        (rows, m)
+    }
+}
+
 /// The host inventory for the dashboard, or `None` when the caller may not see it
 /// (`page-sensr-hosts`), so the card is left out.
 #[server(prefix = "/ui/fn", input = Json)]
