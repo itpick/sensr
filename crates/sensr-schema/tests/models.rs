@@ -1592,3 +1592,55 @@ fn user_passkeys_must_be_well_formed() {
     };
     assert!(doc.validate().is_ok());
 }
+
+#[test]
+fn host_mode_rules() {
+    use sensr_schema::models::firewall::{HostMode, HostModeSettings};
+    let hm = |mac: &str| -> HostMode {
+        serde_json::from_value(json!({"mac": mac, "mode": "isolated"})).unwrap()
+    };
+    let mut doc = Document::factory();
+    doc.firewall.host_modes.push(hm("aa:bb:cc:dd:ee:01"));
+    doc.firewall.host_modes.push(hm("aa:bb:cc:dd:ee:02"));
+    let v = doc.validate();
+    assert!(
+        v.get("firewall.host_modes").is_none() && !format!("{v}").contains("host_modes"),
+        "distinct MACs must validate clean; got:\n{v}"
+    );
+
+    let dup = doc.firewall.host_modes.push(hm("AA:BB:CC:DD:EE:01"));
+    let first = *doc.firewall.host_modes.keys().next().unwrap();
+    let v = doc.validate();
+    for id in [first, dup] {
+        assert_eq!(
+            messages(&v, &format!("firewall.host_modes.{id}.mac")),
+            ["A host mode for this MAC already exists."]
+        );
+    }
+
+    assert!(
+        serde_json::from_value::<HostMode>(
+            json!({"mac": "aa:bb:cc:dd:ee:01", "mode": "allowlist"})
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<HostMode>(
+            json!({"mac": "aa:bb:cc:dd:ee:01", "mode": "quarantine", "extra": 1})
+        )
+        .is_err()
+    );
+    let ok: HostMode =
+        serde_json::from_value(json!({"mac": "aa:bb:cc:dd:ee:01", "mode": "quarantine"})).unwrap();
+    assert!(ok.enabled);
+
+    assert!(HostModeSettings::default().arp_intercept);
+    let fw = serde_json::to_value(Document::factory().firewall).unwrap();
+    assert!(fw.get("host_modes").is_none());
+    assert!(fw.get("host_mode_settings").is_none());
+    let mut off = Document::factory().firewall;
+    off.host_mode_settings.arp_intercept = false;
+    let back: sensr_schema::models::firewall::Firewall =
+        serde_json::from_value(serde_json::to_value(&off).unwrap()).unwrap();
+    assert!(!back.host_mode_settings.arp_intercept);
+}

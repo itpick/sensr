@@ -38,6 +38,12 @@ pub struct Firewall {
     /// Clients locked out of the local networks (Firewall › Isolation).
     #[serde(default, skip_serializing_if = "ArrayField::is_empty")]
     pub isolation: ArrayField<Isolation>,
+    /// Per-host containment modes keyed by MAC (Firewall › Host modes).
+    #[serde(default, skip_serializing_if = "ArrayField::is_empty")]
+    pub host_modes: ArrayField<HostMode>,
+    /// Global behaviour of host modes.
+    #[serde(default, skip_serializing_if = "HostModeSettings::is_default")]
+    pub host_mode_settings: HostModeSettings,
     /// Global behaviour.
     #[serde(default)]
     pub settings: FirewallSettings,
@@ -177,6 +183,56 @@ pub struct Isolation {
     /// Free text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Description>,
+}
+
+/// How a host is contained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum HostModeKind {
+    /// Reaches the router and the internet but no other local host.
+    Isolated,
+    /// Held back until an operator releases it.
+    Quarantine,
+}
+
+/// A containment mode for the one host with this MAC address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HostMode {
+    /// Whether the mode is in force.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// The host's MAC address.
+    pub mac: MacAddr,
+    /// How the host is contained.
+    pub mode: HostModeKind,
+    /// Free text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<Description>,
+}
+
+/// Global behaviour of host modes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HostModeSettings {
+    /// Answer ARP for contained hosts so their traffic reaches the router.
+    #[serde(default = "yes")]
+    pub arp_intercept: bool,
+}
+
+impl Default for HostModeSettings {
+    fn default() -> Self {
+        Self {
+            arp_intercept: true,
+        }
+    }
+}
+
+impl HostModeSettings {
+    /// True when nothing differs from the defaults (kept out of documents).
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// Global filter settings (OPNsense `Firewall/Filter.xml` `settings`).
@@ -718,6 +774,16 @@ impl Validate for Firewall {
             }
             check::interfaces(ctx, &g.members, &p.join("members"), out);
         }
+
+        let hm = at.join("host_modes");
+        check::unique(
+            self.host_modes
+                .iter()
+                .map(|(id, h)| (hm.join(id), Some(h.mac.to_string()))),
+            "mac",
+            "A host mode for this MAC already exists.",
+            out,
+        );
 
         let isolation = at.join("isolation");
         for (id, iso) in &self.isolation {
