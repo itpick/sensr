@@ -288,6 +288,7 @@ pub async fn runtime(
         "gateways" => sensr_ipc::RuntimeSection::Gateways,
         "aliases" => sensr_ipc::RuntimeSection::Aliases,
         "ipv6" => sensr_ipc::RuntimeSection::Ipv6,
+        "hosts" => sensr_ipc::RuntimeSection::Hosts,
         other => {
             return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
@@ -296,6 +297,41 @@ pub async fn runtime(
         }
     };
     match call(&state, &caller, Op::Runtime { section }).await? {
+        Response::Value(v) => Ok(Json(v.unwrap_or(serde_json::Value::Null))),
+        other => Err(unexpected(other)),
+    }
+}
+
+/// `GET /api/v1/hosts`: the discovered host inventory, or an empty one when
+/// the collector is not running.
+pub async fn hosts(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+) -> ApiResult {
+    let section = sensr_ipc::RuntimeSection::Hosts;
+    match call(&state, &caller, Op::Runtime { section }).await? {
+        Response::Value(v) => Ok(Json(
+            v.unwrap_or_else(|| serde_json::json!({"now": 0, "hosts": []})),
+        )),
+        other => Err(unexpected(other)),
+    }
+}
+
+/// Body of `POST /api/v1/hosts/forget`.
+#[derive(Deserialize)]
+pub struct ForgetBody {
+    key: String,
+}
+
+/// `POST /api/v1/hosts/forget`: drop a host from the inventory. The agent
+/// answers Conflict (409) for a reserved or unknown host and Forbidden
+/// (403) to read-only principals.
+pub async fn forget_host(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    Json(b): Json<ForgetBody>,
+) -> ApiResult {
+    match call(&state, &caller, Op::HostForget { key: b.key }).await? {
         Response::Value(v) => Ok(Json(v.unwrap_or(serde_json::Value::Null))),
         other => Err(unexpected(other)),
     }

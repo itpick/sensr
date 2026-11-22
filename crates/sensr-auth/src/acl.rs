@@ -171,6 +171,11 @@ impl Registry {
             &["api/v1/config/*", "api/v1/apply/*"],
         );
         r.insert(
+            "page-sensr-hosts",
+            "sensr: Hosts",
+            &["ui/core/dashboard/hosts", "api/v1/hosts", "api/v1/hosts/*"],
+        );
+        r.insert(
             "page-interfaces-assignnetworkports",
             "Interfaces: Assign network ports",
             &["ui/interfaces/assignment", "api/v1/interfaces/*"],

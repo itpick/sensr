@@ -58,6 +58,12 @@ async fn start() -> Fx {
             ]),
         ),
         (3, "watchers", json!(["page-sensr-status"])),
+        (4, "hostviewers", json!(["page-sensr-hosts"])),
+        (
+            5,
+            "hostreaders",
+            json!(["page-sensr-hosts", "user-config-readonly"]),
+        ),
     ] {
         edits.push((
             format!("system.groups.{}", uuid(100 + n)),
@@ -68,6 +74,8 @@ async fn start() -> Fx {
         (1, "admin", "adminpw", "admins"),
         (2, "auditor", "pw", "auditors"),
         (3, "watcher", "pw", "watchers"),
+        (4, "hostviewer", "pw", "hostviewers"),
+        (5, "hostreader", "pw", "hostreaders"),
     ] {
         let mut user = json!({"name": name, "uid": if n == 1 { 0 } else { 2000 + n },
             "password_hash": hash_password(password).unwrap(), "groups": [group]});
@@ -486,4 +494,35 @@ async fn duplicate_alias_name_is_rejected() {
     );
     let (_, status) = http(&fx, "GET", "/api/v1/status", Some(&admin), None).await;
     assert_eq!(status["candidate_dirty"], false, "nothing staged");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hosts_requires_privilege() {
+    let fx = start().await;
+    let watcher = pw("watcher", "pw");
+    assert_eq!(
+        http(&fx, "GET", "/api/v1/hosts", Some(&watcher), None)
+            .await
+            .0,
+        403
+    );
+    let viewer = pw("hostviewer", "pw");
+    let (st, body) = http(&fx, "GET", "/api/v1/hosts", Some(&viewer), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body["hosts"].is_array(), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_host_readonly_forbidden() {
+    let fx = start().await;
+    let reader = pw("hostreader", "pw");
+    let (st, body) = http(
+        &fx,
+        "POST",
+        "/api/v1/hosts/forget",
+        Some(&reader),
+        Some(json!({"key": "aa:bb:cc:00:00:01"})),
+    )
+    .await;
+    assert_eq!(st, 403, "{body}");
 }
