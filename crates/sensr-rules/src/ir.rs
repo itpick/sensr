@@ -114,6 +114,9 @@ pub enum Addr {
     IfaceAddr(String),
     /// a literal device reference written by automated rules (`(em0)`)
     Device(String),
+    /// a named set of source MAC addresses (`ether saddr @name`; the name
+    /// without `@`), written by host-mode rules; source-only and nft-only
+    MacSet(String),
     /// an address that failed to parse; the rule is disabled
     Invalid(String),
 }

@@ -478,6 +478,14 @@ fn emit_sets<W: io::Write>(
             })?;
         }
     }
+    for name in &refs.mac_sets {
+        w.add(Object::Set {
+            name: name.as_str().into(),
+            ty: SetType(vec!["ether_addr"]),
+            interval: false,
+            elem: Vec::new(),
+        })?;
+    }
     for (name, a) in policy.aliases {
         w.add(Object::Set {
             name: compile::port_alias_set(name).into(),
@@ -522,6 +530,7 @@ fn field_expr(f: Field) -> Expr<'static> {
     match f {
         Field::Nfproto => Expr::Meta("nfproto"),
         Field::L4proto => Expr::Meta("l4proto"),
+        Field::EtherSaddr => Expr::Payload("ether", "saddr"),
         Field::Saddr(IpFamily::V4) => Expr::Payload("ip", "saddr"),
         Field::Saddr(IpFamily::V6) => Expr::Payload("ip6", "saddr"),
         Field::Daddr(IpFamily::V4) => Expr::Payload("ip", "daddr"),
@@ -1525,4 +1534,60 @@ fn emit_route<W: io::Write>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ether_saddr_renders() {
+        assert_eq!(
+            field_expr(Field::EtherSaddr),
+            Expr::Payload("ether", "saddr")
+        );
+        let m = compile::Match {
+            field: Field::EtherSaddr,
+            neg: false,
+            val: Val::SetRef(compile::host_mode_set("host_isolated")),
+        };
+        assert_eq!(
+            serde_json::to_string(&match_stmt(&m)).unwrap(),
+            r#"{"match":{"op":"==","left":{"payload":{"protocol":"ether","field":"saddr"}},"right":"@host_isolated"}}"#
+        );
+    }
+
+    #[test]
+    fn referenced_mac_set_is_declared_as_ether_addr() {
+        let rule = FilterRule {
+            action: crate::ir::Action::Block,
+            quick: true,
+            enabled: true,
+            src: Endpoint {
+                addr: Addr::MacSet("host_isolated".into()),
+                ..Endpoint::default()
+            },
+            ..FilterRule::default()
+        };
+        let render_one = |rules: &[FilterRule]| {
+            let mut buf = Vec::new();
+            let policy = Policy {
+                rules,
+                interfaces: &InterfaceMap::new(),
+                aliases: &BTreeMap::new(),
+                nat: None,
+                routing: None,
+            };
+            let report = render(&policy, &Options::default(), &mut buf).unwrap();
+            assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+            String::from_utf8(buf).unwrap()
+        };
+        let out = render_one(std::slice::from_ref(&rule));
+        assert!(
+            out.contains(r#"{"add":{"set":{"family":"inet","table":"sensr","name":"host_isolated","type":"ether_addr"}}}"#),
+            "{out}"
+        );
+        assert!(out.contains(r#""right":"@host_isolated""#), "{out}");
+        assert!(!render_one(&[]).contains("ether_addr"));
+    }
 }
