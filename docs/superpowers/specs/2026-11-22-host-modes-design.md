@@ -96,7 +96,7 @@ pub host_mode_settings: HostModeSettings,       // in Firewall, serde default
 
 pub struct HostMode {
     #[serde(default = "yes")] pub enabled: bool,
-    pub mac: MacAddress,                         // lowercase, unique across entries
+    pub mac: MacAddressField,                    // lowercase, unique across entries
     pub mode: HostModeKind,                      // "isolated" | "quarantine"
     pub description: Option<Description>,
 }
@@ -111,8 +111,21 @@ pub struct HostModeSettings {
 
 ### Router-side rules (`sensr-rules`)
 
-There is a new module beside `isolation.rs`, registered at the same priority
-(6) right after the existing isolation policies and before user rules.
+There is a new module beside `isolation.rs`.
+
+- The rule IR has no MAC match today. This piece adds a source-MAC-set
+  operand (`ether saddr @set`) to `ir.rs`, `compile.rs` and the nft
+  renderer.
+- The pf renderer is out of scope. It emits nothing for host modes, apart
+  from a comment saying they are nft-only.
+- Isolated rules register at priority 6, after the existing isolation.
+- **Quarantine rules register before anti-lockout (priority 5).** A
+  quarantined device must not reach the GUI or SSH (my call; the device is
+  presumed compromised). The UI guard below keeps this from locking the
+  admin out.
+- Cover both the input chain (traffic to the router) and the forward chain.
+  `(self)` only means something in input. A forward-chain "pass" is a
+  `return`, so correctness must not depend on an early accept.
 
 - Two nft sets of MACs: `host_isolated` and `host_quarantine`.
 - Two dynamic IP sets for the reverse direction: `host_locked_v4` and
@@ -136,6 +149,14 @@ There is a new module beside `isolation.rs`, registered at the same priority
   LAN2.
 - Forwarded same-interface traffic (iif == oif, produced by interception)
   hits these same rules in the forward chain.
+- **Existing connections are cut.**
+  - The forward chain accepts `ct state established,related` first, and
+    offloaded flows skip the chain.
+  - So when a host enters a mode (or moves Isolated → Quarantine), the agent
+    deletes conntrack entries to or from the host's addresses and flushes
+    the flowtable entries for them.
+  - The goal is that the new mode bites within seconds, not on the device's
+    next new connection.
 - Rule labels carry `#ref` `ui/core/dashboard` and the description, for the
   firewall log.
 - Goldens: add nft golden cases for one Isolated and one Quarantine host on
@@ -147,10 +168,16 @@ This is a task owned by the slice applier, started like `HostCollector`. It
 is active only when `arp_intercept` is on and at least one enabled Isolated or
 Quarantine host exists.
 
-- **Inputs,** recomputed on each config apply and each `HostCollector` poll:
-  - the locked MACs and their current IPv4 addresses, from the inventory;
-  - per internal interface: the router's MAC and IPv4 address, and the IPv4
-    neighbours (from the inventory) on the same subnet.
+- **Inputs,** recomputed on each config apply, each `HostCollector` poll,
+  and every 10 s (`FEED_TICK`) from a direct read of the neighbour table, so
+  a new neighbour is covered quickly:
+  - the locked MACs and their current IPv4 addresses;
+  - per internal interface: the router's MAC and IPv4 address, and the
+    *live* IPv4 neighbours on the same subnet.
+    - Live means REACHABLE/DELAY/PROBE/STALE in the kernel table, or
+      inventory `last_seen` within `ONLINE_SECS` (300 s).
+    - Rows that only exist in the inventory (offline, up to 90 days) are
+      never poisoned.
 - **Plan** (a pure function, unit-tested). For each locked host T on
   interface I:
   - for every other live neighbour X on I (not the router):
@@ -158,15 +185,30 @@ Quarantine host exists.
     - send X: "T's IP is at the router's MAC".
   - Never claim the router's own IP. Never target the router.
   - Never act on interfaces outside `internal_interfaces(doc)`.
-- **Send:** unicast ARP replies (opcode 2) on an `AF_PACKET` raw socket per
-  interface (socket2 is already a workspace dependency; the agent runs as
-  root). Repeat every **5 s** while active.
-- **Kernel settings** while active on an interface:
-  - `net.ipv4.conf.<if>.send_redirects=0`, so the kernel does not tell T to
-    go direct;
-  - `net.ipv4.conf.all.send_redirects=0`.
-  - The previous values are restored when interception stops.
-  - IP forwarding is already on.
+- **It must hold reliably, not best effort (my call).** Linux ignores
+  unsolicited replies for entries it doesn't already have, and an expired
+  entry re-resolves by broadcast, which the real neighbour answers. So the
+  interceptor does three things on an `AF_PACKET` raw socket per interface
+  (socket2 is a workspace dependency; the agent runs as root):
+  1. **Answers requests.** It listens for ARP requests from T for any X, and
+     from any X for T. It replies immediately with the router's MAC, racing
+     the real owner. It then repeats the reply about 50 ms later, so the
+     last answer the requester hears is the router's.
+  2. **Seeds with requests, not just replies.** Every **2 s** it sends a
+     unicast ARP *request* to T whose sender fields are (X's IP, router
+     MAC), and the reverse to each X. Receivers create or update neighbour
+     entries from requests addressed to them.
+  3. Measuring this on real devices is part of the acceptance check (see
+     Testing). Two cases count as success:
+     - from a locked host, `ping` to a LAN neighbour fails;
+     - over several minutes, the neighbour's real MAC never appears in the
+       locked host's ARP table for more than about 2 s.
+- **Kernel settings:** whenever interception is configured, the sysctl
+  applier (`appliers/sysctl.rs`, which owns `net.ipv4.*`) sets
+  `send_redirects=0` for `all` and for each internal interface. That way the
+  kernel never tells T to go direct, and no other code fights the applier
+  over these keys. Interception being configured means `arp_intercept` is on
+  and at least one host is locked. IP forwarding is already on.
 - **Heal:** when a host leaves the locked set, interception is switched off,
   or the agent shuts down (Drop / SIGTERM path, like the inventory flush),
   send three rounds 1 s apart of correct replies:
@@ -181,11 +223,21 @@ Quarantine host exists.
 
 - Hosts card: a Mode `<select>` per MAC row. Locked rows get a coloured badge
   (Isolated amber, Quarantine red) so they stand out in the list.
-- A server function, `set_host_mode(mac, mode)`:
-  - writes or removes the `firewall.host_modes` entry by MAC;
-  - commits only if the candidate had no other changes (see Goals);
-  - returns `Applied` or `Staged`.
-  - MockBackend gets the same behaviour.
+- A new agent write op, `Op::HostModeSet{mac, mode}` (REST `POST
+  /api/v1/hosts/mode`, privilege `page-sensr-hosts` plus config write). It
+  writes or removes the `firewall.host_modes` entry by MAC.
+  - The "no other changes" check and the commit happen atomically inside
+    the agent, so another user's edit can't slip in between.
+  - It commits only if the candidate equals the applied config apart from
+    this entry, and no provisional commit is waiting for confirmation.
+    Otherwise it stages only.
+  - It returns `Applied` or `Staged`.
+  - A UI server function `set_host_mode` calls it. MockBackend gets the same
+    behaviour.
+- **Self-protection guard:** the UI and the op refuse to Quarantine the MAC
+  of the client making the request. That client is found by matching the
+  request's source IP against the inventory. The error reads "That's the
+  device you're using — quarantine it from another device."
 - The card footer carries help text when any host is locked:
   "Same-network blocking works by redirecting the device's local traffic
   through the router (IPv4). It stops ordinary devices, not ones configured
@@ -198,6 +250,26 @@ Quarantine host exists.
 - Mode changes go through config writes. Users with `page-sensr-hosts` but
   only read-only config (`CONFIG_READONLY`) see the mode but can't change it.
 - No new privilege.
+
+## Testing
+
+- Unit tests:
+  - interception plan: who gets told what; never the router; only live
+    neighbours; only internal interfaces;
+  - ARP frame build/parse;
+  - request-answering decisions;
+  - the atomic commit rule (no other changes / other changes / pending
+    confirm).
+- nft goldens for Isolated and Quarantine on `home-router`, including the
+  pre-anti-lockout Quarantine block.
+- UI component tests and a Playwright e2e for the Mode select, the badges,
+  the "Staged" path, the read-only view and the self-quarantine refusal.
+- An on-router acceptance check after release (manual, with the owner's go):
+  1. Put a test device in Isolated.
+  2. Confirm that from it a LAN neighbour is unreachable and the internet
+     works.
+  3. Put it in Quarantine; the internet should stop.
+  4. Set it back to Normal; it should recover within about 5 s.
 
 ## Approaches considered
 
