@@ -957,6 +957,13 @@ impl<A: Applier> Agent<A> {
                 self.stage(inner, &base, doc)
             }
             Op::Runtime { section } => Ok(Response::Value(inner.applier.runtime(section))),
+            Op::HostForget { key } => match inner.applier.forget_host(&key) {
+                Ok(true) => Ok(Response::Value(Some(
+                    serde_json::json!({"forgotten": true}),
+                ))),
+                Ok(false) => Err(err(ErrorKind::Conflict, "host is reserved or unknown")),
+                Err(e) => Err(apply_error(e)),
+            },
         }
     }
 
@@ -1135,6 +1142,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::Nics => "nics",
         Op::InterfacesAssign { .. } => "interfaces.assign",
         Op::Runtime { .. } => "runtime",
+        Op::HostForget { .. } => "host.forget",
     }
 }
 

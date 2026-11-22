@@ -40,6 +40,12 @@ pub trait Applier: Send + 'static {
     fn runtime(&self, _section: sensr_ipc::RuntimeSection) -> Option<Value> {
         None
     }
+
+    /// Drops an unreserved host from the inventory; `false` when `key` is
+    /// reserved or unknown (or this pipeline keeps no inventory).
+    fn forget_host(&mut self, _key: &str) -> Result<bool, ApplyError> {
+        Ok(false)
+    }
 }
 
 /// Sections and the unit that serves them, for the preview plan.
@@ -158,6 +164,10 @@ pub struct FakeState {
     pub fail_next_apply: Option<String>,
     /// Paths whose presence in a document makes `plan` reject it.
     pub reject_paths: Vec<sensr_ipc::ConfigPath>,
+    /// Canned answers for [`Applier::runtime`].
+    pub runtime: Vec<(sensr_ipc::RuntimeSection, Value)>,
+    /// Host keys [`Applier::forget_host`] accepts (each once).
+    pub forgettable: Vec<String>,
 }
 
 /// Test double: records applies, can be told to fail.
@@ -199,6 +209,21 @@ impl Applier for FakeApplier {
         }
         st.applied.push(next.clone());
         Ok(())
+    }
+
+    fn runtime(&self, section: sensr_ipc::RuntimeSection) -> Option<Value> {
+        self.lock()
+            .runtime
+            .iter()
+            .find(|(s, _)| *s == section)
+            .map(|(_, v)| v.clone())
+    }
+
+    fn forget_host(&mut self, key: &str) -> Result<bool, ApplyError> {
+        let mut st = self.lock();
+        let before = st.forgettable.len();
+        st.forgettable.retain(|k| k != key);
+        Ok(st.forgettable.len() != before)
     }
 }
 

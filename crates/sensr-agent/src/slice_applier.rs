@@ -35,6 +35,7 @@ pub struct SliceApplier {
     refreshing: bool,
     gateways: Option<Arc<crate::gateways::GatewayService>>,
     pd: Option<Arc<crate::pd::PdService>>,
+    hosts: Option<Arc<crate::hosts::HostCollector>>,
 }
 
 /// How often link addresses are compared with the ruleset's sets.
@@ -65,6 +66,12 @@ impl SliceApplier {
             let pd = crate::pd::PdService::new(Arc::new(SystemRunner), "/", state.join("pd"));
             pd.start();
             a.pd = Some(pd);
+            let hosts = crate::hosts::HostCollector::new(
+                crate::hosts::HostStore::new(state.join("hosts.json")),
+                Arc::new(host_sources(Arc::new(SystemRunner))),
+            );
+            hosts.start();
+            a.hosts = Some(hosts);
         }
         if let Some(dir) = feeds_dir {
             let runner: Arc<dyn Runner> = Arc::new(SystemRunner);
@@ -133,6 +140,7 @@ impl SliceApplier {
             refreshing: false,
             gateways: None,
             pd: None,
+            hosts: None,
         })
     }
 
@@ -370,7 +378,12 @@ impl Applier for SliceApplier {
                 .pd
                 .as_ref()
                 .and_then(|p| serde_json::to_value(p.view(unix_now())).ok()),
+            sensr_ipc::RuntimeSection::Hosts => self.hosts.as_ref().map(|h| h.view(unix_now())),
         }
+    }
+
+    fn forget_host(&mut self, key: &str) -> Result<bool, ApplyError> {
+        Ok(self.hosts.as_ref().is_some_and(|h| h.forget(key)))
     }
 
     fn apply(&mut self, _running: Option<&Document>, next: &Document) -> Result<(), ApplyError> {
@@ -401,10 +414,44 @@ impl Applier for SliceApplier {
         if let Some(p) = &self.pd {
             p.applied(&doc);
         }
+        if let Some(h) = &self.hosts {
+            h.set_document(&doc);
+        }
         *lock(&self.applied) = Some((doc, addrs));
         self.start_watcher();
         self.start_refresher();
         Ok(())
+    }
+}
+
+impl Drop for SliceApplier {
+    fn drop(&mut self) {
+        // clean shutdown: keep the last `last_seen`s the throttle held back
+        if let Some(h) = &self.hosts {
+            h.shutdown();
+        }
+    }
+}
+
+/// The host inventory's inputs: `ip -j neigh show` and Kea's lease files.
+fn host_sources(
+    runner: Arc<dyn Runner>,
+) -> impl Fn() -> (
+    Vec<sensr_feeds::neigh::NeighEntry>,
+    Vec<sensr_feeds::neigh::KeaLease>,
+) + Send
++ Sync
++ 'static {
+    move || {
+        let neigh = runner
+            .run(&Cmd::new("ip").args(["-j", "neigh", "show"]), None)
+            .map(|o| sensr_feeds::neigh::parse_ip_neigh_entries(&o.stdout))
+            .unwrap_or_default();
+        let leases = sensr_feeds::neigh::read_kea_lease_records(
+            std::path::Path::new(sensr_apply::appliers::kea::LEASE_FILE),
+            unix_now(),
+        );
+        (neigh, leases)
     }
 }
 

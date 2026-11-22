@@ -2,12 +2,13 @@
 //! MAC from the neighbour table, Kea's leases and the configured
 //! reservations (docs/superpowers/specs/2026-11-22-host-inventory-design.md).
 //!
-//! Pure model and merge; reading the inputs, persisting and serving the view
-//! live elsewhere.
+//! The model and merge ([`Inventory`]), its file ([`HostStore`]) and the
+//! 30 s loop that feeds both ([`HostCollector`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use sensr_apply::appliers::convert::kea_subnet_id;
 use sensr_feeds::neigh::{KeaLease, NeighEntry};
@@ -597,6 +598,143 @@ impl HostStore {
         self.dirty = Change::None;
         self.last_flush = Some(now);
         Ok(())
+    }
+}
+
+/// How often the collector polls its sources.
+const POLL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Reads the neighbour table and Kea's leases (at call time).
+pub type Sources = Arc<dyn Fn() -> (Vec<NeighEntry>, Vec<KeaLease>) + Send + Sync>;
+
+struct Collected {
+    inv: Inventory,
+    store: HostStore,
+    /// Reservations and interfaces of the applied document; `neigh` and
+    /// `leases` are filled per poll.
+    snap: Snapshot,
+    /// No document applied yet: polling would read every loaded
+    /// reservation as removed.
+    ready: bool,
+}
+
+/// The host inventory service: polls [`Sources`] every 30 s, merges them into
+/// the [`Inventory`] and persists it through a [`HostStore`].
+pub struct HostCollector {
+    sources: Sources,
+    state: Mutex<Collected>,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl HostCollector {
+    /// Loads what `store` saved; polls nothing until [`Self::set_document`].
+    pub fn new(store: HostStore, sources: Sources) -> Arc<Self> {
+        let inv = Inventory::from_hosts(store.load());
+        Arc::new(Self {
+            sources,
+            state: Mutex::new(Collected {
+                inv,
+                store,
+                snap: Snapshot {
+                    neigh: Vec::new(),
+                    leases: Vec::new(),
+                    reservations: Vec::new(),
+                    internal: Vec::new(),
+                    subnet_iface: BTreeMap::new(),
+                },
+                ready: false,
+            }),
+        })
+    }
+
+    /// After an apply: the document's internal interfaces, Kea subnets and
+    /// reservations.
+    pub fn set_document(&self, doc: &Document) {
+        let internal = internal_interfaces(doc);
+        let mut st = lock(&self.state);
+        st.snap.subnet_iface = subnet_ifaces(doc, &internal);
+        st.snap.reservations = reservations(doc);
+        st.snap.internal = internal;
+        st.ready = true;
+    }
+
+    /// One poll at `now`: merge, prune, persist when due. Write failures are
+    /// logged; the in-memory inventory stays authoritative.
+    pub fn poll(&self, now: u64) {
+        if !lock(&self.state).ready {
+            return;
+        }
+        // outside the lock: this runs `ip` and reads Kea's files
+        let (neigh, leases) = (self.sources)();
+        let mut st = lock(&self.state);
+        let st = &mut *st;
+        st.snap.neigh = neigh;
+        st.snap.leases = leases;
+        let change = st.inv.observe(&st.snap, now);
+        st.snap.neigh.clear();
+        st.snap.leases.clear();
+        st.store.note(change);
+        if st.inv.prune(now) {
+            st.store.note(Change::Structural);
+        }
+        if let Err(e) = st.store.maybe_flush(&st.inv, now) {
+            tracing::warn!(error = %e, "saving the host inventory");
+        }
+    }
+
+    /// Starts polling in a thread.
+    pub fn start(self: &Arc<Self>) {
+        let s = Arc::clone(self);
+        let r = std::thread::Builder::new()
+            .name("sensr-hosts".into())
+            .spawn(move || {
+                loop {
+                    s.poll(unix_now());
+                    std::thread::sleep(POLL);
+                }
+            });
+        if let Err(e) = r {
+            tracing::error!(error = %e, "host collector not started");
+        }
+    }
+
+    /// The wire format ([`Inventory::view`]).
+    pub fn view(&self, now: u64) -> serde_json::Value {
+        let st = lock(&self.state);
+        st.inv.view(now, &st.snap.internal)
+    }
+
+    /// Forgets an unreserved host and saves at once; `false` if `key` is
+    /// reserved or unknown.
+    pub fn forget(&self, key: &str) -> bool {
+        let mut st = lock(&self.state);
+        let st = &mut *st;
+        if !st.inv.forget(key) {
+            return false;
+        }
+        st.store.note(Change::Structural);
+        if let Err(e) = st.store.flush(&st.inv, unix_now()) {
+            tracing::warn!(error = %e, "saving the host inventory");
+        }
+        true
+    }
+
+    /// Final save (clean shutdown).
+    pub fn shutdown(&self) {
+        let mut st = lock(&self.state);
+        let st = &mut *st;
+        if let Err(e) = st.store.flush(&st.inv, unix_now()) {
+            tracing::warn!(error = %e, "saving the host inventory");
+        }
     }
 }
 
@@ -1227,5 +1365,114 @@ mod store {
         let mut s = HostStore::new(dir.path().join("sub/hosts.json"));
         s.flush(&inv_with(&["aa:bb:cc:dd:ee:01"]), 0).unwrap();
         assert_eq!(s.load().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod collector {
+    use super::*;
+
+    const MAC: &str = "aa:bb:cc:dd:ee:42";
+
+    fn home_router() -> Document {
+        let path = format!(
+            "{}/../sensr-import-opnsense/tests/golden/home-router.sensr.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("importer golden"))
+            .expect("document")
+    }
+
+    /// A collector whose neighbour table holds one REACHABLE host on the
+    /// document's LAN device.
+    fn collector(dir: &tempfile::TempDir) -> (Arc<HostCollector>, Document) {
+        let doc = home_router();
+        let lan = internal_interfaces(&doc)
+            .into_iter()
+            .find(|i| i.id == "lan")
+            .expect("lan");
+        let ip = IpAddr::V4(lan.subnets[0].hosts().nth(41).unwrap());
+        let dev = lan.device.clone();
+        let sources = Arc::new(move || {
+            (
+                vec![NeighEntry {
+                    mac: MAC.into(),
+                    ip,
+                    dev: dev.clone(),
+                    state: vec!["REACHABLE".into()],
+                }],
+                Vec::new(),
+            )
+        });
+        let c = HostCollector::new(HostStore::new(dir.path().join("hosts.json")), sources);
+        c.set_document(&doc);
+        (c, doc)
+    }
+
+    #[test]
+    fn collector_poll_and_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, _) = collector(&dir);
+        c.poll(1000);
+        let v = c.view(1000);
+        assert_eq!(v["now"], 1000);
+        let row = v["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["key"] == MAC)
+            .expect("seen host");
+        assert_eq!(row["online"], true);
+        assert_eq!(row["interface"], "lan");
+        assert!(dir.path().join("hosts.json").exists());
+    }
+
+    #[test]
+    fn collector_forget_flushes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, _) = collector(&dir);
+        c.poll(1000);
+        let file = dir.path().join("hosts.json");
+        assert!(std::fs::read_to_string(&file).unwrap().contains(MAC));
+        assert!(c.forget(MAC));
+        assert!(!std::fs::read_to_string(&file).unwrap().contains(MAC));
+        // a reserved host stays
+        assert!(!c.forget("02:00:5e:10:00:0a"));
+        assert!(!c.forget("00:00:00:00:00:00"));
+    }
+
+    #[test]
+    fn collector_reloads_the_saved_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, _) = collector(&dir);
+        c.poll(1000);
+        c.shutdown();
+        let again = HostCollector::new(
+            HostStore::new(dir.path().join("hosts.json")),
+            Arc::new(|| (Vec::new(), Vec::new())),
+        );
+        let v = again.view(1000);
+        assert!(
+            v["hosts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|h| h["key"] == MAC)
+        );
+    }
+
+    #[test]
+    fn poll_survives_an_unwritable_store() {
+        let dir = tempfile::tempdir().unwrap();
+        // the store's parent is a file, so every write fails
+        std::fs::write(dir.path().join("blocker"), b"").unwrap();
+        let c = HostCollector::new(
+            HostStore::new(dir.path().join("blocker/hosts.json")),
+            Arc::new(|| (Vec::new(), Vec::new())),
+        );
+        c.set_document(&home_router());
+        c.poll(1000);
+        c.shutdown();
+        assert!(!c.view(1000)["hosts"].as_array().unwrap().is_empty());
     }
 }
