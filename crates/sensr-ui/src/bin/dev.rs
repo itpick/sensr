@@ -30,7 +30,11 @@ async fn main() -> anyhow::Result<()> {
     let mut backend = sensr_ui::mock::MockBackend::new().with_insight_dir(insight);
     // SENSR_UI_PRIVILEGES="page-all,user-config-readonly" runs the server as a read-only user.
     if let Ok(list) = std::env::var("SENSR_UI_PRIVILEGES") {
-        let names: Vec<&str> = list.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
+        let names: Vec<&str> = list
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
         backend = backend.with_privileges(&names);
     }
     let backend = Arc::new(backend);
