@@ -1609,7 +1609,12 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
                 Ok(()) => {
                     error.set(None);
                     bump();
-                    refresh();
+                    // Stay busy until the card shows the row as staged, so a second
+                    // click cannot stage the reservation twice.
+                    match hosts().await {
+                        Ok(c) => card.set(c),
+                        Err(e) => error.set(Some(format!("Could not read the hosts: {e}"))),
+                    }
                 }
                 Err(e) => error.set(Some(e.to_string())),
             }
@@ -1648,7 +1653,8 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
         let actions = if read_only {
             ().into_any()
         } else {
-            let offer_static = h.leased_only() && h.mac.is_some() && h.ipv4.is_some();
+            let offer_static = h.leased_only() && !h.staged && h.mac.is_some() && h.ipv4.is_some();
+            let staged = h.leased_only() && h.staged;
             let (for_static, for_forget) = (h.clone(), h.clone());
             let (k1, k2) = (key.clone(), key.clone());
             view! {
@@ -1656,6 +1662,9 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
                     <button type="button" class="btn btn-sm"
                         disabled=move || busy.get().as_deref() == Some(k1.as_str())
                         on:click=move |_| make_static(for_static.clone())>"Make static"</button>
+                })}
+                {staged.then(|| view! {
+                    <span class="muted" title="A reservation is staged; apply it to make this host static">"staged"</span>
                 })}
                 {if h.reserved() {
                     view! { <span class="muted">"remove the reservation on the DHCP page to forget this host"</span> }.into_any()

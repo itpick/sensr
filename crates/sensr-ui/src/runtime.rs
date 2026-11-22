@@ -376,9 +376,11 @@ pub struct HostRow {
     pub reserved_name: Option<String>,
     /// Host name the client sent with its lease.
     pub lease_hostname: Option<String>,
-    /// Interface id (`lan`, `opt1`).
+    /// Interface id (`lan`, `opt1`); empty when unknown (`null` reads as empty).
+    #[serde(deserialize_with = "null_default")]
     pub interface: String,
-    /// Interface display name (`LAN`).
+    /// Interface display name (`LAN`); empty when unknown.
+    #[serde(deserialize_with = "null_default")]
     pub interface_name: String,
     /// IPv4 address.
     pub ipv4: Option<String>,
@@ -394,6 +396,31 @@ pub struct HostRow {
     pub last_seen: Option<u64>,
     /// Currently on the network.
     pub online: bool,
+    /// A reservation for it is staged but not applied yet (set by the UI from the
+    /// staged document, never sent by the agent).
+    pub staged: bool,
+}
+
+/// `null` as the type's default, for fields an agent may send as `null`.
+fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Option::unwrap_or_default)
+}
+
+/// The rows that parse; one odd row is dropped instead of failing the whole list.
+fn lenient_rows<'de, D>(d: D) -> Result<Vec<HostRow>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let rows: Option<Vec<Value>> = Option::deserialize(d)?;
+    Ok(rows
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| serde_json::from_value(r).ok())
+        .collect())
 }
 
 impl HostRow {
@@ -468,7 +495,33 @@ pub struct HostList {
     /// Agent time, seconds since the epoch.
     pub now: u64,
     /// Hosts, online first, then most recently seen.
+    #[serde(deserialize_with = "lenient_rows")]
     pub hosts: Vec<HostRow>,
+}
+
+impl HostList {
+    /// Marks the unreserved hosts a reservation in `doc` (the staged document) covers,
+    /// by MAC or address, so the card stops offering Make static before Apply.
+    pub fn mark_staged(&mut self, doc: &Value) {
+        let reservations: Vec<&Value> = doc
+            .pointer("/dhcpv4/reservations")
+            .and_then(Value::as_object)
+            .map(|m| m.values().collect())
+            .unwrap_or_default();
+        let get = |r: &Value, p: &str| {
+            r.pointer(p)
+                .and_then(Value::as_str)
+                .map(str::to_ascii_lowercase)
+        };
+        for h in &mut self.hosts {
+            // a reserved row's reservation is already applied
+            h.staged = !h.reserved()
+                && reservations.iter().any(|r| {
+                    (h.mac.is_some() && get(r, "/client/hw_address").as_deref() == h.mac.as_deref())
+                        || (h.ipv4.is_some() && get(r, "/ip_address") == h.ipv4)
+                });
+        }
+    }
 }
 
 /// Parses an agent reply; `null` (subsystem not running) and unknown shapes give the default.
@@ -639,6 +692,55 @@ mod tests {
             [ago(30), ago(300), ago(7_200), ago(172_800)],
             ["30s", "5m", "2h", "2d"]
         );
+    }
+
+    #[test]
+    fn one_odd_host_row_does_not_empty_the_list() {
+        // `null` interfaces are what the agent sent before they were always strings.
+        let l: HostList = parse(json!({"now": 1000, "hosts": [
+            {"key": "aa:bb:cc:dd:ee:09", "interface": null, "interface_name": null,
+             "sources": ["reserved"], "first_seen": 900},
+            {"key": "garbage", "first_seen": "yesterday"},
+            {"key": "aa:bb:cc:dd:ee:01", "interface": "lan", "interface_name": "LAN",
+             "sources": ["neighbour"], "first_seen": 900, "online": true}
+        ]}));
+        let keys: Vec<&str> = l.hosts.iter().map(|h| h.key.as_str()).collect();
+        assert_eq!(keys, ["aa:bb:cc:dd:ee:09", "aa:bb:cc:dd:ee:01"]);
+        assert_eq!(
+            (
+                l.hosts[0].interface.as_str(),
+                l.hosts[0].interface_name.as_str()
+            ),
+            ("", "")
+        );
+        assert_eq!(l.now, 1000);
+        let none: HostList = parse(json!({"now": 5, "hosts": null}));
+        assert_eq!((none.now, none.hosts.len()), (5, 0));
+    }
+
+    /// The agent's own `view()` output (its `view_matches_the_ui_contract` test keeps
+    /// the file current): every row survives, one on a no-longer-internal interface too.
+    #[test]
+    fn parses_the_agent_view_golden() {
+        let v: Value = serde_json::from_str(include_str!(
+            "../../sensr-agent/tests/golden/hosts-view.json"
+        ))
+        .unwrap();
+        let l: HostList = parse(v);
+        assert_eq!(l.now, 1010);
+        let row = |name: &str| l.hosts.iter().find(|h| h.name.as_deref() == Some(name));
+        assert_eq!(l.hosts.len(), 3);
+        assert_eq!(l.hosts[0].interface_name, "LAN");
+        assert!(l.hosts[0].online);
+        let camera = row("camera").expect("camera");
+        assert_eq!(
+            (camera.interface.as_str(), camera.interface_name.as_str()),
+            ("opt9", "OPT9")
+        );
+        assert_eq!(camera.source(), "static");
+        let orphan = row("orphan").expect("orphan");
+        assert_eq!(orphan.interface, "");
+        assert_eq!(orphan.seen(l.now), "never");
     }
 
     #[test]

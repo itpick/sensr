@@ -743,8 +743,13 @@ pub async fn hosts() -> Result<Option<HostCard>, ServerFnError> {
     if !b.may_access("/api/v1/hosts") {
         return Ok(None);
     }
-    let list: crate::runtime::HostList =
+    let mut list: crate::runtime::HostList =
         crate::runtime::parse(b.runtime(RuntimeSection::Hosts).await.map_err(imp::err)?);
+    // A reservation staged from this card (or anywhere) hides Make static until the
+    // applied one shows up; without the document the card just offers it.
+    if let Ok(doc) = imp::doc().await {
+        list.mark_staged(&doc);
+    }
     let networks: std::collections::BTreeMap<String, String> = list
         .hosts
         .iter()

@@ -802,6 +802,48 @@ fn hosts_card_make_static_needs_a_lease_a_mac_and_an_ipv4() {
 }
 
 #[test]
+fn hosts_card_make_static_is_gone_once_staged() {
+    let handle: sensr_ui::api::BackendHandle = std::sync::Arc::new(hosts_mock());
+    let owner = Owner::new();
+    let card = owner.with(|| {
+        provide_context(handle);
+        futures::executor::block_on(sensr_ui::actions::reserve_lease(
+            "192.168.1.112".into(),
+            Some("b8:27:eb:7d:4e:25".into()),
+            None,
+            "bench-pi".into(),
+        ))
+        .unwrap();
+        futures::executor::block_on(sensr_ui::actions::hosts())
+            .unwrap()
+            .unwrap()
+    });
+    let pi = card
+        .list
+        .hosts
+        .iter()
+        .find(|h| h.name.as_deref() == Some("bench-pi"))
+        .unwrap();
+    assert!(pi.staged, "the staged reservation covers bench-pi");
+    // others are untouched until they are staged too
+    assert!(
+        !card
+            .list
+            .hosts
+            .iter()
+            .any(|h| h.staged && h.name.as_deref() != Some("bench-pi"))
+    );
+    let doc = render_hosts(Some(card));
+    let row = host_row(&doc, "bench-pi");
+    let buttons: Vec<String> = row
+        .select(&sel("button"))
+        .map(|b| text(b).trim().to_owned())
+        .collect();
+    assert_eq!(buttons, ["Forget"], "no second Make static before Apply");
+    assert!(text(row).contains("staged"));
+}
+
+#[test]
 fn hosts_card_filter_search_and_show_all() {
     let card = hosts_from(hosts_mock()).unwrap();
     // Everything, first 20 of 25.
