@@ -1568,6 +1568,216 @@ pub fn DhcpLeases(initial: LeaseTable) -> impl IntoView {
     }
 }
 
+/// Rows the Hosts card shows before "Show all".
+const HOSTS_SHOWN: usize = 20;
+
+/// Dashboard › Hosts: every client the router knows of, searchable and filterable by
+/// network, with Make static for leased hosts and Forget for unreserved ones. Refreshed
+/// with the other dashboard widgets; renders nothing when the caller may not see hosts.
+#[island]
+pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
+    if initial.is_none() {
+        return ().into_any();
+    }
+    mark_hydrated();
+    let card = RwSignal::new(initial);
+    let search = RwSignal::new(String::new());
+    let network = RwSignal::new(String::new());
+    let show_all = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let busy = RwSignal::new(None::<String>);
+
+    let refresh = move || {
+        spawn_local(async move {
+            match hosts().await {
+                Ok(c) => {
+                    card.set(c);
+                    error.set(None);
+                }
+                Err(e) => error.set(Some(format!("Could not read the hosts: {e}"))),
+            }
+        });
+    };
+    Effect::new(move |_| {
+        set_interval(refresh, std::time::Duration::from_secs(3));
+    });
+
+    let make_static = move |h: crate::runtime::HostRow| {
+        let (Some(ip), Some(mac)) = (h.ipv4.clone(), h.mac.clone()) else {
+            return;
+        };
+        busy.set(Some(h.key.clone()));
+        spawn_local(async move {
+            match reserve_lease(ip, Some(mac), None, h.name.clone().unwrap_or_default()).await {
+                Ok(()) => {
+                    error.set(None);
+                    bump();
+                    refresh();
+                }
+                Err(e) => error.set(Some(e.to_string())),
+            }
+            busy.set(None);
+        });
+    };
+    let forget = move |h: crate::runtime::HostRow| {
+        #[cfg(feature = "hydrate")]
+        {
+            let msg = format!(
+                "Forget {}? It reappears if it is still on the network.",
+                h.label()
+            );
+            if !web_sys::window()
+                .and_then(|w| w.confirm_with_message(&msg).ok())
+                .unwrap_or(false)
+            {
+                return;
+            }
+        }
+        busy.set(Some(h.key.clone()));
+        spawn_local(async move {
+            match forget_host(h.key.clone()).await {
+                Ok(()) => {
+                    error.set(None);
+                    refresh();
+                }
+                Err(e) => error.set(Some(e.to_string())),
+            }
+            busy.set(None);
+        });
+    };
+
+    let row = move |h: &crate::runtime::HostRow, now: u64, read_only: bool| {
+        let key = h.key.clone();
+        let actions = if read_only {
+            ().into_any()
+        } else {
+            let offer_static = h.leased_only() && h.mac.is_some() && h.ipv4.is_some();
+            let (for_static, for_forget) = (h.clone(), h.clone());
+            let (k1, k2) = (key.clone(), key.clone());
+            view! {
+                {offer_static.then(|| view! {
+                    <button type="button" class="btn btn-sm"
+                        disabled=move || busy.get().as_deref() == Some(k1.as_str())
+                        on:click=move |_| make_static(for_static.clone())>"Make static"</button>
+                })}
+                {if h.reserved() {
+                    view! { <span class="muted">"remove the reservation on the DHCP page to forget this host"</span> }.into_any()
+                } else {
+                    view! {
+                        <button type="button" class="btn btn-sm"
+                            disabled=move || busy.get().as_deref() == Some(k2.as_str())
+                            on:click=move |_| forget(for_forget.clone())>"Forget"</button>
+                    }.into_any()
+                }}
+            }
+            .into_any()
+        };
+        view! {
+            <tr class:dimmed=!h.online>
+                <td>{h.label()}</td>
+                <td class="num">{h.mac.clone().unwrap_or_default()}</td>
+                <td class="num">{h.ipv4.clone().unwrap_or_default()}
+                    {h.ipv6.first().map(|v6| view! { <br/><span class="muted">{v6.clone()}</span> })}</td>
+                <td>{h.interface_name.clone()}</td>
+                <td>{h.source()}</td>
+                <td>{h.seen(now)}</td>
+                <td class="host-actions">{actions}</td>
+            </tr>
+        }
+    };
+
+    // Rebuilt only when the card appears or disappears, so typing keeps focus.
+    let visible = Memo::new(move |_| card.with(Option::is_some));
+    let any =
+        Memo::new(move |_| card.with(|c| c.as_ref().is_some_and(|c| !c.list.hosts.is_empty())));
+    let body = move || {
+        card.with(|c| {
+            let c = c.as_ref()?;
+            if c.list.hosts.is_empty() {
+                return Some(view! { <p class="muted">"No hosts seen yet."</p> }.into_any());
+            }
+            let q = search.with(|s| s.trim().to_lowercase());
+            let net = network.get();
+            let matching: Vec<&crate::runtime::HostRow> = c
+                .list
+                .hosts
+                .iter()
+                .filter(|h| net.is_empty() || h.interface == net)
+                .filter(|h| h.matches(&q))
+                .collect();
+            let m = matching.len();
+            let all = show_all.get();
+            let rows = matching
+                .iter()
+                .take(if all { m } else { HOSTS_SHOWN })
+                .map(|h| row(h, c.list.now, c.read_only))
+                .collect_view();
+            Some(
+                view! {
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th scope="col">"Name"</th>
+                                    <th scope="col">"MAC"</th>
+                                    <th scope="col">"IP"</th>
+                                    <th scope="col">"Network"</th>
+                                    <th scope="col">"Source"</th>
+                                    <th scope="col">"Seen"</th>
+                                    <th scope="col" aria-label="Actions"></th>
+                                </tr>
+                            </thead>
+                            <tbody>{rows}</tbody>
+                        </table>
+                    </div>
+                    {(!all && m > HOSTS_SHOWN).then(|| view! {
+                        <div class="banner-actions">
+                            <button type="button" class="btn" on:click=move |_| show_all.set(true)>
+                                {format!("Show all ({m})")}
+                            </button>
+                        </div>
+                    })}
+                }
+                .into_any(),
+            )
+        })
+    };
+    let toolbar = move || {
+        any.get().then(|| view! {
+            <div class="grid-toolbar">
+                <label class="search">
+                    <span class="sr-only">"Search hosts"</span>
+                    <input type="search" placeholder="Search name, MAC or IP"
+                        prop:value=move || search.get()
+                        on:input=move |ev| search.set(event_target_value(&ev))/>
+                </label>
+                <label>
+                    <span class="sr-only">"Network"</span>
+                    <select prop:value=move || network.get()
+                        on:change=move |ev| network.set(event_target_value(&ev))>
+                        <option value="">"All networks"</option>
+                        {move || card.with(|c| c.as_ref().map(|c| c.networks.clone()).unwrap_or_default())
+                            .into_iter()
+                            .map(|(id, name)| view! { <option value=id>{name}</option> })
+                            .collect_view()}
+                    </select>
+                </label>
+            </div>
+        })
+    };
+    view! {
+        {move || visible.get().then(|| view! {
+            <section class="card card-wide hosts-card" aria-labelledby="w-hosts">
+                <h2 id="w-hosts">{move || card.with(|c| format!("Hosts ({})", c.as_ref().map_or(0, |c| c.list.hosts.len())))}</h2>
+                {toolbar}
+                {body}
+                {move || error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
+            </section>
+        })}
+    }
+    .into_any()
+}
+
 /// Keeps `DiffKind` in the bundle's public surface for the history page CSS classes.
 pub fn diff_class(kind: DiffKind) -> &'static str {
     match kind {

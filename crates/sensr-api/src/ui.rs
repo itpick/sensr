@@ -299,6 +299,7 @@ impl Backend for UiBackend {
                 RuntimeSection::Gateways => sensr_ipc::RuntimeSection::Gateways,
                 RuntimeSection::Aliases => sensr_ipc::RuntimeSection::Aliases,
                 RuntimeSection::Ipv6 => sensr_ipc::RuntimeSection::Ipv6,
+                RuntimeSection::Hosts => sensr_ipc::RuntimeSection::Hosts,
             };
             match self.call(Op::Runtime { section }).await? {
                 Response::Value(v) => Ok(v.unwrap_or(Value::Null)),
@@ -306,6 +307,24 @@ impl Backend for UiBackend {
             }
         }
         .boxed()
+    }
+
+    fn forget_host(&self, key: String) -> BoxFuture<'_, ApiResult<()>> {
+        async move {
+            match self.call(Op::HostForget { key }).await? {
+                Response::Value(_) => Ok(()),
+                other => Err(unexpected(other)),
+            }
+        }
+        .boxed()
+    }
+
+    fn read_only(&self) -> bool {
+        self.caller
+            .info
+            .privileges
+            .iter()
+            .any(|p| p == sensr_auth::acl::CONFIG_READONLY)
     }
 }
 

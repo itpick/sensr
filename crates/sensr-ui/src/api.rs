@@ -716,6 +716,14 @@ mod server {
             &self,
             section: crate::runtime::RuntimeSection,
         ) -> BoxFuture<'_, ApiResult<Value>>;
+        /// Drops an unreserved host from the inventory (`key` as in
+        /// [`crate::runtime::HostRow::key`]); it comes back if it is still on the network.
+        fn forget_host(&self, key: String) -> BoxFuture<'_, ApiResult<()>>;
+        /// The caller may read but not change anything (`user-config-readonly`), so the
+        /// UI hides actions that would be refused.
+        fn read_only(&self) -> bool {
+            false
+        }
     }
 
     /// A backend bound to one signed-in user (their identity and privileges travel with

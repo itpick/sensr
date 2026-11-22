@@ -693,6 +693,58 @@ pub async fn dhcp_leases() -> Result<LeaseTable, ServerFnError> {
     Ok(LeaseTable { now, leases })
 }
 
+/// The dashboard's Hosts card: the inventory, whether the caller may act on it, and the
+/// networks to filter by.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostCard {
+    /// The inventory as the agent reports it.
+    pub list: crate::runtime::HostList,
+    /// The caller may not change anything: no Make static or Forget.
+    pub read_only: bool,
+    /// `(interface id, display name)` of each network with hosts, by id.
+    pub networks: Vec<(String, String)>,
+}
+
+/// The host inventory for the dashboard, or `None` when the caller may not see it
+/// (`page-sensr-hosts`), so the card is left out.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn hosts() -> Result<Option<HostCard>, ServerFnError> {
+    let b = imp::backend()?;
+    if !b.may_access("/api/v1/hosts") {
+        return Ok(None);
+    }
+    let list: crate::runtime::HostList =
+        crate::runtime::parse(b.runtime(RuntimeSection::Hosts).await.map_err(imp::err)?);
+    let networks: std::collections::BTreeMap<String, String> = list
+        .hosts
+        .iter()
+        .filter(|h| !h.interface.is_empty())
+        .map(|h| {
+            let name = if h.interface_name.is_empty() {
+                h.interface.to_uppercase()
+            } else {
+                h.interface_name.clone()
+            };
+            (h.interface.clone(), name)
+        })
+        .collect();
+    Ok(Some(HostCard {
+        read_only: b.read_only(),
+        networks: networks.into_iter().collect(),
+        list,
+    }))
+}
+
+/// Drops an unreserved host from the inventory (it comes back if still on the network).
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn forget_host(key: String) -> Result<(), ServerFnError> {
+    let b = imp::backend()?;
+    if !b.may_access("/api/v1/hosts/forget") {
+        return Err(ServerFnError::new("you may not change the host inventory"));
+    }
+    b.forget_host(key).await.map_err(imp::err)
+}
+
 /// Stages a static reservation for a lease, mirroring the lease's MAC (or client id, when
 /// the lease has no MAC) and host name. Nothing takes effect until the change is applied.
 #[server(prefix = "/ui/fn", input = Json)]

@@ -32,6 +32,8 @@ struct State {
     sessions: HashMap<String, String>,
     next_token: u64,
     clock: Box<dyn Fn() -> u64 + Send>,
+    /// Host keys dropped with Forget.
+    forgotten: std::collections::HashSet<String>,
 }
 
 impl State {
@@ -98,6 +100,8 @@ pub struct MockBackend {
     users: Vec<(String, String)>,
     /// Where the traffic and alert databases are (see [`seed_insight`]).
     insight_dir: Option<std::path::PathBuf>,
+    /// The caller's privileges, checked against the built-in registry; `None` is root.
+    privileges: Option<Vec<String>>,
 }
 
 impl Default for MockBackend {
@@ -149,9 +153,11 @@ impl MockBackend {
                 sessions: HashMap::new(),
                 next_token: 1,
                 clock,
+                forgotten: Default::default(),
             }),
             users: vec![("root".into(), "sensr".into())],
             insight_dir: None,
+            privileges: None,
         }
     }
 
@@ -159,6 +165,15 @@ impl MockBackend {
     #[must_use]
     pub fn with_insight_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.insight_dir = Some(dir.into());
+        self
+    }
+
+    /// Acts as a caller holding only `privileges` (names from
+    /// [`sensr_auth::acl::Registry::builtin`]), e.g. `["page-all", "user-config-readonly"]`
+    /// for a read-only administrator.
+    #[must_use]
+    pub fn with_privileges(mut self, privileges: &[&str]) -> Self {
+        self.privileges = Some(privileges.iter().map(|p| (*p).to_owned()).collect());
         self
     }
 
@@ -357,8 +372,44 @@ impl Backend for MockBackend {
                 RuntimeSection::Gateways => simulated_gateways(t),
                 RuntimeSection::Aliases => simulated_feeds(&s.staged, t),
                 RuntimeSection::Ipv6 => simulated_pd(&s.staged, t),
+                RuntimeSection::Hosts => {
+                    let hosts: Vec<Value> = simulated_hosts(t)
+                        .into_iter()
+                        .filter(|h| !s.forgotten.contains(h["key"].as_str().unwrap_or_default()))
+                        .collect();
+                    json!({ "now": t, "hosts": hosts })
+                }
             })
         }))
+    }
+
+    fn forget_host(&self, key: String) -> BoxFuture<'_, ApiResult<()>> {
+        ready(self.with(|s| {
+            let t = (s.clock)();
+            let forgettable = simulated_hosts(t).iter().any(|h| {
+                h["key"] == key.as_str()
+                    && !h["sources"]
+                        .as_array()
+                        .is_some_and(|v| v.iter().any(|x| x == "reserved"))
+            });
+            if forgettable && s.forgotten.insert(key) {
+                Ok(())
+            } else {
+                Err(ApiError::Conflict("host is reserved or unknown".into()))
+            }
+        }))
+    }
+
+    fn may_access(&self, url: &str) -> bool {
+        self.privileges.as_ref().is_none_or(|p| {
+            sensr_auth::acl::Registry::builtin().grants(p.iter().map(String::as_str), url)
+        })
+    }
+
+    fn read_only(&self) -> bool {
+        self.privileges
+            .as_ref()
+            .is_some_and(|p| p.iter().any(|p| p == sensr_auth::acl::CONFIG_READONLY))
     }
 
     fn dns_stats(&self) -> BoxFuture<'_, ApiResult<DnsStats>> {
@@ -375,6 +426,66 @@ impl Backend for MockBackend {
             )
         })
     }
+}
+
+/// The host inventory as the agent would report it at `now`, sorted the agent's way
+/// (online first, then most recently seen): 25 hosts on LAN and LAN2 with one of each
+/// kind the dashboard card renders. `nas` is the seeded reservation and `bench-pi` the
+/// seeded active lease (see [`simulated_leases`]).
+pub fn simulated_hosts(now: u64) -> Vec<Value> {
+    let mut hosts = vec![
+        // Reserved, leased and answering.
+        json!({"key": "52:54:00:aa:bb:01", "mac": "52:54:00:aa:bb:01", "name": "nas",
+               "reserved_name": "nas", "lease_hostname": "nas",
+               "interface": "lan", "interface_name": "LAN", "ipv4": "192.168.1.20",
+               "ipv6": ["2001:db8:42:1::20"], "sources": ["reserved", "lease", "neighbour"],
+               "lease": {"state": "active", "expires": now + 3_600},
+               "first_seen": now - 86_400 * 30, "last_seen": now - 5, "online": true}),
+        // Dynamic lease.
+        json!({"key": "b8:27:eb:7d:4e:25", "mac": "b8:27:eb:7d:4e:25", "name": "bench-pi",
+               "lease_hostname": "bench-pi", "interface": "lan", "interface_name": "LAN",
+               "ipv4": "192.168.1.112", "sources": ["lease", "neighbour"],
+               "lease": {"state": "active", "expires": now + 1_800},
+               "first_seen": now - 86_400 * 2, "last_seen": now - 12, "online": true}),
+        // Only seen in the neighbour table: no name.
+        json!({"key": "3c:22:fb:10:9e:41", "mac": "3c:22:fb:10:9e:41",
+               "interface": "opt1", "interface_name": "LAN2", "ipv4": "192.168.72.40",
+               "ipv6": ["fe80::3e22:fbff:fe10:9e41"], "sources": ["neighbour"],
+               "first_seen": now - 3_600, "last_seen": now - 20, "online": true}),
+        // Gone two hours ago.
+        json!({"key": "84:47:09:38:a5:fc", "mac": "84:47:09:38:a5:fc", "name": "old-router",
+               "lease_hostname": "old-router", "interface": "opt1", "interface_name": "LAN2",
+               "ipv4": "192.168.72.2", "sources": ["lease"],
+               "lease": {"state": "expired", "expires": now - 3_600},
+               "first_seen": now - 86_400 * 9, "last_seen": now - 7_200, "online": false}),
+        // Reserved but never on the network.
+        json!({"key": "00:1b:a9:44:02:7c", "mac": "00:1b:a9:44:02:7c", "name": "printer",
+               "reserved_name": "printer", "interface": "lan", "interface_name": "LAN",
+               "ipv4": "192.168.1.30", "sources": ["reserved"],
+               "first_seen": now - 86_400 * 4, "online": false}),
+    ];
+    for i in 1..=20u64 {
+        let (iface, name, net) = if i % 3 == 0 {
+            ("opt1", "LAN2", "192.168.72")
+        } else {
+            ("lan", "LAN", "192.168.1")
+        };
+        hosts.push(json!({
+            "key": format!("02:00:00:00:00:{i:02x}"), "mac": format!("02:00:00:00:00:{i:02x}"),
+            "name": format!("device-{i:02}"), "lease_hostname": format!("device-{i:02}"),
+            "interface": iface, "interface_name": name, "ipv4": format!("{net}.{}", 100 + i),
+            "sources": ["lease", "neighbour"],
+            "lease": {"state": "active", "expires": now + 3_600},
+            "first_seen": now - 86_400, "last_seen": now - 30 - i, "online": true,
+        }));
+    }
+    hosts.sort_by_key(|h| {
+        (
+            !h["online"].as_bool().unwrap_or(false),
+            std::cmp::Reverse(h["last_seen"].as_u64()),
+        )
+    });
+    hosts
 }
 
 /// Leases for the seeded DHCP server on 192.168.1.0/24: a client of each kind the page
