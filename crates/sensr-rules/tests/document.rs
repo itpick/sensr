@@ -98,3 +98,32 @@ fn anti_lockout_follows_the_webgui_port() {
     doc.system.webgui.port = None;
     assert!(lockout(&doc).contains("80"), "{}", lockout(&doc));
 }
+
+/// Internal interfaces are the ones isolation treats as local networks: not
+/// a gateway and not virtual. The home router reduced to WAN, LAN and an
+/// unassigned WireGuard instance gives just the LAN.
+#[test]
+fn internal_interfaces_excludes_wan_and_virtual() {
+    let path = format!(
+        "{}/../sensr-import-opnsense/tests/golden/home-router.sensr.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("importer golden")).unwrap();
+    // keep WAN and LAN; with opt3 gone, wg0 is an unassigned (virtual) instance
+    for id in ["opt1", "opt2", "opt3"] {
+        v["interfaces"][id]["enabled"] = false.into();
+    }
+    let doc: sensr_schema::Document = serde_json::from_value(v).expect("document");
+    assert!(doc.wireguard.servers.values().any(|s| s.enabled));
+    let got = document::internal_interfaces(&doc);
+    assert_eq!(
+        got,
+        vec![document::InternalIf {
+            id: "lan".into(),
+            device: "igc1".into(),
+            descr: "LAN".into(),
+            subnets: vec!["192.168.1.0/24".parse().unwrap()],
+        }]
+    );
+}

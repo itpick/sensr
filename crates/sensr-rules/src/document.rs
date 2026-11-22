@@ -234,6 +234,43 @@ fn interfaces(doc: &Document, rt: &Runtime<'_>) -> InterfaceMap {
     map
 }
 
+/// A local network the router serves: neither a gateway nor virtual.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InternalIf {
+    /// logical interface id (`lan`, `opt1`)
+    pub id: String,
+    /// kernel device
+    pub device: String,
+    /// display name
+    pub descr: String,
+    /// the interface's static IPv4 networks
+    pub subnets: Vec<ipnet::Ipv4Net>,
+}
+
+/// The interfaces isolation treats as internal networks
+/// (`!virtual && !gateway_v4 && !gateway_v6`), from the configuration alone.
+pub fn internal_interfaces(doc: &Document) -> Vec<InternalIf> {
+    interfaces(doc, &Runtime::default())
+        .into_iter()
+        .filter(|(_, i)| !i.r#virtual && !i.gateway_v4 && !i.gateway_v6)
+        .map(|(id, i)| InternalIf {
+            id,
+            subnets: i
+                .addrs
+                .iter()
+                .filter_map(|a| match a.addr {
+                    IpAddr::V4(v4) => ipnet::Ipv4Net::new(v4, a.prefix_len)
+                        .ok()
+                        .map(|n| n.trunc()),
+                    IpAddr::V6(_) => None,
+                })
+                .collect(),
+            device: i.device,
+            descr: i.descr,
+        })
+        .collect()
+}
+
 /// `NetOrAlias` as the MVC models store it (`source_net`).
 fn net_token(n: &NetOrAlias) -> String {
     match n {

@@ -12,6 +12,7 @@ pub mod applier;
 pub mod auth;
 pub mod diff;
 pub mod gateways;
+pub mod hosts;
 pub mod ifnames;
 pub mod pd;
 pub mod redact;
