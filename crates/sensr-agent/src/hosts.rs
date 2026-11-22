@@ -88,6 +88,10 @@ pub struct Host {
     /// Lowercase MAC, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mac: Option<String>,
+    /// Lowercase hex DHCP client id, once known; keeps a client-id
+    /// reservation attached to this MAC row after the linking lease is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
     /// `reserved_name`, else `lease_hostname`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -117,15 +121,13 @@ pub struct Host {
     /// Last real activity, Unix seconds; `None` if never seen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<u64>,
-    /// The previous poll's lease expiry; a change is a renewal.
-    #[serde(skip)]
-    pub last_expire: Option<u64>,
 }
 
 impl Host {
     fn new(key: String, now: u64) -> Self {
         Self {
             mac: (!key.starts_with("id:")).then(|| key.clone()),
+            client_id: key.strip_prefix("id:").map(Into::into),
             key,
             name: None,
             reserved_name: None,
@@ -137,7 +139,6 @@ impl Host {
             lease: None,
             first_seen: now,
             last_seen: None,
-            last_expire: None,
         }
     }
 
@@ -169,20 +170,17 @@ impl Host {
         self.interface = self.interface.take().or(other.interface);
         self.ipv4 = self.ipv4.or(other.ipv4);
         self.lease = self.lease.take().or(other.lease);
-        self.last_expire = self.last_expire.or(other.last_expire);
-        for a in other.ipv6 {
-            if !self.ipv6.contains(&a) {
-                self.ipv6.push(a);
-            }
+        self.client_id = self.client_id.take().or(other.client_id);
+        let mine = std::mem::replace(&mut self.ipv6, other.ipv6);
+        for a in mine.into_iter().rev() {
+            self.add_ipv6(a);
         }
-        self.ipv6.truncate(MAX_IPV6);
     }
 
     /// Equal apart from the fields that move without a structural change.
     fn same_structure(&self, other: &Host) -> bool {
         let strip = |h: &Host| Host {
             last_seen: None,
-            last_expire: None,
             lease: None,
             ..h.clone()
         };
@@ -238,14 +236,12 @@ pub fn reservations(doc: &Document) -> Vec<ReservationView> {
         .reservations
         .values()
         .map(|r| {
-            let (mac, client_id) = match &r.client {
-                ClientMatch::HwAddress(m) => (Some(m.to_string()), None),
-                ClientMatch::ClientId(c) => (None, Some(c.to_string())),
+            let (key, mac, client_id) = match &r.client {
+                ClientMatch::HwAddress(m) => (m.to_string(), Some(m.to_string()), None),
+                ClientMatch::ClientId(c) => (client_key(&c.to_string()), None, Some(c.to_string())),
             };
             ReservationView {
-                key: mac
-                    .clone()
-                    .unwrap_or_else(|| client_key(client_id.as_deref().unwrap_or_default())),
+                key,
                 mac,
                 client_id,
                 ip: r.ip_address,
@@ -260,6 +256,10 @@ pub fn reservations(doc: &Document) -> Vec<ReservationView> {
 #[derive(Default)]
 pub struct Inventory {
     hosts: BTreeMap<String, Host>,
+    /// The previous poll's active lease expiries, by the lease's own client
+    /// (MAC, else `id:<client id>`). Kept apart from the rows so forgetting
+    /// or re-keying a row does not make an unchanged lease look renewed.
+    expires: BTreeMap<String, u64>,
     /// Set after the first poll; until then lease expiries are only recorded,
     /// so leases existing at start-up are not mistaken for activity.
     primed: bool,
@@ -270,6 +270,7 @@ impl Inventory {
     pub fn from_hosts(hosts: Vec<Host>) -> Self {
         Self {
             hosts: hosts.into_iter().map(|h| (h.key.clone(), h)).collect(),
+            expires: BTreeMap::new(),
             primed: false,
         }
     }
@@ -278,22 +279,31 @@ impl Inventory {
     pub fn observe(&mut self, snap: &Snapshot, now: u64) -> Change {
         let before = self.hosts.clone();
 
-        // A lease that carries both identifiers links a client id to its MAC.
-        let links: BTreeMap<&str, &str> = snap
-            .leases
-            .iter()
-            .filter_map(|l| Some((l.client_id.as_deref()?, l.mac.as_deref()?)))
+        // A lease that carries both identifiers links a client id to its MAC
+        // for good; the link is kept on the MAC row.
+        let mut links: BTreeMap<String, String> = self
+            .hosts
+            .values()
+            .filter_map(|h| Some((h.client_id.clone()?, h.mac.clone()?)))
             .collect();
+        for l in &snap.leases {
+            if let (Some(cid), Some(mac)) = (&l.client_id, &l.mac) {
+                links.insert(cid.clone(), mac.clone());
+            }
+        }
         for (cid, mac) in &links {
             if let Some(row) = self.hosts.remove(&client_key(cid)) {
                 self.row(mac, now).absorb(row);
+            }
+            if let Some(h) = self.hosts.get_mut(mac) {
+                h.client_id = Some(cid.clone());
             }
         }
         let key_of = |mac: Option<&str>, cid: Option<&str>| -> Option<String> {
             match (mac, cid) {
                 (Some(m), _) => Some(m.to_owned()),
                 (None, Some(c)) => Some(match links.get(c) {
-                    Some(m) => (*m).to_owned(),
+                    Some(m) => m.clone(),
                     None => client_key(c),
                 }),
                 (None, None) => None,
@@ -323,12 +333,23 @@ impl Inventory {
 
         // Active leases; the lease field and expiry follow what Kea holds now.
         let mut leased = BTreeSet::new();
+        let previous = std::mem::take(&mut self.expires);
         for l in snap.leases.iter().filter(|l| l.active) {
+            // the lease's own client, stable however the row is keyed
+            let client = match (&l.mac, &l.client_id) {
+                (Some(m), _) => m.clone(),
+                (None, Some(c)) => client_key(c),
+                (None, None) => continue,
+            };
             let Some(key) = key_of(l.mac.as_deref(), l.client_id.as_deref()) else {
                 continue;
             };
-            let primed = self.primed;
+            let renewed = self.primed && previous.get(&client) != Some(&l.expire);
+            self.expires.insert(client, l.expire);
             let h = self.row(&key, now);
+            if l.mac.is_some() && l.client_id.is_some() {
+                h.client_id = l.client_id.clone();
+            }
             h.sources.insert(Source::Lease);
             h.ipv4 = Some(l.address);
             if let Some(i) = snap.subnet_iface.get(&l.subnet_id) {
@@ -342,16 +363,14 @@ impl Inventory {
                 expires: l.expire,
             });
             // issued or renewed since the last poll
-            if primed && h.last_expire != Some(l.expire) {
+            if renewed {
                 h.last_seen = Some(now);
             }
-            h.last_expire = Some(l.expire);
             leased.insert(key);
         }
         for (key, h) in &mut self.hosts {
             if !leased.contains(key) {
                 h.lease = None;
-                h.last_expire = None;
             }
         }
 
@@ -551,6 +570,7 @@ mod tests {
         Host {
             key: key.into(),
             mac: Some(key.into()),
+            client_id: None,
             name: None,
             reserved_name: None,
             lease_hostname: None,
@@ -561,7 +581,6 @@ mod tests {
             lease: None,
             first_seen,
             last_seen,
-            last_expire: None,
         }
     }
 
@@ -734,6 +753,49 @@ mod tests {
     }
 
     #[test]
+    fn client_id_link_outlives_the_lease() {
+        let mut inv = Inventory::from_hosts(Vec::new());
+        let mut s = snap();
+        s.reservations
+            .push(reservation("id:01:aa", None, Some("01:aa")));
+        inv.observe(&s, 1000);
+        let mut linked = snap();
+        linked.reservations = s.reservations.clone();
+        linked.leases.push(lease(Some(MAC), Some("01:aa"), 9000));
+        inv.observe(&linked, 1030);
+        assert_eq!(only(&inv).key, MAC);
+        assert_eq!(only(&inv).client_id.as_deref(), Some("01:aa"));
+
+        // Kea reclaims the lease: the reservation still attaches to the MAC row
+        inv.observe(&s, 1060);
+        let h = only(&inv);
+        assert_eq!(h.key, MAC);
+        assert!(h.sources.contains(&Source::Reserved));
+        assert_eq!(h.reserved_name.as_deref(), Some("printer"));
+
+        // and the link is persisted across a restart
+        let stored = serde_json::to_string(&inv.hosts().cloned().collect::<Vec<_>>()).unwrap();
+        let mut inv = Inventory::from_hosts(serde_json::from_str(&stored).unwrap());
+        inv.observe(&s, 1090);
+        let h = only(&inv);
+        assert_eq!(h.key, MAC);
+        assert!(h.sources.contains(&Source::Reserved));
+    }
+
+    #[test]
+    fn forgotten_leased_host_returns_unseen() {
+        let mut inv = Inventory::from_hosts(Vec::new());
+        inv.observe(&with_lease(9000), 1000);
+        inv.observe(&with_lease(9000), 1030);
+        assert!(inv.forget(MAC));
+        // the same lease, unrenewed, is not activity for the recreated row
+        inv.observe(&with_lease(9000), 1060);
+        let h = only(&inv);
+        assert_eq!(h.first_seen, 1060);
+        assert_eq!(h.last_seen, None);
+    }
+
+    #[test]
     fn lease_without_mac_is_keyed_by_client_id() {
         let mut inv = Inventory::from_hosts(Vec::new());
         let mut s = snap();
@@ -850,7 +912,7 @@ mod tests {
         h.mac = None;
         let v = Inventory::from_hosts(vec![h]).view(now, &lan());
         let h = v["hosts"][0].as_object().unwrap();
-        for absent in ["mac", "name", "lease", "last_seen", "last_expire"] {
+        for absent in ["mac", "client_id", "name", "lease", "last_seen"] {
             assert!(!h.contains_key(absent), "{absent}: {h:?}");
         }
         assert_eq!(h["first_seen"], 900);
@@ -859,17 +921,17 @@ mod tests {
     }
 
     #[test]
-    fn host_round_trips_without_last_expire() {
+    fn host_round_trips() {
         let mut h = host(MAC, 1, Some(2));
-        h.last_expire = Some(9000);
+        h.client_id = Some("01:aa".into());
         h.lease = Some(LeaseInfo {
             state: "active".into(),
             expires: 9000,
         });
-        let back: Host = serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
-        assert_eq!(back.last_expire, None);
-        assert_eq!(back.lease, h.lease);
-        assert_eq!(back.sources, h.sources);
+        let json = serde_json::to_value(&h).unwrap();
+        assert_eq!(json["client_id"], "01:aa");
+        let back: Host = serde_json::from_value(json).unwrap();
+        assert_eq!(back, h);
     }
 
     #[test]
