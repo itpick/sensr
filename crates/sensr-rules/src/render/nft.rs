@@ -22,9 +22,12 @@ use std::io;
 
 use ipnet::IpNet;
 
+use sensr_schema::fields::MacAddr;
+
 use crate::compile::{
     self, ChainOptions, Field, Item, Low, SetRefs, Val, Verdict as LowVerdict, Warning,
 };
+use crate::host_modes::{self, HostModeSets};
 use crate::ir::{Addr, Endpoint, FilterRule, InterfaceMap, IpFamily, PortMatch};
 use crate::nat::{NatRules, RdrRule, SnatTarget, StaticKind, StaticPart, StaticRule};
 use crate::render::json::{Expr, Hook, Nat, Object, SetType, Stmt, Verdict, Writer};
@@ -79,6 +82,9 @@ pub struct Policy<'a> {
     pub nat: Option<&'a NatRules>,
     /// policy-routing targets; `None` (or empty) renders no route marking
     pub routing: Option<&'a PolicyRouting>,
+    /// host-mode sets; `Some` declares all four host-mode sets with these
+    /// contents (`None`: only sets a rule references, empty)
+    pub host_modes: Option<&'a HostModeSets>,
 }
 
 /// Counts that make the compilation visible (and benchmarkable).
@@ -478,13 +484,31 @@ fn emit_sets<W: io::Write>(
             })?;
         }
     }
-    for name in &refs.mac_sets {
+    let mut mac_sets = refs.mac_sets.clone();
+    let mut ip_sets = refs.ip_sets.clone();
+    if policy.host_modes.is_some() {
+        mac_sets.extend(host_modes::MAC_SETS.map(str::to_owned));
+        ip_sets.insert(host_modes::LOCKED_SET.to_owned());
+    }
+    for name in &mac_sets {
+        let macs = policy.host_modes.map_or(&[][..], |h| h.macs(name));
         w.add(Object::Set {
             name: name.as_str().into(),
             ty: SetType(vec!["ether_addr"]),
             interval: false,
-            elem: Vec::new(),
+            elem: macs.iter().map(mac_elem).collect(),
         })?;
+    }
+    for name in &ip_sets {
+        for fam in IpFamily::BOTH {
+            let addrs = policy.host_modes.map_or(Vec::new(), |h| h.ips(name, fam));
+            w.add(Object::Set {
+                name: compile::ip_set(name, fam).into(),
+                ty: SetType(vec![addr_type(fam)]),
+                interval: false,
+                elem: addrs.iter().map(net_elem).collect(),
+            })?;
+        }
     }
     for (name, a) in policy.aliases {
         w.add(Object::Set {
@@ -515,6 +539,10 @@ fn addr_type(fam: IpFamily) -> &'static str {
         IpFamily::V4 => "ipv4_addr",
         IpFamily::V6 => "ipv6_addr",
     }
+}
+
+fn mac_elem(m: &MacAddr) -> Expr<'static> {
+    Expr::Str(m.to_string().into())
 }
 
 fn net_elem(n: &IpNet) -> Expr<'static> {
@@ -1247,6 +1275,8 @@ pub enum SetContents {
     Nets(Vec<IpNet>),
     /// inclusive port ranges
     Ports(Vec<(u16, u16)>),
+    /// Ethernet addresses (an `ether_addr` set)
+    Macs(Vec<MacAddr>),
 }
 
 /// Replaces the contents of named sets in one transaction (`flush set` +
@@ -1277,6 +1307,7 @@ pub fn render_set_updates<W: io::Write>(
                     }
                 })
                 .collect(),
+            SetContents::Macs(macs) => macs.iter().map(mac_elem).collect(),
         };
         if !elem.is_empty() {
             w.add(Object::Element {
@@ -1577,6 +1608,7 @@ mod tests {
                 aliases: &BTreeMap::new(),
                 nat: None,
                 routing: None,
+                host_modes: None,
             };
             let report = render(&policy, &Options::default(), &mut buf).unwrap();
             assert!(report.warnings.is_empty(), "{:?}", report.warnings);

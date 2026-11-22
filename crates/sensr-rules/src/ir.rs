@@ -117,6 +117,9 @@ pub enum Addr {
     /// a named set of source MAC addresses (`ether saddr @name`; the name
     /// without `@`), written by host-mode rules; source-only and nft-only
     MacSet(String),
+    /// a named pair of address sets filled at run time (`@name_v4`,
+    /// `@name_v6`; the base name), written by host-mode rules; nft-only
+    IpSet(String),
     /// an address that failed to parse; the rule is disabled
     Invalid(String),
 }

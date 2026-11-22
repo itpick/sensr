@@ -16,10 +16,11 @@ const LABEL_MAX: usize = 63;
 /// Renders one expanded rule as upstream's `ruleToText` would, including the
 /// trailing newline and a preceding `#debug:` line when normalisation logged.
 ///
-/// Host-mode rules (source `Addr::MacSet`) are nft-only: pf gets one comment
-/// line naming the rule and no rule body.
+/// Host-mode rules (an `Addr::MacSet` source or an `Addr::IpSet` operand)
+/// are nft-only: pf gets one comment line naming the rule and no rule body.
 pub fn filter_rule(rule: &FilterRule, ifs: &InterfaceMap, out: &mut String) {
-    if matches!(rule.src.addr, Addr::MacSet(_)) {
+    let host_mode = |a: &Addr| matches!(a, Addr::MacSet(_) | Addr::IpSet(_));
+    if host_mode(&rule.src.addr) || host_mode(&rule.dst.addr) {
         let _ = writeln!(
             out,
             "# host mode (nft-only): {}",
@@ -198,7 +199,7 @@ fn addr_text(a: &Addr, ifs: &InterfaceMap) -> String {
         Addr::IfaceAddr(i) => format!("({})", dev(i)),
         Addr::Device(d) => format!("({d})"),
         // nft-only; filter_rule never renders a body for these
-        Addr::MacSet(s) => format!("##{s}##"),
+        Addr::MacSet(s) | Addr::IpSet(s) => format!("##{s}##"),
         // upstream json_encode()s the unparsable value into the output
         Addr::Invalid(s) => serde_json::to_string(s).unwrap_or_default(),
     }
@@ -540,6 +541,26 @@ mod tests {
         assert_eq!(
             out,
             "# host mode (nft-only): host mode isolated: block localnetworks\n"
+        );
+    }
+
+    #[test]
+    fn locked_set_rule_is_a_comment_only() {
+        let rule = FilterRule {
+            action: Action::Block,
+            quick: true,
+            dst: Endpoint {
+                addr: Addr::IpSet("host_locked".into()),
+                ..Endpoint::default()
+            },
+            descr: "host modes: block lan to locked hosts".into(),
+            ..FilterRule::default()
+        };
+        let mut out = String::new();
+        filter_rule(&rule, &InterfaceMap::new(), &mut out);
+        assert_eq!(
+            out,
+            "# host mode (nft-only): host modes: block lan to locked hosts\n"
         );
     }
 }

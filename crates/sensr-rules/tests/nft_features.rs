@@ -123,6 +123,7 @@ impl Fixture {
             aliases: &self.resolved,
             nat: None,
             routing: None,
+            host_modes: None,
         };
         let mut buf = Vec::new();
         let report = nft::render(&policy, opts, &mut buf).expect("render");

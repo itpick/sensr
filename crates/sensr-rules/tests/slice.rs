@@ -138,6 +138,7 @@ fn slice_nft() {
         aliases: &aliases,
         nat: Some(&s.nat),
         routing: None,
+        host_modes: None,
     };
     let mut buf = Vec::new();
     let report = nft::render(&policy, &nft::Options::default(), &mut buf).unwrap();
@@ -184,6 +185,7 @@ fn wan_address_update_is_a_set_update() {
         aliases: &aliases,
         nat: Some(&s.nat),
         routing: None,
+        host_modes: None,
     };
     let mut base = Vec::new();
     nft::render(&policy, &nft::Options::default(), &mut base).unwrap();

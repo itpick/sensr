@@ -22,6 +22,7 @@ use sensr_schema::models::nat::{
 use crate::alias::{self, AliasDef, Resolution, Sources};
 use crate::conf;
 use crate::conf::{Conf, Value};
+use crate::host_modes::{self, HostModeEntry, HostModeSets};
 use crate::ir::{FilterRule, IfAddr, Interface, InterfaceMap, IpFamily, V4Mode, V6Mode};
 use crate::isolation;
 use crate::nat::{self, NatRules, OutboundMode, ReflectionDefaults, StaticDefaults};
@@ -56,6 +57,9 @@ pub struct Compiled {
     pub options: nft::Options,
     /// policy-routing targets (route-to / reply-to marks and tables)
     pub routing: PolicyRouting,
+    /// host-mode set contents (MACs from the configuration; the locked
+    /// addresses are the agent's to fill)
+    pub host_modes: HostModeSets,
 }
 
 impl Compiled {
@@ -67,6 +71,7 @@ impl Compiled {
             aliases: &self.aliases.aliases,
             nat: Some(&self.nat),
             routing: Some(&self.routing),
+            host_modes: (!self.host_modes.is_empty()).then_some(&self.host_modes),
         }
     }
 
@@ -662,6 +667,26 @@ pub fn compile(doc: &Document, rt: &Runtime<'_>) -> Compiled {
         .collect();
     isolation::register(&mut rs, &policies, &ctx);
 
+    // Host modes: quarantine ahead of anti-lockout, isolated beside device
+    // isolation, both before the user's rules.
+    let entries: Vec<HostModeEntry<'_>> = doc
+        .firewall
+        .host_modes
+        .values()
+        .filter(|h| h.enabled)
+        .map(|h| HostModeEntry {
+            mac: &h.mac,
+            kind: h.mode,
+            description: h
+                .description
+                .as_ref()
+                .map(|d| d.as_str())
+                .unwrap_or_default(),
+        })
+        .collect();
+    host_modes::register(&mut rs, &entries, &ctx);
+    let host_mode_sets = HostModeSets::of(&entries);
+
     for (uuid, r) in doc.firewall.rules_in_order() {
         let (prio, c) = filter_conf_in(&uuid.to_string(), r, doc, &ifs);
         rs.register_filter(prio, &c, None, &ctx);
@@ -711,6 +736,7 @@ pub fn compile(doc: &Document, rt: &Runtime<'_>) -> Compiled {
     let routing = policy_routing(doc, &ifs);
     Compiled {
         routing,
+        host_modes: host_mode_sets,
         interfaces: ifs,
         filter: rs.rules,
         nat: nat_rules,

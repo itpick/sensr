@@ -188,6 +188,8 @@ pub struct SetRefs {
     pub tables: BTreeSet<String>,
     /// source-MAC sets (`ether_addr`) referenced
     pub mac_sets: BTreeSet<String>,
+    /// run-time address sets ([`ip_set`] base names) referenced
+    pub ip_sets: BTreeSet<String>,
 }
 
 /// Set name of a logical interface's networks.
@@ -209,6 +211,11 @@ pub fn alias_set(name: &str, fam: IpFamily) -> String {
 /// (`host_isolated`), so this is the name verbatim.
 pub fn host_mode_set(name: &str) -> String {
     name.to_owned()
+}
+
+/// Set name of one family of a run-time address set (`host_locked_v4`).
+pub fn ip_set(name: &str, fam: IpFamily) -> String {
+    format!("{name}_v{}", fam_digit(fam))
 }
 
 /// Set name of a port alias.
@@ -454,6 +461,7 @@ fn needs_family(a: &Addr) -> bool {
             | Addr::IfaceNet { .. }
             | Addr::IfaceAddr(_)
             | Addr::Device(_)
+            | Addr::IpSet(_)
     )
 }
 
@@ -586,6 +594,11 @@ fn addr_alternatives(
                 iface_addr_set(name, f)
             };
             vec![vec![m(field(f), Val::SetRef(set))]]
+        }
+        Addr::IpSet(s) => {
+            let f = need("address set")?;
+            refs.ip_sets.insert(s.clone());
+            vec![vec![m(field(f), Val::SetRef(ip_set(s, f)))]]
         }
         Addr::MacSet(_) if dst => return Err("a MAC set can only match the source".into()),
         Addr::MacSet(s) => {
