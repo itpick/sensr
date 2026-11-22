@@ -1,5 +1,5 @@
 //! Run-time state the agent reports next to the configuration: gateway monitoring, alias
-//! feeds and IPv6 prefix delegation (`Op::Runtime`, `GET /api/v1/status/{section}`).
+//! feeds, IPv6 prefix delegation and the host inventory (`Op::Runtime`, `GET /api/v1/status/{section}`).
 //!
 //! The agent sends plain JSON; these types mirror its shapes leniently (every field
 //! defaulted) so an older or newer agent degrades to "unknown" instead of breaking a page.
@@ -17,6 +17,8 @@ pub enum RuntimeSection {
     Aliases,
     /// IPv6 prefix delegation: delegated prefix, lifetimes, per-LAN prefixes.
     Ipv6,
+    /// Host inventory: every client seen on an internal network.
+    Hosts,
 }
 
 /// Monitor verdict for one gateway (the agent's snake_case status).
@@ -350,6 +352,178 @@ impl UpdateStatus {
     }
 }
 
+/// The DHCP lease behind a host.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostLease {
+    /// Kea's lease state (`active`, `expired`, ...).
+    pub state: String,
+    /// Lease expiry, seconds since the epoch.
+    pub expires: Option<u64>,
+}
+
+/// One client in the host inventory.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostRow {
+    /// Inventory key: the lowercase MAC, else `id:<client id>`.
+    pub key: String,
+    /// MAC address, when known.
+    pub mac: Option<String>,
+    /// The reservation's host name, else the lease's.
+    pub name: Option<String>,
+    /// Host name from a static reservation.
+    pub reserved_name: Option<String>,
+    /// Host name the client sent with its lease.
+    pub lease_hostname: Option<String>,
+    /// Interface id (`lan`, `opt1`); empty when unknown (`null` reads as empty).
+    #[serde(deserialize_with = "null_default")]
+    pub interface: String,
+    /// Interface display name (`LAN`); empty when unknown.
+    #[serde(deserialize_with = "null_default")]
+    pub interface_name: String,
+    /// IPv4 address.
+    pub ipv4: Option<String>,
+    /// IPv6 addresses.
+    pub ipv6: Vec<String>,
+    /// Where the host is known from: `reserved`, `lease`, `neighbour`.
+    pub sources: Vec<String>,
+    /// The lease, when there is one.
+    pub lease: Option<HostLease>,
+    /// First sighting, seconds since the epoch.
+    pub first_seen: u64,
+    /// Last sighting; `None` when never seen on the network.
+    pub last_seen: Option<u64>,
+    /// Currently on the network.
+    pub online: bool,
+    /// A reservation for it is staged but not applied yet (set by the UI from the
+    /// staged document, never sent by the agent).
+    pub staged: bool,
+}
+
+/// `null` as the type's default, for fields an agent may send as `null`.
+fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Option::unwrap_or_default)
+}
+
+/// The rows that parse; one odd row is dropped instead of failing the whole list.
+fn lenient_rows<'de, D>(d: D) -> Result<Vec<HostRow>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let rows: Option<Vec<Value>> = Option::deserialize(d)?;
+    Ok(rows
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| serde_json::from_value(r).ok())
+        .collect())
+}
+
+impl HostRow {
+    fn has(&self, source: &str) -> bool {
+        self.sources.iter().any(|s| s == source)
+    }
+
+    /// A static reservation covers the host.
+    pub fn reserved(&self) -> bool {
+        self.has("reserved")
+    }
+
+    /// Leased without a reservation: a reservation can be made from it.
+    pub fn leased_only(&self) -> bool {
+        self.has("lease") && !self.reserved()
+    }
+
+    /// What the table calls it: the name, else the MAC, else the key.
+    pub fn label(&self) -> String {
+        self.name
+            .clone()
+            .filter(|n| !n.is_empty())
+            .or_else(|| self.mac.clone())
+            .unwrap_or_else(|| self.key.clone())
+    }
+
+    /// `static`, `dynamic` or `seen`.
+    pub fn source(&self) -> &'static str {
+        if self.reserved() {
+            "static"
+        } else if self.has("lease") {
+            "dynamic"
+        } else {
+            "seen"
+        }
+    }
+
+    /// `now` while online, `never` if never seen, else how long ago (`5m`, `3h`, `2d`).
+    pub fn seen(&self, now: u64) -> String {
+        if self.online {
+            return "now".to_owned();
+        }
+        let Some(t) = self.last_seen else {
+            return "never".to_owned();
+        };
+        let ago = now.saturating_sub(t);
+        match ago {
+            0..60 => format!("{ago}s"),
+            60..3_600 => format!("{}m", ago / 60),
+            3_600..86_400 => format!("{}h", ago / 3_600),
+            _ => format!("{}d", ago / 86_400),
+        }
+    }
+
+    /// Case-insensitive substring match on name, MAC and addresses; `q` is lowercase.
+    pub fn matches(&self, q: &str) -> bool {
+        q.is_empty()
+            || self
+                .name
+                .iter()
+                .chain(&self.mac)
+                .chain(&self.ipv4)
+                .chain(&self.ipv6)
+                .any(|f| f.to_lowercase().contains(q))
+    }
+}
+
+/// The host inventory with the agent's clock.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostList {
+    /// Agent time, seconds since the epoch.
+    pub now: u64,
+    /// Hosts, online first, then most recently seen.
+    #[serde(deserialize_with = "lenient_rows")]
+    pub hosts: Vec<HostRow>,
+}
+
+impl HostList {
+    /// Marks the unreserved hosts a reservation in `doc` (the staged document) covers,
+    /// by MAC or address, so the card stops offering Make static before Apply.
+    pub fn mark_staged(&mut self, doc: &Value) {
+        let reservations: Vec<&Value> = doc
+            .pointer("/dhcpv4/reservations")
+            .and_then(Value::as_object)
+            .map(|m| m.values().collect())
+            .unwrap_or_default();
+        let get = |r: &Value, p: &str| {
+            r.pointer(p)
+                .and_then(Value::as_str)
+                .map(str::to_ascii_lowercase)
+        };
+        for h in &mut self.hosts {
+            // a reserved row's reservation is already applied
+            h.staged = !h.reserved()
+                && reservations.iter().any(|r| {
+                    (h.mac.is_some() && get(r, "/client/hw_address").as_deref() == h.mac.as_deref())
+                        || (h.ipv4.is_some() && get(r, "/ip_address") == h.ipv4)
+                });
+        }
+    }
+}
+
 /// Parses an agent reply; `null` (subsystem not running) and unknown shapes give the default.
 pub fn parse<T: serde::de::DeserializeOwned + Default>(v: Value) -> T {
     if v.is_null() {
@@ -483,6 +657,90 @@ mod tests {
         assert!(v.gateways.is_empty());
         let a: Vec<AliasFeed> = parse(json!({"not": "a list"}));
         assert!(a.is_empty());
+    }
+
+    #[test]
+    fn parses_the_agent_host_list() {
+        let l: HostList = parse(json!({"now": 1000, "hosts": [
+            {"key": "84:47:09:38:a5:fc", "mac": "84:47:09:38:a5:fc", "name": "old-router",
+             "reserved_name": null, "lease_hostname": "old-router", "client_id": "01:ab",
+             "interface": "opt1", "interface_name": "LAN2", "ipv4": "192.168.72.2",
+             "ipv6": ["2600::1"], "sources": ["lease", "neighbour"],
+             "lease": {"state": "active", "expires": 2000},
+             "first_seen": 900, "last_seen": 990, "online": true},
+            {"key": "id:01ff", "sources": ["reserved"], "first_seen": 0}
+        ]}));
+        assert_eq!(l.now, 1000);
+        let h = &l.hosts[0];
+        assert_eq!(h.interface_name, "LAN2");
+        assert_eq!(h.lease.as_ref().unwrap().expires, Some(2000));
+        assert_eq!((h.source(), h.seen(l.now).as_str()), ("dynamic", "now"));
+        assert!(h.leased_only() && h.matches("2600") && h.matches("old-r") && !h.matches("zz"));
+        let r = &l.hosts[1];
+        assert_eq!(
+            (r.label(), r.source(), r.seen(1000)),
+            ("id:01ff".into(), "static", "never".into())
+        );
+        let ago = |s: u64| {
+            HostRow {
+                last_seen: Some(10_000_000 - s),
+                ..Default::default()
+            }
+            .seen(10_000_000)
+        };
+        assert_eq!(
+            [ago(30), ago(300), ago(7_200), ago(172_800)],
+            ["30s", "5m", "2h", "2d"]
+        );
+    }
+
+    #[test]
+    fn one_odd_host_row_does_not_empty_the_list() {
+        // `null` interfaces are what the agent sent before they were always strings.
+        let l: HostList = parse(json!({"now": 1000, "hosts": [
+            {"key": "aa:bb:cc:dd:ee:09", "interface": null, "interface_name": null,
+             "sources": ["reserved"], "first_seen": 900},
+            {"key": "garbage", "first_seen": "yesterday"},
+            {"key": "aa:bb:cc:dd:ee:01", "interface": "lan", "interface_name": "LAN",
+             "sources": ["neighbour"], "first_seen": 900, "online": true}
+        ]}));
+        let keys: Vec<&str> = l.hosts.iter().map(|h| h.key.as_str()).collect();
+        assert_eq!(keys, ["aa:bb:cc:dd:ee:09", "aa:bb:cc:dd:ee:01"]);
+        assert_eq!(
+            (
+                l.hosts[0].interface.as_str(),
+                l.hosts[0].interface_name.as_str()
+            ),
+            ("", "")
+        );
+        assert_eq!(l.now, 1000);
+        let none: HostList = parse(json!({"now": 5, "hosts": null}));
+        assert_eq!((none.now, none.hosts.len()), (5, 0));
+    }
+
+    /// The agent's own `view()` output (its `view_matches_the_ui_contract` test keeps
+    /// the file current): every row survives, one on a no-longer-internal interface too.
+    #[test]
+    fn parses_the_agent_view_golden() {
+        let v: Value = serde_json::from_str(include_str!(
+            "../../sensr-agent/tests/golden/hosts-view.json"
+        ))
+        .unwrap();
+        let l: HostList = parse(v);
+        assert_eq!(l.now, 1010);
+        let row = |name: &str| l.hosts.iter().find(|h| h.name.as_deref() == Some(name));
+        assert_eq!(l.hosts.len(), 3);
+        assert_eq!(l.hosts[0].interface_name, "LAN");
+        assert!(l.hosts[0].online);
+        let camera = row("camera").expect("camera");
+        assert_eq!(
+            (camera.interface.as_str(), camera.interface_name.as_str()),
+            ("opt9", "OPT9")
+        );
+        assert_eq!(camera.source(), "static");
+        let orphan = row("orphan").expect("orphan");
+        assert_eq!(orphan.interface, "");
+        assert_eq!(orphan.seen(l.now), "never");
     }
 
     #[test]

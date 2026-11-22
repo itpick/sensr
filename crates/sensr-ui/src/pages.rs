@@ -4,16 +4,16 @@
 
 use crate::actions::{
     alias_feeds, dhcp_leases, dns_stats, field_choices, form_load, gateways_status, grid_fetch,
-    ids_alerts, insight_data, live_status, passkey_list, pd_status, revision_diff, revisions,
-    totp_status, update_status,
+    hosts, ids_alerts, insight_data, live_status, passkey_list, pd_status, revision_diff,
+    revisions, totp_status, update_status,
 };
 use crate::api::{
     AlertPage, DiffLine, DnsStats, INSIGHT_RANGES, InsightReport, TrafficPoint, TrafficRow,
 };
 use crate::grid::GridQuery;
 use crate::islands::{
-    DashboardLive, DhcpLeases, GatewaysLive, GridIsland, SettingsFormIsland, UpdatesLive, bps,
-    diff_class,
+    DashboardLive, DhcpLeases, GatewaysLive, GridIsland, HostsCard, SettingsFormIsland,
+    UpdatesLive, bps, diff_class,
 };
 use crate::models::*;
 use crate::runtime::{Ipv6Status, fmt_time, lifetime, until};
@@ -96,8 +96,13 @@ fn param(name: &'static str) -> Option<String> {
 pub fn Dashboard() -> impl IntoView {
     let load = || {
         Suspend::new(async move {
-            match live_status().await {
-                Ok(initial) => view! { <DashboardLive initial/> }.into_any(),
+            let (status, hosts) = futures::join!(live_status(), hosts());
+            match status {
+                Ok(initial) => {
+                    // The Hosts card is optional: an inventory error only leaves it out.
+                    let hosts = hosts.ok().flatten();
+                    view! { <DashboardLive initial/><HostsCard initial=hosts/> }.into_any()
+                }
                 Err(e) => load_error(e),
             }
         })

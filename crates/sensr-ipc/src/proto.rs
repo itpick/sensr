@@ -253,6 +253,12 @@ pub enum Op {
         /// Which subsystem.
         section: RuntimeSection,
     },
+    /// Drop an unreserved host from the inventory (Hosts › Forget). It
+    /// reappears on the next poll if it is still on the network.
+    HostForget {
+        /// The host key: the lowercase MAC, else `id:<client id>`.
+        key: String,
+    },
 }
 
 /// Subsystems with run-time state the UI shows.
@@ -264,6 +270,8 @@ pub enum RuntimeSection {
     Aliases,
     /// IPv6 prefix delegation: delegated prefix, lifetimes, per-LAN prefixes.
     Ipv6,
+    /// Host inventory: every device seen on an internal network.
+    Hosts,
 }
 
 /// One interface-to-NIC binding for [`Op::InterfacesAssign`].
@@ -330,6 +338,7 @@ impl Op {
                 | Op::ConfigConfirm
                 | Op::ConfigRollback { .. }
                 | Op::InterfacesAssign { .. }
+                | Op::HostForget { .. }
         )
     }
 }
@@ -625,5 +634,21 @@ impl std::fmt::Debug for WebListener {
             .field("devices", &self.devices)
             .field("certificate", &self.certificate)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_forget_is_write() {
+        assert!(Op::HostForget { key: "x".into() }.is_write());
+        assert!(
+            !Op::Runtime {
+                section: RuntimeSection::Hosts
+            }
+            .is_write()
+        );
     }
 }

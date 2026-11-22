@@ -27,7 +27,17 @@ async fn main() -> anyhow::Result<()> {
             dir
         }
     };
-    let backend = Arc::new(sensr_ui::mock::MockBackend::new().with_insight_dir(insight));
+    let mut backend = sensr_ui::mock::MockBackend::new().with_insight_dir(insight);
+    // SENSR_UI_PRIVILEGES="page-all,user-config-readonly" runs the server as a read-only user.
+    if let Ok(list) = std::env::var("SENSR_UI_PRIVILEGES") {
+        let names: Vec<&str> = list
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        backend = backend.with_privileges(&names);
+    }
+    let backend = Arc::new(backend);
     let app = sensr_ui::server::router(options, Arc::new(sensr_ui::mock::MockSessions(backend)));
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("sensr-ui listening on http://{addr} (mock backend, login root / sensr)");

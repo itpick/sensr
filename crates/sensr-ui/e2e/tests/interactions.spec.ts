@@ -7,14 +7,16 @@ test("login: focus order, wrong password, sign in", async ({ page }) => {
   await page.goto("/login");
   await expect(page.getByLabel("Username")).toBeFocused();
   await page.keyboard.press("Tab");
-  await expect(page.getByLabel("Password")).toBeFocused();
+  await expect(page.getByLabel("Password", { exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.getByLabel("One-time password")).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(page.getByRole("button", { name: "Login" })).toBeFocused();
 
   await page.getByLabel("Username").fill("root");
-  await page.getByLabel("Password").fill("wrong");
+  await page.getByLabel("Password", { exact: true }).fill("wrong");
   await page.getByRole("button", { name: "Login" }).click();
-  await expect(page.getByRole("alert")).toHaveText("Wrong username or password.");
+  await expect(page.getByRole("alert")).toHaveText("Wrong username, password or one-time password.");
 
   await login(page);
   await expect(page).toHaveTitle("Lobby: Dashboard | sensr");
@@ -28,7 +30,7 @@ test("unauthenticated pages redirect to login", async ({ page }) => {
 test("menu tree mirrors OPNsense and marks the current page", async ({ page }) => {
   await login(page);
   const sections = page.locator("#sidebar > ul > li > details > summary");
-  await expect(sections).toHaveText(["Lobby", "Reporting", "System", "Interfaces", "Firewall", "VPN", "Services", "Power", "Help"]);
+  await expect(sections).toHaveText(["Lobby", "Reporting", "System", "Interfaces", "Firewall", "VPN", "Services", "Help"]);
   await page.goto("/ui/firewall/alias");
   const current = page.locator('#sidebar a[aria-current="page"]');
   await expect(current).toHaveText("Aliases");
@@ -39,7 +41,8 @@ test("menu tree mirrors OPNsense and marks the current page", async ({ page }) =
   // Unimplemented entries land on a placeholder inside the shell.
   await page.goto("/ui/trust/ca");
   await expect(page.getByRole("heading", { name: "Not available yet" })).toBeVisible();
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText("System: Trust: Authorities");
+  // The menu no longer lists unimplemented pages, so the title has no breadcrumb.
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("sensr");
 });
 
 test("grid: search, sort, paging info, bulk disable, validation, add, edit, delete", async ({ page }) => {
@@ -47,14 +50,14 @@ test("grid: search, sort, paging info, bulk disable, validation, add, edit, dele
   await page.goto("/ui/firewall/alias");
   await hydrated(page);
   const rows = page.locator(".grid tbody tr");
-  await expect(rows).toHaveCount(5);
-  await expect(page.getByText("Showing 1 to 5 of 5 entries")).toBeVisible();
+  await expect(rows).toHaveCount(6);
+  await expect(page.getByText("Showing 1 to 6 of 6 entries")).toBeVisible();
 
   await page.getByLabel("Search alias").fill("port");
   await expect(rows).toHaveCount(1);
   await expect(rows.first()).toContainText("web_ports");
   await page.getByLabel("Search alias").fill("");
-  await expect(rows).toHaveCount(5);
+  await expect(rows).toHaveCount(6);
 
   await page.getByRole("button", { name: "Name" }).click();
   await expect(page.getByRole("columnheader", { name: "Name" })).toHaveAttribute("aria-sort", "ascending");
@@ -86,7 +89,7 @@ test("grid: search, sort, paging info, bulk disable, validation, add, edit, dele
   await dialog.getByLabel("Content").fill("53\n853");
   await dialog.getByRole("button", { name: "Save" }).click();
   await expect(dialog).toBeHidden();
-  await expect(rows).toHaveCount(6);
+  await expect(rows).toHaveCount(7);
 
   // Edit.
   await rows.filter({ hasText: "dns_servers" }).getByRole("button", { name: "Edit" }).click();
@@ -98,7 +101,7 @@ test("grid: search, sort, paging info, bulk disable, validation, add, edit, dele
   // Delete.
   page.once("dialog", (d) => d.accept());
   await rows.filter({ hasText: "dns_servers" }).getByRole("button", { name: "Delete" }).click();
-  await expect(rows).toHaveCount(5);
+  await expect(rows).toHaveCount(6);
 });
 
 test("rules: per-interface tabs, reorder with buttons and drag", async ({ page }) => {
@@ -155,7 +158,7 @@ test("phone: menu opens from the top bar", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await login(page);
   await hydrated(page);
-  const nav = page.getByRole("navigation", { name: "Main menu" });
+  const nav = page.locator('nav[aria-label="Main menu"]');
   await expect(nav).not.toBeInViewport();
   await page.getByRole("button", { name: "Menu" }).click();
   await expect(nav).toBeInViewport();

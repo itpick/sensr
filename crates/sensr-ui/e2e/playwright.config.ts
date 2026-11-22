@@ -6,6 +6,24 @@ import { defineConfig, devices } from "@playwright/test";
 const external = process.env.SENSR_UI_BASE_URL;
 const root = (process.env.SENSR_UI_ROOT ?? require("node:path").resolve(__dirname, "../../..")) + "/";
 const port = Number(process.env.SENSR_UI_PORT ?? 3300);
+const readOnlyPort = port + 1;
+
+function server(p: number, bin?: string, privileges?: string) {
+  return {
+    command: bin ?? `${root}target/release/sensr-ui-dev`,
+    cwd: root,
+    url: `http://127.0.0.1:${p}/healthz`,
+    reuseExistingServer: false,
+    env: {
+      LEPTOS_SITE_ROOT: "target/site",
+      LEPTOS_SITE_PKG_DIR: "pkg",
+      LEPTOS_OUTPUT_NAME: "sensr-ui",
+      LEPTOS_SITE_ADDR: `127.0.0.1:${p}`,
+      LEPTOS_ENV: "PROD",
+      ...(privileges ? { SENSR_UI_PRIVILEGES: privileges } : {}),
+    },
+  };
+}
 
 export default defineConfig({
   testDir: "tests",
@@ -19,17 +37,9 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1366, height: 860 } } }],
-  webServer: external ? undefined : {
-    command: process.env.SENSR_UI_BIN ?? `${root}target/release/sensr-ui-dev`,
-    cwd: root,
-    url: `http://127.0.0.1:${port}/healthz`,
-    reuseExistingServer: false,
-    env: {
-      LEPTOS_SITE_ROOT: "target/site",
-      LEPTOS_SITE_PKG_DIR: "pkg",
-      LEPTOS_OUTPUT_NAME: "sensr-ui",
-      LEPTOS_SITE_ADDR: `127.0.0.1:${port}`,
-      LEPTOS_ENV: "PROD",
-    },
-  },
+  webServer: external ? undefined : [
+    server(port, process.env.SENSR_UI_BIN),
+    // A second instance whose only user is a read-only administrator.
+    server(readOnlyPort, process.env.SENSR_UI_BIN, "page-all,user-config-readonly"),
+  ],
 });

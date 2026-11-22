@@ -36,7 +36,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Run-time state as JSON: `gateways`, `aliases` or `ipv6`.
+    /// Run-time state as JSON: `gateways`, `aliases`, `ipv6` or `hosts`.
     Runtime {
         /// Which subsystem.
         section: RuntimeArg,
@@ -76,6 +76,8 @@ pub enum RuntimeArg {
     Aliases,
     /// IPv6 prefix delegation.
     Ipv6,
+    /// Host inventory.
+    Hosts,
 }
 
 /// `sensr insight …`
@@ -376,6 +378,7 @@ pub async fn run_with_input(
                 RuntimeArg::Gateways => sensr_ipc::RuntimeSection::Gateways,
                 RuntimeArg::Aliases => sensr_ipc::RuntimeSection::Aliases,
                 RuntimeArg::Ipv6 => sensr_ipc::RuntimeSection::Ipv6,
+                RuntimeArg::Hosts => sensr_ipc::RuntimeSection::Hosts,
             };
             let Response::Value(v) = call(&mut c, Op::Runtime { section }).await? else {
                 bail!("unexpected runtime reply")

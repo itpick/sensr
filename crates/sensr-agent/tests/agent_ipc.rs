@@ -674,3 +674,77 @@ async fn secrets_are_masked_on_read_and_kept_on_write_back() {
     let shown = serde_json::to_string(&p).unwrap();
     assert!(!shown.contains(new_key) && !shown.contains(private));
 }
+
+#[tokio::test]
+async fn runtime_hosts_section_round_trips() {
+    let fx = Fx::start(true).await;
+    let canned = json!({"now": 5, "hosts": [{"key": "aa:bb:cc:dd:ee:01", "online": true}]});
+    fx.applier
+        .state
+        .lock()
+        .unwrap()
+        .runtime
+        .push((sensr_ipc::RuntimeSection::Hosts, canned.clone()));
+    let mut c = fx.client().await;
+    let r = c
+        .call(Op::Runtime {
+            section: sensr_ipc::RuntimeSection::Hosts,
+        })
+        .await
+        .unwrap();
+    assert_eq!(r, Response::Value(Some(canned)));
+}
+
+#[tokio::test]
+async fn host_forget_answers_forgotten_or_conflict() {
+    let fx = Fx::start(true).await;
+    fx.applier
+        .state
+        .lock()
+        .unwrap()
+        .forgettable
+        .push("aa:bb:cc:dd:ee:01".into());
+    let mut c = fx.client().await;
+    let r = c
+        .call(Op::HostForget {
+            key: "aa:bb:cc:dd:ee:01".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"forgotten": true}))));
+    let e = agent_err(
+        c.call(Op::HostForget {
+            key: "aa:bb:cc:dd:ee:01".into(),
+        })
+        .await,
+    );
+    assert_eq!(e.kind, ErrorKind::Conflict);
+    assert_eq!(e.message, "host is reserved or unknown");
+}
+
+#[tokio::test]
+async fn host_forget_is_refused_for_readonly() {
+    let fx = Fx::start(true).await;
+    fx.applier
+        .state
+        .lock()
+        .unwrap()
+        .forgettable
+        .push("aa:bb:cc:dd:ee:01".into());
+    let mut c = fx.client().await;
+    c.set_principal(Principal {
+        readonly: true,
+        ..c.principal().clone()
+    });
+    let e = agent_err(
+        c.call(Op::HostForget {
+            key: "aa:bb:cc:dd:ee:01".into(),
+        })
+        .await,
+    );
+    assert_eq!(e.kind, ErrorKind::Forbidden);
+    assert_eq!(
+        fx.applier.state.lock().unwrap().forgettable,
+        vec!["aa:bb:cc:dd:ee:01".to_owned()]
+    );
+}
