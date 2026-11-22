@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::PathBuf;
 
 use sensr_apply::appliers::convert::kea_subnet_id;
 use sensr_feeds::neigh::{KeaLease, NeighEntry};
@@ -197,7 +198,7 @@ fn client_key(cid: &str) -> String {
 }
 
 /// What an [`Inventory::observe`] changed.
-#[derive(PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Change {
     /// Nothing.
     None,
@@ -488,6 +489,114 @@ impl Inventory {
             })
             .collect();
         serde_json::json!({ "now": now, "hosts": hosts })
+    }
+}
+
+/// Minimum seconds between writes for `last_seen`-only changes.
+const FLUSH_SECS: u64 = 300;
+
+/// On-disk format version.
+const FILE_VERSION: u64 = 1;
+
+#[derive(Serialize)]
+struct FileOut<'a> {
+    version: u64,
+    hosts: Vec<&'a Host>,
+}
+
+#[derive(Deserialize)]
+struct FileIn {
+    version: u64,
+    hosts: Vec<Host>,
+}
+
+/// Persists the inventory to a JSON file, throttling `last_seen`-only writes.
+pub struct HostStore {
+    path: PathBuf,
+    last_flush: Option<u64>,
+    dirty: Change,
+}
+
+impl HostStore {
+    /// A store writing to `path`.
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            last_flush: None,
+            dirty: Change::None,
+        }
+    }
+
+    /// The saved hosts; empty (with a warning) when the file is missing,
+    /// unparsable or of another version.
+    pub fn load(&self) -> Vec<Host> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(b) => b,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(path = %self.path.display(), error = %e, "reading host inventory");
+                }
+                return Vec::new();
+            }
+        };
+        match serde_json::from_slice::<FileIn>(&bytes) {
+            Ok(f) if f.version == FILE_VERSION => f.hosts,
+            Ok(f) => {
+                tracing::warn!(
+                    version = f.version,
+                    "host inventory has an unknown version; starting empty"
+                );
+                Vec::new()
+            }
+            Err(e) => {
+                tracing::warn!(path = %self.path.display(), error = %e, "host inventory is unreadable; starting empty");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Records a change, keeping the strongest pending one.
+    pub fn note(&mut self, c: Change) {
+        self.dirty = self.dirty.max(c);
+    }
+
+    /// Writes when a structural change is pending, or a `Seen` one is and the
+    /// throttle has elapsed. Returns whether it wrote.
+    pub fn maybe_flush(&mut self, inv: &Inventory, now: u64) -> std::io::Result<bool> {
+        let due = match self.dirty {
+            Change::None => false,
+            Change::Structural => true,
+            Change::Seen => self
+                .last_flush
+                .is_none_or(|t| now.saturating_sub(t) >= FLUSH_SECS),
+        };
+        if due {
+            self.flush(inv, now)?;
+        }
+        Ok(due)
+    }
+
+    /// Writes unconditionally (for shutdown).
+    pub fn flush(&mut self, inv: &Inventory, now: u64) -> std::io::Result<()> {
+        use std::io::Write;
+        let dir = self.path.parent().filter(|p| !p.as_os_str().is_empty());
+        if let Some(dir) = dir {
+            std::fs::create_dir_all(dir)?;
+        }
+        let out = FileOut {
+            version: FILE_VERSION,
+            hosts: inv.hosts().collect(),
+        };
+        let bytes = serde_json::to_vec(&out).map_err(std::io::Error::other)?;
+        let tmp = self.path.with_extension("json.tmp");
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, &self.path)?;
+        self.dirty = Change::None;
+        self.last_flush = Some(now);
+        Ok(())
     }
 }
 
@@ -1010,5 +1119,113 @@ mod tests {
         );
         let ids: BTreeSet<&str> = m.values().map(String::as_str).collect();
         assert_eq!(ids, BTreeSet::from(["lan", "opt1", "opt2"]));
+    }
+}
+
+#[cfg(test)]
+mod store {
+    use super::*;
+
+    fn inv_with(macs: &[&str]) -> Inventory {
+        let mut inv = Inventory::default();
+        let snap = Snapshot {
+            neigh: macs
+                .iter()
+                .enumerate()
+                .map(|(i, m)| NeighEntry {
+                    mac: (*m).into(),
+                    ip: format!("192.168.68.{}", 10 + i).parse().unwrap(),
+                    dev: "ue1".into(),
+                    state: vec!["REACHABLE".into()],
+                })
+                .collect(),
+            leases: Vec::new(),
+            reservations: Vec::new(),
+            internal: vec![InternalIf {
+                id: "lan".into(),
+                device: "ue1".into(),
+                descr: "LAN".into(),
+                subnets: vec!["192.168.68.0/22".parse().unwrap()],
+            }],
+            subnet_iface: BTreeMap::new(),
+        };
+        inv.observe(&snap, 1000);
+        inv
+    }
+
+    fn store(dir: &tempfile::TempDir) -> HostStore {
+        HostStore::new(dir.path().join("hosts.json"))
+    }
+
+    #[test]
+    fn round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = inv_with(&["aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"]);
+        let mut s = store(&dir);
+        s.flush(&inv, 0).unwrap();
+        let loaded = s.load();
+        let want: Vec<Host> = inv.hosts().cloned().collect();
+        assert_eq!(want.len(), 2);
+        assert_eq!(loaded, want);
+    }
+
+    #[test]
+    fn corrupt_file_starts_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hosts.json"), r#"{"version":1,"hosts":["#).unwrap();
+        assert!(store(&dir).load().is_empty());
+    }
+
+    #[test]
+    fn missing_and_wrong_version_start_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(store(&dir).load().is_empty());
+        std::fs::write(dir.path().join("hosts.json"), r#"{"version":2,"hosts":[]}"#).unwrap();
+        assert!(store(&dir).load().is_empty());
+    }
+
+    #[test]
+    fn seen_only_changes_are_throttled() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = inv_with(&["aa:bb:cc:dd:ee:01"]);
+        let mut s = store(&dir);
+        s.note(Change::Seen);
+        assert!(s.maybe_flush(&inv, 0).unwrap());
+        s.note(Change::Seen);
+        assert!(!s.maybe_flush(&inv, 100).unwrap());
+        s.note(Change::Seen);
+        assert!(s.maybe_flush(&inv, 300).unwrap());
+    }
+
+    #[test]
+    fn structural_change_flushes_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = inv_with(&["aa:bb:cc:dd:ee:01"]);
+        let mut s = store(&dir);
+        s.note(Change::Seen);
+        assert!(s.maybe_flush(&inv, 0).unwrap());
+        s.note(Change::Structural);
+        assert!(s.maybe_flush(&inv, 10).unwrap());
+        assert!(!s.maybe_flush(&inv, 11).unwrap());
+    }
+
+    #[test]
+    fn no_tmp_left_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let inv = inv_with(&["aa:bb:cc:dd:ee:01"]);
+        store(&dir).flush(&inv, 0).unwrap();
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["hosts.json".to_owned()]);
+    }
+
+    #[test]
+    fn creates_missing_parent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = HostStore::new(dir.path().join("sub/hosts.json"));
+        s.flush(&inv_with(&["aa:bb:cc:dd:ee:01"]), 0).unwrap();
+        assert_eq!(s.load().len(), 1);
     }
 }
