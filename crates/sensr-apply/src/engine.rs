@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sensr_rules::document::{self, Runtime};
+use sensr_rules::host_modes::{self, HostModeSets};
 use sensr_rules::ir::IfAddr;
 use sensr_rules::render::nft as rules_nft;
 use sensr_schema::Document;
@@ -130,6 +131,9 @@ pub struct Prepared {
     pub alias_failed: Vec<String>,
     /// alias contents the ruleset was rendered with
     pub aliases: BTreeMap<String, rules_nft::ResolvedAlias>,
+    /// host-mode MAC sets the ruleset was rendered with (the locked
+    /// addresses are empty: [`Engine::update_host_mode_sets`] fills them)
+    pub host_modes: HostModeSets,
     secrets: Vec<(PathBuf, String)>,
 }
 
@@ -216,6 +220,7 @@ impl Engine {
                 .collect(),
             alias_failed: compiled.aliases.failed.iter().cloned().collect(),
             aliases: compiled.aliases.aliases.clone(),
+            host_modes: compiled.host_modes.clone(),
             secrets,
         })
     }
@@ -874,6 +879,30 @@ impl Engine {
     }
 }
 
+impl Engine {
+    /// Replaces the contents of the four host-mode sets in one transaction
+    /// (the MACs and the locked hosts' current addresses): no re-render.
+    /// Does nothing when no host is in a mode, since the ruleset then
+    /// declares none of the sets.
+    pub fn update_host_mode_sets(&self, sets: &HostModeSets) -> Result<(), EngineError> {
+        if sets.is_empty() {
+            return Ok(());
+        }
+        let mut buf = Vec::new();
+        rules_nft::render_set_updates(
+            &rules_nft::Options::default().table,
+            &host_modes::host_mode_set_updates(sets),
+            &mut buf,
+        )
+        .map_err(|source| EngineError::Io {
+            path: PathBuf::from("<nft host-mode update>"),
+            source,
+        })?;
+        nft::load(self.runner.as_ref(), &buf)?;
+        Ok(())
+    }
+}
+
 /// A group's id from `<root>/etc/group`.
 fn group_id(root: &Path, name: &str) -> Option<u32> {
     std::fs::read_to_string(root.join("etc/group"))
@@ -1194,6 +1223,39 @@ mod tests {
             "{err}"
         );
         assert!(!root.path().join("run/systemd/network").exists());
+    }
+
+    #[test]
+    fn host_mode_sets_are_pushed_only_when_a_host_is_in_a_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let (e, runner) = engine(root.path());
+        e.update_host_mode_sets(&HostModeSets::default()).unwrap();
+        assert!(
+            runner.calls().is_empty(),
+            "no sets declared, nothing pushed"
+        );
+        let sets = HostModeSets {
+            quarantine: vec!["02:00:00:00:00:01".parse().unwrap()],
+            locked_v4: vec!["192.168.1.20".parse().unwrap()],
+            locked_v6: vec!["fd00::20".parse().unwrap()],
+            ..HostModeSets::default()
+        };
+        e.update_host_mode_sets(&sets).unwrap();
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].cmd.display(), "nft '-j' '-f' '-'");
+        let text = String::from_utf8(calls[0].stdin.clone().unwrap()).unwrap();
+        for set in [
+            "host_isolated",
+            "host_quarantine",
+            "host_locked_v4",
+            "host_locked_v6",
+            "02:00:00:00:00:01",
+            "192.168.1.20",
+            "fd00::20",
+        ] {
+            assert!(text.contains(set), "{set} missing from {text}");
+        }
     }
 
     #[test]

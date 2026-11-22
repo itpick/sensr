@@ -12,11 +12,13 @@ use sensr_apply::cmd::{Cmd, Runner, SystemRunner};
 use sensr_apply::engine::{Engine, EngineError, EngineOptions, Prepared};
 use sensr_apply::plan::UnitAction;
 use sensr_feeds::http::HttpFetcher;
-use sensr_feeds::{Feeds, SystemResolver};
+use sensr_feeds::{Feeds, NeighbourFn, SystemResolver};
 use sensr_ipc::{FileDiff, PlanView, ServiceAction, ServiceChange, ValidationIssue};
 use sensr_rules::document::Runtime;
+use sensr_rules::host_modes::HostModeSets;
 use sensr_rules::ir::IfAddr;
 use sensr_schema::Document;
+use sensr_schema::fields::MacAddr;
 use serde_json::Value;
 
 use crate::applier::{Applier, ApplyError};
@@ -36,6 +38,11 @@ pub struct SliceApplier {
     gateways: Option<Arc<crate::gateways::GatewayService>>,
     pd: Option<Arc<crate::pd::PdService>>,
     hosts: Option<Arc<crate::hosts::HostCollector>>,
+    /// The neighbour table and active leases (`(mac, address)`), for MAC
+    /// aliases and the locked hosts' addresses.
+    neighbours: Option<Arc<NeighbourFn>>,
+    /// The host-mode sets last pushed to the ruleset.
+    host_modes: Arc<Mutex<HostModeSets>>,
 }
 
 /// How often link addresses are compared with the ruleset's sets.
@@ -75,7 +82,7 @@ impl SliceApplier {
         }
         if let Some(dir) = feeds_dir {
             let runner: Arc<dyn Runner> = Arc::new(SystemRunner);
-            let neighbours = move || {
+            let neighbours: Arc<NeighbourFn> = Arc::new(move || {
                 let mut table = runner
                     .run(&Cmd::new("ip").args(["-j", "neigh", "show"]), None)
                     .map(|o| sensr_feeds::neigh::parse_ip_neigh_json(&o.stdout))
@@ -90,12 +97,13 @@ impl SliceApplier {
                     now,
                 ));
                 table
-            };
+            });
+            a.neighbours = Some(Arc::clone(&neighbours));
             a.feeds = Some(Arc::new(Feeds::new(
                 dir,
                 Arc::new(HttpFetcher::default()),
                 Arc::new(SystemResolver),
-                Arc::new(neighbours),
+                neighbours,
             )));
         }
         Ok(a)
@@ -104,6 +112,12 @@ impl SliceApplier {
     /// With an explicit feed store (tests).
     pub fn with_feeds(mut self, feeds: Arc<Feeds>) -> SliceApplier {
         self.feeds = Some(feeds);
+        self
+    }
+
+    /// With an explicit neighbour table (tests).
+    pub fn with_neighbours(mut self, neighbours: Arc<NeighbourFn>) -> SliceApplier {
+        self.neighbours = Some(neighbours);
         self
     }
 
@@ -141,29 +155,38 @@ impl SliceApplier {
             gateways: None,
             pd: None,
             hosts: None,
+            neighbours: None,
+            host_modes: Arc::new(Mutex::new(HostModeSets::default())),
         })
     }
 
     /// Feeds refresh on their own schedules; changed aliases reach the
-    /// ruleset as one set transaction each tick, never as a reload.
+    /// ruleset as one set transaction each tick, never as a reload. The
+    /// locked hosts' addresses follow the neighbour table on the same tick.
     fn start_refresher(&mut self) {
-        let (Some(feeds), false) = (self.feeds.clone(), self.refreshing) else {
+        if self.refreshing || (self.feeds.is_none() && self.neighbours.is_none()) {
             return;
-        };
+        }
         if self.watch.is_none() {
             // tests drive refresh() themselves
             return;
         }
         self.refreshing = true;
+        let feeds = self.feeds.clone();
+        let neighbours = self.neighbours.clone();
         let engine = Arc::clone(&self.engine);
         let applied = Arc::clone(&self.applied);
+        let host_modes = Arc::clone(&self.host_modes);
         std::thread::Builder::new()
             .name("sensr-alias-feeds".into())
             .spawn(move || {
                 loop {
                     let doc = lock(&applied).as_ref().map(|(d, _)| d.clone());
-                    if let Some(doc) = doc {
-                        refresh_once(&feeds, &engine, &doc, unix_now());
+                    if let (Some(feeds), Some(doc)) = (&feeds, doc) {
+                        refresh_once(feeds, &engine, &doc, unix_now());
+                    }
+                    if let Some(n) = &neighbours {
+                        refresh_host_modes(n.as_ref(), &engine, &host_modes);
                     }
                     std::thread::sleep(FEED_TICK);
                 }
@@ -241,6 +264,65 @@ pub fn refresh_once(feeds: &Feeds, engine: &Mutex<Engine>, doc: &Document, now: 
             tracing::warn!(error = %e, aliases = ?names, "alias set update failed; retrying next tick");
             feeds.reset();
         }
+    }
+}
+
+/// `sets`' MACs with the addresses `table` holds for them: the locked
+/// hosts' current IPv4 and IPv6 addresses.
+fn with_locked(sets: &HostModeSets, table: &[(String, std::net::IpAddr)]) -> HostModeSets {
+    use std::collections::BTreeSet;
+    use std::net::IpAddr;
+    let locked: BTreeSet<MacAddr> = sets
+        .isolated
+        .iter()
+        .chain(&sets.quarantine)
+        .copied()
+        .collect();
+    let (mut v4, mut v6) = (BTreeSet::new(), BTreeSet::new());
+    for (mac, ip) in table {
+        if !mac.parse().is_ok_and(|m: MacAddr| locked.contains(&m)) {
+            continue;
+        }
+        match ip {
+            IpAddr::V4(a) => v4.insert(*a),
+            IpAddr::V6(a) => v6.insert(*a),
+        };
+    }
+    HostModeSets {
+        isolated: sets.isolated.clone(),
+        quarantine: sets.quarantine.clone(),
+        locked_v4: v4.into_iter().collect(),
+        locked_v6: v6.into_iter().collect(),
+    }
+}
+
+/// One host-mode tick: re-reads the locked hosts' addresses and pushes the
+/// sets when they changed (a new lease, a released one). Nothing when no
+/// host is in a mode, since the ruleset then declares none of the sets.
+pub fn refresh_host_modes(
+    neighbours: &NeighbourFn,
+    engine: &Mutex<Engine>,
+    pushed: &Mutex<HostModeSets>,
+) {
+    if lock(pushed).is_empty() {
+        return;
+    }
+    // outside the locks: this runs `ip` and reads Kea's files
+    let table = neighbours();
+    let mut pushed = lock(pushed);
+    if pushed.is_empty() {
+        return;
+    }
+    let next = with_locked(&pushed, &table);
+    if next == *pushed {
+        return;
+    }
+    match lock(engine).update_host_mode_sets(&next) {
+        Ok(()) => {
+            tracing::info!(v4 = ?next.locked_v4, v6 = ?next.locked_v6, "locked host addresses updated");
+            *pushed = next;
+        }
+        Err(e) => tracing::warn!(error = %e, "host-mode set update failed; retrying next tick"),
     }
 }
 
@@ -386,11 +468,19 @@ impl Applier for SliceApplier {
         Ok(self.hosts.as_ref().is_some_and(|h| h.forget(key)))
     }
 
+    fn client_mac(&self, ip: std::net::IpAddr) -> Option<String> {
+        self.hosts.as_ref()?.mac_for_ip(ip)
+    }
+
     fn apply(&mut self, _running: Option<&Document>, next: &Document) -> Result<(), ApplyError> {
         let doc = document(next)?.clone();
+        // before the engine, as in the refresher: no tick pushes stale sets
+        // between the reload and the push below
+        let mut pushed = lock(&self.host_modes);
         let mut engine = self.engine();
         let (p, addrs) = prepare(&engine, &doc, self.feeds.as_deref()).map_err(rejected)?;
         let rendered = p.aliases.clone();
+        let host_modes = p.host_modes.clone();
         for w in &p.warnings {
             tracing::warn!(rule = %w, "firewall rule degraded");
         }
@@ -404,7 +494,20 @@ impl Applier for SliceApplier {
             nft = report.nft_loaded,
             "applied"
         );
+        // A full ruleset declares the locked hosts' address sets empty:
+        // fill them now, not on the next tick.
+        let table = self.neighbours.as_ref().map(|n| n()).unwrap_or_default();
+        let sets = with_locked(&host_modes, &table);
+        match engine.update_host_mode_sets(&sets) {
+            Ok(()) => *pushed = sets,
+            Err(e) => {
+                tracing::warn!(error = %e, "host-mode set update failed; retrying next tick");
+                // the ruleset holds the MACs only; the tick fills the rest
+                *pushed = with_locked(&host_modes, &[]);
+            }
+        }
         drop(engine);
+        drop(pushed);
         if let Some(f) = &self.feeds {
             f.applied(rendered);
         }
@@ -616,5 +719,144 @@ mod tests {
         assert!(!doc.validate().is_empty());
         let err = a.plan(None, &doc).unwrap_err();
         assert!(matches!(err, ApplyError::Invalid(_)), "{err:?}");
+    }
+
+    fn fake_root() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        for k in sensr_apply::appliers::sysctl::SysctlModel::default()
+            .to_map()
+            .unwrap()
+            .into_keys()
+            .chain(["net.core.default_qdisc".into(), "kernel.hostname".into()])
+        {
+            let p = root.path().join("proc/sys").join(k.replace('.', "/"));
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "0\n").unwrap();
+        }
+        // locked hosts turn ICMP redirects off per internal link
+        for i in crate::hosts::internal_interfaces(&home_router()) {
+            let p = root
+                .path()
+                .join(format!("proc/sys/net/ipv4/conf/{}", i.device));
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("send_redirects"), "1\n").unwrap();
+        }
+        root
+    }
+
+    type Table = Arc<Mutex<Vec<(String, std::net::IpAddr)>>>;
+
+    fn moded_applier(root: &tempfile::TempDir) -> (SliceApplier, Arc<FakeRunner>, Table) {
+        let runner = Arc::new(FakeRunner::new());
+        let table: Table = Arc::new(Mutex::new(Vec::new()));
+        let t = Arc::clone(&table);
+        let a = SliceApplier::new(
+            EngineOptions {
+                root: root.path().to_owned(),
+                ..EngineOptions::default()
+            },
+            runner.clone(),
+        )
+        .unwrap()
+        .with_neighbours(Arc::new(move || lock(&t).clone()));
+        (a, runner, table)
+    }
+
+    /// The nft transactions so far, as text.
+    fn nft_loads(r: &FakeRunner) -> Vec<String> {
+        r.calls()
+            .iter()
+            .filter(|c| c.cmd.display() == "nft '-j' '-f' '-'")
+            .map(|c| String::from_utf8_lossy(c.stdin.as_deref().unwrap_or_default()).into_owned())
+            .collect()
+    }
+
+    const LOCKED: &str = "02:00:5e:10:00:99";
+
+    fn quarantined() -> Document {
+        use sensr_schema::PathAccess;
+        let mut doc = home_router();
+        doc.set_by_path(
+            "firewall.host_modes.6d0de000-0000-4000-8000-000000000001",
+            serde_json::json!({"mac": LOCKED, "mode": "quarantine"}),
+        )
+        .unwrap();
+        doc
+    }
+
+    #[test]
+    fn no_host_mode_push_without_modes() {
+        let root = fake_root();
+        let (mut a, runner, table) = moded_applier(&root);
+        lock(&table).push((LOCKED.into(), "192.168.1.20".parse().unwrap()));
+        a.apply(None, &home_router()).unwrap();
+        let loads = nft_loads(&runner);
+        assert!(
+            loads.iter().all(|l| !l.contains("host_locked")),
+            "no host-mode sets are declared, so none may be pushed"
+        );
+        let n = runner.calls().len();
+        refresh_host_modes(a.neighbours.as_deref().unwrap(), &a.engine, &a.host_modes);
+        assert_eq!(runner.calls().len(), n, "the tick pushes nothing either");
+    }
+
+    #[test]
+    fn locked_addresses_are_pushed_after_every_apply_and_follow_the_table() {
+        let root = fake_root();
+        let (mut a, runner, table) = moded_applier(&root);
+        lock(&table).extend([
+            (LOCKED.to_uppercase(), "192.168.1.20".parse().unwrap()),
+            (LOCKED.into(), "fd00::20".parse().unwrap()),
+            ("02:00:5e:10:00:0a".into(), "192.168.1.10".parse().unwrap()),
+        ]);
+        let doc = quarantined();
+        a.apply(None, &doc).unwrap();
+        let loads = nft_loads(&runner);
+        let last = loads.last().unwrap();
+        assert!(
+            last.contains("host_locked_v4") && last.contains("192.168.1.20"),
+            "{last}"
+        );
+        assert!(last.contains("fd00::20"), "{last}");
+        assert!(
+            !last.contains("192.168.1.10"),
+            "a Normal host is not locked"
+        );
+        // a re-apply of the same document reloads nothing but still pushes
+        a.apply(Some(&doc), &doc).unwrap();
+        let again = nft_loads(&runner);
+        assert!(again.len() > loads.len());
+        assert!(again.last().unwrap().contains("192.168.1.20"));
+
+        let tick = |a: &SliceApplier| {
+            refresh_host_modes(a.neighbours.as_deref().unwrap(), &a.engine, &a.host_modes)
+        };
+        // nothing changed: nothing pushed
+        let n = nft_loads(&runner).len();
+        tick(&a);
+        assert_eq!(nft_loads(&runner).len(), n);
+        // a new lease is covered on the next tick, the old address drops out
+        lock(&table)[0].1 = "192.168.1.21".parse().unwrap();
+        tick(&a);
+        let loads = nft_loads(&runner);
+        assert_eq!(loads.len(), n + 1);
+        let last = loads.last().unwrap();
+        assert!(
+            last.contains("192.168.1.21") && !last.contains("192.168.1.20"),
+            "{last}"
+        );
+        // released: the set empties
+        lock(&table).clear();
+        tick(&a);
+        let loads = nft_loads(&runner);
+        assert_eq!(loads.len(), n + 2);
+        assert!(!loads.last().unwrap().contains("192.168.1.21"));
+
+        // back to no modes: the next tick pushes nothing
+        a.apply(Some(&doc), &home_router()).unwrap();
+        lock(&table).push((LOCKED.into(), "192.168.1.22".parse().unwrap()));
+        let n = runner.calls().len();
+        tick(&a);
+        assert_eq!(runner.calls().len(), n);
     }
 }

@@ -17,6 +17,7 @@ struct Fx {
     _dir: tempfile::TempDir,
     addr: std::net::SocketAddr,
     admin_key: String,
+    applier: FakeApplier,
     _agent: Running,
 }
 
@@ -27,12 +28,8 @@ async fn start() -> Fx {
         trusted_uids: vec![me],
         ..Settings::default()
     };
-    let agent = Agent::new(
-        sensr_agent::store::in_memory(),
-        FakeApplier::default(),
-        settings,
-    )
-    .unwrap();
+    let applier = FakeApplier::default();
+    let agent = Agent::new(sensr_agent::store::in_memory(), applier.clone(), settings).unwrap();
     agent.boot().await.unwrap();
     let socket = dir.path().join("agent.sock");
     let running = sensr_agent::start(agent, &socket, 0o600, None).unwrap();
@@ -115,6 +112,7 @@ async fn start() -> Fx {
         _dir: dir,
         addr,
         admin_key: basic_header(&key.key, &key.secret),
+        applier,
         _agent: running,
     }
 }
@@ -551,4 +549,66 @@ async fn forget_host_readonly_forbidden() {
     )
     .await;
     assert_eq!(st, 409, "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_host_mode_route() {
+    const MAC: &str = "aa:bb:cc:00:00:01";
+    let fx = start().await;
+    let viewer = pw("hostviewer", "pw");
+    let set = |who: String, mode: Value| {
+        let fx = &fx;
+        async move {
+            http(
+                fx,
+                "POST",
+                "/api/v1/hosts/mode",
+                Some(&who),
+                Some(json!({"mac": MAC, "mode": mode})),
+            )
+            .await
+        }
+    };
+    let (st, body) = set(viewer.clone(), json!("isolated")).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body, json!({"result": "applied"}));
+    let applied = fx.applier.state.lock().unwrap().applied.clone();
+    let modes: Vec<_> = applied
+        .last()
+        .unwrap()
+        .firewall
+        .host_modes
+        .values()
+        .map(|h| h.mac.to_string())
+        .collect();
+    assert_eq!(modes, [MAC]);
+
+    // read-only config: the mode is visible but not changeable
+    let (st, body) = set(pw("hostreader", "pw"), json!("quarantine")).await;
+    assert_eq!(st, 403, "{body}");
+    // no hosts privilege at all
+    let (st, _) = set(pw("watcher", "pw"), json!("quarantine")).await;
+    assert_eq!(st, 403);
+
+    // the request comes from 127.0.0.1: quarantining that host is refused
+    fx.applier
+        .state
+        .lock()
+        .unwrap()
+        .client_macs
+        .push(("127.0.0.1".parse().unwrap(), MAC.into()));
+    let (st, body) = set(viewer.clone(), json!("quarantine")).await;
+    assert_eq!(st, 409, "{body}");
+    assert!(
+        body.to_string().contains("That's the device you're using"),
+        "{body}"
+    );
+
+    // back to Normal, spelled `normal` or `null`
+    let (st, body) = set(viewer.clone(), json!("normal")).await;
+    assert_eq!((st, body), (200, json!({"result": "applied"})));
+    let (st, body) = set(viewer, Value::Null).await;
+    assert_eq!((st, body), (200, json!({"result": "applied"})));
+    let applied = fx.applier.state.lock().unwrap().applied.clone();
+    assert!(applied.last().unwrap().firewall.host_modes.is_empty());
 }

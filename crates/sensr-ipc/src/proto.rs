@@ -259,6 +259,31 @@ pub enum Op {
         /// The host key: the lowercase MAC, else `id:<client id>`.
         key: String,
     },
+    /// Put a host in a mode, or back to Normal (Hosts › Mode): writes or
+    /// removes its `firewall.host_modes` entry. Commits and applies at once
+    /// when nothing else is staged and no commit awaits confirmation;
+    /// otherwise only stages. Answered with [`Response::Value`]
+    /// `{"result": "applied" | "staged"}`.
+    HostModeSet {
+        /// The host's MAC address.
+        mac: String,
+        /// The new mode; `None` is Normal (the entry is removed).
+        mode: Option<HostModeMode>,
+        /// The client's address as seen by the API: quarantining the device
+        /// the request comes from is refused.
+        #[serde(default)]
+        remote_addr: Option<std::net::IpAddr>,
+    },
+}
+
+/// A host mode other than Normal, for [`Op::HostModeSet`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostModeMode {
+    /// Reaches the router and the internet but no other local host.
+    Isolated,
+    /// Reaches only the router's DHCP, DNS and NTP.
+    Quarantine,
 }
 
 /// Subsystems with run-time state the UI shows.
@@ -339,6 +364,7 @@ impl Op {
                 | Op::ConfigRollback { .. }
                 | Op::InterfacesAssign { .. }
                 | Op::HostForget { .. }
+                | Op::HostModeSet { .. }
         )
     }
 }
@@ -650,5 +676,19 @@ mod tests {
             }
             .is_write()
         );
+    }
+
+    #[test]
+    fn host_mode_set_is_write() {
+        assert!(
+            Op::HostModeSet {
+                mac: "x".into(),
+                mode: None,
+                remote_addr: None
+            }
+            .is_write()
+        );
+        let v = serde_json::to_value(Some(HostModeMode::Quarantine)).unwrap();
+        assert_eq!(v, serde_json::json!("quarantine"));
     }
 }
