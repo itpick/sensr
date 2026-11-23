@@ -26,6 +26,7 @@ sensr-apply.workspace = true
 sensr-auth.workspace = true
 sensr-config.workspace = true
 sensr-feeds.workspace = true
+sensr-fingerprint.workspace = true
 sensr-import-opnsense.workspace = true
 sensr-ipc.workspace = true
 sensr-monitor.workspace = true

@@ -4995,6 +4995,7 @@ dependencies = [
  "sensr-auth",
  "sensr-config",
  "sensr-feeds",
+ "sensr-fingerprint",
  "sensr-import-opnsense",
  "sensr-ipc",
  "sensr-monitor",

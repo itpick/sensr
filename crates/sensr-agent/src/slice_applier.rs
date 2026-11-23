@@ -46,6 +46,59 @@ pub struct SliceApplier {
     host_modes: Arc<Mutex<HostModeSets>>,
     /// Same-LAN enforcement of host modes.
     intercept: Option<Intercept>,
+    /// Passive DHCP/mDNS evidence for host labels.
+    fingerprint: Option<Fingerprint>,
+}
+
+/// Builds a (not yet started) sniffer.
+type MakeSniffer = dyn Fn() -> Arc<crate::fingerprint::Sniffer> + Send + Sync;
+
+/// The host-label sniffer, running while `hosts.fingerprint.enabled` and an
+/// internal interface exists.
+#[derive(Clone)]
+struct Fingerprint {
+    make: Arc<MakeSniffer>,
+    link: Arc<LinkFn>,
+    running: Arc<Mutex<Option<Arc<crate::fingerprint::Sniffer>>>>,
+}
+
+impl Fingerprint {
+    /// Starts, retargets or stops the sniffer for the applied document.
+    /// Holds `running` while reading `applied`, so the apply and the
+    /// inventory poll cannot land an older document after a newer one.
+    fn update_from(&self, applied: &Mutex<Applied>) {
+        let mut running = lock(&self.running);
+        let Some(doc) = lock(applied).as_ref().map(|(d, _)| d.clone()) else {
+            return;
+        };
+        let ifaces = if doc.hosts.fingerprint.enabled {
+            crate::fingerprint::interfaces(
+                &sensr_rules::document::internal_interfaces(&doc),
+                &*self.link,
+            )
+        } else {
+            Vec::new()
+        };
+        if ifaces.is_empty() {
+            if let Some(s) = running.take() {
+                s.stop();
+                tracing::info!("host fingerprinting stopped");
+            }
+            return;
+        }
+        let s = running.get_or_insert_with(|| {
+            let s = (self.make)();
+            s.start();
+            s
+        });
+        s.set_interfaces(ifaces);
+    }
+
+    fn stop(&self) {
+        if let Some(s) = lock(&self.running).take() {
+            s.stop();
+        }
+    }
 }
 
 /// Reads the kernel neighbour table.
@@ -203,8 +256,22 @@ impl SliceApplier {
                 hosts: Some(Arc::downgrade(&hosts)),
                 serial: Arc::default(),
             };
-            feed_from_polls(&hosts, &ic, &a.applied, &a.host_modes);
+            let sink_hosts = Arc::downgrade(&hosts);
+            let fp = Fingerprint {
+                make: Arc::new(move || {
+                    let h = sink_hosts.clone();
+                    crate::fingerprint::Sniffer::system(Arc::new(move |mac, ev| {
+                        if let Some(h) = h.upgrade() {
+                            h.record_evidence(mac, ev);
+                        }
+                    }))
+                }),
+                link: Arc::new(crate::arp_intercept::link),
+                running: Arc::default(),
+            };
+            feed_from_polls(&hosts, &ic, Some(&fp), &a.applied, &a.host_modes);
             a.intercept = Some(ic);
+            a.fingerprint = Some(fp);
             hosts.start();
             a.hosts = Some(hosts);
         }
@@ -304,6 +371,7 @@ impl SliceApplier {
             neighbours: None,
             host_modes: Arc::new(Mutex::new(HostModeSets::default())),
             intercept: None,
+            fingerprint: None,
         })
     }
 
@@ -578,10 +646,12 @@ fn host_mode_tick(
 fn feed_from_polls(
     hosts: &crate::hosts::HostCollector,
     ic: &Intercept,
+    fp: Option<&Fingerprint>,
     applied: &Arc<Mutex<Applied>>,
     host_modes: &Arc<Mutex<HostModeSets>>,
 ) {
     let (ic, applied, host_modes) = (ic.clone(), Arc::clone(applied), Arc::clone(host_modes));
+    let fp = fp.cloned();
     hosts.on_poll(Arc::new(move |neigh, leases| {
         ic.update_from(
             &applied,
@@ -589,6 +659,9 @@ fn feed_from_polls(
             &poll_table(neigh, leases),
             Some(neigh),
         );
+        if let Some(fp) = &fp {
+            fp.update_from(&applied);
+        }
     }));
 }
 
@@ -803,6 +876,9 @@ impl Applier for SliceApplier {
             // after `applied`, so no refresh can land an older document later
             ic.update_from(&self.applied, &self.host_modes, &table, None);
         }
+        if let Some(fp) = &self.fingerprint {
+            fp.update_from(&self.applied);
+        }
         self.start_watcher();
         self.start_refresher();
         Ok(())
@@ -814,6 +890,9 @@ impl Drop for SliceApplier {
         // clean shutdown: keep the last `last_seen`s the throttle held back
         if let Some(h) = &self.hosts {
             h.shutdown();
+        }
+        if let Some(fp) = &self.fingerprint {
+            fp.stop();
         }
         // and leave no neighbour pointing at the router (blocks 2 s)
         if let Some(ic) = &self.intercept {
@@ -1362,6 +1441,117 @@ mod tests {
         assert_eq!(conntrack(&runner).len(), n + 3);
     }
 
+    mod fingerprint {
+        use super::*;
+        use crate::fingerprint::{PacketSource, QuerySender, SniffIface, Sniffer};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Idle;
+
+        impl PacketSource for Idle {
+            fn recv(&self, _: &mut [u8]) -> std::io::Result<(usize, u32)> {
+                std::thread::sleep(Duration::from_millis(5));
+                Err(std::io::ErrorKind::WouldBlock.into())
+            }
+        }
+
+        #[derive(Default)]
+        struct Sent(Mutex<Vec<String>>);
+
+        impl QuerySender for Sent {
+            fn send(&self, iface: &SniffIface) -> std::io::Result<()> {
+                lock(&self.0).push(iface.device.clone());
+                Ok(())
+            }
+        }
+
+        /// An applier whose sniffers are counted: `(applier, made, opened)`.
+        fn applier(
+            root: &tempfile::TempDir,
+        ) -> (SliceApplier, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<Sent>) {
+            let (mut a, _, _) = moded_applier(root);
+            let (made, opened) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+            let sent = Arc::new(Sent::default());
+            let (m, o, q) = (Arc::clone(&made), Arc::clone(&opened), Arc::clone(&sent));
+            a.fingerprint = Some(Fingerprint {
+                make: Arc::new(move || {
+                    m.fetch_add(1, Ordering::SeqCst);
+                    let o = Arc::clone(&o);
+                    Sniffer::new(
+                        Arc::new(move || {
+                            o.fetch_add(1, Ordering::SeqCst);
+                            Ok(Arc::new(Idle) as Arc<dyn PacketSource>)
+                        }),
+                        Arc::clone(&q) as Arc<dyn QuerySender>,
+                        Arc::new(crate::arp_intercept::SystemClock),
+                        Arc::new(|_, _| {}),
+                    )
+                }),
+                link: Arc::new(|dev: &str| (dev == "igc1").then_some((5, [2, 0, 0, 0, 0, 1]))),
+                running: Arc::default(),
+            });
+            (a, made, opened, sent)
+        }
+
+        fn running(a: &SliceApplier) -> Option<Arc<Sniffer>> {
+            lock(&a.fingerprint.as_ref().unwrap().running).clone()
+        }
+
+        fn disabled() -> Document {
+            use sensr_schema::PathAccess;
+            let mut doc = home_router();
+            doc.set_by_path("hosts.fingerprint.enabled", serde_json::json!(false))
+                .unwrap();
+            doc
+        }
+
+        #[test]
+        fn fingerprint_disabled_starts_nothing() {
+            let root = fake_root();
+            let (mut a, made, opened, sent) = applier(&root);
+            a.apply(None, &disabled()).unwrap();
+            assert!(running(&a).is_none());
+            assert_eq!(made.load(Ordering::SeqCst), 0);
+            assert_eq!(opened.load(Ordering::SeqCst), 0);
+            assert!(lock(&sent.0).is_empty());
+        }
+
+        #[test]
+        fn apply_starts_retargets_and_stops_the_sniffer() {
+            let root = fake_root();
+            let (mut a, made, opened, sent) = applier(&root);
+            a.apply(None, &home_router()).unwrap();
+            let s = running(&a).expect("on by default");
+            assert!(s.listening());
+            a.apply(Some(&home_router()), &home_router()).unwrap();
+            assert!(
+                Arc::ptr_eq(&s, &running(&a).unwrap()),
+                "kept across applies"
+            );
+            assert_eq!(
+                (made.load(Ordering::SeqCst), opened.load(Ordering::SeqCst)),
+                (1, 1)
+            );
+            // the loop asks the LAN only (the WAN device has no index here,
+            // and is not internal anyway)
+            let t = std::time::Instant::now();
+            while lock(&sent.0).is_empty() && t.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(*lock(&sent.0), ["igc1"]);
+            a.apply(Some(&home_router()), &disabled()).unwrap();
+            assert!(running(&a).is_none());
+            assert!(!s.listening(), "stopped and closed");
+            a.apply(Some(&disabled()), &home_router()).unwrap();
+            assert_eq!(
+                made.load(Ordering::SeqCst),
+                2,
+                "a fresh one after re-enabling"
+            );
+            drop(a);
+        }
+    }
+
     mod intercept {
         use super::*;
         use crate::arp_intercept::{ArpFrame, Clock, Interceptor, PacketSocket};
@@ -1552,6 +1742,7 @@ mod tests {
             feed_from_polls(
                 &hosts,
                 a.intercept.as_ref().unwrap(),
+                None,
                 &a.applied,
                 &a.host_modes,
             );
