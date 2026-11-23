@@ -450,6 +450,13 @@ impl Engine {
             if let Some(dir) = quoted("directory:") {
                 let _ = dir;
                 out.push_str(&format!("  directory: \"{}\"\n", scratch.display()));
+            } else if let Some(file) = quoted("logfile:").filter(|f| !f.is_empty()) {
+                // the query log lives in the unit's runtime directory, which
+                // only exists while Unbound runs: a stopped resolver (boot, or
+                // a switch that stopped it) must not fail the check
+                let local = scratch.join(Path::new(&file).file_name().unwrap_or_default());
+                staged.push(local.clone());
+                out.push_str(&format!("  logfile: \"{}\"\n", local.display()));
             } else if let Some((key, file)) = ["include:", "auto-trust-anchor-file:"]
                 .iter()
                 .find_map(|k| quoted(k).map(|f| (*k, f)))
@@ -1036,6 +1043,32 @@ mod tests {
         )
         .unwrap();
         (e, runner)
+    }
+
+    #[test]
+    fn unbound_check_copy_moves_the_query_log_into_scratch() {
+        let root = tempfile::tempdir().unwrap();
+        let (e, _) = engine(root.path());
+        let scratch = root.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let mut staged = Vec::new();
+        let conf = b"server:\n  logfile: \"/run/unbound/query.log\"\n  log-queries: yes\n";
+        let out = e.unbound_check_copy(conf, &scratch, &mut staged).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("/run/unbound"), "{out}");
+        assert!(
+            out.contains(&format!(
+                "logfile: \"{}\"",
+                scratch.join("query.log").display()
+            )),
+            "{out}"
+        );
+        assert!(out.contains("log-queries: yes"));
+        // an empty logfile (logging to stderr/syslog) is left alone
+        let out = e
+            .unbound_check_copy(b"server:\n  logfile: \"\"\n", &scratch, &mut staged)
+            .unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("logfile: \"\""));
     }
 
     #[test]
