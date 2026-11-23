@@ -442,7 +442,10 @@ impl Backend for MockBackend {
                 })
                 .filter(|h| !s.forgotten.contains(h["key"].as_str().unwrap_or_default()))
                 .ok_or_else(|| ApiError::NotFound("no such host".into()))?;
-            Ok(simulated_activity(&host, &range, page, t, self.stale_feed))
+            let mut v = simulated_activity(&host, &range, page, t, self.stale_feed);
+            // the applied overrides re-attribute names, as the daemon's catalogue does
+            apply_mock_overrides(&mut v, &s.head().doc);
+            Ok(v)
         }))
     }
 
@@ -608,6 +611,84 @@ impl Backend for MockBackend {
         }))
     }
 
+    fn set_service_override(
+        &self,
+        suffix: String,
+        service: Option<String>,
+        category: Option<String>,
+    ) -> BoxFuture<'_, ApiResult<String>> {
+        if self.read_only() || !self.may_access("/api/v1/insight/service-override") {
+            return ready(Err(ApiError::Unauthorized));
+        }
+        let suffix = suffix.trim().trim_end_matches('.').to_ascii_lowercase();
+        let service = service.map(|s| s.trim().to_owned());
+        let category = category.filter(|c| !c.is_empty());
+        if let Some(c) = &category
+            && !crate::runtime::CATEGORIES.iter().any(|(k, _)| k == c)
+        {
+            return ready(Err(ApiError::Validation(vec![FieldError::new(
+                "category",
+                format!("Unknown category {c:?}."),
+            )])));
+        }
+        if service.is_some() != category.is_some() {
+            return ready(Err(ApiError::Backend(
+                "give both a service and a category, or neither".into(),
+            )));
+        }
+        let message = match (&service, &category) {
+            (Some(sv), Some(c)) => format!("set service override {suffix} → {sv}/{c}"),
+            _ => format!("remove service override {suffix}"),
+        };
+        // Like the agent: commit at once unless something is staged.
+        ready(self.with(|s| {
+            let dirty = !s.changed().is_empty() || s.confirm.is_some();
+            let mut doc = s.staged.clone();
+            let root = doc
+                .as_object_mut()
+                .ok_or_else(|| ApiError::Backend("no document".into()))?;
+            let insight = root.entry("insight").or_insert_with(|| json!({}));
+            let dns = insight
+                .as_object_mut()
+                .map(|i| i.entry("dns").or_insert_with(|| json!({})))
+                .ok_or_else(|| ApiError::Backend("no insight section".into()))?;
+            let entries = dns
+                .as_object_mut()
+                .map(|d| d.entry("service_overrides").or_insert_with(|| json!({})))
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| ApiError::Backend("no dns section".into()))?;
+            let id = entries
+                .iter()
+                .find(|(_, o)| o["suffix"].as_str() == Some(suffix.as_str()))
+                .map(|(id, _)| id.clone());
+            match (service, category) {
+                (Some(service), Some(category)) => {
+                    let id = id.unwrap_or_else(|| {
+                        format!("5e7f0000-0000-4000-8000-{:012x}", entries.len() + 1)
+                    });
+                    entries.insert(
+                        id,
+                        json!({"enabled": true, "suffix": suffix, "service": service, "category": category}),
+                    );
+                }
+                _ => {
+                    if let Some(id) = id {
+                        entries.remove(&id);
+                    }
+                }
+            }
+            validate(&doc).map_err(ApiError::Validation)?;
+            if dirty {
+                s.staged = doc;
+                return Ok("staged".to_owned());
+            }
+            if doc != s.head().doc {
+                s.push("root", &message, doc);
+            }
+            Ok("applied".to_owned())
+        }))
+    }
+
     fn may_access(&self, url: &str) -> bool {
         self.privileges.as_ref().is_none_or(|p| {
             sensr_auth::acl::Registry::builtin().grants(p.iter().map(String::as_str), url)
@@ -633,6 +714,40 @@ impl Backend for MockBackend {
                 std::path::PathBuf::from,
             )
         })
+    }
+}
+
+/// Re-attributes the domains of a mock activity page by the enabled service overrides
+/// of `doc` (the longest matching suffix wins).
+fn apply_mock_overrides(v: &mut HostActivityView, doc: &Value) {
+    let overrides: Vec<(&str, &str, &str)> = doc
+        .pointer("/insight/dns/service_overrides")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|m| m.values())
+        .filter(|o| o["enabled"].as_bool().unwrap_or(true))
+        .filter_map(|o| {
+            Some((
+                o["suffix"].as_str()?,
+                o["service"].as_str()?,
+                o["category"].as_str()?,
+            ))
+        })
+        .collect();
+    for d in &mut v.domains {
+        let best = overrides
+            .iter()
+            .filter(|(sfx, ..)| {
+                d.qname == *sfx
+                    || d.qname
+                        .strip_suffix(sfx)
+                        .is_some_and(|head| head.ends_with('.'))
+            })
+            .max_by_key(|(sfx, ..)| sfx.len());
+        if let Some((_, service, category)) = best {
+            d.service = (*service).to_owned();
+            d.category = (*category).to_owned();
+        }
     }
 }
 
@@ -2160,6 +2275,36 @@ mod tests {
 
     fn activity(mock: &MockBackend, mac: &str, range: &str) -> ApiResult<HostActivityView> {
         block(mock.host_activity(mac.into(), range.into(), 0))
+    }
+
+    #[test]
+    fn mock_service_override_reattributes_domains() {
+        let m = MockBackend::new();
+        let set = |sv: Option<&str>, c: Option<&str>| {
+            block(m.set_service_override(
+                " Some-New-Game-CDN.net ".into(),
+                sv.map(Into::into),
+                c.map(Into::into),
+            ))
+        };
+        assert_eq!(set(Some("Fortnite"), Some("games")).unwrap(), "applied");
+        let v = activity(&m, KID_TABLET, "today").unwrap();
+        let d = v
+            .domains
+            .iter()
+            .find(|d| d.qname == "some-new-game-cdn.net")
+            .unwrap();
+        assert_eq!(
+            (d.service.as_str(), d.category.as_str()),
+            ("Fortnite", "games")
+        );
+        assert!(matches!(
+            set(Some("X"), Some("toaster")),
+            Err(ApiError::Validation(_))
+        ));
+        assert_eq!(set(None, None).unwrap(), "applied");
+        let v = activity(&m, KID_TABLET, "today").unwrap();
+        assert!(v.domains.iter().all(|d| d.service != "Fortnite"));
     }
 
     #[test]

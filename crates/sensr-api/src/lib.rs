@@ -86,6 +86,9 @@ pub const ROUTES: &[Route] = &[
     }),
     ("/api/v1/insight/top", || get(insight::top)),
     ("/api/v1/insight/series", || get(insight::series)),
+    ("/api/v1/insight/service-override", || {
+        post(native::set_service_override)
+    }),
     ("/api/v1/ids/alerts", || get(insight::alerts)),
     ("/api/v1/ids/signatures", || get(insight::signatures)),
     ("/api/v1/ids/stats", || get(insight::stats)),

@@ -860,6 +860,16 @@ mod server {
             kind: Option<String>,
             maker: Option<String>,
         ) -> BoxFuture<'_, ApiResult<String>>;
+        /// Sets what the domain `suffix` counts as on the DNS activity page
+        /// (`insight.dns.service_overrides`): `service` a name, `category` a
+        /// [`crate::runtime::CATEGORIES`] key; both `None` removes the override. Returns
+        /// `applied` when it took effect at once, `staged` when it waits for Apply.
+        fn set_service_override(
+            &self,
+            suffix: String,
+            service: Option<String>,
+            category: Option<String>,
+        ) -> BoxFuture<'_, ApiResult<String>>;
         /// The caller may read but not change anything (`user-config-readonly`), so the
         /// UI hides actions that would be refused.
         fn read_only(&self) -> bool {

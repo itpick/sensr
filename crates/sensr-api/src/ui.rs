@@ -417,6 +417,40 @@ impl Backend for UiBackend {
         .boxed()
     }
 
+    fn set_service_override(
+        &self,
+        suffix: String,
+        service: Option<String>,
+        category: Option<String>,
+    ) -> BoxFuture<'_, ApiResult<String>> {
+        async move {
+            let category = match category.as_deref() {
+                None | Some("") => None,
+                Some(c) => Some(serde_json::from_value(Value::String(c.to_owned())).map_err(
+                    |_| {
+                        ApiError::Validation(vec![FieldError::new(
+                            "category",
+                            format!("Unknown category {c:?}."),
+                        )])
+                    },
+                )?),
+            };
+            let op = Op::ServiceOverrideSet {
+                suffix,
+                service,
+                category,
+            };
+            match self.call(op).await? {
+                Response::Value(Some(v)) => match v.get("result").and_then(Value::as_str) {
+                    Some(r) => Ok(r.to_owned()),
+                    None => Err(ApiError::Backend(format!("unexpected agent reply {v}"))),
+                },
+                other => Err(unexpected(other)),
+            }
+        }
+        .boxed()
+    }
+
     fn read_only(&self) -> bool {
         self.caller
             .info

@@ -893,3 +893,101 @@ async fn ui_backend_set_host_label() {
         Err(ApiError::Unauthorized)
     ));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_service_override_route() {
+    use sensr_schema::models::insight::Category;
+    let fx = start().await;
+    let post = |who: String, body: Value| {
+        let fx = &fx;
+        async move {
+            http(
+                fx,
+                "POST",
+                "/api/v1/insight/service-override",
+                Some(&who),
+                Some(body),
+            )
+            .await
+        }
+    };
+    let overrides = |fx: &Fx| {
+        fx.applier
+            .state
+            .lock()
+            .unwrap()
+            .applied
+            .last()
+            .unwrap()
+            .insight
+            .dns
+            .service_overrides
+            .values()
+            .map(|o| (o.suffix.clone(), o.service.clone(), o.category))
+            .collect::<Vec<_>>()
+    };
+    let who = pw("activity", "pw");
+    let (st, body) = post(
+        who.clone(),
+        json!({"suffix": "game-cdn.net", "service": "Fortnite", "category": "games"}),
+    )
+    .await;
+    assert_eq!((st, body), (200, json!({"result": "applied"})));
+    assert_eq!(
+        overrides(&fx),
+        [(
+            "game-cdn.net".to_owned(),
+            "Fortnite".to_owned(),
+            Category::Games
+        )]
+    );
+    // the hosts privilege alone does not cover it
+    let body = json!({"suffix": "x.net", "service": "X", "category": "other"});
+    let (st, _) = post(pw("hostviewer", "pw"), body.clone()).await;
+    assert_eq!(st, 403);
+    let (st, _) = post(pw("auditor", "pw"), body).await;
+    assert_eq!(st, 403);
+    let (st, _) = post(
+        who.clone(),
+        json!({"suffix": "x.net", "service": "X", "category": "toaster"}),
+    )
+    .await;
+    assert!(st == 400 || st == 422, "{st}");
+    // both null removes it
+    let (st, body) = post(who, json!({"suffix": "game-cdn.net"})).await;
+    assert_eq!((st, body), (200, json!({"result": "applied"})));
+    assert!(overrides(&fx).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ui_backend_set_service_override() {
+    use sensr_ui::api::ApiError;
+    let fx = start().await;
+    let b = ui_backend(&fx, "activity", "pw").await;
+    assert_eq!(
+        b.set_service_override(
+            "cdn.example.com".into(),
+            Some("Example".into()),
+            Some("video".into())
+        )
+        .await
+        .unwrap(),
+        "applied"
+    );
+    let applied = fx.applier.state.lock().unwrap().applied.clone();
+    assert_eq!(
+        applied.last().unwrap().insight.dns.service_overrides.len(),
+        1
+    );
+    assert!(matches!(
+        b.set_service_override("cdn.example.com".into(), Some("X".into()), Some("toaster".into()))
+            .await,
+        Err(ApiError::Validation(e)) if e.len() == 1 && e[0].path == "category"
+    ));
+    let b = ui_backend(&fx, "hostreader", "pw").await;
+    assert!(matches!(
+        b.set_service_override("cdn.example.com".into(), None, None)
+            .await,
+        Err(ApiError::Unauthorized)
+    ));
+}

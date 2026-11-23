@@ -34,6 +34,7 @@ use sensr_schema::Document;
 use sensr_schema::fields::MacAddr;
 use sensr_schema::models::firewall::{HostMode, HostModeKind};
 use sensr_schema::models::hosts::{HostKind, HostLabel};
+use sensr_schema::models::insight::{Category, ServiceOverride};
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
 
@@ -980,6 +981,14 @@ impl<A: Applier> Agent<A> {
                 self.set_host_label(inner, principal, &mac, kind, maker)
                     .await
             }
+            Op::ServiceOverrideSet {
+                suffix,
+                service,
+                category,
+            } => {
+                self.set_service_override(inner, principal, &suffix, service, category)
+                    .await
+            }
         }
     }
 
@@ -1126,6 +1135,87 @@ impl<A: Applier> Agent<A> {
             "set host label {mac} → {kind_name}/{}",
             maker.as_deref().unwrap_or("auto")
         );
+        self.stage_or_commit(inner, principal, base, doc, message)
+            .await
+    }
+
+    /// [`Op::ServiceOverrideSet`]: sets (or, with neither field, removes)
+    /// the `insight.dns.service_overrides` entry for `suffix`, committed or
+    /// staged like a host label. The schema validates the suffix, service
+    /// name and length.
+    async fn set_service_override(
+        &self,
+        inner: &mut Inner<A>,
+        principal: &Principal,
+        suffix: &str,
+        service: Option<String>,
+        category: Option<Category>,
+    ) -> Result<Response, IpcError> {
+        let suffix = suffix.trim().trim_end_matches('.').to_ascii_lowercase();
+        if !sensr_schema::models::insight::is_domain_suffix(&suffix) {
+            return Err(err(
+                ErrorKind::BadRequest,
+                format!("{suffix:?} is not a domain suffix such as example.com"),
+            ));
+        }
+        let service = service.map(|s| s.trim().to_owned());
+        let set = match (service, category) {
+            (None, None) => None,
+            (Some(s), Some(c)) => {
+                if s.is_empty() || s.chars().count() > 48 || s.chars().any(char::is_control) {
+                    return Err(err(
+                        ErrorKind::BadRequest,
+                        "the service name is 1-48 characters without control characters",
+                    ));
+                }
+                Some((s, c))
+            }
+            _ => {
+                return Err(err(
+                    ErrorKind::BadRequest,
+                    "give both a service and a category, or neither to remove the override",
+                ));
+            }
+        };
+        let base = inner
+            .candidate
+            .clone()
+            .unwrap_or_else(|| inner.head.1.clone());
+        let mut doc = base.clone();
+        let overrides = &mut doc.insight.dns.service_overrides;
+        let existing = overrides.find(|o| o.suffix == suffix).map(|(id, _)| *id);
+        let message = match set {
+            None => {
+                overrides.retain(|_, o| o.suffix != suffix);
+                format!("remove service override {suffix}")
+            }
+            Some((service, category)) => {
+                let message = format!(
+                    "set service override {suffix} → {service}/{}",
+                    serde_json::to_value(category)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_default()
+                );
+                // keep the entry's id: a change is an edit of its row
+                match existing.and_then(|id| overrides.get_mut(&id)) {
+                    Some(o) => {
+                        o.service = service;
+                        o.category = category;
+                        o.enabled = true;
+                    }
+                    None => {
+                        overrides.push(ServiceOverride {
+                            enabled: true,
+                            suffix,
+                            service,
+                            category,
+                        });
+                    }
+                }
+                message
+            }
+        };
         self.stage_or_commit(inner, principal, base, doc, message)
             .await
     }
@@ -1347,6 +1437,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::HostForget { .. } => "host.forget",
         Op::HostModeSet { .. } => "host.mode_set",
         Op::HostLabelSet { .. } => "host.label_set",
+        Op::ServiceOverrideSet { .. } => "insight.service_override_set",
     }
 }
 

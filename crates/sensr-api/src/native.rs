@@ -489,6 +489,40 @@ pub async fn set_host_label(
     }
 }
 
+/// Body of `POST /api/v1/insight/service-override`.
+#[derive(Deserialize)]
+pub struct ServiceOverrideBody {
+    /// Domain suffix (`example.com`).
+    suffix: String,
+    /// Service name (1-48 characters); `null` with `category` removes it.
+    #[serde(default)]
+    service: Option<String>,
+    /// Category key (`games`, `ads_tracking`, ...).
+    #[serde(default)]
+    category: Option<sensr_schema::models::insight::Category>,
+}
+
+/// `POST /api/v1/insight/service-override`: set what a domain suffix counts
+/// as on the per-host DNS activity page, or remove the override with both
+/// `service` and `category` `null`. The agent commits at once when nothing
+/// else is staged (`{"result": "applied"}`), else stages (`"staged"`);
+/// read-only principals get 403.
+pub async fn set_service_override(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    Json(b): Json<ServiceOverrideBody>,
+) -> ApiResult {
+    let op = Op::ServiceOverrideSet {
+        suffix: b.suffix,
+        service: b.service,
+        category: b.category,
+    };
+    match call(&state, &caller, op).await? {
+        Response::Value(Some(v)) => Ok(Json(v)),
+        other => Err(unexpected(other)),
+    }
+}
+
 /// Body of `POST /api/v1/session`.
 #[derive(Deserialize)]
 pub struct LoginBody {
