@@ -32,6 +32,8 @@
 
   Category minutes are the **union** of that category's service minutes. "Apple/Google/Microsoft system" and "Ads & tracking" are excluded from the headline screen-time total.
 - **IP → qname map, per device:** each entry lasts answer TTL + **600 s**. Caps: **4096** entries per device and **65 536** in total, evicting the oldest first.
+  - Eviction is least-recently-used: bytes flowing to an address refresh its entry (and slide its expiry), so an active flow is not pushed out by a burst of new lookups.
+  - Task 5 notes: the pair sets make `nft -j list table` much larger. Measure a full listing with large sets (e.g. tens of thousands of `p` elements) and, if it is large, prefer a typed or streaming deserializer over `serde_json::Value`.
 - **Retention:**
   - `dns_queries` and `service_minutes`: **7 days**.
   - `service_days` and `domains_seen`: **90 days**.

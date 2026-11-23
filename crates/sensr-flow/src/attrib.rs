@@ -9,15 +9,21 @@
 //! long stream after one lookup keeps its service. The map is capped per
 //! device and in total ([`Caps`]); the least recently used entry goes first.
 //!
-//! **Bytes.** Each (device, remote address) byte delta goes to the mapped
-//! name's service, or to [`OTHER_BY_ADDRESS`] when there is no live mapping
-//! or the catalogue does not know the name. Names are resolved against the
-//! catalogue when a minute is drained, so owner overrides apply at once.
+//! **Bytes.** Byte deltas are gathered per (device, remote address) for the
+//! minute and attributed when the minute is drained, through the device's
+//! mapping at that point: bytes sampled just before the answer that maps
+//! the address was processed still find it, and owner overrides apply at
+//! once. A mapped name goes to its catalogue service, or, when the
+//! catalogue does not know it, to a service named after its registrable
+//! domain ([`registrable_domain`], category Other). Only traffic with no
+//! live mapping goes to [`OTHER_BY_ADDRESS`].
 //!
 //! **Minute rule** (per device, per service, per minute): active when the
 //! service moved at least [`BULK_BYTES`], or when the device looked up one
-//! of its names in that minute and it moved at least [`QUERY_BYTES`].
-//! Category minutes are the union of their services' ([`active_categories`]).
+//! of its names in that minute or the one before (so a lookup at :55 and
+//! bytes sampled at :05 still count) and it moved at least [`QUERY_BYTES`].
+//! A lookup a blocklist answered does not count. Category minutes are the
+//! union of their services' ([`active_categories`]).
 //!
 //! **Clock.** Events land in the minute of their own timestamp. A minute is
 //! returned at most once: anything arriving for a minute already drained (a
@@ -40,6 +46,11 @@ pub const QUERY_BYTES: u64 = 4_096;
 pub const OTHER_BY_ADDRESS: &str = "Other (by address)";
 /// How far before the newest drained minute a minute may still be written.
 pub const MAX_BACKFILL: i64 = 86_400;
+/// Second-level labels that, with the top-level label, form a public
+/// suffix: under them the registrable domain has three labels.
+const TWO_LEVEL_SUFFIXES: [&str; 9] = [
+    "co.uk", "com.au", "co.jp", "co.nz", "com.br", "co.in", "org.uk", "ac.uk", "gov.uk",
+];
 /// Undrained minutes kept at most (the furthest in the future go first).
 const MAX_PENDING: usize = 2 * 1440;
 
@@ -92,11 +103,27 @@ struct Target {
 }
 
 impl Target {
-    fn service<'c>(&self, cat: &'c Catalogue) -> Option<&'c str> {
+    /// The catalogue's service, else the queried name's registrable domain.
+    fn service(&self, cat: &Catalogue) -> String {
         cat.lookup(&self.qname)
             .or_else(|| self.alias.as_deref().and_then(|a| cat.lookup(a)))
-            .map(|(s, _)| s)
+            .map_or_else(|| registrable_domain(&self.qname), |(s, _)| s.to_string())
     }
+}
+
+/// The registrable domain of `name` (lowercased, no trailing dot): its last
+/// two labels, or three under a known two-level public suffix (`co.uk`, …).
+/// A name with fewer labels is returned whole.
+pub fn registrable_domain(name: &str) -> String {
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    let labels: Vec<&str> = name.split('.').collect();
+    let n = labels.len();
+    let keep = if n >= 3 && TWO_LEVEL_SUFFIXES.contains(&labels[n - 2..].join(".").as_str()) {
+        3
+    } else {
+        2
+    };
+    labels[n.saturating_sub(keep)..].join(".")
 }
 
 #[derive(Debug)]
@@ -116,8 +143,11 @@ struct Device {
 
 #[derive(Debug, Default)]
 struct Acc {
-    /// `None`: no live mapping.
-    bytes: HashMap<Option<Target>, u64>,
+    /// Bytes per remote address, attributed when the minute is drained.
+    bytes: HashMap<IpAddr, u64>,
+    /// Bytes to addresses past the per-device cap (unattributed).
+    overflow: u64,
+    /// Unblocked lookups in this minute or the one before.
     looked_up: BTreeSet<Target>,
     queries: BTreeMap<String, (u32, bool)>,
 }
@@ -170,18 +200,23 @@ impl Attributor {
         };
         let blocked = is_blocked(ev);
         let per_device = self.caps.per_device;
-        if let Some(acc) = self.acc(mac, ev.time) {
-            if acc.queries.len() < per_device || acc.queries.contains_key(&ev.qname) {
-                let q = acc.queries.entry(ev.qname.clone()).or_default();
-                q.0 = q.0.saturating_add(1);
-                q.1 |= blocked;
-            }
-            if acc.looked_up.len() < per_device {
-                acc.looked_up.insert(target.clone());
-            }
+        if let Some(acc) = self.acc(mac, ev.time)
+            && (acc.queries.len() < per_device || acc.queries.contains_key(&ev.qname))
+        {
+            let q = acc.queries.entry(ev.qname.clone()).or_default();
+            q.0 = q.0.saturating_add(1);
+            q.1 |= blocked;
         }
         if blocked {
             return;
+        }
+        // the lookup counts for its minute and the next
+        for t in [ev.time, ev.time.saturating_add(60)] {
+            if let Some(acc) = self.acc(mac, t)
+                && acc.looked_up.len() < per_device
+            {
+                acc.looked_up.insert(target.clone());
+            }
         }
         for (ip, ttl) in &ev.answers {
             if !ip.is_unspecified() {
@@ -196,9 +231,14 @@ impl Attributor {
         if bytes == 0 {
             return;
         }
-        let target = self.touch(mac, remote, now);
+        self.touch(mac, remote, now);
+        let per_device = self.caps.per_device;
         if let Some(acc) = self.acc(mac, now) {
-            let b = acc.bytes.entry(target).or_default();
+            let b = if acc.bytes.len() < per_device || acc.bytes.contains_key(&remote) {
+                acc.bytes.entry(remote).or_default()
+            } else {
+                &mut acc.overflow
+            };
             *b = b.saturating_add(bytes);
         }
     }
@@ -218,17 +258,28 @@ impl Attributor {
         self.newest = Some(self.newest.map_or(minute, |n| n.max(minute)));
         let accs = self.pending.remove(&minute).unwrap_or_default();
         for (mac, acc) in accs {
-            let mut h = HostMinute::default();
-            let name =
-                |t: Option<&Target>| t.and_then(|t| t.service(cat)).unwrap_or(OTHER_BY_ADDRESS);
-            for (t, b) in &acc.bytes {
-                let v = h
-                    .bytes_by_service
-                    .entry(name(t.as_ref()).to_string())
-                    .or_default();
-                *v = v.saturating_add(*b);
+            if acc.bytes.is_empty() && acc.overflow == 0 && acc.queries.is_empty() {
+                // only a lookup carried over from the minute before
+                continue;
             }
-            let looked_up: BTreeSet<&str> = acc.looked_up.iter().map(|t| name(Some(t))).collect();
+            let mut h = HostMinute::default();
+            let dev = self.devices.get(&mac);
+            let mut add = |service: String, b: u64| {
+                let v = h.bytes_by_service.entry(service).or_default();
+                *v = v.saturating_add(b);
+            };
+            if acc.overflow > 0 {
+                add(OTHER_BY_ADDRESS.to_string(), acc.overflow);
+            }
+            for (ip, b) in &acc.bytes {
+                let service = dev
+                    .and_then(|d| d.by_ip.get(ip))
+                    .filter(|e| e.expires >= minute)
+                    .map_or_else(|| OTHER_BY_ADDRESS.to_string(), |e| e.target.service(cat));
+                add(service, *b);
+            }
+            let looked_up: BTreeSet<String> =
+                acc.looked_up.iter().map(|t| t.service(cat)).collect();
             for (s, b) in &h.bytes_by_service {
                 if *b >= BULK_BYTES || (*b >= QUERY_BYTES && looked_up.contains(s.as_str())) {
                     h.services_active.insert(s.clone());
@@ -344,27 +395,29 @@ impl Attributor {
         }
     }
 
-    /// The live mapping for (`mac`, `ip`) at `now`, sliding its expiry and
-    /// marking it recently used; an expired one is dropped.
-    fn touch(&mut self, mac: &str, ip: IpAddr, now: i64) -> Option<Target> {
+    /// Slides the expiry of the live mapping for (`mac`, `ip`) at `now` and
+    /// marks it recently used; an expired one is dropped.
+    fn touch(&mut self, mac: &str, ip: IpAddr, now: i64) {
         let seq = self.next_seq();
-        let dev = self.devices.get_mut(mac)?;
-        let e = dev.by_ip.get_mut(&ip)?;
+        let Some(dev) = self.devices.get_mut(mac) else {
+            return;
+        };
+        let Some(e) = dev.by_ip.get_mut(&ip) else {
+            return;
+        };
         let old = e.seq;
         if e.expires < now {
             self.order.remove(&old);
             self.forget(mac, ip);
-            return None;
+            return;
         }
         let slid = now.saturating_add(e.ttl).saturating_add(GRACE_SECS);
         e.expires = e.expires.max(slid);
         e.seq = seq;
-        let target = e.target.clone();
         dev.order.remove(&old);
         dev.order.insert(seq, ip);
         self.order.remove(&old);
         self.order.insert(seq, (mac.to_string(), ip));
-        Some(target)
     }
 
     fn expire(&mut self, now: i64) {
@@ -503,13 +556,117 @@ mod tests {
             r.per_host[KID].queries,
             [("www.youtube.com".into(), 1, false)]
         );
-        // the same transfer without a lookup that minute does not
-        a.on_bytes(KID, ip(YT), 4_096, T0 + 62);
-        assert!(!active(&a.drain_minute(T0 + 60, cat()), KID, "YouTube"));
-        // a lookup with too little traffic does not either
-        a.on_dns(KID, &resp("www.youtube.com", &[(YT, 300)], T0 + 121), cat());
-        a.on_bytes(KID, ip(YT), 4_095, T0 + 122);
+        // two minutes on, with no fresh lookup, the same transfer does not
+        assert!(a.drain_minute(T0 + 60, cat()).per_host.is_empty());
+        a.on_bytes(KID, ip(YT), 4_096, T0 + 122);
         assert!(!active(&a.drain_minute(T0 + 120, cat()), KID, "YouTube"));
+        // a lookup with too little traffic does not either
+        a.on_dns(KID, &resp("www.youtube.com", &[(YT, 300)], T0 + 181), cat());
+        a.on_bytes(KID, ip(YT), 4_095, T0 + 182);
+        assert!(!active(&a.drain_minute(T0 + 180, cat()), KID, "YouTube"));
+    }
+
+    #[test]
+    fn lookup_counts_into_the_next_minute() {
+        let mut a = Attributor::new(Caps::default());
+        // looked up at :55, bytes first sampled at :05 of the next minute
+        a.on_dns(KID, &resp("www.youtube.com", &[(YT, 300)], T0 + 55), cat());
+        let r = a.drain_minute(T0, cat());
+        assert!(!active(&r, KID, "YouTube"));
+        a.on_bytes(KID, ip(YT), 5_000, T0 + 65);
+        let r = a.drain_minute(T0 + 60, cat());
+        assert!(active(&r, KID, "YouTube"));
+        // the carried-over lookup is not a second query
+        assert!(r.per_host[KID].queries.is_empty());
+        // but not into the one after
+        a.on_bytes(KID, ip(YT), 5_000, T0 + 125);
+        assert!(!active(&a.drain_minute(T0 + 120, cat()), KID, "YouTube"));
+    }
+
+    #[test]
+    fn bytes_before_the_answer_in_the_same_minute_are_attributed() {
+        let mut a = Attributor::new(Caps::default());
+        // the sample is read before the dnstap answer is processed
+        a.on_bytes(KID, ip(YT), 40_000, T0 + 10);
+        a.on_dns(KID, &resp("www.youtube.com", &[(YT, 300)], T0 + 9), cat());
+        let r = a.drain_minute(T0, cat());
+        assert!(active(&r, KID, "YouTube"));
+        assert_eq!(service_bytes(&r, KID, OTHER_BY_ADDRESS), 0);
+    }
+
+    #[test]
+    fn blocked_lookups_do_not_count_as_looked_up() {
+        let mut a = Attributor::new(Caps::default());
+        // mapped earlier, so the bytes are YouTube's
+        a.on_dns(
+            KID,
+            &resp("www.youtube.com", &[(YT, 3600)], T0 - 600),
+            cat(),
+        );
+        // a blocked lookup of a YouTube name this minute
+        let mut blocked = resp("i.ytimg.com", &[], T0 + 1);
+        blocked.rcode = 3;
+        assert!(is_blocked(&blocked));
+        a.on_dns(KID, &blocked, cat());
+        a.on_bytes(KID, ip(YT), 5_000, T0 + 2);
+        let r = a.drain_minute(T0, cat());
+        assert!(!active(&r, KID, "YouTube"));
+        assert_eq!(service_bytes(&r, KID, "YouTube"), 5_000);
+        assert_eq!(r.per_host[KID].queries, [("i.ytimg.com".into(), 1, true)]);
+    }
+
+    #[test]
+    fn small_transfer_needs_a_lookup_of_that_service() {
+        let mut a = Attributor::new(Caps::default());
+        let nf = "45.57.1.1";
+        a.on_dns(KID, &resp("www.netflix.com", &[(nf, 300)], T0 - 600), cat());
+        // look up YouTube (A), move 4-32 KB to Netflix (B)
+        a.on_dns(KID, &resp("www.youtube.com", &[(YT, 300)], T0 + 1), cat());
+        a.on_bytes(KID, ip(nf), 20_000, T0 + 2);
+        let r = a.drain_minute(T0, cat());
+        assert!(!active(&r, KID, "Netflix"));
+        assert_eq!(service_bytes(&r, KID, "Netflix"), 20_000);
+    }
+
+    #[test]
+    fn uncatalogued_names_are_their_registrable_domain() {
+        let mut a = Attributor::new(Caps::default());
+        let addr = "198.51.100.7";
+        a.on_dns(
+            KID,
+            &resp("eu-3.edge.some-new-game-cdn.net", &[(addr, 60)], T0 + 1),
+            cat(),
+        );
+        a.on_bytes(KID, ip(addr), 40_000, T0 + 2);
+        let r = a.drain_minute(T0, cat());
+        assert!(active(&r, KID, "some-new-game-cdn.net"));
+        assert_eq!(category_of("some-new-game-cdn.net", cat()), Category::Other);
+        assert_eq!(
+            active_categories(&r.per_host[KID], cat()),
+            BTreeSet::from([Category::Other])
+        );
+        assert_eq!(registrable_domain("foo.bar.co.uk"), "bar.co.uk");
+        assert_eq!(registrable_domain("x.y.school.ac.uk"), "school.ac.uk");
+        assert_eq!(registrable_domain("a.b.Example.COM."), "example.com");
+        assert_eq!(registrable_domain("co.uk"), "co.uk");
+        assert_eq!(registrable_domain("localhost"), "localhost");
+        assert_eq!(registrable_domain(""), "");
+        assert_eq!(registrable_domain("\u{0}.\u{fffd}..ü"), ".ü");
+    }
+
+    #[test]
+    fn unknown_lookup_does_not_activate_unmapped_traffic() {
+        let mut a = Attributor::new(Caps::default());
+        let addr = "198.51.100.8";
+        a.on_dns(
+            KID,
+            &resp("thing.unknown-iot.example", &[(addr, 60)], T0 + 1),
+            cat(),
+        );
+        a.on_bytes(KID, ip("203.0.113.50"), 10_000, T0 + 2);
+        let r = a.drain_minute(T0, cat());
+        assert_eq!(service_bytes(&r, KID, OTHER_BY_ADDRESS), 10_000);
+        assert!(r.per_host[KID].services_active.is_empty());
     }
 
     #[test]
@@ -607,7 +764,8 @@ mod tests {
             cat(),
         );
         assert!(a.drain_minute(T0, cat()).per_host.is_empty());
-        assert!(a.pending_minutes().is_empty());
+        // only the lookup's carry-over into the next minute is pending
+        assert_eq!(a.pending_minutes(), [T0 + 60]);
         // a jump forward by two days (NTP at boot) is followed
         let late = T0 + 2 * 86_400;
         a.on_bytes(KID, ip(YT), 40_000, late + 5);
@@ -668,7 +826,7 @@ mod tests {
     fn unattributed_goes_to_other_by_address() {
         let mut a = Attributor::new(Caps::default());
         a.on_bytes(KID, ip("203.0.113.9"), 40_000, T0 + 1);
-        // a name the catalogue does not know is not a service either
+        // a mapped name the catalogue does not know is its own domain's
         a.on_dns(
             KID,
             &resp("printer.example.test", &[("203.0.113.10", 60)], T0 + 2),
@@ -679,7 +837,10 @@ mod tests {
         let h = &r.per_host[KID];
         assert_eq!(
             h.bytes_by_service,
-            BTreeMap::from([(OTHER_BY_ADDRESS.to_string(), 42_000)])
+            BTreeMap::from([
+                (OTHER_BY_ADDRESS.to_string(), 40_000),
+                ("example.test".to_string(), 2_000)
+            ])
         );
         assert_eq!(
             h.services_active,
