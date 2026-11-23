@@ -806,6 +806,8 @@ pub async fn set_host_mode(mac: String, mode: Option<String>) -> Result<String, 
         let own = list
             .hosts
             .iter()
+            // an offline row may still hold an address someone else has now
+            .filter(|h| h.online)
             .find(|h| h.ipv4.as_deref().is_some_and(at) || h.ipv6.iter().any(|a| at(a)));
         if own
             .and_then(|h| h.mac.as_deref())

@@ -76,6 +76,19 @@
     }
   },
   "firewall": {
+    "host_modes": {
+      "6d0de000-0000-4000-8000-020000000002": {
+        "enabled": true,
+        "mac": "02:00:00:00:00:02",
+        "mode": "isolated"
+      },
+      "6d0de000-0000-4000-8000-020000000005": {
+        "enabled": true,
+        "mac": "02:00:00:00:00:05",
+        "mode": "quarantine",
+        "description": "Unknown device"
+      }
+    },
     "aliases": {
       "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a01": {
         "enabled": true,

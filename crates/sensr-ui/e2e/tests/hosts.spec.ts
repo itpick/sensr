@@ -45,11 +45,17 @@ test("mode select isolates a host and quarantine of your own device is refused",
   test.skip(!!process.env.SENSR_UI_BASE_URL, "relies on the mock's client MAC");
   await open(page);
   const pi = rows(page).filter({ hasText: "bench-pi" });
-  await pi.getByRole("combobox", { name: "Mode for bench-pi" }).selectOption("isolated");
-  await expect(pi.locator(".pill-warn")).toHaveText("Isolated");
+  const mode = pi.getByRole("combobox", { name: "Mode for bench-pi" });
+  await mode.selectOption("isolated");
+  // in force at once, or staged when an earlier test left changes waiting for Apply
+  await expect(pi.locator(".pill-warn, .host-mode-staged")).toHaveText(
+    /^(Isolated|Staged — Apply to take effect)$/,
+  );
+  await expect(mode).toHaveValue("isolated");
   await expect(card(page)).toContainText("Same-network blocking works by redirecting");
-  await pi.getByRole("combobox", { name: "Mode for bench-pi" }).selectOption("normal");
-  await expect(pi.locator(".pill")).toHaveCount(0);
+  await mode.selectOption("normal");
+  await expect(pi.locator(".pill, .host-mode-staged")).toHaveCount(0);
+  await expect(mode).toHaveValue("normal");
   const own = rows(page).filter({ hasText: "device-01" });
   await own.getByRole("combobox", { name: "Mode for device-01" }).selectOption("quarantine");
   await expect(card(page).getByRole("alert")).toHaveText(

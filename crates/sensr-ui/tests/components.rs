@@ -1114,3 +1114,66 @@ fn host_mode_set_and_back_to_normal() {
     let (r, _) = set_mode_on(hosts_mock(), None, "b8:27:eb:7d:4e:25", Some("bogus"));
     assert!(r.is_err());
 }
+
+#[test]
+fn host_mode_offline_row_with_the_remote_address_is_not_the_caller() {
+    // old-router is offline and still lists 192.168.72.2; whoever sends from it now
+    // is another device, so the card's check lets it through
+    let (r, card) = set_mode_on(
+        hosts_mock(),
+        Some("192.168.72.2:50000"),
+        "84:47:09:38:a5:fc",
+        Some("quarantine"),
+    );
+    assert_eq!(r.as_deref(), Ok("applied"));
+    let old = card
+        .list
+        .hosts
+        .iter()
+        .find(|h| h.name.as_deref() == Some("old-router"))
+        .unwrap();
+    assert!(!old.online);
+    assert_eq!(old.mode.as_deref(), Some("quarantine"));
+}
+
+#[test]
+fn host_mode_staged_shows_on_the_row() {
+    use sensr_ui::api::Backend;
+    let m = hosts_mock();
+    // another change is staged, so a mode waits for Apply as on the agent
+    block(m.set("system.hostname", serde_json::json!("fw"))).unwrap();
+    let (r, card) = set_mode_on(m, None, "b8:27:eb:7d:4e:25", Some("quarantine"));
+    assert_eq!(r.as_deref(), Ok("staged"));
+    let pi = card
+        .list
+        .hosts
+        .iter()
+        .find(|h| h.name.as_deref() == Some("bench-pi"))
+        .unwrap();
+    assert_eq!(
+        (pi.mode.as_deref(), pi.staged_mode.as_deref()),
+        (None, Some("quarantine")),
+        "in force: Normal; staged: Quarantine"
+    );
+    assert!(
+        card.list
+            .hosts
+            .iter()
+            .all(|h| h.staged_mode.is_none() || h.name.as_deref() == Some("bench-pi"))
+    );
+    let doc = render_hosts(Some(card));
+    let cell = mode_cell(host_row(&doc, "bench-pi"));
+    assert!(
+        text(cell).contains("Staged — Apply to take effect"),
+        "{}",
+        text(cell)
+    );
+    assert!(
+        cell.select(&sel(".pill")).next().is_none(),
+        "not in force yet"
+    );
+    let selected: Vec<String> = cell.select(&sel("option[selected]")).map(text).collect();
+    assert_eq!(selected, ["Quarantine"]);
+    // other rows say nothing
+    assert!(!text(mode_cell(host_row(&doc, "device-02"))).contains("Staged"));
+}

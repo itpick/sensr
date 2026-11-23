@@ -1584,8 +1584,7 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
     let show_all = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(None::<String>);
-    // The last Mode change's outcome; kept across refreshes (which clear `error`).
-    let note = RwSignal::new(None::<String>);
+    // The last Mode change's refusal; kept across refreshes (which clear `error`).
     let mode_error = RwSignal::new(None::<String>);
 
     let refresh = move || {
@@ -1652,24 +1651,35 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
         });
     };
 
-    let set_mode = move |mac: String, mode: String| {
+    let set_mode = move |mac: String, mode: String, select: NodeRef<leptos::html::Select>| {
         let mode = (mode != "normal").then_some(mode);
         busy.set(Some(mac.clone()));
         spawn_local(async move {
-            match set_host_mode(mac, mode).await {
-                Ok(r) => {
+            match set_host_mode(mac.clone(), mode).await {
+                // a staged mode shows on its row (from the staged document)
+                Ok(_) => {
                     mode_error.set(None);
-                    note.set((r == "staged").then(|| "Staged — Apply to take effect".to_owned()));
                     bump();
                 }
-                Err(e) => {
-                    note.set(None);
-                    mode_error.set(Some(server_message(&e)));
-                }
+                Err(e) => mode_error.set(Some(server_message(&e))),
             }
-            // also on a refusal: the select goes back to the host's actual mode
+            // also on a refusal: the select goes back to the host's actual mode. The row
+            // is patched in place and its `selected` attributes may not change, so the
+            // value the user picked is reset by hand.
             match hosts().await {
-                Ok(c) => card.set(c),
+                Ok(c) => {
+                    let shown = c.as_ref().and_then(|c| {
+                        c.list
+                            .hosts
+                            .iter()
+                            .find(|h| h.mac.as_deref() == Some(mac.as_str()))
+                            .map(|h| mode_shown(h).to_owned())
+                    });
+                    card.set(c);
+                    if let (Some(el), Some(v)) = (select.get_untracked(), shown) {
+                        el.set_value(&v);
+                    }
+                }
                 Err(e) => error.set(Some(format!("Could not read the hosts: {e}"))),
             }
             busy.set(None);
@@ -1687,24 +1697,30 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
             "quarantine" => Some(view! { <span class="pill pill-off">"Quarantine"</span> }),
             _ => None,
         };
+        let staged_note = h.staged_mode.is_some().then(|| {
+            view! { <span class="muted host-mode-staged">"Staged — Apply to take effect"</span> }
+        });
         if read_only {
-            return view! { {badge} }.into_any();
+            return view! { {badge} {staged_note} }.into_any();
         }
+        let shown = mode_shown(h);
+        let select = NodeRef::<leptos::html::Select>::new();
         let label = format!("Mode for {}", h.label());
         let options = [
             ("normal", "Normal"),
             ("isolated", "Isolated"),
             ("quarantine", "Quarantine"),
         ]
-        .map(|(v, t)| view! { <option value=v selected=v == current>{t}</option> });
+        .map(|(v, t)| view! { <option value=v selected=v == shown>{t}</option> });
         let m = mac.clone();
         view! {
             {badge}
-            <select aria-label=label
+            <select aria-label=label node_ref=select
                 disabled=move || busy.get().as_deref() == Some(m.as_str())
-                on:change=move |ev| set_mode(mac.clone(), event_target_value(&ev))>
+                on:change=move |ev| set_mode(mac.clone(), event_target_value(&ev), select)>
                 {options}
             </select>
+            {staged_note}
         }
         .into_any()
     };
@@ -1848,13 +1864,19 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
                 {toolbar}
                 {body}
                 {footer}
-                {move || note.get().map(|n| view! { <p class="muted" role="status">{n}</p> })}
                 {move || mode_error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
                 {move || error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
             </section>
         })}
     }
     .into_any()
+}
+
+/// The mode a host's Mode select shows: the staged one, else the one in force.
+fn mode_shown(h: &crate::runtime::HostRow) -> &str {
+    h.staged_mode
+        .as_deref()
+        .unwrap_or_else(|| h.locked_mode().unwrap_or("normal"))
 }
 
 /// Keeps `DiffKind` in the bundle's public surface for the history page CSS classes.

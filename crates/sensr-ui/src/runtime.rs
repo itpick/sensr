@@ -401,6 +401,10 @@ pub struct HostRow {
     pub staged: bool,
     /// Its host mode: `isolated` or `quarantine`; `None` (omitted) is Normal.
     pub mode: Option<String>,
+    /// The mode staged for it (`normal`, `isolated`, `quarantine`) when that differs from
+    /// `mode` and waits for Apply (set by the UI from the staged document, never sent by
+    /// the agent).
+    pub staged_mode: Option<String>,
 }
 
 /// The ARP interceptor that enforces host modes between hosts of one network.
@@ -537,8 +541,22 @@ pub struct HostList {
 
 impl HostList {
     /// Marks the unreserved hosts a reservation in `doc` (the staged document) covers,
-    /// by MAC or address, so the card stops offering Make static before Apply.
+    /// by MAC or address, so the card stops offering Make static before Apply, and the
+    /// hosts whose staged mode differs from the one in force.
     pub fn mark_staged(&mut self, doc: &Value) {
+        let modes: std::collections::BTreeMap<String, &str> = doc
+            .pointer("/firewall/host_modes")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|m| m.values())
+            .filter(|h| h.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+            .filter_map(|h| {
+                Some((
+                    h.get("mac")?.as_str()?.to_ascii_lowercase(),
+                    h.get("mode")?.as_str()?,
+                ))
+            })
+            .collect();
         let reservations: Vec<&Value> = doc
             .pointer("/dhcpv4/reservations")
             .and_then(Value::as_object)
@@ -550,6 +568,10 @@ impl HostList {
                 .map(str::to_ascii_lowercase)
         };
         for h in &mut self.hosts {
+            h.staged_mode = h.mac.as_deref().and_then(|mac| {
+                let staged = modes.get(mac).copied().unwrap_or("normal");
+                (staged != h.locked_mode().unwrap_or("normal")).then(|| staged.to_owned())
+            });
             // a reserved row's reservation is already applied
             h.staged = !h.reserved()
                 && reservations.iter().any(|r| {
