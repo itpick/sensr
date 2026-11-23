@@ -67,3 +67,119 @@ fn hosts_need_the_hosts_privilege() {
     let m = MockBackend::new().with_privileges(&["page-all", "user-config-readonly"]);
     assert!(has(&search(&m, "bench-pi"), "Hosts"));
 }
+
+/// The mock with chosen calls failing, as for a caller the agent refuses them to.
+struct Flaky {
+    inner: MockBackend,
+    deny_get: bool,
+    fail_hosts: bool,
+}
+
+mod flaky {
+    use super::Flaky;
+    use futures::future::BoxFuture;
+    use sensr_ui::api::*;
+    use sensr_ui::runtime::RuntimeSection;
+    use serde_json::Value;
+
+    impl Backend for Flaky {
+        fn get<'a>(&'a self, p: &'a str) -> BoxFuture<'a, ApiResult<Value>> {
+            if self.deny_get {
+                return Box::pin(async { Err(ApiError::Backend("config.get denied".into())) });
+            }
+            self.inner.get(p)
+        }
+        fn set<'a>(&'a self, p: &'a str, v: Value) -> BoxFuture<'a, ApiResult<()>> {
+            self.inner.set(p, v)
+        }
+        fn pending(&self) -> BoxFuture<'_, ApiResult<Pending>> {
+            self.inner.pending()
+        }
+        fn commit<'a>(
+            &'a self,
+            u: &'a str,
+            m: &'a str,
+            c: Option<u32>,
+        ) -> BoxFuture<'a, ApiResult<Revision>> {
+            self.inner.commit(u, m, c)
+        }
+        fn confirm(&self) -> BoxFuture<'_, ApiResult<()>> {
+            self.inner.confirm()
+        }
+        fn discard(&self) -> BoxFuture<'_, ApiResult<()>> {
+            self.inner.discard()
+        }
+        fn rollback<'a>(&'a self, u: &'a str, to: u64) -> BoxFuture<'a, ApiResult<Revision>> {
+            self.inner.rollback(u, to)
+        }
+        fn history(&self) -> BoxFuture<'_, ApiResult<Vec<Revision>>> {
+            self.inner.history()
+        }
+        fn diff(&self, f: u64, t: Option<u64>) -> BoxFuture<'_, ApiResult<Vec<DiffLine>>> {
+            self.inner.diff(f, t)
+        }
+        fn status(&self) -> BoxFuture<'_, ApiResult<SystemStatus>> {
+            self.inner.status()
+        }
+        fn nics(&self) -> BoxFuture<'_, ApiResult<Vec<NetworkCard>>> {
+            self.inner.nics()
+        }
+        fn may_access(&self, url: &str) -> bool {
+            self.inner.may_access(url)
+        }
+        fn runtime(&self, s: RuntimeSection) -> BoxFuture<'_, ApiResult<Value>> {
+            if self.fail_hosts && matches!(s, RuntimeSection::Hosts) {
+                return Box::pin(async { Err(ApiError::Backend("agent down".into())) });
+            }
+            self.inner.runtime(s)
+        }
+        fn forget_host(&self, k: String) -> BoxFuture<'_, ApiResult<()>> {
+            self.inner.forget_host(k)
+        }
+        fn set_host_mode(
+            &self,
+            m: String,
+            mode: Option<String>,
+            r: Option<std::net::IpAddr>,
+        ) -> BoxFuture<'_, ApiResult<String>> {
+            self.inner.set_host_mode(m, mode, r)
+        }
+        fn set_host_label(
+            &self,
+            m: String,
+            k: Option<String>,
+            mk: Option<String>,
+        ) -> BoxFuture<'_, ApiResult<String>> {
+            self.inner.set_host_label(m, k, mk)
+        }
+    }
+}
+
+fn run_on(b: &Flaky, q: &str) -> SearchResults {
+    futures::executor::block_on(run(b as &dyn Backend, q)).expect("search must not fail")
+}
+
+#[test]
+fn failing_hosts_call_still_returns_pages_and_rows() {
+    let b = Flaky {
+        inner: MockBackend::new(),
+        deny_get: false,
+        fail_hosts: true,
+    };
+    assert!(has(&run_on(&b, "rfc1918"), "Aliases"));
+    assert!(has(&run_on(&b, "alias"), "Pages"));
+    assert!(!has(&run_on(&b, "bench-pi"), "Hosts"));
+}
+
+#[test]
+fn refused_config_degrades_to_pages_and_settings() {
+    let b = Flaky {
+        inner: MockBackend::new(),
+        deny_get: true,
+        fail_hosts: false,
+    };
+    let r = run_on(&b, "rfc1918");
+    assert!(!has(&r, "Aliases"), "{r:?}");
+    assert!(has(&run_on(&b, "hostname"), "Settings"));
+    assert!(has(&run_on(&b, "aliases"), "Pages"));
+}

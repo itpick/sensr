@@ -121,7 +121,7 @@ pub struct Candidate {
     /// Texts matched against the query; the title comes first.
     pub haystack: Vec<String>,
     /// `haystack` case-folded once, when the candidate is built (see [`Candidate::new`]).
-    pub folded: Vec<String>,
+    folded: Vec<String>,
 }
 
 #[cfg(feature = "ssr")]
@@ -541,9 +541,9 @@ pub fn menu_interfaces(interfaces: &serde_json::Value) -> Vec<crate::menu::MenuI
 #[cfg(feature = "ssr")]
 type Index = std::sync::Arc<Vec<Candidate>>;
 
-/// The last index built: `(config hash + the caller's access to every page, index)`.
+/// The last index built: `(config hash, index)`.
 #[cfg(feature = "ssr")]
-static INDEX: std::sync::Mutex<Option<(String, Index)>> = std::sync::Mutex::new(None);
+static INDEX: std::sync::Mutex<Option<(u64, Index)>> = std::sync::Mutex::new(None);
 
 #[cfg(feature = "ssr")]
 fn settings() -> &'static [Candidate] {
@@ -551,27 +551,15 @@ fn settings() -> &'static [Candidate] {
     SETTINGS_INDEX.get_or_init(setting_candidates)
 }
 
-/// Cache key: a hash of the document and which of the pages the caller may open, so an index
-/// built for one user is never served to another.
+/// Cache key: a hash of the document. The index holds every page and row regardless of who
+/// asks; what a caller may see is decided per hit by `may_access` in [`search_in`], so one
+/// index serves every privilege set.
 #[cfg(feature = "ssr")]
-fn index_key(
-    doc: &serde_json::Value,
-    pages: &[Candidate],
-    may_access: &dyn Fn(&str) -> bool,
-) -> String {
+fn index_key(doc: &serde_json::Value) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     doc.to_string().hash(&mut h);
-    let mut probes: Vec<&str> = pages
-        .iter()
-        .map(|c| page_of(&c.url))
-        .chain(GridId::ALL.iter().map(|g| g.page_url()))
-        .chain(FormId::ALL.iter().map(|f| f.page_url()))
-        .collect();
-    probes.sort_unstable();
-    probes.dedup();
-    let granted: Vec<&str> = probes.into_iter().filter(|p| may_access(p)).collect();
-    format!("{:x}|{}", h.finish(), granted.join(","))
+    h.finish()
 }
 
 /// Answers a query for the caller behind `b`: pages, settings, rows of the staged document
@@ -581,30 +569,50 @@ pub async fn run(b: &dyn crate::api::Backend, q: &str) -> crate::api::ApiResult<
     if normalize(q).chars().count() < MIN_QUERY {
         return Ok(search_in(&[], q, &|_| true));
     }
-    let doc = b.get("").await?;
-    let menu = crate::menu::build(&menu_interfaces(&doc["interfaces"]));
-    let pages = page_candidates(&menu);
-    let key = index_key(&doc, &pages, &|u| b.may_access(u));
-    let cached = INDEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .filter(|(k, _)| *k == key)
-        .map(|(_, i)| i.clone());
-    let index = match cached {
-        Some(i) => i,
-        None => {
-            let mut all = pages;
-            all.extend(row_candidates(&doc));
-            let i: Index = std::sync::Arc::new(all);
-            *INDEX.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, i.clone()));
-            i
+    // Without the document (a caller the agent refuses it to) search covers pages and settings.
+    let doc = match b.get("").await {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::debug!(error = %e, "search: config unavailable, skipping objects");
+            None
         }
     };
+    let null = serde_json::Value::Null;
+    let menu = crate::menu::build(&menu_interfaces(
+        &doc.as_ref().unwrap_or(&null)["interfaces"],
+    ));
+    let pages = page_candidates(&menu);
+    let index: Index = match &doc {
+        None => std::sync::Arc::new(pages),
+        Some(doc) => {
+            let key = index_key(doc);
+            let cached = INDEX
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .filter(|(k, _)| *k == key)
+                .map(|(_, i)| i.clone());
+            match cached {
+                Some(i) => i,
+                None => {
+                    let mut all = pages;
+                    all.extend(row_candidates(doc));
+                    let i: Index = std::sync::Arc::new(all);
+                    *INDEX.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, i.clone()));
+                    i
+                }
+            }
+        }
+    };
+    // A failing inventory must not fail the search.
     let hosts = if b.may_access(HOSTS_API) {
-        let list: crate::runtime::HostList =
-            crate::runtime::parse(b.runtime(crate::runtime::RuntimeSection::Hosts).await?);
-        host_candidates(&list)
+        match b.runtime(crate::runtime::RuntimeSection::Hosts).await {
+            Ok(v) => host_candidates(&crate::runtime::parse(v)),
+            Err(e) => {
+                tracing::debug!(error = %e, "search: hosts unavailable, skipping");
+                Vec::new()
+            }
+        }
     } else {
         Vec::new()
     };
