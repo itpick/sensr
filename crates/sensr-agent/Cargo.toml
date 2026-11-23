@@ -46,7 +46,7 @@ tracing-subscriber.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 # ARP interception: AF_PACKET (socket2 opens it for ETH_P_ARP; nix sends and
 # receives with the kernel's own link addresses)
-nix = { version = "0.32", features = ["socket", "net"] }
+nix = { version = "0.32", features = ["socket", "net", "poll"] }
 socket2.workspace = true
 
 [dev-dependencies]

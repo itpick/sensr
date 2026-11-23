@@ -253,36 +253,84 @@ pub trait QuerySender: Send + Sync {
 pub const MDNS_V4: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 0, 251);
 pub const MDNS_V6: std::net::Ipv6Addr = std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb);
 
+/// How long [`Polled::recv`] waits for either tap before the loop takes a
+/// turn.
+pub const POLL_WAIT: Duration = Duration::from_millis(200);
+
+/// Two non-blocking receive sockets and one wait over both.
+pub trait Taps: Send + Sync {
+    /// Waits up to `timeout` for either tap to have a frame; which are ready.
+    fn wait(&self, timeout: Duration) -> io::Result<[bool; 2]>;
+    /// A frame from tap `i` if one is queued, without waiting.
+    fn try_recv(&self, i: usize, buf: &mut [u8]) -> io::Result<Option<(usize, u32)>>;
+}
+
+/// Reads two [`Taps`] as one stream: whatever is queued on either goes
+/// first (taking turns, so neither starves), and only when both are empty
+/// does it wait, on both at once. An idle tap never delays the busy one.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub struct Polled<T> {
+    taps: T,
+    /// The tap read first next.
+    turn: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl<T: Taps> Polled<T> {
+    pub fn new(taps: T) -> Self {
+        Self {
+            taps,
+            turn: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn take(&self, ready: [bool; 2], buf: &mut [u8]) -> io::Result<Option<(usize, u32)>> {
+        let first = self.turn.load(Ordering::Relaxed);
+        for k in 0..2 {
+            let i = (first + k) % 2;
+            if !ready[i] {
+                continue;
+            }
+            if let Some(r) = self.taps.try_recv(i, buf)? {
+                self.turn.store((i + 1) % 2, Ordering::Relaxed);
+                return Ok(Some(r));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The next frame from either tap; `WouldBlock` after [`POLL_WAIT`]
+    /// with none.
+    pub fn recv(&self, buf: &mut [u8]) -> io::Result<(usize, u32)> {
+        if let Some(r) = self.take([true; 2], buf)? {
+            return Ok(r);
+        }
+        let ready = self.taps.wait(POLL_WAIT)?;
+        self.take(ready, buf)?
+            .ok_or_else(|| io::ErrorKind::WouldBlock.into())
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod sys {
     use std::io::{self, Read};
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-    use std::os::fd::AsRawFd;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::os::fd::{AsFd, AsRawFd};
     use std::time::Duration;
 
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
     use nix::sys::socket::{LinkAddr, recvfrom};
 
     use super::{
         ETH_P_IP, ETH_P_IPV6, FILTER, MDNS_PORT, MDNS_V4, MDNS_V6, Membership, PacketSource,
-        QuerySender, SniffIface,
+        Polled, QuerySender, SniffIface, Taps,
     };
 
-    /// How long `recv` waits on each of the two sockets before the loop
-    /// takes a turn.
-    const RECV_WAIT: Duration = Duration::from_millis(100);
     /// `sll_pkttype` of a frame this host sent (a backstop: protocol taps
     /// see received frames only).
     const PACKET_OUTGOING: u8 = 4;
     /// Most frames discarded right after the filter is attached.
     const DRAIN_MAX: usize = 4096;
-
-    fn would_block(e: &io::Error) -> bool {
-        matches!(
-            e.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-        )
-    }
 
     /// An `AF_PACKET`/`SOCK_RAW` tap for one ethertype, with [`FILTER`].
     /// A protocol-specific tap is on the receive path only, so frames the
@@ -299,11 +347,11 @@ mod sys {
             .collect();
         sock.attach_filter(&prog)?;
         drain(&sock)?;
-        sock.set_read_timeout(Some(RECV_WAIT))?;
         Ok(sock)
     }
 
-    /// Discards what was queued before the filter was attached.
+    /// Discards what was queued before the filter was attached, and leaves
+    /// the socket non-blocking ([`super::Polled`] waits in `poll`).
     fn drain(sock: &socket2::Socket) -> io::Result<()> {
         sock.set_nonblocking(true)?;
         // a short read drops the rest of the frame
@@ -315,35 +363,59 @@ mod sys {
                 Err(e) => return Err(e),
             }
         }
-        sock.set_nonblocking(false)
+        Ok(())
     }
 
     /// Two receive-only taps, IPv4 and IPv6, on every interface. Nothing is
     /// ever sent on them.
     pub struct AfPacketSource {
-        socks: [socket2::Socket; 2],
-        /// Which tap is read first next; they take turns.
-        turn: AtomicUsize,
+        taps: Polled<LinuxTaps>,
     }
+
+    /// The two non-blocking taps.
+    pub struct LinuxTaps([socket2::Socket; 2]);
 
     impl AfPacketSource {
         /// Needs `CAP_NET_RAW`.
         pub fn open() -> io::Result<Self> {
             Ok(Self {
-                socks: [tap(ETH_P_IP)?, tap(ETH_P_IPV6)?],
-                turn: AtomicUsize::new(0),
+                taps: Polled::new(LinuxTaps([tap(ETH_P_IP)?, tap(ETH_P_IPV6)?])),
             })
         }
     }
 
-    fn recv_one(sock: &socket2::Socket, buf: &mut [u8]) -> io::Result<(usize, u32)> {
-        loop {
-            let (n, from) = recvfrom::<LinkAddr>(sock.as_raw_fd(), buf)?;
-            let Some(from) = from else { continue };
-            if from.pkttype() == PACKET_OUTGOING {
-                continue;
+    impl Taps for LinuxTaps {
+        fn wait(&self, timeout: Duration) -> io::Result<[bool; 2]> {
+            let ms = u16::try_from(timeout.as_millis()).unwrap_or(u16::MAX);
+            let mut fds = [
+                PollFd::new(self.0[0].as_fd(), PollFlags::POLLIN),
+                PollFd::new(self.0[1].as_fd(), PollFlags::POLLIN),
+            ];
+            match poll(&mut fds, PollTimeout::from(ms)) {
+                Ok(_) => {}
+                Err(nix::errno::Errno::EINTR) => return Ok([false; 2]),
+                Err(e) => return Err(e.into()),
             }
-            return Ok((n, u32::try_from(from.ifindex()).unwrap_or(0)));
+            // an error or hang-up counts as ready: the read reports it
+            Ok(fds.map(|f| f.revents().is_some_and(|r| !r.is_empty())))
+        }
+
+        fn try_recv(&self, i: usize, buf: &mut [u8]) -> io::Result<Option<(usize, u32)>> {
+            let Some(sock) = self.0.get(i) else {
+                return Ok(None);
+            };
+            loop {
+                let (n, from) = match recvfrom::<LinkAddr>(sock.as_raw_fd(), buf) {
+                    Ok(r) => r,
+                    Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => return Ok(None),
+                    Err(e) => return Err(e.into()),
+                };
+                let Some(from) = from else { continue };
+                if from.pkttype() == PACKET_OUTGOING {
+                    continue;
+                }
+                return Ok(Some((n, u32::try_from(from.ifindex()).unwrap_or(0))));
+            }
         }
     }
 
@@ -352,7 +424,7 @@ mod sys {
         /// delivered to it) that joins the mDNS group on the interface: the
         /// kernel then programs the NIC to accept the group's frames.
         fn join(&self, iface: &SniffIface) -> io::Result<Membership> {
-            let (v4, _) = addrs(&iface.device)?;
+            let (v4, ll) = addrs(&iface.device)?;
             let mut held: Vec<socket2::Socket> = Vec::new();
             let mut first_err = None;
             if let Some(a) = v4 {
@@ -362,7 +434,7 @@ mod sys {
                         socket2::Type::DGRAM,
                         Some(socket2::Protocol::UDP),
                     )?;
-                    s.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)).into())?;
+                    bind_or_any(&s, SocketAddr::from((a, 0)))?;
                     s.join_multicast_v4(&MDNS_V4, &a)?;
                     Ok::<_, io::Error>(s)
                 })();
@@ -380,7 +452,8 @@ mod sys {
                     Some(socket2::Protocol::UDP),
                 )?;
                 s.set_only_v6(true)?;
-                s.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)).into())?;
+                let own = ll.unwrap_or(Ipv6Addr::UNSPECIFIED);
+                bind_or_any(&s, SocketAddrV6::new(own, 0, 0, iface.index).into())?;
                 s.join_multicast_v6(&MDNS_V6, iface.index)?;
                 Ok::<_, io::Error>(s)
             })();
@@ -397,20 +470,21 @@ mod sys {
         }
 
         fn recv(&self, buf: &mut [u8]) -> io::Result<(usize, u32)> {
-            let first = self.turn.load(Ordering::Relaxed);
-            for k in 0..2 {
-                let i = (first + k) % 2;
-                match recv_one(&self.socks[i], buf) {
-                    Ok(r) => {
-                        self.turn.store((i + 1) % 2, Ordering::Relaxed);
-                        return Ok(r);
-                    }
-                    Err(e) if would_block(&e) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            Err(io::ErrorKind::WouldBlock.into())
+            self.taps.recv(buf)
         }
+    }
+
+    /// Binds `s` to `addr` on an ephemeral port, else to the wildcard
+    /// (the address went away, or the scope is refused).
+    fn bind_or_any(s: &socket2::Socket, addr: SocketAddr) -> io::Result<()> {
+        if s.bind(&addr.into()).is_ok() {
+            return Ok(());
+        }
+        let any = match addr {
+            SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+            SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        };
+        s.bind(&any.into())
     }
 
     /// The device's IPv4 address and IPv6 link-local address.
@@ -501,6 +575,13 @@ mod sys {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn would_block(e: &io::Error) -> bool {
+            matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+            )
+        }
 
         /// Every option the senders set is accepted, in this order (Linux
         /// refuses `IPV6_V6ONLY` after the bind).
@@ -1360,5 +1441,74 @@ mod tests {
         let f = with_ip_options(ipv4_udp(PHONE, [224, 0, 0, 251], 5353, 5353, &m));
         assert_ne!(bpf(&FILTER, &f), 0);
         assert_eq!(evidence(&f).unwrap().1.mdns_services, ["_ipp._tcp"]);
+    }
+
+    /// Two queued taps; `wait` is a blocking wait in the real thing, so
+    /// each call is recorded and costs its full timeout on the mock clock.
+    /// Frames and their interface index, oldest first.
+    type Queue = Mutex<Vec<(Vec<u8>, u32)>>;
+
+    #[derive(Default)]
+    struct TwoQueues {
+        queues: [Queue; 2],
+        waits: Mutex<Vec<Duration>>,
+    }
+
+    impl Taps for &TwoQueues {
+        fn wait(&self, timeout: Duration) -> io::Result<[bool; 2]> {
+            lock(&self.waits).push(timeout);
+            Ok([0, 1].map(|i| !lock(&self.queues[i]).is_empty()))
+        }
+
+        fn try_recv(&self, i: usize, buf: &mut [u8]) -> io::Result<Option<(usize, u32)>> {
+            let mut q = lock(&self.queues[i]);
+            if q.is_empty() {
+                return Ok(None);
+            }
+            let (f, index) = q.remove(0);
+            buf[..f.len()].copy_from_slice(&f);
+            Ok(Some((f.len(), index)))
+        }
+    }
+
+    #[test]
+    fn a_busy_tap_is_not_held_up_by_an_idle_one() {
+        let q = TwoQueues::default();
+        for n in [1u8, 2] {
+            lock(&q.queues[0]).push((vec![n; 4], LAN));
+        }
+        let p = Polled::new(&q);
+        let mut buf = [0u8; 64];
+        assert_eq!(p.recv(&mut buf).unwrap(), (4, LAN));
+        assert_eq!(buf[0], 1);
+        assert_eq!(p.recv(&mut buf).unwrap(), (4, LAN));
+        assert_eq!(buf[0], 2);
+        assert!(
+            lock(&q.waits).is_empty(),
+            "never waited while a frame was queued"
+        );
+        // both empty: one wait over both, then WouldBlock
+        let e = p.recv(&mut buf).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(*lock(&q.waits), [POLL_WAIT]);
+    }
+
+    #[test]
+    fn both_taps_take_turns() {
+        let q = TwoQueues::default();
+        for n in [1u8, 2, 3] {
+            lock(&q.queues[0]).push((vec![n], LAN));
+            lock(&q.queues[1]).push((vec![10 + n], LAN));
+        }
+        let p = Polled::new(&q);
+        let mut buf = [0u8; 8];
+        let got: Vec<u8> = (0..6)
+            .map(|_| {
+                p.recv(&mut buf).unwrap();
+                buf[0]
+            })
+            .collect();
+        assert_eq!(got, [1, 11, 2, 12, 3, 13]);
+        assert!(lock(&q.waits).is_empty());
     }
 }
