@@ -2,6 +2,7 @@
 
 pub mod classify;
 pub mod dhcp;
+pub mod dns;
 pub mod mdns;
 pub mod oui;
 
@@ -36,11 +37,13 @@ mod garbage {
         };
         let dhcp = crate::dhcp::tests::discover();
         let mdns = crate::mdns::tests::chromecast_response();
+        let dns = crate::dns::tests::youtube_response();
         for round in 0..10_000 {
             let len = (next() % 600) as usize;
             let mut buf: Vec<u8> = (0..len).map(|_| next() as u8).collect();
             let _ = crate::dhcp::parse_bootp(&buf);
             let _ = crate::mdns::parse(&buf);
+            let _ = crate::dns::parse_message(&buf);
             // Valid headers with a random tail reach the option/record code.
             if round % 2 == 0 && buf.len() > 240 {
                 buf[..240].copy_from_slice(&dhcp[..240]);
@@ -49,22 +52,26 @@ mod garbage {
             if buf.len() > 12 {
                 buf[..12].copy_from_slice(&mdns[..12]);
                 let _ = crate::mdns::parse(&buf);
+                buf[..12].copy_from_slice(&dns[..12]);
+                let _ = crate::dns::parse_message(&buf);
             }
             // Mutate a valid packet: flip a byte, then truncate.
-            for valid in [&dhcp, &mdns] {
+            for valid in [&dhcp, &mdns, &dns] {
                 let mut m = valid.clone();
                 let at = next() as usize % m.len();
                 m[at] = next() as u8;
                 let cut = next() as usize % (m.len() + 1);
                 let _ = crate::dhcp::parse_bootp(&m[..cut]);
                 let _ = crate::mdns::parse(&m[..cut]);
+                let _ = crate::dns::parse_message(&m[..cut]);
             }
         }
         // Every prefix of the valid packets.
-        for valid in [&dhcp, &mdns] {
+        for valid in [&dhcp, &mdns, &dns] {
             for cut in 0..=valid.len() {
                 let _ = crate::dhcp::parse_bootp(&valid[..cut]);
                 let _ = crate::mdns::parse(&valid[..cut]);
+                let _ = crate::dns::parse_message(&valid[..cut]);
             }
         }
         assert_eq!(crate::dhcp::parse_bootp(&[]), None);

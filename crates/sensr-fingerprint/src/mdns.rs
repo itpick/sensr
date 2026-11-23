@@ -1,5 +1,7 @@
 //! mDNS / DNS-SD response parsing: advertised service types, model and name.
 
+use crate::dns::{read_name, u16_at};
+
 /// What an mDNS response tells us about the sender.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MdnsInfo {
@@ -34,17 +36,8 @@ pub fn parse(udp_payload: &[u8]) -> Option<MdnsInfo> {
 const TYPE_PTR: u16 = 12;
 const TYPE_TXT: u16 = 16;
 const TYPE_SRV: u16 = 33;
-/// Pointer hops allowed while reading one name.
-const MAX_HOPS: usize = 16;
-/// RFC 1035 name length limit.
-const MAX_NAME: usize = 255;
 /// Service types kept per packet.
 pub const MAX_SERVICES: usize = 16;
-
-fn u16_at(p: &[u8], at: usize) -> Option<u16> {
-    let b = p.get(at..at.checked_add(2)?)?;
-    Some(u16::from_be_bytes([*b.first()?, *b.get(1)?]))
-}
 
 /// Reads every record; `None` means the walk hit damage and stopped.
 fn walk(p: &[u8], questions: u16, records: usize, info: &mut MdnsInfo) -> Option<()> {
@@ -90,47 +83,6 @@ fn walk(p: &[u8], questions: u16, records: usize, info: &mut MdnsInfo) -> Option
         }
     }
     Some(())
-}
-
-/// Read a possibly compressed name at `pos`; returns its labels and the
-/// offset just past it in the record stream. Loops, over-long labels and
-/// reserved label types give `None`.
-fn read_name(p: &[u8], pos: usize) -> Option<(Vec<String>, usize)> {
-    let mut labels = Vec::new();
-    let mut at = pos;
-    let mut after = None;
-    let mut hops = 0;
-    let mut total = 0usize;
-    loop {
-        let len = *p.get(at)?;
-        match len & 0xc0 {
-            0x00 if len == 0 => return Some((labels, after.unwrap_or(at + 1))),
-            // Top bits 00: a plain label, so its length is at most 63.
-            0x00 => {
-                let n = usize::from(len);
-                total += n + 1;
-                if total > MAX_NAME {
-                    return None;
-                }
-                let raw = p.get(at + 1..at + 1 + n)?;
-                labels.push(String::from_utf8_lossy(raw).into_owned());
-                at += 1 + n;
-            }
-            0xc0 => {
-                let lo = *p.get(at + 1)?;
-                after.get_or_insert(at + 2);
-                hops += 1;
-                if hops > MAX_HOPS {
-                    return None;
-                }
-                at = (usize::from(len & 0x3f) << 8) | usize::from(lo);
-            }
-            // Top bits 01 / 10: extended or reserved label types, not valid
-            // in mDNS. A length byte of 64..=191 lands here, which is how a
-            // label over 63 bytes is rejected.
-            _ => return None,
-        }
-    }
 }
 
 fn eq(a: &str, b: &str) -> bool {
