@@ -1769,3 +1769,48 @@ fn host_label_mock_set_applies_and_stages() {
     assert_eq!(p.host_label.as_ref().unwrap().by, "auto");
     assert_eq!(p.owner_kind, None);
 }
+
+#[test]
+fn grid_q_param_prefills_search() {
+    let seed = sensr_ui::mock::seed();
+    let rows: Vec<serde_json::Value> =
+        sensr_ui::adapt::rows(GridId::Aliases, &GridId::Aliases.scope(&None), &seed)
+            .into_iter()
+            .map(|r| r.view)
+            .collect();
+    let q = GridQuery {
+        search: "web".to_owned(),
+        ..Default::default()
+    };
+    let page = run_query(&rows, GridId::Aliases.columns(), &q);
+    let doc = render(|| {
+        view! {
+            <GridIsland grid=GridId::Aliases scope=None initial=page label="alias".to_owned()
+                choices=Default::default() search="web".to_owned()/>
+        }
+        .into_any()
+    });
+    let input = doc
+        .select(&sel(".grid-toolbar input[type=search]"))
+        .next()
+        .unwrap();
+    assert_eq!(input.value().attr("value"), Some("web"));
+}
+
+#[test]
+fn hosts_card_host_param_prefills_search() {
+    use sensr_ui::islands::HostsCard;
+    let card = hosts_from(hosts_mock()).expect("root may see hosts");
+    let mac = card.list.hosts[3].mac.clone().expect("mock host has a MAC");
+    let doc = render(|| view! { <HostsCard initial=Some(card) search=mac.clone()/> }.into_any());
+    let input = doc
+        .select(&sel(".grid-toolbar input[type=search]"))
+        .next()
+        .unwrap();
+    assert_eq!(input.value().attr("value"), Some(mac.as_str()));
+    assert_eq!(
+        doc.select(&sel("tbody tr")).count(),
+        1,
+        "filtered to that host"
+    );
+}

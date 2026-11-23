@@ -486,6 +486,42 @@ fn general_errors(
 
 // ------------------------------------------------------------------ settings form
 
+/// A `#<field dom id>` link (a global search hit) into this form: scroll to the field,
+/// focus it and flash its row for 2 s.
+#[cfg(feature = "hydrate")]
+fn flash_field(form: &str) {
+    use wasm_bindgen::JsCast;
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let hash = doc
+        .location()
+        .and_then(|l| l.hash().ok())
+        .unwrap_or_default();
+    let Some(id) = hash
+        .strip_prefix('#')
+        .filter(|id| id.strip_prefix(form).is_some_and(|r| r.starts_with("--")))
+    else {
+        return;
+    };
+    let Some(el) = doc.get_element_by_id(id) else {
+        return;
+    };
+    el.scroll_into_view();
+    if let Some(h) = el.dyn_ref::<web_sys::HtmlElement>() {
+        let _ = h.focus();
+    }
+    if let Ok(Some(row)) = el.closest(".field") {
+        let _ = row.class_list().add_1("field-flash");
+        set_timeout(
+            move || {
+                let _ = row.class_list().remove_1("field-flash");
+            },
+            std::time::Duration::from_secs(2),
+        );
+    }
+}
+
 /// A generated settings form (`<SettingsForm<T>>` renders this with `T`'s id).
 #[island]
 pub fn SettingsFormIsland(
@@ -501,6 +537,11 @@ pub fn SettingsFormIsland(
     let status = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let form_dom = form.dom_id();
+    #[cfg(feature = "hydrate")]
+    {
+        let form_dom = form_dom.clone();
+        Effect::new(move || flash_field(&form_dom));
+    }
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         let inputs = values.get_untracked();
@@ -571,6 +612,13 @@ pub fn GridIsland(
     initial: GridPage,
     label: String,
     choices: Choices,
+    /// `?q=`: the initial search (`initial` is already filtered by it).
+    #[prop(optional)]
+    search: Option<String>,
+    /// `?edit=`: the row whose edit dialog opens on hydrate, and the page URL without
+    /// `edit` (built on the server, keeping the wasm small) to `replaceState` to.
+    #[prop(optional_no_strip)]
+    edit: Option<(Value, String)>,
 ) -> impl IntoView {
     mark_hydrated();
     let meta = grid.meta();
@@ -582,6 +630,7 @@ pub fn GridIsland(
 
     let query = RwSignal::new(GridQuery {
         per_page: initial.per_page,
+        search: search.clone().unwrap_or_default(),
         ..Default::default()
     });
     let page = RwSignal::new(initial);
@@ -651,6 +700,19 @@ pub fn GridIsland(
             let _ = d.show_modal();
         }
     };
+    // A `?edit=` deep link opens the row as its Edit button would, then leaves the URL
+    // so a reload does not reopen it.
+    #[cfg(feature = "hydrate")]
+    if let Some((row, url)) = edit {
+        Effect::new(move || {
+            untrack(|| open_dialog(Editing::Row(key_of(&row), row.clone())));
+            if let Some(h) = web_sys::window().and_then(|w| w.history().ok()) {
+                let _ = h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url));
+            }
+        });
+    }
+    #[cfg(not(feature = "hydrate"))]
+    let _ = edit;
     let close_dialog = move || {
         editing.set(Editing::Closed);
         #[cfg(feature = "hydrate")]
@@ -908,7 +970,7 @@ pub fn GridIsland(
             <div class="grid-toolbar">
                 <label class="search">
                     <span class="sr-only">{format!("Search {label_for_aria}")}</span>
-                    <input type="search" placeholder="Search"
+                    <input type="search" placeholder="Search" value=search
                         prop:value=move || query.with(|q| q.search.clone())
                         on:input=move |ev| {
                             let s = event_target_value(&ev);
@@ -1576,13 +1638,18 @@ pub fn DhcpLeases(initial: LeaseTable) -> impl IntoView {
 /// (Normal / Isolated / Quarantine) for hosts with a MAC. Refreshed with the other
 /// dashboard widgets; renders nothing when the caller may not see hosts.
 #[island]
-pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
+pub fn HostsCard(
+    initial: Option<HostCard>,
+    /// `?host=`: the initial search.
+    #[prop(optional)]
+    search: Option<String>,
+) -> impl IntoView {
     if initial.is_none() {
         return ().into_any();
     }
     mark_hydrated();
     let card = RwSignal::new(initial);
-    let search = RwSignal::new(String::new());
+    let search = RwSignal::new(search.unwrap_or_default());
     let network = RwSignal::new(String::new());
     let show_all = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
@@ -1874,7 +1941,7 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
             <div class="grid-toolbar">
                 <label class="search">
                     <span class="sr-only">"Search hosts"</span>
-                    <input type="search" placeholder="Search name, MAC or IP"
+                    <input type="search" placeholder="Search name, MAC or IP" value=search.get_untracked()
                         prop:value=move || search.get()
                         on:input=move |ev| { search.set(event_target_value(&ev)); show_all.set(false); }/>
                 </label>
