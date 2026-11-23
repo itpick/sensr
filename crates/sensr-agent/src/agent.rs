@@ -33,6 +33,7 @@ use sensr_ipc::{
 use sensr_schema::Document;
 use sensr_schema::fields::MacAddr;
 use sensr_schema::models::firewall::{HostMode, HostModeKind};
+use sensr_schema::models::hosts::{HostKind, HostLabel};
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
 
@@ -975,6 +976,10 @@ impl<A: Applier> Agent<A> {
                 self.set_host_mode(inner, principal, &mac, mode, remote_addr)
                     .await
             }
+            Op::HostLabelSet { mac, kind, maker } => {
+                self.set_host_label(inner, principal, &mac, kind, maker)
+                    .await
+            }
         }
     }
 
@@ -1040,6 +1045,96 @@ impl<A: Applier> Agent<A> {
                 }
             }
         }
+        let to = match mode {
+            None => "normal",
+            Some(HostModeMode::Isolated) => "isolated",
+            Some(HostModeMode::Quarantine) => "quarantine",
+        };
+        self.stage_or_commit(
+            inner,
+            principal,
+            base,
+            doc,
+            format!("set host mode {mac} → {to}"),
+        )
+        .await
+    }
+
+    /// [`Op::HostLabelSet`]: sets (or, with neither field, removes) the
+    /// host's `hosts.labels` entry, committed or staged like a host mode.
+    async fn set_host_label(
+        &self,
+        inner: &mut Inner<A>,
+        principal: &Principal,
+        mac: &str,
+        kind: Option<HostKind>,
+        maker: Option<String>,
+    ) -> Result<Response, IpcError> {
+        let mac: MacAddr = mac.to_ascii_lowercase().parse().map_err(|_| {
+            err(
+                ErrorKind::BadRequest,
+                format!("{mac:?} is not a MAC address"),
+            )
+        })?;
+        // the schema checks the length of the trimmed maker but stores it
+        // as given: store it trimmed, and a blank one is no maker
+        let maker = maker.map(|m| m.trim().to_owned()).filter(|m| !m.is_empty());
+        let base = inner
+            .candidate
+            .clone()
+            .unwrap_or_else(|| inner.head.1.clone());
+        let mut doc = base.clone();
+        let labels = &mut doc.hosts.labels;
+        let existing = labels.find(|l| l.mac == mac).map(|(id, _)| *id);
+        if kind.is_none() && maker.is_none() {
+            labels.retain(|_, l| l.mac != mac);
+        } else {
+            // keep the entry's id and description: a label change is an
+            // edit of the host's row, not a new one
+            match existing.and_then(|id| labels.get_mut(&id)) {
+                Some(l) => {
+                    l.kind = kind;
+                    l.maker = maker.clone();
+                    l.enabled = true;
+                }
+                None => {
+                    labels.push(HostLabel {
+                        enabled: true,
+                        mac,
+                        kind,
+                        maker: maker.clone(),
+                        description: None,
+                    });
+                }
+            }
+        }
+        // the kind as on the wire (`smart_home`)
+        let kind_name = kind
+            .and_then(|k| serde_json::to_value(k).ok())
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "auto".into());
+        let message = format!(
+            "set host label {mac} → {kind_name}/{}",
+            maker.as_deref().unwrap_or("auto")
+        );
+        self.stage_or_commit(inner, principal, base, doc, message)
+            .await
+    }
+
+    /// The atomic edit behind [`Op::HostModeSet`] and [`Op::HostLabelSet`]:
+    /// `doc` is `base` (the candidate, else head) with one host-row edit. When
+    /// nothing else is staged and no commit awaits confirmation it is
+    /// committed in the same critical section (no other edit can slip in) as
+    /// `message`; otherwise it is staged beside the other changes. Answered
+    /// `{"result": "applied" | "staged"}`.
+    async fn stage_or_commit(
+        &self,
+        inner: &mut Inner<A>,
+        principal: &Principal,
+        base: Document,
+        doc: Document,
+        message: String,
+    ) -> Result<Response, IpcError> {
         let result = |r: &str| Ok(Response::Value(Some(serde_json::json!({ "result": r }))));
         let other_changes = Self::dirty(inner);
         let pending = inner.store.pending_confirm().map_err(internal)?.is_some();
@@ -1048,21 +1143,15 @@ impl<A: Applier> Agent<A> {
             return result("staged");
         }
         if doc == inner.head.1 {
-            // already in that mode: nothing to commit
+            // already so: nothing to commit
             return result("applied");
         }
         let head = inner.head.clone();
         let previous = inner.candidate.clone();
         self.stage(inner, &head.1, doc)?;
-        let to = match mode {
-            None => "normal",
-            Some(HostModeMode::Isolated) => "isolated",
-            Some(HostModeMode::Quarantine) => "quarantine",
-        };
-        let message = format!("set host mode {mac} → {to}");
         if let Err(e) = self.commit(inner, principal, Some(message), None).await {
             // refused before anything was stored: leave the candidate as it
-            // was rather than holding a half-made mode change
+            // was rather than holding a half-made edit
             if inner.head.0 == head.0 {
                 inner.set_candidate(previous);
             }
@@ -1248,6 +1337,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::Runtime { .. } => "runtime",
         Op::HostForget { .. } => "host.forget",
         Op::HostModeSet { .. } => "host.mode_set",
+        Op::HostLabelSet { .. } => "host.label_set",
     }
 }
 

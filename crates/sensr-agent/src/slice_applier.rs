@@ -1750,6 +1750,64 @@ mod tests {
             assert!(i.status().active);
         }
 
+        /// A label-only change (no other section differs) still reaches the
+        /// hosts view: every apply hands the document to the collector.
+        #[test]
+        fn a_label_only_apply_reaches_the_hosts_view() {
+            use sensr_schema::PathAccess;
+            let root = fake_root();
+            let (mut a, _, _, _) = applier(
+                &root,
+                Arc::new(|| Err(std::io::Error::other("no socket needed"))),
+            );
+            a.hosts = Some(crate::hosts::HostCollector::new(
+                crate::hosts::HostStore::new(root.path().join("hosts2.json")),
+                Arc::new(|| {
+                    (
+                        vec![sensr_feeds::neigh::NeighEntry {
+                            mac: OTHER.into(),
+                            ip: "192.168.1.10".parse().unwrap(),
+                            dev: "igc1".into(),
+                            state: vec!["REACHABLE".into()],
+                        }],
+                        Vec::new(),
+                    )
+                }),
+            ));
+            let row = |a: &SliceApplier| {
+                let v = a.runtime(sensr_ipc::RuntimeSection::Hosts).unwrap();
+                v["hosts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|h| h["key"] == OTHER)
+                    .cloned()
+                    .expect("row")
+            };
+            let first = quarantined();
+            a.apply(None, &first).unwrap();
+            a.hosts.as_ref().unwrap().poll(1_000);
+            assert_eq!(row(&a)["label"]["by"], "auto");
+
+            let mut second = first.clone();
+            second
+                .set_by_path(
+                    "hosts.labels.6d0de000-0000-4000-8000-000000000001",
+                    serde_json::json!({"mac": OTHER, "kind": "printer", "maker": "Brother"}),
+                )
+                .unwrap();
+            assert_eq!(
+                first.changed_sections(&second),
+                [sensr_schema::Section::Hosts]
+            );
+            a.apply(Some(&first), &second).unwrap();
+            let l = row(&a)["label"].clone();
+            assert_eq!(
+                (l["by"].as_str(), l["kind"].as_str(), l["maker"].as_str()),
+                (Some("owner"), Some("printer"), Some("Brother"))
+            );
+        }
+
         #[test]
         fn a_socket_failure_shows_in_the_view_and_the_nft_layer_still_applies() {
             let root = fake_root();

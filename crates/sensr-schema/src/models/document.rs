@@ -127,11 +127,13 @@ pub enum Section {
     Ids,
     /// `insight`.
     Insight,
+    /// `hosts`.
+    Hosts,
 }
 
 impl Section {
     /// Every section, in document order.
-    pub const ALL: [Section; 17] = [
+    pub const ALL: [Section; 18] = [
         Self::System,
         Self::Interfaces,
         Self::Firewall,
@@ -149,6 +151,7 @@ impl Section {
         Self::Ntp,
         Self::Ids,
         Self::Insight,
+        Self::Hosts,
     ];
 
     /// The section's key in the JSON document.
@@ -171,6 +174,7 @@ impl Section {
             Self::Ntp => "ntp",
             Self::Ids => "ids",
             Self::Insight => "insight",
+            Self::Hosts => "hosts",
         }
     }
 }
@@ -416,6 +420,7 @@ impl Document {
                 Section::Ntp => self.ntp != other.ntp,
                 Section::Ids => self.ids != other.ids,
                 Section::Insight => self.insight != other.insight,
+                Section::Hosts => self.hosts != other.hosts,
             })
             .collect()
     }

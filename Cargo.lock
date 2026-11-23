@@ -5213,6 +5213,7 @@ version = "0.0.0"
 dependencies = [
  "ciborium",
  "proptest",
+ "sensr-schema",
  "serde",
  "serde_json",
  "tempfile",

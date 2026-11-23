@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 ciborium.workspace = true
 serde.workspace = true
+sensr-schema.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

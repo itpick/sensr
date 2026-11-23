@@ -823,6 +823,45 @@ fn host_modes(doc: &Document) -> BTreeMap<String, &'static str> {
         .collect()
 }
 
+/// Enabled owner labels of `doc`: lowercase MAC → the entry. An entry for a
+/// MAC that is not in the inventory is kept and applies when that host
+/// appears.
+fn host_labels(doc: &Document) -> BTreeMap<String, sensr_schema::models::hosts::HostLabel> {
+    doc.hosts
+        .labels
+        .values()
+        .filter(|l| l.enabled)
+        .map(|l| (l.mac.to_string(), l.clone()))
+        .collect()
+}
+
+/// `label` (the automatic one, as wire JSON) with the owner's fields laid
+/// over it: a set field wins, `by` becomes `owner`, confidence `high` and
+/// the first reason `Set by you`.
+fn overlay_label(label: &mut serde_json::Value, owner: &sensr_schema::models::hosts::HostLabel) {
+    let maker = owner
+        .maker
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    if owner.kind.is_none() && maker.is_none() {
+        return;
+    }
+    if let Some(k) = owner.kind {
+        label["kind"] = serde_json::json!(k);
+    }
+    if let Some(m) = maker {
+        label["maker"] = m.into();
+    }
+    let mut reasons = vec![serde_json::Value::from("Set by you")];
+    if let Some(auto) = label["reasons"].as_array() {
+        reasons.extend(auto.iter().cloned());
+    }
+    label["reasons"] = reasons.into();
+    label["confidence"] = "high".into();
+    label["by"] = "owner".into();
+}
+
 /// How often the collector polls its sources.
 const POLL: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -841,6 +880,9 @@ struct Collected {
     /// Hosts in a mode (enabled `firewall.host_modes` entries of the
     /// applied document): MAC → `isolated` / `quarantine`.
     modes: BTreeMap<String, &'static str>,
+    /// Owner labels (enabled `hosts.labels` entries of the applied
+    /// document), by lowercase MAC.
+    labels: BTreeMap<String, sensr_schema::models::hosts::HostLabel>,
 }
 
 /// The host inventory service: polls [`Sources`] every 30 s, merges them into
@@ -884,6 +926,7 @@ impl HostCollector {
                 },
                 ready: false,
                 modes: BTreeMap::new(),
+                labels: BTreeMap::new(),
             }),
             on_poll: Mutex::new(None),
         })
@@ -899,8 +942,10 @@ impl HostCollector {
     pub fn set_document(&self, doc: &Document) {
         let internal = internal_interfaces(doc);
         let modes = host_modes(doc);
+        let labels = host_labels(doc);
         let mut st = lock(&self.state);
         st.modes = modes;
+        st.labels = labels;
         st.snap.subnet_iface = subnet_ifaces(doc, &internal);
         st.snap.reservations = reservations(doc);
         st.snap.internal = internal;
@@ -965,6 +1010,12 @@ impl HostCollector {
             for h in hosts {
                 if let Some(mode) = h["mac"].as_str().and_then(|m| st.modes.get(m)) {
                     h["mode"] = (*mode).into();
+                }
+                let owner = h["mac"]
+                    .as_str()
+                    .and_then(|m| st.labels.get(&m.to_ascii_lowercase()));
+                if let (Some(owner), Some(label)) = (owner, h.get_mut("label")) {
+                    overlay_label(label, owner);
                 }
             }
         }
@@ -2175,6 +2226,90 @@ mod collector {
         assert!(row(&c, MAC).get("mode").is_none());
         c.set_document(&doc);
         assert!(row(&c, MAC).get("mode").is_none());
+    }
+
+    fn with_label(mut doc: Document, mac: &str, label: serde_json::Value) -> Document {
+        use sensr_schema::PathAccess;
+        let mut l = label;
+        l["mac"] = mac.into();
+        doc.set_by_path("hosts.labels.6d0de000-0000-4000-8000-000000000001", l)
+            .unwrap();
+        doc
+    }
+
+    fn row(c: &HostCollector, key: &str) -> serde_json::Value {
+        c.view(1000)["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["key"] == key)
+            .cloned()
+            .expect("row")
+    }
+
+    #[test]
+    fn view_overlays_owner_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, doc) = collector(&dir);
+        c.poll(1000);
+        let auto = row(&c, MAC)["label"].clone();
+        assert_eq!(auto["by"], "auto");
+
+        // kind set, maker unset: kind from the owner, maker from the OUI
+        c.set_document(&with_label(
+            doc.clone(),
+            MAC,
+            serde_json::json!({"kind": "camera"}),
+        ));
+        let l = row(&c, MAC)["label"].clone();
+        assert_eq!(l["kind"], "camera");
+        assert_eq!(l["maker"], auto["maker"]);
+        assert_eq!(l["by"], "owner");
+        assert_eq!(l["confidence"], "high");
+        assert_eq!(l["reasons"][0], "Set by you");
+        assert!(
+            l["reasons"].as_array().unwrap().len() > 1,
+            "the guess is kept after Set by you"
+        );
+
+        // maker set, kind unset; an upper-case entry still matches
+        c.set_document(&with_label(
+            doc.clone(),
+            &MAC.to_uppercase(),
+            serde_json::json!({"maker": "Home brew"}),
+        ));
+        let l = row(&c, MAC)["label"].clone();
+        assert_eq!(l["maker"], "Home brew");
+        assert_eq!(l["kind"], auto["kind"]);
+        assert_eq!(l["by"], "owner");
+
+        // other rows are untouched
+        assert_eq!(row(&c, "02:00:5e:10:00:0a")["label"]["by"], "auto");
+
+        // a disabled entry is ignored
+        let mut off = with_label(doc.clone(), MAC, serde_json::json!({"kind": "camera"}));
+        for l in off.hosts.labels.iter_mut() {
+            l.1.enabled = false;
+        }
+        c.set_document(&off);
+        assert_eq!(row(&c, MAC)["label"], auto);
+    }
+
+    #[test]
+    fn override_for_unknown_mac_is_kept_but_not_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, doc) = collector(&dir);
+        c.poll(1000);
+        let before = c.view(1000);
+        let stranger = "aa:bb:cc:00:99:99";
+        c.set_document(&with_label(
+            doc.clone(),
+            stranger,
+            serde_json::json!({"kind": "tv", "maker": "Nobody"}),
+        ));
+        // no row is invented and none changes
+        assert_eq!(c.view(1000), before);
+        assert_eq!(lock(&c.state).labels.len(), 1, "the override is kept");
     }
 
     #[test]

@@ -351,6 +351,32 @@ impl Backend for UiBackend {
         .boxed()
     }
 
+    fn set_host_label(
+        &self,
+        mac: String,
+        kind: Option<String>,
+        maker: Option<String>,
+    ) -> BoxFuture<'_, ApiResult<String>> {
+        async move {
+            let kind = match kind.as_deref() {
+                None | Some("") => None,
+                Some(k) => Some(
+                    serde_json::from_value(Value::String(k.to_owned()))
+                        .map_err(|_| ApiError::Backend(format!("unknown host kind {k:?}")))?,
+                ),
+            };
+            let op = Op::HostLabelSet { mac, kind, maker };
+            match self.call(op).await? {
+                Response::Value(Some(v)) => match v.get("result").and_then(Value::as_str) {
+                    Some(r) => Ok(r.to_owned()),
+                    None => Err(ApiError::Backend(format!("unexpected agent reply {v}"))),
+                },
+                other => Err(unexpected(other)),
+            }
+        }
+        .boxed()
+    }
+
     fn read_only(&self) -> bool {
         self.caller
             .info

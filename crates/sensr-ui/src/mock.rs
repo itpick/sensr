@@ -415,6 +415,18 @@ impl Backend for MockBackend {
         }))
     }
 
+    fn set_host_label(
+        &self,
+        _mac: String,
+        _kind: Option<String>,
+        _maker: Option<String>,
+    ) -> BoxFuture<'_, ApiResult<String>> {
+        if self.read_only() {
+            return ready(Err(ApiError::Unauthorized));
+        }
+        ready(Ok("applied".to_owned()))
+    }
+
     fn set_host_mode(
         &self,
         mac: String,

@@ -732,6 +732,16 @@ mod server {
             mode: Option<String>,
             remote: Option<std::net::IpAddr>,
         ) -> BoxFuture<'_, ApiResult<String>>;
+        /// Sets what a host is called (`hosts.labels`): `kind` is a kind name
+        /// (`camera`, `smart_home`, ...), `maker` free text; both `None` clears the
+        /// label. Returns `applied` when it took effect at once, `staged` when it
+        /// waits for Apply.
+        fn set_host_label(
+            &self,
+            mac: String,
+            kind: Option<String>,
+            maker: Option<String>,
+        ) -> BoxFuture<'_, ApiResult<String>>;
         /// The caller may read but not change anything (`user-config-readonly`), so the
         /// UI hides actions that would be refused.
         fn read_only(&self) -> bool {
