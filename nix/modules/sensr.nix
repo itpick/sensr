@@ -536,7 +536,7 @@ in
     # firmware re-enumerate it: the pinned name comes back, and networkd
     # applies the interface's .network (addresses, routes) again by itself.
     systemd.services.sensr-nic-recover = {
-      description = "Prevent and recover USB Ethernet adapter wedges";
+      description = "Prevent and recover Ethernet adapter wedges (USB adapters, Pi 5 macb)";
       serviceConfig = {
         Type = "oneshot";
         ExecStart = pkgs.writeShellScript "sensr-nic-recover" ''
@@ -562,6 +562,23 @@ in
             [ -e "$devlink" ] || continue
             name=$(basename "$(dirname "$devlink")")
             path=$(readlink -f "$devlink") || continue
+            # The Pi 5's built-in port (RP1 macb) stalls its transmit queue
+            # with EEE on: "NETDEV WATCHDOG: transmit queue 0 timed out",
+            # a ~5 s outage every 10-15 min on a live WAN (2026-11-23, 308
+            # in 3 days). Its 512-slot RX ring also overflowed under load
+            # (rx_resource_errors). Both settings reset with the link, so they
+            # are re-checked every tick; the ring change bounces the link once.
+            drv=$(basename "$(readlink -f /sys/class/net/"$name"/device/driver 2>/dev/null)" 2>/dev/null)
+            if [ "$drv" = macb ]; then
+              if "$ethtool" --show-eee "$name" 2>/dev/null | grep -q 'EEE status: enabled'; then
+                "$ethtool" --set-eee "$name" eee off 2>/dev/null && log "$name (macb): EEE off"
+              fi
+              rx=$("$ethtool" -g "$name" 2>/dev/null | sed -n '/^Current/,$p' | awk '/^RX:/{print $2; exit}')
+              if [ -n "$rx" ] && [ "$rx" -lt 2048 ] 2>/dev/null; then
+                "$ethtool" -G "$name" rx 2048 2>/dev/null && log "$name (macb): RX ring $rx -> 2048"
+              fi
+              continue
+            fi
             # USB adapters only: the USB bus is in the resolved device path.
             case $path in */usb[0-9]*/*) ;; *) continue ;; esac
             usb=$(basename "$(dirname "$path")")
