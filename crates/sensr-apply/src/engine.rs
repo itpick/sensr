@@ -908,11 +908,13 @@ impl Engine {
     /// skip the new rules. Runs `conntrack -D -s <ip>`, `-D -d <ip>` and
     /// `-D -r <ip>` per address: the reply source catches a flow that was
     /// destination-NATed to the host (a port forward, 1:1 NAT), whose
-    /// original destination is the router's address. Deleting a conntrack entry also drops its flowtable offload
-    /// (the offloaded flow is torn down with the entry), so no separate
-    /// flowtable delete is needed. `conntrack` exits non-zero when nothing
-    /// matched ("0 flow entries"); that is not an error. A box without the
-    /// binary (a dev machine) is skipped with a warning.
+    /// original destination is the router's address. Deleting a conntrack
+    /// entry also drops its flowtable offload (the offloaded flow is torn
+    /// down with the entry), so no separate flowtable delete is needed.
+    /// `conntrack` exits non-zero when nothing matched ("0 flow entries");
+    /// that is not an error. A box without the binary (a dev machine) is
+    /// skipped with a warning. A command that fails to run is logged and the
+    /// rest still run: one address must not keep the others' flows alive.
     pub fn cut_host(&self, addrs: &[IpAddr]) -> Result<(), EngineError> {
         if addrs.is_empty() {
             return Ok(());
@@ -925,7 +927,13 @@ impl Engine {
             let ip = addr.to_string();
             for flag in ["-s", "-d", "-r"] {
                 let cmd = Cmd::new("conntrack").args(["-D", flag, ip.as_str()]);
-                let out = self.runner.run(&cmd, None)?;
+                let out = match self.runner.run(&cmd, None) {
+                    Ok(out) => out,
+                    Err(e) => {
+                        tracing::warn!(cmd = %cmd.display(), error = %e, "conntrack delete did not run");
+                        continue;
+                    }
+                };
                 if out.code != Some(0) {
                     let err = String::from_utf8_lossy(&out.stderr);
                     if !err.contains("0 flow entries") {
@@ -1282,6 +1290,54 @@ mod tests {
         );
         e.cut_host(&[]).unwrap();
         assert_eq!(runner.calls().len(), 3, "no addresses, no commands");
+    }
+
+    /// One command that fails to run does not abort the others.
+    #[test]
+    fn cut_host_continues_past_a_spawn_error() {
+        use crate::cmd::{CmdError, Runner, StdinWriter};
+        struct FailFirst(FakeRunner, std::sync::Mutex<bool>);
+        impl Runner for FailFirst {
+            fn run(&self, cmd: &Cmd, stdin: Option<StdinWriter<'_>>) -> Result<Output, CmdError> {
+                let out = self.0.run(cmd, stdin);
+                if std::mem::replace(&mut *self.1.lock().unwrap(), false) {
+                    return Err(CmdError::Spawn {
+                        cmd: cmd.display(),
+                        source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                    });
+                }
+                out
+            }
+            fn has_program(&self, p: &str) -> bool {
+                self.0.has_program(p)
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let runner = Arc::new(FailFirst(FakeRunner::new(), std::sync::Mutex::new(true)));
+        let e = Engine::new(
+            EngineOptions {
+                root: root.path().to_owned(),
+                ..EngineOptions::default()
+            },
+            runner.clone(),
+        )
+        .unwrap();
+        e.cut_host(&[
+            "192.168.68.50".parse().unwrap(),
+            "fd00::51".parse().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(
+            runner.0.call_lines(),
+            [
+                "conntrack '-D' '-s' '192.168.68.50'",
+                "conntrack '-D' '-d' '192.168.68.50'",
+                "conntrack '-D' '-r' '192.168.68.50'",
+                "conntrack '-D' '-s' 'fd00::51'",
+                "conntrack '-D' '-d' 'fd00::51'",
+                "conntrack '-D' '-r' 'fd00::51'"
+            ]
+        );
     }
 
     #[test]
