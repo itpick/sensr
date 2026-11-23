@@ -360,10 +360,14 @@ impl Backend for UiBackend {
         async move {
             let kind = match kind.as_deref() {
                 None | Some("") => None,
-                Some(k) => Some(
-                    serde_json::from_value(Value::String(k.to_owned()))
-                        .map_err(|_| ApiError::Backend(format!("unknown host kind {k:?}")))?,
-                ),
+                Some(k) => Some(serde_json::from_value(Value::String(k.to_owned())).map_err(
+                    |_| {
+                        ApiError::Validation(vec![FieldError::new(
+                            "kind",
+                            format!("Unknown type {k:?}."),
+                        )])
+                    },
+                )?),
             };
             let op = Op::HostLabelSet { mac, kind, maker };
             match self.call(op).await? {

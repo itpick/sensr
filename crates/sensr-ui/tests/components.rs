@@ -670,7 +670,7 @@ fn hosts_card_source_and_seen_labels() {
         .select(&sel("td"))
         .map(|c| text(c).trim().to_owned())
         .collect();
-    assert_eq!(seen[0], seen[1], "name falls back to the MAC");
+    assert!(seen[1].starts_with(&seen[0]), "name falls back to the MAC");
     assert_eq!(seen[4], "seen");
     // IPv6 sits on its own muted line under the IPv4.
     let ip = host_row(&doc, "nas").select(&sel("td")).nth(2).unwrap();
@@ -708,7 +708,11 @@ fn hosts_card_read_only_has_no_actions() {
 fn hosts_card_reserved_row_has_no_forget() {
     let doc = render_hosts(hosts_from(hosts_mock()));
     let nas = host_row(&doc, "nas");
-    assert!(nas.select(&sel("button")).next().is_none(), "{}", text(nas));
+    assert!(
+        nas.select(&sel(".host-actions button")).next().is_none(),
+        "{}",
+        text(nas)
+    );
     let reserved = nas
         .select(&sel(".host-reserved"))
         .next()
@@ -720,7 +724,7 @@ fn hosts_card_reserved_row_has_no_forget() {
     );
     // A leased host can be made static and forgotten.
     let pi: Vec<String> = host_row(&doc, "bench-pi")
-        .select(&sel("button"))
+        .select(&sel(".host-actions button"))
         .map(|b| text(b).trim().to_owned())
         .collect();
     assert_eq!(pi, ["Make static", "Forget"]);
@@ -792,7 +796,7 @@ fn hosts_card_make_static_needs_a_lease_a_mac_and_an_ipv4() {
     card.list.hosts.extend([no_mac, no_ip]);
     let doc = render_hosts(Some(card));
     let buttons = |r: scraper::ElementRef<'_>| -> Vec<String> {
-        r.select(&sel("button"))
+        r.select(&sel(".host-actions button"))
             .map(|b| text(b).trim().to_owned())
             .collect()
     };
@@ -848,7 +852,7 @@ fn hosts_card_make_static_is_gone_once_staged() {
     let doc = render_hosts(Some(card));
     let row = host_row(&doc, "bench-pi");
     let buttons: Vec<String> = row
-        .select(&sel("button"))
+        .select(&sel(".host-actions button"))
         .map(|b| text(b).trim().to_owned())
         .collect();
     assert_eq!(buttons, ["Forget"], "no second Make static before Apply");
@@ -1452,4 +1456,220 @@ fn chart_without_timestamps_shows_no_times() {
     let charts: Vec<_> = doc.select(&sel(".traffic figure .tchart")).collect();
     assert_eq!(charts[0].select(&sel(".tc-x span")).count(), 0);
     assert!(charts[1].select(&sel(".tc-x span")).count() >= 3);
+}
+
+/// The MAC cell (second column) of a host row.
+fn mac_cell<'a>(row: scraper::ElementRef<'a>) -> scraper::ElementRef<'a> {
+    row.select(&sel("td")).nth(1).unwrap()
+}
+
+/// The label line in a MAC cell.
+fn label_line<'a>(cell: scraper::ElementRef<'a>) -> scraper::ElementRef<'a> {
+    cell.select(&sel(".host-label")).next().expect("label line")
+}
+
+/// The card with only the named hosts (the printer sorts past the first 20).
+fn hosts_named(names: &[&str]) -> sensr_ui::actions::HostCard {
+    let mut card = hosts_from(hosts_mock()).unwrap();
+    card.list
+        .hosts
+        .retain(|h| h.name.as_deref().is_some_and(|n| names.contains(&n)));
+    card
+}
+
+#[test]
+fn host_label_line_renders() {
+    let doc = render_hosts(Some(hosts_named(&["bench-pi", "nas"])));
+    let cell = mac_cell(host_row(&doc, "bench-pi"));
+    assert!(text(cell).starts_with("b8:27:eb:7d:4e:25"));
+    let line = label_line(cell);
+    let icon = line.select(&sel(".host-kind-icon")).next().unwrap();
+    assert_eq!(icon.value().attr("aria-hidden"), Some("true"));
+    assert_eq!(text(icon), "🗄");
+    assert_eq!(
+        text(line).trim_start_matches(&text(icon)).trim(),
+        "Raspberry Pi · Server?"
+    );
+    assert!(
+        line.value()
+            .has_class("host-label-guess", scraper::CaseSensitivity::CaseSensitive)
+    );
+    let title = line.value().attr("title").unwrap();
+    assert!(title.contains("MAC maker: Raspberry Pi"), "{title}");
+    assert!(title.contains('\n'), "one reason per line: {title}");
+    // a confident guess is not italic
+    let nas = label_line(mac_cell(host_row(&doc, "nas")));
+    assert!(text(nas).ends_with("QEMU/KVM · Virtual machine"));
+    assert!(
+        !nas.value()
+            .has_class("host-label-guess", scraper::CaseSensitivity::CaseSensitive)
+    );
+    assert_all_labelled(&doc, "hosts card with labels");
+}
+
+#[test]
+fn host_label_private_mac_text() {
+    let doc = render_hosts(Some(hosts_named(&["device-01"])));
+    let line = label_line(mac_cell(host_row(&doc, "device-01")));
+    let icon = text(line.select(&sel(".host-kind-icon")).next().unwrap());
+    assert_eq!(
+        text(line).trim_start_matches(&icon).trim(),
+        "Private MAC · Phone/laptop?"
+    );
+}
+
+#[test]
+fn host_label_owner_not_guess() {
+    let card = hosts_named(&["printer", "bench-pi"]);
+    let printer = card
+        .list
+        .hosts
+        .iter()
+        .find(|h| h.name.as_deref() == Some("printer"))
+        .unwrap();
+    assert_eq!(printer.owner_kind.as_deref(), Some("printer"));
+    assert_eq!(printer.owner_maker.as_deref(), Some("Brother"));
+    assert!(!printer.staged_label);
+    let doc = render_hosts(Some(card));
+    let line = label_line(mac_cell(host_row(&doc, "printer")));
+    assert!(text(line).ends_with("Brother · Printer"), "{}", text(line));
+    assert!(
+        !line
+            .value()
+            .has_class("host-label-guess", scraper::CaseSensitivity::CaseSensitive)
+    );
+    assert!(line.value().attr("title").unwrap().contains("Set by you"));
+    // the editor is closed until ✎ is pressed
+    let edit = mac_cell(host_row(&doc, "printer"))
+        .select(&sel("button.icon-btn.host-label-edit"))
+        .next()
+        .expect("edit button");
+    assert_eq!(
+        edit.value().attr("aria-label"),
+        Some("Edit label for printer")
+    );
+    assert!(doc.select(&sel(".host-label-editor")).next().is_none());
+}
+
+#[test]
+fn host_label_edit_hidden_read_only() {
+    let m = hosts_mock().with_privileges(&["page-all", "user-config-readonly"]);
+    let doc = render_hosts(hosts_from(m));
+    assert!(
+        doc.select(&sel(".host-label")).next().is_some(),
+        "labels still show"
+    );
+    assert!(doc.select(&sel(".host-label-edit")).next().is_none());
+    // the read-only mock refuses a change like the agent does
+    use sensr_ui::api::Backend;
+    let m = hosts_mock().with_privileges(&["page-all", "user-config-readonly"]);
+    assert!(block(m.set_host_label("b8:27:eb:7d:4e:25".into(), Some("tv".into()), None)).is_err());
+}
+
+#[test]
+fn host_label_editor_options() {
+    let doc = Html::parse_fragment(&sensr_ui::islands::host_label_editor_html(
+        "bench-pi", "", "",
+    ));
+    let select = doc.select(&sel("select")).next().unwrap();
+    assert_eq!(select.value().attr("aria-label"), Some("Type for bench-pi"));
+    let options: Vec<(String, String)> = select
+        .select(&sel("option"))
+        .map(|o| (o.value().attr("value").unwrap_or("?").to_owned(), text(o)))
+        .collect();
+    assert_eq!(options.len(), 15);
+    assert_eq!(options[0], ("".to_owned(), "Auto".to_owned()));
+    assert_eq!(options[1], ("phone".to_owned(), "Phone".to_owned()));
+    assert_eq!(options[4], ("tv".to_owned(), "TV/streaming".to_owned()));
+    assert_eq!(options[14], ("unknown".to_owned(), "Unknown".to_owned()));
+    let selected: Vec<String> = select.select(&sel("option[selected]")).map(text).collect();
+    assert_eq!(selected, ["Auto"]);
+    let input = doc.select(&sel("input[type=text]")).next().unwrap();
+    assert_eq!(input.value().attr("aria-label"), Some("Maker for bench-pi"));
+    assert_eq!(input.value().attr("placeholder"), Some("Auto"));
+    let buttons: Vec<String> = doc.select(&sel("button.btn.btn-sm")).map(text).collect();
+    assert_eq!(buttons, ["Save", "Reset to auto"]);
+    assert_all_labelled(&doc, "label editor");
+    // filled with the owner's label
+    let doc = Html::parse_fragment(&sensr_ui::islands::host_label_editor_html(
+        "printer", "printer", "Brother",
+    ));
+    let selected: Vec<String> = doc.select(&sel("option[selected]")).map(text).collect();
+    assert_eq!(selected, ["Printer"]);
+    let input = doc.select(&sel("input[type=text]")).next().unwrap();
+    assert_eq!(input.value().attr("value"), Some("Brother"));
+    // names and makers come off the network: escaped, not markup
+    let doc = Html::parse_fragment(&sensr_ui::islands::host_label_editor_html(
+        "<b>\"x'",
+        "",
+        "a\"><script>&",
+    ));
+    assert!(doc.select(&sel("script, b")).next().is_none());
+    let input = doc.select(&sel("input[type=text]")).next().unwrap();
+    assert_eq!(input.value().attr("value"), Some("a\"><script>&"));
+    assert_eq!(input.value().attr("aria-label"), Some("Maker for <b>\"x'"));
+}
+
+#[test]
+fn host_label_mock_set_applies_and_stages() {
+    use sensr_ui::api::Backend;
+    let m = hosts_mock();
+    const PI: &str = "b8:27:eb:7d:4e:25";
+    assert_eq!(
+        block(m.set_host_label(PI.into(), Some("tv".into()), Some(" Acme ".into()))).unwrap(),
+        "applied"
+    );
+    assert!(matches!(
+        block(m.set_host_label(PI.into(), Some("toaster".into()), None)),
+        Err(sensr_ui::api::ApiError::Validation(_))
+    ));
+    let card = hosts_from(m).unwrap();
+    let pi = card
+        .list
+        .hosts
+        .iter()
+        .find(|h| h.mac.as_deref() == Some(PI))
+        .unwrap();
+    let l = pi.label.as_ref().unwrap();
+    assert_eq!(
+        (l.text().as_str(), l.by.as_str()),
+        ("Acme · TV/streaming", "owner")
+    );
+    assert_eq!(pi.owner_maker.as_deref(), Some("Acme"));
+    assert!(!pi.staged_label);
+    // with another change staged, a label waits for Apply and says so
+    let m = hosts_mock();
+    block(m.set_host_mode(PI.into(), Some("isolated".into()), None)).unwrap();
+    block(m.set("system.hostname", serde_json::json!("other"))).unwrap();
+    assert_eq!(
+        block(m.set_host_label(PI.into(), Some("camera".into()), None)).unwrap(),
+        "staged"
+    );
+    let card = hosts_from(m).unwrap();
+    let pi = card
+        .list
+        .hosts
+        .iter()
+        .find(|h| h.mac.as_deref() == Some(PI))
+        .unwrap();
+    assert!(pi.staged_label);
+    assert_eq!(pi.label.as_ref().unwrap().text(), "Raspberry Pi · Server?");
+    let doc = render_hosts(Some(card));
+    let cell = mac_cell(host_row(&doc, "bench-pi"));
+    assert_eq!(
+        text(cell.select(&sel(".host-label-staged")).next().unwrap()),
+        "Staged — Apply to take effect"
+    );
+    // Reset to auto removes the owner's entry
+    let m = hosts_mock();
+    block(m.set_host_label("00:1b:a9:44:02:7c".into(), None, None)).unwrap();
+    let card = hosts_from(m).unwrap();
+    let p = card
+        .list
+        .hosts
+        .iter()
+        .find(|h| h.name.as_deref() == Some("printer"))
+        .unwrap();
+    assert_eq!(p.label.as_ref().unwrap().by, "auto");
+    assert_eq!(p.owner_kind, None);
 }

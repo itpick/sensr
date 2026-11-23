@@ -75,6 +75,16 @@
       }
     }
   },
+  "hosts": {
+    "labels": {
+      "6d1abe10-0000-4000-8000-001ba944027c": {
+        "enabled": true,
+        "mac": "00:1b:a9:44:02:7c",
+        "kind": "printer",
+        "maker": "Brother"
+      }
+    }
+  },
   "firewall": {
     "host_modes": {
       "6d0de000-0000-4000-8000-020000000002": {

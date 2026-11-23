@@ -1587,10 +1587,15 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
     let show_all = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(None::<String>);
-    // The last Mode change's refusal; kept across refreshes (which clear `error`).
+    // The last Mode or label change's refusal; kept across refreshes (which clear `error`).
     let mode_error = RwSignal::new(None::<String>);
+    // The MAC whose label editor is open; the periodic refresh waits while it is.
+    let editing = RwSignal::new(None::<String>);
 
     let refresh = move || {
+        if editing.get_untracked().is_some() {
+            return;
+        }
         spawn_local(async move {
             match hosts().await {
                 Ok(c) => {
@@ -1690,6 +1695,64 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
         });
     };
 
+    let save_label = move |mac: String, kind: Option<String>, maker: Option<String>| {
+        busy.set(Some(mac.clone()));
+        spawn_local(async move {
+            match set_host_label(mac, kind, maker).await {
+                // a staged label shows its note on the row (from the staged document)
+                Ok(_) => {
+                    mode_error.set(None);
+                    editing.set(None);
+                    bump();
+                }
+                Err(e) => mode_error.set(Some(server_message(&e))),
+            }
+            busy.set(None);
+            refresh();
+        });
+    };
+
+    // The MAC cell: the MAC, the label line under it, and the ✎ button and label editor.
+    // It is markup with one click handler rather than a view tree, which keeps the island
+    // bundle small.
+    let mac_cell = move |h: &crate::runtime::HostRow, read_only: bool| {
+        let mac = h.mac.clone().unwrap_or_default();
+        // `id:` rows have no MAC to label
+        let edit = !read_only && h.mac.is_some() && !h.key.starts_with("id:");
+        let base = mac_cell_html(h, edit);
+        let editor = edit.then(|| {
+            host_label_editor_html(
+                &h.label(),
+                h.owner_kind.as_deref().unwrap_or_default(),
+                h.owner_maker.as_deref().unwrap_or_default(),
+            )
+        });
+        let m = mac.clone();
+        let html = move || match &editor {
+            Some(e) if editing.with(|o| o.as_deref() == Some(m.as_str())) => {
+                format!(r#"{base}<span class="host-label-editor">{e}</span>"#)
+            }
+            _ => base.clone(),
+        };
+        view! {
+            <td class="num host-mac" inner_html=html
+                on:click=move |ev| {
+                    let _ = &ev;
+                    #[cfg(feature = "hydrate")]
+                    match label_click(&ev) {
+                        Some(LabelClick::Edit) => editing.update(|e| {
+                            *e = (e.as_deref() != Some(mac.as_str())).then(|| mac.clone())
+                        }),
+                        Some(LabelClick::Save(k, m)) => save_label(mac.clone(), Some(k), Some(m)),
+                        Some(LabelClick::Reset) => save_label(mac.clone(), None, None),
+                        None => {}
+                    }
+                    #[cfg(not(feature = "hydrate"))]
+                    let _ = (&mac, save_label);
+                }></td>
+        }
+    };
+
     let mode_cell = move |h: &crate::runtime::HostRow, read_only: bool| {
         // `id:` rows have no MAC to match on
         let Some(mac) = h.mac.clone().filter(|_| !h.key.starts_with("id:")) else {
@@ -1772,7 +1835,7 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
         view! {
             <tr class:dimmed=!h.online>
                 <td>{h.label()}</td>
-                <td class="num">{h.mac.clone().unwrap_or_default()}</td>
+                {mac_cell(h, read_only)}
                 <td class="num">{h.ipv4.clone().unwrap_or_default()}
                     {h.ipv6.first().map(|v6| view! { <br/><span class="muted">{v6.clone()}</span> })}</td>
                 <td>{h.interface_name.clone()}</td>
@@ -1884,6 +1947,103 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
         })}
     }
     .into_any()
+}
+
+/// Markup of a Hosts row's MAC cell: the MAC, the label line (`title` holds the reasons,
+/// one per line), the staged note and, with `edit`, the ✎ button. Agent strings are
+/// escaped: names and makers come off the network.
+fn mac_cell_html(h: &crate::runtime::HostRow, edit: bool) -> String {
+    let mut out = escape_html(h.mac.as_deref().unwrap_or_default());
+    if let Some(l) = &h.label {
+        let text = l.text();
+        if !text.is_empty() {
+            out += &format!(
+                r#"<span class="host-label{}" title="{}"><span class="host-kind-icon" aria-hidden="true">{}</span>{}</span>"#,
+                if l.guess() { " host-label-guess" } else { "" },
+                escape_html(&l.reasons.join("\n")),
+                l.kind_display().1,
+                escape_html(&text)
+            );
+        }
+    }
+    if h.staged_label {
+        out += r#"<span class="muted host-label-staged">Staged — Apply to take effect</span>"#;
+    }
+    if edit {
+        out += &format!(
+            r#"<button type="button" class="icon-btn host-label-edit" aria-label="Edit label for {}" data-edit="">✎</button>"#,
+            escape_html(&h.label())
+        );
+    }
+    out
+}
+
+/// The label editor's controls for the host called `name`: a type select (Auto, then
+/// every kind) and a maker field, filled with the owner's `kind` and `maker` (empty for
+/// the guess), then Save and Reset to auto. `name` and `maker` are escaped.
+pub fn host_label_editor_html(name: &str, kind: &str, maker: &str) -> String {
+    let name = escape_html(name);
+    let sel = |on: bool| if on { " selected" } else { "" };
+    let mut h = format!(
+        r#"<select aria-label="Type for {name}"><option value=""{}>Auto</option>"#,
+        sel(kind.is_empty())
+    );
+    for (v, t, _) in crate::runtime::HOST_KINDS {
+        h += &format!(r#"<option value="{v}"{}>{t}</option>"#, sel(v == kind));
+    }
+    h + &format!(
+        r#"</select><input type="text" aria-label="Maker for {name}" placeholder="Auto" maxlength="64" value="{}"><button type="button" class="btn btn-sm" data-save="">Save</button><button type="button" class="btn btn-sm" data-reset="">Reset to auto</button>"#,
+        escape_html(maker)
+    )
+}
+
+/// `s` safe inside markup and quoted attributes.
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// What a click in a MAC cell asks for.
+#[cfg(feature = "hydrate")]
+enum LabelClick {
+    /// ✎: open or close the editor.
+    Edit,
+    /// Save with this type and maker (empty is Auto).
+    Save(String, String),
+    /// Reset to auto.
+    Reset,
+}
+
+#[cfg(feature = "hydrate")]
+fn label_click(ev: &leptos::ev::MouseEvent) -> Option<LabelClick> {
+    use wasm_bindgen::JsCast;
+    let button: web_sys::Element = ev.target()?.dyn_into().ok()?;
+    if button.has_attribute("data-edit") {
+        return Some(LabelClick::Edit);
+    }
+    if button.has_attribute("data-reset") {
+        return Some(LabelClick::Reset);
+    }
+    if !button.has_attribute("data-save") {
+        return None;
+    }
+    let editor = button.parent_element()?;
+    let kind = editor.query_selector("select").ok()??;
+    let maker = editor.query_selector("input").ok()??;
+    Some(LabelClick::Save(
+        kind.dyn_into::<web_sys::HtmlSelectElement>().ok()?.value(),
+        maker.dyn_into::<web_sys::HtmlInputElement>().ok()?.value(),
+    ))
 }
 
 /// The mode select's classes: compact, tinted for a locked mode.

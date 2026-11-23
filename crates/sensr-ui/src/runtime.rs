@@ -405,6 +405,91 @@ pub struct HostRow {
     /// `mode` and waits for Apply (set by the UI from the staged document, never sent by
     /// the agent).
     pub staged_mode: Option<String>,
+    /// What the router thinks the host is; `None` for `id:` rows (and an odd label).
+    #[serde(deserialize_with = "lenient")]
+    pub label: Option<HostLabelView>,
+    /// The owner's kind and maker for it in the staged document (set by the UI, never
+    /// sent by the agent), to fill the label editor.
+    pub owner_kind: Option<String>,
+    /// See [`HostRow::owner_kind`].
+    pub owner_maker: Option<String>,
+    /// The staged owner label differs from the one in force (set by the UI).
+    pub staged_label: bool,
+}
+
+/// `(kind, display name, icon)` for every host kind, in the order the editor lists them
+/// (sensr-schema's `HostKind::ALL`, which the wasm bundle does not link).
+pub const HOST_KINDS: [(&str, &str, &str); 14] = [
+    ("phone", "Phone", "📱"),
+    ("tablet", "Tablet", "📱"),
+    ("computer", "Computer", "💻"),
+    ("tv", "TV/streaming", "📺"),
+    ("speaker", "Speaker", "🔊"),
+    ("camera", "Camera", "📷"),
+    ("printer", "Printer", "🖨"),
+    ("console", "Game console", "🎮"),
+    ("network", "Network gear", "🌐"),
+    ("smart_home", "Smart home", "🏠"),
+    ("server", "Server", "🗄"),
+    ("wearable", "Wearable", "⌚"),
+    ("virtual", "Virtual machine", "🧩"),
+    ("unknown", "Unknown", "•"),
+];
+
+/// The agent's guess (or the owner's word) about what a host is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostLabelView {
+    /// Who made it (`Raspberry Pi`, `Private MAC`).
+    pub maker: Option<String>,
+    /// A [`HOST_KINDS`] name.
+    pub kind: String,
+    /// `high`, `medium` or `low`.
+    pub confidence: String,
+    /// Why, one line each.
+    pub reasons: Vec<String>,
+    /// `auto` or `owner`.
+    pub by: String,
+}
+
+impl HostLabelView {
+    /// The kind's `(display name, icon)`; an unknown name reads as Unknown.
+    pub fn kind_display(&self) -> (&'static str, &'static str) {
+        let k = HOST_KINDS
+            .iter()
+            .find(|k| k.0 == self.kind)
+            .unwrap_or(&HOST_KINDS[13]);
+        (k.1, k.2)
+    }
+
+    /// A guess rather than something known: low confidence and not the owner's.
+    pub fn guess(&self) -> bool {
+        self.confidence == "low" && self.by != "owner"
+    }
+
+    /// The line under the MAC: `Wyze · Camera`, `Raspberry Pi · Server?` for a weak
+    /// guess, just the maker for an unknown kind (empty with no maker either).
+    pub fn text(&self) -> String {
+        let maker = self.maker.as_deref().unwrap_or_default();
+        let kind = if self.kind == "unknown" {
+            ""
+        } else if maker == "Private MAC" && self.kind == "phone" && self.guess() {
+            "Phone/laptop"
+        } else {
+            self.kind_display().0
+        };
+        let sep = if maker.is_empty() || kind.is_empty() {
+            ""
+        } else {
+            " · "
+        };
+        let q = if self.guess() && !kind.is_empty() {
+            "?"
+        } else {
+            ""
+        };
+        format!("{maker}{sep}{kind}{q}")
+    }
 }
 
 /// The ARP interceptor that enforces host modes between hosts of one network.
@@ -557,6 +642,18 @@ impl HostList {
                 ))
             })
             .collect();
+        // MAC -> (kind, maker) of each enabled owner label
+        let labels: std::collections::BTreeMap<String, (Option<&str>, Option<&str>)> = doc
+            .pointer("/hosts/labels")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|m| m.values())
+            .filter(|l| l.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+            .filter_map(|l| {
+                let s = |k: &str| l.get(k).and_then(Value::as_str);
+                Some((s("mac")?.to_ascii_lowercase(), (s("kind"), s("maker"))))
+            })
+            .collect();
         let reservations: Vec<&Value> = doc
             .pointer("/dhcpv4/reservations")
             .and_then(Value::as_object)
@@ -573,6 +670,25 @@ impl HostList {
             h.staged_mode = mac.as_deref().and_then(|mac| {
                 let staged = modes.get(mac).copied().unwrap_or("normal");
                 (staged != h.locked_mode().unwrap_or("normal")).then(|| staged.to_owned())
+            });
+            let (kind, maker) = mac
+                .as_deref()
+                .and_then(|m| labels.get(m).copied())
+                .unwrap_or_default();
+            h.owner_kind = kind.map(str::to_owned);
+            h.owner_maker = maker.map(str::to_owned);
+            // The agent's label says only that some field is the owner's, so this is a
+            // close guess: an owner label that disagrees with the shown one, or none
+            // while the shown one is the owner's.
+            h.staged_label = h.label.as_ref().is_some_and(|l| {
+                let owner = l.by == "owner";
+                if kind.is_none() && maker.is_none() {
+                    owner
+                } else {
+                    !owner
+                        || kind.is_some_and(|k| k != l.kind)
+                        || maker.is_some_and(|m| Some(m) != l.maker.as_deref())
+                }
             });
             // a reserved row's reservation is already applied
             h.staged = !h.reserved()
@@ -881,5 +997,80 @@ mod tests {
     fn formats_utc() {
         assert_eq!(fmt_time(0), "1970-01-01 00:00:00 UTC");
         assert_eq!(fmt_time(1_794_787_200), "2026-11-16 00:00:00 UTC");
+    }
+
+    fn lbl(maker: Option<&str>, kind: &str, confidence: &str, by: &str) -> HostLabelView {
+        HostLabelView {
+            maker: maker.map(str::to_owned),
+            kind: kind.into(),
+            confidence: confidence.into(),
+            reasons: vec![],
+            by: by.into(),
+        }
+    }
+
+    #[test]
+    fn host_label_text() {
+        let t = |m, k, c, b| lbl(m, k, c, b).text();
+        assert_eq!(t(Some("Wyze"), "camera", "medium", "auto"), "Wyze · Camera");
+        assert_eq!(
+            t(Some("Raspberry Pi"), "server", "low", "auto"),
+            "Raspberry Pi · Server?"
+        );
+        assert_eq!(t(None, "tv", "high", "auto"), "TV/streaming");
+        assert_eq!(t(None, "tv", "low", "auto"), "TV/streaming?");
+        assert_eq!(t(Some("Espressif"), "unknown", "low", "auto"), "Espressif");
+        assert_eq!(t(None, "unknown", "low", "auto"), "");
+        assert_eq!(
+            t(Some("Private MAC"), "phone", "low", "auto"),
+            "Private MAC · Phone/laptop?"
+        );
+        assert_eq!(
+            t(Some("Private MAC"), "phone", "high", "owner"),
+            "Private MAC · Phone"
+        );
+        assert_eq!(
+            t(Some("Brother"), "printer", "high", "owner"),
+            "Brother · Printer"
+        );
+        assert_eq!(t(None, "toaster", "high", "auto"), "Unknown");
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn host_kinds_follow_the_schema() {
+        use sensr_schema::models::hosts::HostKind;
+        assert_eq!(HOST_KINDS.len(), HostKind::ALL.len());
+        for (k, (name, display, _)) in HostKind::ALL.iter().zip(HOST_KINDS) {
+            assert_eq!(serde_json::to_value(k).unwrap(), json!(name));
+            assert_eq!(k.display(), display);
+        }
+    }
+
+    #[test]
+    fn mark_staged_reads_owner_labels() {
+        let mut l: HostList = parse(json!({"now": 1, "hosts": [
+            {"key": "k1", "mac": "aa:bb:cc:dd:ee:01",
+             "label": {"maker": "Brother", "kind": "printer", "confidence": "high", "reasons": ["Set by you"], "by": "owner"}},
+            {"key": "k2", "mac": "aa:bb:cc:dd:ee:02",
+             "label": {"maker": "Wyze", "kind": "camera", "confidence": "medium", "reasons": [], "by": "auto"}},
+            {"key": "k3", "mac": "aa:bb:cc:dd:ee:03",
+             "label": {"maker": "Acme", "kind": "tv", "confidence": "high", "reasons": [], "by": "owner"}},
+            {"key": "k4", "mac": "aa:bb:cc:dd:ee:04", "label": "odd"}
+        ]}));
+        assert_eq!(l.hosts.len(), 4, "an odd label keeps its row");
+        assert_eq!(l.hosts[3].label, None);
+        l.mark_staged(&json!({"hosts": {"labels": {
+            "a": {"mac": "AA:BB:CC:DD:EE:01", "kind": "printer", "maker": "Brother"},
+            "b": {"mac": "aa:bb:cc:dd:ee:02", "kind": "speaker"}
+        }}}));
+        let h = &l.hosts;
+        assert_eq!(h[0].owner_kind.as_deref(), Some("printer"));
+        assert_eq!(h[0].owner_maker.as_deref(), Some("Brother"));
+        assert!(!h[0].staged_label, "applied as is");
+        assert!(h[1].staged_label, "an override not in force yet");
+        assert!(h[2].staged_label, "an owner label being removed");
+        assert_eq!(h[2].owner_kind, None);
+        assert!(!h[3].staged_label);
     }
 }

@@ -833,6 +833,44 @@ pub async fn set_host_mode(mac: String, mode: Option<String>) -> Result<String, 
     }
 }
 
+/// Sets what a host is called: `kind` a [`crate::runtime::HOST_KINDS`] name, `maker`
+/// free text (1-64 characters); empty or `None` leaves the field to the guess, both
+/// cleared removes the owner label. Returns `applied` or `staged`.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn set_host_label(
+    mac: String,
+    kind: Option<String>,
+    maker: Option<String>,
+) -> Result<String, ServerFnError> {
+    use crate::api::ApiError;
+    let b = imp::backend()?;
+    if !b.may_access("/api/v1/hosts/label") || b.read_only() {
+        return Err(ServerFnError::new("you may not change host labels"));
+    }
+    let kind = kind.filter(|k| !k.is_empty());
+    if let Some(k) = &kind
+        && !crate::runtime::HOST_KINDS.iter().any(|(n, ..)| n == k)
+    {
+        return Err(ServerFnError::new(format!("Unknown type {k:?}.")));
+    }
+    let maker = maker.map(|m| m.trim().to_owned()).filter(|m| !m.is_empty());
+    if maker.as_ref().is_some_and(|m| m.chars().count() > 64) {
+        return Err(ServerFnError::new("The maker is at most 64 characters."));
+    }
+    match b.set_host_label(mac, kind, maker).await {
+        Ok(r) => Ok(r),
+        Err(ApiError::Validation(errors)) => Err(ServerFnError::new(
+            errors
+                .into_iter()
+                .map(|e| e.message)
+                .collect::<Vec<_>>()
+                .join(" "),
+        )),
+        Err(ApiError::Conflict(m)) => Err(ServerFnError::new(m)),
+        Err(e) => Err(imp::err(e)),
+    }
+}
+
 /// Drops an unreserved host from the inventory (it comes back if still on the network).
 #[server(prefix = "/ui/fn", input = Json)]
 pub async fn forget_host(key: String) -> Result<(), ServerFnError> {

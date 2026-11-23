@@ -774,11 +774,11 @@ async fn ui_backend_set_host_label() {
     );
     let applied = fx.applier.state.lock().unwrap().applied.clone();
     assert_eq!(applied.last().unwrap().hosts.labels.len(), 1);
-    assert!(
-        b.set_host_label(MAC.into(), Some("toaster".into()), None)
-            .await
-            .is_err()
-    );
+    // a field error, not a backend failure
+    assert!(matches!(
+        b.set_host_label(MAC.into(), Some("toaster".into()), None).await,
+        Err(ApiError::Validation(e)) if e.len() == 1 && e[0].path == "kind"
+    ));
     let reader = ui_backend(&fx, "hostreader", "pw").await;
     assert!(matches!(
         reader.set_host_label(MAC.into(), None, None).await,
