@@ -1193,3 +1193,161 @@ fn host_mode_staged_shows_on_the_row() {
     // other rows say nothing
     assert!(!text(mode_cell(host_row(&doc, "device-02"))).contains("Staged"));
 }
+
+// ------------------------------------------------------------------ traffic charts
+
+#[test]
+fn rate_formatting_scales_units() {
+    use sensr_ui::chart::bps;
+    assert_eq!(bps(0), "0 bit/s");
+    assert_eq!(bps(950), "950 bit/s");
+    assert_eq!(bps(12_300_000), "12.3 Mbit/s");
+    assert_eq!(bps(1_200_000_000), "1.20 Gbit/s");
+    assert_eq!(bps(64_000), "64 kbit/s");
+}
+
+#[test]
+fn rate_ticks_are_nice_round_steps() {
+    use sensr_ui::chart::{rate_ticks, rate_unit, tick_label};
+    // Idle: still a 1 kbit/s axis.
+    assert_eq!(rate_ticks(0), [0, 250, 500, 750, 1_000]);
+    assert_eq!(rate_ticks(950), [0, 250, 500, 750, 1_000]);
+    assert_eq!(
+        rate_ticks(12_300_000),
+        [0, 5_000_000, 10_000_000, 15_000_000]
+    );
+    assert_eq!(rate_ticks(1_001), [0, 500, 1_000, 1_500]);
+    assert_eq!(
+        rate_ticks(180_000_000),
+        [0, 50_000_000, 100_000_000, 150_000_000, 200_000_000]
+    );
+    assert_eq!(
+        rate_ticks(2_400_000_000),
+        [0, 1_000_000_000, 2_000_000_000, 3_000_000_000]
+    );
+    for max in [1, 999, 1_234, 77_777, 3_000_001, 9_999_999_999] {
+        let t = rate_ticks(max);
+        assert!((4..=5).contains(&t.len()), "{max}: {t:?}");
+        assert!(*t.last().unwrap() >= max, "{max}: {t:?}");
+    }
+    assert_eq!(rate_unit(1_000), (1_000, "kbit/s"));
+    assert_eq!(rate_unit(15_000_000), (1_000_000, "Mbit/s"));
+    assert_eq!(rate_unit(3_000_000_000), (1_000_000_000, "Gbit/s"));
+    assert_eq!(rate_unit(500), (1, "bit/s"));
+    let labels: Vec<String> = rate_ticks(950)
+        .iter()
+        .map(|v| tick_label(*v, 1_000))
+        .collect();
+    assert_eq!(labels, ["0", "0.25", "0.5", "0.75", "1"]);
+}
+
+#[test]
+fn time_ticks_fall_on_round_local_times() {
+    use sensr_ui::chart::{clock, time_ticks};
+    const T: i64 = 1_794_787_200; // 00:00:00 UTC
+    // Two minutes: every 30 s, none in the outer 6 %.
+    assert_eq!(time_ticks(T + 2, T + 122, 0), [T + 30, T + 60, T + 90]);
+    // One minute: every 15 s; ten minutes: every 2 min; one hour: every 15 min.
+    assert_eq!(time_ticks(T - 59, T, 0), [T - 45, T - 30, T - 15]);
+    assert_eq!(
+        time_ticks(T, T + 600, 0),
+        [T + 120, T + 240, T + 360, T + 480]
+    );
+    assert_eq!(
+        time_ticks(T - 3_540, T + 60, 0),
+        [T - 2_700, T - 1_800, T - 900]
+    );
+    // Aligned to local time: 10 minutes east of UTC moves the quarter hours with it.
+    assert_eq!(
+        time_ticks(T - 3_540, T + 60, 600),
+        [T - 3_300, T - 2_400, T - 1_500, T - 600]
+    );
+    assert!(time_ticks(T, T, 0).is_empty());
+    assert_eq!(clock(T + 3_723, 0, false), "01:02");
+    assert_eq!(clock(T + 3_723, 0, true), "01:02:03");
+    assert_eq!(clock(T, 3_600, false), "01:00");
+    assert_eq!(clock(T, -3_600, false), "23:00");
+}
+
+fn chart_samples() -> Vec<sensr_ui::chart::Sample> {
+    (0..41)
+        .map(|i| sensr_ui::chart::Sample {
+            ts: 1_794_787_200 + 3 * i,
+            rx: if i == 20 { 12_300_000 } else { 2_000_000 },
+            tx: 800_000,
+        })
+        .collect()
+}
+
+#[test]
+fn traffic_chart_renders_axes_for_a_known_series() {
+    use sensr_ui::chart::TrafficChart;
+    let doc = render(|| {
+        view! { <TrafficChart samples=Memo::new(|_| chart_samples()) label="Traffic, test".to_owned()/> }
+            .into_any()
+    });
+    let ys: Vec<String> = doc.select(&sel(".tc-y span")).map(text).collect();
+    assert_eq!(ys, ["0", "5", "10", "15"]);
+    assert_eq!(text(doc.select(&sel(".tc-unit")).next().unwrap()), "Mbit/s");
+    let xs: Vec<String> = doc.select(&sel(".tc-x span")).map(text).collect();
+    assert_eq!(xs, ["00:00:30", "00:01:00", "00:01:30"]);
+    // One faint gridline per tick, the baseline stronger.
+    assert_eq!(doc.select(&sel("svg line.tc-grid")).count(), 3);
+    assert_eq!(doc.select(&sel("svg line.tc-base")).count(), 1);
+    // No text inside the stretched SVG.
+    let svg = doc.select(&sel("svg")).next().unwrap();
+    assert_eq!(svg.value().attr("preserveAspectRatio"), Some("none"));
+    assert!(svg.select(&sel("text")).next().is_none());
+    // Keyboard-operable, and says what the latest sample is.
+    let plot = doc.select(&sel(".tc-plot")).next().unwrap().value();
+    assert_eq!(plot.attr("tabindex"), Some("0"));
+    assert_eq!(plot.attr("role"), Some("slider"));
+    assert_eq!(plot.attr("aria-label"), Some("Traffic, test"));
+    assert_eq!(plot.attr("aria-valuemax"), Some("40"));
+    assert_eq!(
+        plot.attr("aria-valuetext"),
+        Some("00:02:00: In 2.0 Mbit/s, Out 800 kbit/s")
+    );
+    // No tooltip until hovered.
+    assert!(doc.select(&sel(".tc-tip")).next().is_none());
+
+    // The name is escaped (interface descriptions are user text).
+    let doc = render(|| {
+        view! { <TrafficChart samples=Memo::new(|_| Vec::new()) label=r#"LAN "office" <&>"#.to_owned()/> }
+            .into_any()
+    });
+    let plot = doc.select(&sel(".tc-plot")).next().unwrap().value();
+    assert_eq!(plot.attr("aria-label"), Some(r#"LAN "office" <&>"#));
+    assert_eq!(plot.attr("aria-valuetext"), Some("No samples yet"));
+    assert_eq!(doc.select(&sel(".tc-y span")).count(), 5, "idle axis");
+}
+
+#[test]
+fn dashboard_traffic_cards_use_the_axis_chart() {
+    use sensr_ui::api::Backend;
+    use sensr_ui::islands::DashboardLive;
+    let m = sensr_ui::mock::MockBackend::with_clock(Box::new(|| 1_794_787_200));
+    let initial = block(m.status()).unwrap();
+    let n = initial.traffic.len();
+    assert!(n > 0);
+    assert!(initial.traffic.iter().all(|t| t.ts.len() == t.rx.len()));
+    let doc = render(|| view! { <DashboardLive initial/> }.into_any());
+    let charts: Vec<_> = doc.select(&sel(".traffic figure .tchart")).collect();
+    assert_eq!(charts.len(), n);
+    for c in &charts {
+        assert!(c.select(&sel(".tc-y span")).count() >= 4);
+        assert!(c.select(&sel(".tc-x span")).count() >= 3);
+        let name = c
+            .select(&sel(".tc-plot"))
+            .next()
+            .unwrap()
+            .value()
+            .attr("aria-label")
+            .unwrap();
+        assert!(name.ends_with("traffic, last two minutes"), "{name}");
+    }
+    assert!(
+        doc.select(&sel(".spark")).next().is_none(),
+        "old sparklines are gone"
+    );
+}

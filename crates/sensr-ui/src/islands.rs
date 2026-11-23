@@ -4,7 +4,9 @@
 //! through [`bump`] without either knowing about the other.
 
 use crate::actions::*;
-use crate::api::{DiffKind, FieldError, Pending, SystemStatus};
+use crate::api::{DiffKind, FieldError, Pending, SystemStatus, TrafficSeries};
+pub use crate::chart::bps;
+use crate::chart::{Sample, TrafficChart};
 use crate::form::{Choices, FieldKind, FieldSpec, Inputs, to_inputs};
 use crate::grid::{ColumnKind, GridPage, GridQuery, SortDir, cell_text};
 use crate::models::{FormId, GridId};
@@ -973,20 +975,6 @@ pub fn GridIsland(
 
 // ------------------------------------------------------------------ dashboard
 
-/// A rate in bits per second, scaled.
-pub fn bps(v: u64) -> String {
-    let v = v as f64;
-    if v >= 1e9 {
-        format!("{:.2} Gbit/s", v / 1e9)
-    } else if v >= 1e6 {
-        format!("{:.1} Mbit/s", v / 1e6)
-    } else if v >= 1e3 {
-        format!("{:.0} kbit/s", v / 1e3)
-    } else {
-        format!("{v:.0} bit/s")
-    }
-}
-
 fn bytes(v: u64) -> String {
     format!("{:.1} GiB", v as f64 / 1_073_741_824.0)
 }
@@ -999,31 +987,6 @@ fn uptime(s: u64) -> String {
         s / 60 % 60,
         s % 60
     )
-}
-
-fn sparkline(rx: &[u64], tx: &[u64], label: &'static str) -> impl IntoView + use<> {
-    let max = rx.iter().chain(tx).copied().max().unwrap_or(1).max(1) as f64;
-    let pts = |s: &[u64]| {
-        let n = s.len().max(2) - 1;
-        s.iter()
-            .enumerate()
-            .map(|(i, v)| {
-                format!(
-                    "{:.1},{:.1}",
-                    i as f64 * 300.0 / n as f64,
-                    60.0 - *v as f64 / max * 56.0
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let (rx_pts, tx_pts) = (pts(rx), pts(tx));
-    view! {
-        <svg class="spark" viewBox="0 0 300 60" preserveAspectRatio="none" role="img" aria-label=label>
-            <polyline points=rx_pts class="spark-rx" fill="none"/>
-            <polyline points=tx_pts class="spark-tx" fill="none"/>
-        </svg>
-    }
 }
 
 /// Status badge of a gateway, in the OPNsense colours.
@@ -1176,6 +1139,25 @@ pub fn DashboardLive(initial: SystemStatus) -> impl IntoView {
     let st = RwSignal::new(initial);
     // Traffic graph: 10 s samples of the last ten minutes, or the last hour per minute.
     let live = RwSignal::new(true);
+    let names = Memo::new(move |_| {
+        st.with(|s| s.traffic.iter().map(|t| t.name.clone()).collect::<Vec<_>>())
+    });
+    let has_history = Memo::new(move |_| st.with(|s| s.history.is_some()));
+    let graph = Memo::new(move |_| {
+        let live = live.get();
+        st.with(|s| {
+            s.history.as_ref().map_or_else(Vec::new, |h| {
+                let pts = if live { &h.live } else { &h.hour };
+                pts.iter()
+                    .map(|p| Sample {
+                        ts: p.ts,
+                        rx: p.down_bps(),
+                        tx: p.up_bps(),
+                    })
+                    .collect()
+            })
+        })
+    });
     Effect::new(move |_| {
         set_interval(
             move || {
@@ -1249,47 +1231,66 @@ pub fn DashboardLive(initial: SystemStatus) -> impl IntoView {
                 <h2 id="w-tr">"Traffic"</h2>
                 <p class="legend"><span class="key key-rx"></span>"In "<span class="key key-tx"></span>"Out"</p>
                 <div class="traffic">
-                    {move || st.with(|s| s.traffic.iter().map(|t| view! {
-                        <figure>
-                            <figcaption>{t.name.clone()}
-                                <span class="muted">{format!(" in {} · out {}", bps(*t.rx.last().unwrap_or(&0)), bps(*t.tx.last().unwrap_or(&0)))}</span>
-                            </figcaption>
-                            {sparkline(&t.rx, &t.tx, "Traffic over the last two minutes")}
-                        </figure>
-                    }).collect_view())}
+                    // Rebuilt only when the set of interfaces changes, so a chart keeps its
+                    // crosshair and focus across refreshes.
+                    {move || names.get().into_iter().map(|name| {
+                            let series = {
+                                let name = name.clone();
+                                Memo::new(move |_| st.with(|s| s.traffic.iter().find(|t| t.name == name).map(series_samples).unwrap_or_default()))
+                            };
+                            let now = move || series.with(|s| s.last().map_or((0, 0), |p| (p.rx, p.tx)));
+                            view! {
+                                <figure>
+                                    <figcaption>{name.clone()}
+                                        <span class="muted">{move || format!(" in {} · out {}", bps(now().0), bps(now().1))}</span>
+                                    </figcaption>
+                                    <TrafficChart samples=series class="tchart-sm"
+                                        label=format!("{name} traffic, last two minutes")/>
+                                </figure>
+                            }
+                    }).collect_view()}
                 </div>
             </section>
             <section class="card card-wide" aria-labelledby="w-tg">
                 <h2 id="w-tg">"Traffic graph"</h2>
-                {move || st.with(|s| match &s.history {
-                    None => view! {
-                        <p class="muted">"The traffic graph appears once traffic accounting (Reporting › Insight) has collected data."</p>
-                    }.into_any(),
-                    Some(h) => {
-                        let is_live = live.get();
-                        let pts = if is_live { &h.live } else { &h.hour };
-                        let rx: Vec<u64> = pts.iter().map(|p| p.down_bps()).collect();
-                        let tx: Vec<u64> = pts.iter().map(|p| p.up_bps()).collect();
-                        let (now_rx, now_tx) = (rx.last().copied().unwrap_or(0), tx.last().copied().unwrap_or(0));
-                        view! {
-                            <div class="graph-head">
-                                <p class="legend"><span class="key key-rx"></span>{format!("In {}", bps(now_rx))}
-                                    <span class="key key-tx"></span>{format!("Out {}", bps(now_tx))}
-                                    <span class="muted">" · all interfaces"</span></p>
-                                <div class="seg" role="group" aria-label="Graph period">
-                                    <button type="button" class="btn btn-sm" aria-pressed=is_live.to_string()
-                                        on:click=move |_| live.set(true)>"Live (10 s)"</button>
-                                    <button type="button" class="btn btn-sm" aria-pressed=(!is_live).to_string()
-                                        on:click=move |_| live.set(false)>"Last hour"</button>
-                                </div>
+                {move || if has_history.get() {
+                    let now = move || graph.with(|s| s.last().map_or((0, 0), |p| (p.rx, p.tx)));
+                    view! {
+                        <div class="graph-head">
+                            <p class="legend"><span class="key key-rx"></span>{move || format!("In {}", bps(now().0))}
+                                <span class="key key-tx"></span>{move || format!("Out {}", bps(now().1))}
+                                <span class="muted">" · all interfaces"</span></p>
+                            <div class="seg" role="group" aria-label="Graph period">
+                                <button type="button" class="btn btn-sm" aria-pressed=move || live.get().to_string()
+                                    on:click=move |_| live.set(true)>"Live (10 s)"</button>
+                                <button type="button" class="btn btn-sm" aria-pressed=move || (!live.get()).to_string()
+                                    on:click=move |_| live.set(false)>"Last hour"</button>
                             </div>
-                            {sparkline(&rx, &tx, if is_live { "Traffic, all interfaces, last ten minutes" } else { "Traffic, all interfaces, last hour" })}
-                        }.into_any()
-                    }
-                })}
+                        </div>
+                        <TrafficChart samples=graph
+                            label=Signal::derive(move || if live.get() { "Traffic, all interfaces, last ten minutes" } else { "Traffic, all interfaces, last hour" }.to_owned())/>
+                    }.into_any()
+                } else {
+                    view! {
+                        <p class="muted">"The traffic graph appears once traffic accounting (Reporting › Insight) has collected data."</p>
+                    }.into_any()
+                }}
             </section>
         </div>
     }
+}
+
+/// A dashboard interface series as chart samples.
+fn series_samples(t: &TrafficSeries) -> Vec<Sample> {
+    t.rx.iter()
+        .zip(&t.tx)
+        .enumerate()
+        .map(|(i, (rx, tx))| Sample {
+            ts: t.ts.get(i).copied().unwrap_or(i as i64),
+            rx: *rx,
+            tx: *tx,
+        })
+        .collect()
 }
 
 /// System › Updates: the running generation, what the release manifest offers, and

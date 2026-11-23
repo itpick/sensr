@@ -126,9 +126,9 @@ test("dashboard: traffic graph switches between live samples and the last hour",
   await login(page);
   await hydrated(page);
   const card = page.locator("section", { has: page.getByRole("heading", { name: "Traffic graph" }) });
-  await expect(card.getByRole("img", { name: "Traffic, all interfaces, last ten minutes" })).toBeVisible();
+  await expect(card.getByRole("slider", { name: "Traffic, all interfaces, last ten minutes" })).toBeVisible();
   await card.getByRole("button", { name: "Last hour" }).click();
   await expect(card.getByRole("button", { name: "Last hour" })).toHaveAttribute("aria-pressed", "true");
-  await expect(card.getByRole("img", { name: "Traffic, all interfaces, last hour" })).toBeVisible();
+  await expect(card.getByRole("slider", { name: "Traffic, all interfaces, last hour" })).toBeVisible();
   await expect(card).toContainText(/In [\d.]+ [kMG]?bit\/s/);
 });
