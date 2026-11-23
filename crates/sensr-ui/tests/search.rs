@@ -152,6 +152,22 @@ mod flaky {
         ) -> BoxFuture<'_, ApiResult<String>> {
             self.inner.set_host_label(m, k, mk)
         }
+        fn host_activity(
+            &self,
+            m: String,
+            r: String,
+            p: u32,
+        ) -> BoxFuture<'_, ApiResult<HostActivityView>> {
+            self.inner.host_activity(m, r, p)
+        }
+        fn set_service_override(
+            &self,
+            s: String,
+            sv: Option<String>,
+            c: Option<String>,
+        ) -> BoxFuture<'_, ApiResult<String>> {
+            self.inner.set_service_override(s, sv, c)
+        }
     }
 }
 

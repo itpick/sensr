@@ -155,6 +155,9 @@ pub struct UnboundModel {
     pub register_dhcp_leases: bool,
     /// Include the compiled blocklist.
     pub blocklist: bool,
+    /// Stream client queries and responses over dnstap to `sensr-insight`
+    /// (on when traffic insight is enabled).
+    pub dnstap: bool,
     /// What `sensr-dns` needs.
     pub runtime: DnsRuntime,
     /// Working directory (trust anchor).
@@ -164,6 +167,11 @@ pub struct UnboundModel {
     /// Remote-control unix socket.
     pub control_socket: PathBuf,
 }
+
+/// The unix socket `sensr-insight` listens on for Unbound's dnstap stream.
+/// Its directory is the insight unit's RuntimeDirectory, group
+/// `sensr-dnstap` (see nix/modules/sensr.nix).
+pub const DNSTAP_SOCKET: &str = sensr_flow::config::DNSTAP_SOCKET;
 
 /// Model errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -182,6 +190,7 @@ pub enum UnboundError {
 /// Template view: precomputed strings, so the template stays declarative.
 #[derive(Serialize)]
 struct View<'a> {
+    dnstap_socket: Option<&'static str>,
     port: u16,
     listen: &'a [IpAddr],
     outgoing: &'a [IpAddr],
@@ -513,6 +522,7 @@ impl UnboundModel {
             rebind_protection: self.rebind_protection && !self.tuning.private_addresses.is_empty(),
             register_dhcp_leases: self.register_dhcp_leases,
             blocklist: self.blocklist,
+            dnstap_socket: self.dnstap.then_some(DNSTAP_SOCKET),
             // Globs, so a file sensr-dns has not written yet is no error.
             leases_include: dns_runtime::LEASES_INCLUDE.replace(".conf", "*.conf"),
             blocklist_include: dns_runtime::BLOCKLIST_INCLUDE.replace(".conf", "*.conf"),
@@ -681,6 +691,22 @@ pub(crate) mod tests {
         assert_eq!(back, m.runtime);
         insta::assert_snapshot!("sensr_dns_json", json);
         insta::assert_snapshot!("control_conf", render_file(&m, "control.conf"));
+    }
+
+    #[test]
+    fn dnstap_rendered_when_insight_enabled() {
+        let mut m = model();
+        m.dnstap = true;
+        let out = render(&m);
+        let block = "\ndnstap:\n  dnstap-enable: yes\n  dnstap-socket-path: \"/run/sensr-insight/dnstap.sock\"\n  dnstap-log-client-query-messages: yes\n  dnstap-log-client-response-messages: yes\n";
+        assert!(out.contains(block), "{out}");
+    }
+
+    #[test]
+    fn no_dnstap_when_insight_disabled() {
+        let mut m = model();
+        m.dnstap = false;
+        assert!(!render(&m).contains("dnstap"));
     }
 
     #[test]

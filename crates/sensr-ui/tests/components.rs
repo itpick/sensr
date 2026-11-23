@@ -586,13 +586,22 @@ fn render_hosts(initial: Option<sensr_ui::actions::HostCard>) -> Html {
     render(|| view! { <HostsCard initial/> }.into_any())
 }
 
+/// A Hosts row's name: its link's text (the cell also holds the DNS mix for screen readers).
+fn name_text(td: scraper::ElementRef<'_>) -> String {
+    td.select(&sel("a.host-link"))
+        .next()
+        .map_or_else(|| text(td), text)
+        .trim()
+        .to_owned()
+}
+
 /// The card's row for the host named `name`.
 fn host_row<'a>(doc: &'a Html, name: &str) -> scraper::ElementRef<'a> {
     doc.select(&sel("tbody tr"))
         .find(|r| {
             r.select(&sel("td"))
                 .next()
-                .is_some_and(|td| text(td).trim() == name)
+                .is_some_and(|td| name_text(td) == name)
         })
         .unwrap_or_else(|| panic!("no row for {name}"))
 }
@@ -615,7 +624,9 @@ fn hosts_card_lists_first_20_and_show_all() {
         .collect();
     assert_eq!(
         heads,
-        ["Name", "MAC", "IP", "Network", "Source", "Seen", "Mode", ""]
+        [
+            "Name", "MAC", "IP", "Network", "Source", "Seen", "Today", "Mode", ""
+        ]
     );
     let search = doc.select(&sel("input[type=search]")).next().unwrap();
     assert_eq!(
@@ -658,7 +669,7 @@ fn hosts_card_source_and_seen_labels() {
     let nas = cells("nas");
     assert_eq!((nas[4].as_str(), nas[5].as_str()), ("static", "now"));
     // A seen-only host has no name: its MAC stands in.
-    let seen = doc
+    let seen_row = doc
         .select(&sel("tbody tr"))
         .find(|r| {
             r.select(&sel("td"))
@@ -666,11 +677,12 @@ fn hosts_card_source_and_seen_labels() {
                 .is_some_and(|c| text(c).trim() == "seen")
         })
         .expect("seen-only row");
-    let seen: Vec<String> = seen
+    let seen: Vec<String> = seen_row
         .select(&sel("td"))
         .map(|c| text(c).trim().to_owned())
         .collect();
-    assert!(seen[1].starts_with(&seen[0]), "name falls back to the MAC");
+    let name = name_text(seen_row.select(&sel("td")).next().unwrap());
+    assert!(seen[1].starts_with(&name), "name falls back to the MAC");
     assert_eq!(seen[4], "seen");
     // IPv6 sits on its own muted line under the IPv4.
     let ip = host_row(&doc, "nas").select(&sel("td")).nth(2).unwrap();
@@ -921,7 +933,9 @@ fn host_mode_select_present_for_mac_rows() {
         .collect();
     assert_eq!(
         heads,
-        ["Name", "MAC", "IP", "Network", "Source", "Seen", "Mode", ""]
+        [
+            "Name", "MAC", "IP", "Network", "Source", "Seen", "Today", "Mode", ""
+        ]
     );
     let pi = mode_cell(host_row(&doc, "bench-pi"));
     let select = pi.select(&sel("select")).next().expect("mode select");
@@ -1953,4 +1967,496 @@ fn topbar_controls_are_labelled() {
     use sensr_ui::app::TopBar;
     let doc = render(|| view! { <TopBar user="root".to_owned()/> }.into_any());
     assert_all_labelled(&doc, "top bar");
+}
+
+// ------------------------------------------------------------ per-host DNS activity
+
+const KID_TABLET: &str = "e2:5b:7a:31:90:c4";
+
+/// `host_page()` run against `m` as the signed-in backend.
+fn host_page_from(
+    m: sensr_ui::mock::MockBackend,
+    key: &str,
+    range: &str,
+    edit: Option<&str>,
+) -> sensr_ui::actions::HostPageData {
+    let handle: sensr_ui::api::BackendHandle = std::sync::Arc::new(m);
+    let owner = Owner::new();
+    owner.with(|| {
+        provide_context(handle);
+        futures::executor::block_on(sensr_ui::actions::host_page(
+            key.into(),
+            range.into(),
+            0,
+            edit.map(Into::into),
+        ))
+        .unwrap()
+    })
+}
+
+fn render_host_page(p: sensr_ui::actions::HostPageData, q: sensr_ui::pages::HostQuery) -> Html {
+    render(move || sensr_ui::pages::host_page_body(p, q))
+}
+
+fn host_query(range: &str) -> sensr_ui::pages::HostQuery {
+    sensr_ui::pages::HostQuery {
+        range: range.into(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn host_page_renders_services_categories_timeline_domains() {
+    let p = host_page_from(hosts_mock(), KID_TABLET, "today", None);
+    let doc = render_host_page(p, host_query("today"));
+    let h2: Vec<String> = doc.select(&sel("h2")).map(text).collect();
+    assert_eq!(h2[0], "kid-tablet");
+    for want in ["Screen time today", "Services", "When", "Domains"] {
+        assert!(h2.iter().any(|h| h == want), "{want} in {h2:?}");
+    }
+    let head = text(doc.select(&sel(".hp-head")).next().unwrap());
+    assert!(head.contains("Samsung · Tablet"), "{head}");
+    assert!(
+        head.contains(KID_TABLET) && head.contains("Normal") && head.contains("now"),
+        "{head}"
+    );
+    // range links, the current one marked
+    let current: Vec<String> = doc
+        .select(&sel(".seg a[aria-current=page]"))
+        .map(text)
+        .collect();
+    assert_eq!(current, ["Today"]);
+    assert!(
+        doc.select(&sel(".seg a"))
+            .any(|a| a.value().attr("href") == Some(&*format!("/ui/hosts/{KID_TABLET}?range=7d")))
+    );
+    // headline: 2 h 47 m, without system and ads
+    assert_eq!(
+        text(doc.select(&sel(".big")).next().unwrap()).trim(),
+        "2 h 47 m"
+    );
+    // services: name, category, minutes
+    let services: Vec<String> = doc
+        .select(&sel(".svc"))
+        .map(|r| {
+            r.text()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    assert_eq!(services[0], "YouTube Video 1 h 22 m", "{services:?}");
+    assert!(
+        services.iter().any(|s| s == "Roblox Games 48 m"),
+        "{services:?}"
+    );
+    // categories: stacked bar segments and a legend
+    let segs = doc.select(&sel(".sbar i")).count();
+    assert!(segs >= 3, "{segs}");
+    assert!(
+        doc.select(&sel(".sbar[role=img][aria-label]"))
+            .next()
+            .is_some()
+    );
+    // timeline: one row of 24 hours today, each with a title, and a table alternative
+    let cells: Vec<_> = doc.select(&sel(".heat .c")).collect();
+    assert_eq!(cells.len(), 24);
+    assert!(
+        cells
+            .iter()
+            .filter_map(|c| c.value().attr("title"))
+            .any(|t| t.contains(":00 — ") && t.ends_with(" min")),
+        "titles"
+    );
+    assert!(doc.select(&sel(".sr-only table caption")).next().is_some());
+    // domains: pills, Set service, paging total
+    let rows: Vec<_> = doc.select(&sel("table.dom tbody tr")).collect();
+    assert!(rows.len() >= 5);
+    let blocked = rows
+        .iter()
+        .find(|r| text(**r).contains("ads.tiktok.com"))
+        .unwrap();
+    assert!(text(*blocked).contains("blocked"));
+    let new = rows
+        .iter()
+        .find(|r| text(**r).contains("some-new-game-cdn.net"))
+        .unwrap();
+    assert!(text(*new).contains("new"));
+    let set = new.select(&sel("a.btn")).next().expect("Set service");
+    assert_eq!(text(set).trim(), "Set service");
+    assert!(
+        set.value()
+            .attr("href")
+            .unwrap()
+            .contains("edit=some-new-game-cdn.net")
+    );
+    assert!(
+        set.value()
+            .attr("aria-label")
+            .unwrap()
+            .contains("some-new-game-cdn.net")
+    );
+    assert!(
+        doc.select(&sel("input[type=search][name=q]"))
+            .next()
+            .is_some()
+    );
+    assert_all_labelled(&doc, "host page");
+
+    // 7 days: a 7 × 24 grid
+    let p = host_page_from(hosts_mock(), KID_TABLET, "7d", None);
+    let doc = render_host_page(p, host_query("7d"));
+    assert_eq!(doc.select(&sel(".heat .c")).count(), 7 * 24);
+    assert!(
+        doc.select(&sel("h2"))
+            .any(|h| text(h) == "Screen time, last 7 days")
+    );
+    assert_all_labelled(&doc, "host page 7d");
+}
+
+#[test]
+fn host_page_search_filters_and_edit_opens_the_override_dialog() {
+    let p = host_page_from(
+        hosts_mock(),
+        KID_TABLET,
+        "today",
+        Some("rr3---sn-x.googlevideo.com"),
+    );
+    let mut q = host_query("today");
+    q.q = "tiktok".into();
+    q.edit = Some("rr3---sn-x.googlevideo.com".into());
+    let doc = render_host_page(p, q);
+    let rows: Vec<String> = doc.select(&sel("table.dom tbody tr")).map(text).collect();
+    assert!(
+        !rows.is_empty() && rows.iter().all(|r| r.contains("tiktok")),
+        "{rows:?}"
+    );
+    let dialog = doc
+        .select(&sel("dialog.modal[open]"))
+        .next()
+        .expect("dialog");
+    let form = dialog.select(&sel("form[method=post]")).next().unwrap();
+    assert_eq!(form.value().attr("action"), Some("/ui/fn/service_override"));
+    let suffix = dialog.select(&sel("input[name=suffix]")).next().unwrap();
+    // the registrable domain, not the whole name
+    assert_eq!(suffix.value().attr("value"), Some("googlevideo.com"));
+    let cats: Vec<String> = dialog
+        .select(&sel("select[name=category] option"))
+        .map(text)
+        .collect();
+    assert_eq!(cats.len(), 11);
+    assert_eq!(cats[7], "Apple/Google/Microsoft system");
+    assert_all_labelled(&doc, "override dialog");
+}
+
+#[test]
+fn host_page_stale_banner() {
+    let p = host_page_from(hosts_mock().with_stale_feed(), KID_TABLET, "today", None);
+    let doc = render_host_page(p, host_query("today"));
+    let banner = doc
+        .select(&sel("[role=status].banner-warn, .banner-warn"))
+        .next()
+        .expect("banner");
+    assert_eq!(
+        text(banner).trim(),
+        "DNS answers aren't arriving; showing lookups only."
+    );
+    let p = host_page_from(hosts_mock(), KID_TABLET, "today", None);
+    let doc = render_host_page(p, host_query("today"));
+    assert!(!text(doc.root_element()).contains("DNS answers aren't arriving"));
+}
+
+#[test]
+fn hosts_card_links_to_host_page() {
+    let card = hosts_from(hosts_mock()).unwrap();
+    let doc = render_hosts(Some(card.clone()));
+    let rows: Vec<_> = doc.select(&sel("tbody tr")).collect();
+    assert_eq!(rows.len(), 20);
+    for (r, h) in rows.iter().zip(card.visible("", "", false).0) {
+        let a = r.select(&sel("td a.host-link")).next().expect("name link");
+        assert_eq!(
+            a.value().attr("href").unwrap(),
+            sensr_ui::runtime::host_href(&h.key)
+        );
+        assert_eq!(text(a), h.label());
+    }
+    let kid = host_row(&doc, "kid-tablet");
+    let a = kid.select(&sel("a.host-link")).next().unwrap();
+    assert_eq!(
+        a.value().attr("href"),
+        Some(&*format!("/ui/hosts/{KID_TABLET}"))
+    );
+    assert_eq!(
+        sensr_ui::runtime::host_href("id:01 ab"),
+        "/ui/hosts/id:01%20ab"
+    );
+}
+
+#[test]
+fn hosts_card_today_minutes() {
+    let card = hosts_from(hosts_mock()).unwrap();
+    let doc = render_hosts(Some(card));
+    let heads: Vec<String> = doc
+        .select(&sel("thead th"))
+        .map(|h| text(h).trim().to_owned())
+        .collect();
+    assert!(heads.iter().any(|h| h == "Today"), "{heads:?}");
+    let today = |name: &str| {
+        text(
+            host_row(&doc, name)
+                .select(&sel("td.host-today"))
+                .next()
+                .unwrap(),
+        )
+        .trim()
+        .to_owned()
+    };
+    assert_eq!(today("kid-tablet"), "2 h 47 m");
+    assert_eq!(today("laptop"), "5 h 38 m");
+    // no screen time: nothing shown
+    assert_eq!(today("7c:78:b2:10:9e:41"), "");
+    assert!(
+        host_row(&doc, "kid-tablet")
+            .select(&sel("td.host-today .muted"))
+            .next()
+            .is_some()
+    );
+}
+
+#[test]
+fn hosts_card_row_tinted_by_dns_mix() {
+    use sensr_ui::runtime::{HostRow, mix_style};
+    let card = hosts_from(hosts_mock()).unwrap();
+    let doc = render_hosts(Some(card.clone()));
+    let kid = host_row(&doc, "kid-tablet");
+    let style = kid.value().attr("style").expect("tinted");
+    assert!(style.starts_with("--mix:linear-gradient(90deg,"), "{style}");
+    assert!(style.contains("var(--tint-video)"), "{style}");
+    let title = kid.value().attr("title").unwrap();
+    assert!(title.contains("Video") && title.contains('%'), "{title}");
+    // a host without DNS data stays plain
+    let plain = host_row(&doc, "device-01");
+    assert!(plain.value().attr("style").is_none());
+    assert!(plain.value().attr("title").is_none());
+    // the legend sits under the card
+    let legend: Vec<String> = doc
+        .select(&sel(".cat-legend li"))
+        .map(|l| text(l).trim().to_owned())
+        .collect();
+    assert_eq!(legend.len(), 11);
+    assert_eq!(legend[0], "Video");
+
+    // stops follow the proportions: 3:1 puts the boundary at 75%
+    let row = HostRow {
+        dns_mix: vec![("video".into(), 3), ("games".into(), 1)],
+        ..HostRow::default()
+    };
+    let s = mix_style(&row.dns_mix).unwrap();
+    let stops: Vec<f64> = s
+        .split(['(', ')', ','])
+        .filter_map(|p| p.trim().strip_suffix('%'))
+        .filter_map(|p| p.rsplit(' ').next()?.parse().ok())
+        .collect();
+    assert_eq!(stops.first(), Some(&0.0), "{s}");
+    assert_eq!(stops.last(), Some(&100.0), "{s}");
+    // video ends and games starts around 75%, blended over a few percent
+    let video_end = stops[1];
+    let games_start = stops[2];
+    assert!(
+        (70.0..75.0).contains(&video_end) && (75.0..80.0).contains(&games_start),
+        "{s}"
+    );
+    assert!(s.find("--tint-video").unwrap() < s.find("--tint-games").unwrap());
+    assert_eq!(mix_style(&[]), None);
+    assert_eq!(mix_style(&[("video".into(), 0)]), None);
+}
+
+/// Runs a form-post server function as a browser's form post would (with the request
+/// parts and response options leptos_axum gives it) and returns its Location header.
+fn form_post_location<F, Fut>(m: sensr_ui::mock::MockBackend, f: F) -> String
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), ServerFnError>>,
+{
+    let handle: sensr_ui::api::BackendHandle = std::sync::Arc::new(m);
+    let (parts, _) = axum::http::Request::builder()
+        .header("accept", "text/html")
+        .body(())
+        .unwrap()
+        .into_parts();
+    let res = leptos_axum::ResponseOptions::default();
+    let owner = Owner::new();
+    owner.with(|| {
+        provide_context(handle);
+        provide_context(parts);
+        provide_context(res.clone());
+        futures::executor::block_on(f()).unwrap();
+    });
+    let parts = res.0.read().unwrap();
+    parts
+        .headers
+        .get("location")
+        .expect("a redirect")
+        .to_str()
+        .expect("visible ASCII")
+        .to_owned()
+}
+
+const HOSTILE: [&str; 4] = [
+    "\r\nSet-Cookie: x=1",
+    "é",
+    "../../ui/core/password",
+    "\"><script>&",
+];
+
+#[test]
+fn service_override_redirect_is_rebuilt_and_safe() {
+    // a refused save (bad category) and a successful one, with hostile key / q / qname
+    for bad in HOSTILE {
+        for category in ["toaster", "games"] {
+            let loc = form_post_location(hosts_mock(), || {
+                sensr_ui::actions::service_override(
+                    "example.com".into(),
+                    "Example".into(),
+                    category.into(),
+                    bad.into(),
+                    bad.into(),
+                    Some(bad.into()),
+                    Some(3),
+                    Some(bad.into()),
+                    None,
+                )
+            });
+            // not an inventory key: back to the dashboard
+            let want = if category == "games" {
+                "/?saved=applied"
+            } else {
+                ""
+            };
+            if category == "games" {
+                assert_eq!(loc, want, "{bad:?}");
+            } else {
+                assert!(
+                    loc.starts_with("/?edit=") && loc.ends_with("&error=category"),
+                    "{bad:?}: {loc}"
+                );
+            }
+            assert!(
+                loc.starts_with('/') && !loc.starts_with("//"),
+                "{bad:?}: {loc}"
+            );
+            assert!(!loc.contains(['\r', '\n', '"', '<', ' ']), "{bad:?}: {loc}");
+            // the path is the dashboard; `..` may only appear encoded inside a query value
+            assert_eq!(loc.split('?').next(), Some("/"), "{bad:?}: {loc}");
+        }
+    }
+    // a real key keeps the page, range, page number and the encoded search
+    let loc = form_post_location(hosts_mock(), || {
+        sensr_ui::actions::service_override(
+            "example.com".into(),
+            "Example".into(),
+            "toaster".into(),
+            "www.example.com".into(),
+            KID_TABLET.into(),
+            Some("7d".into()),
+            Some(2),
+            Some("é <x>\r\n".into()),
+            None,
+        )
+    });
+    assert_eq!(
+        loc,
+        format!(
+            "/ui/hosts/{KID_TABLET}?range=7d&page=2&q=%C3%A9%20%3Cx%3E%0D%0A&edit=www.example.com&error=category"
+        )
+    );
+    let loc = form_post_location(hosts_mock(), || {
+        sensr_ui::actions::service_override(
+            "example.com".into(),
+            "Example".into(),
+            "games".into(),
+            "www.example.com".into(),
+            KID_TABLET.into(),
+            None,
+            None,
+            None,
+            None,
+        )
+    });
+    assert_eq!(
+        loc,
+        format!("/ui/hosts/{KID_TABLET}?range=today&saved=applied")
+    );
+}
+
+#[test]
+fn ids_suppress_redirect_is_rebuilt_and_safe() {
+    for bad in HOSTILE {
+        let loc = form_post_location(sensr_ui::mock::MockBackend::new(), || {
+            sensr_ui::actions::ids_suppress(
+                2001219,
+                1,
+                "ET SCAN".into(),
+                Some("not an address".into()),
+                Some(bad.into()),
+                Some(bad.into()),
+                Some(1),
+            )
+        });
+        assert!(loc.starts_with("/ui/ids/alerts?"), "{bad:?}: {loc}");
+        assert!(loc.ends_with("&error=address"), "{bad:?}: {loc}");
+        assert!(!loc.contains(['\r', '\n', '"', '<', ' ']), "{bad:?}: {loc}");
+        // the hostile text only ever appears percent-encoded, as a query value
+        assert!(!loc.contains("/../"), "{bad:?}: {loc}");
+    }
+}
+
+#[test]
+fn host_page_escapes_hostile_names() {
+    use sensr_ui::actions::{HostPageData, OverrideDraft};
+    use sensr_ui::api::{ActivityDomain, HostActivityView};
+    const BAD: &str = "\"><script>alert(1)</script>&";
+    let mut p = host_page_from(hosts_mock(), KID_TABLET, "today", None);
+    let a: &mut HostActivityView = p.activity.as_mut().unwrap();
+    a.domains.push(ActivityDomain {
+        qname: BAD.into(),
+        service: BAD.into(),
+        category: "other".into(),
+        count: 1,
+        ..ActivityDomain::default()
+    });
+    p.draft = Some(OverrideDraft {
+        qname: BAD.into(),
+        suffix: BAD.into(),
+        service: BAD.into(),
+        category: "other".into(),
+        existing: true,
+    });
+    let p: HostPageData = p;
+    let html = {
+        let owner = Owner::new();
+        owner.with(|| sensr_ui::pages::host_page_body(p, host_query("today")).to_html())
+    };
+    assert!(!html.contains(BAD), "raw text reached the page");
+    assert!(!html.contains("<script>alert"), "script injected");
+    // text nodes escape <, > and & (a bare quote is harmless there); attributes also the quote
+    let escaped = "&gt;&lt;script&gt;alert(1)&lt;/script&gt;&amp;";
+    let ctx: Vec<&str> = html
+        .match_indices("alert(1)")
+        .map(|(i, _)| &html[i.saturating_sub(70)..i + 30])
+        .collect();
+    // the domain and service cells, the Set service label, the dialog's text, and the
+    // qname, suffix and service fields
+    assert_eq!(html.matches(escaped).count(), 7, "{ctx:#?}");
+    assert_eq!(
+        html.matches(&format!("&quot;{escaped}\"")).count(),
+        4,
+        "attribute values: {ctx:#?}"
+    );
+    let doc = Html::parse_fragment(&html);
+    let suffix = doc.select(&sel("input[name=suffix]")).next().unwrap();
+    assert_eq!(suffix.value().attr("value"), Some(BAD));
+    let service = doc.select(&sel("input[name=service]")).next().unwrap();
+    assert_eq!(service.value().attr("value"), Some(BAD));
 }

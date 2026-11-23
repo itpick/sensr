@@ -22,7 +22,7 @@ type ApiResult = Result<Json<Value>, ApiError>;
 #[cfg(test)]
 static TEST_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-fn dir() -> PathBuf {
+pub(crate) fn dir() -> PathBuf {
     #[cfg(test)]
     if let Some(d) = TEST_DIR.get() {
         return d.clone();
@@ -30,7 +30,7 @@ fn dir() -> PathBuf {
     std::env::var_os("SENSR_INSIGHT_DIR").map_or_else(|| PathBuf::from(DB_DIR), PathBuf::from)
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
@@ -224,13 +224,7 @@ mod tests {
         let mut s = FlowStore::open(&d.path().join(FLOWS_DB)).unwrap();
         let mut b = Batch::default();
         b.add_counters(&[(
-            Key {
-                kind: Kind::Host,
-                dir: Dir::Down,
-                addr: "192.168.1.100".into(),
-                proto: 0,
-                port: 0,
-            },
+            Key::addr(Kind::Host, Dir::Down, "192.168.1.100".parse().unwrap()),
             Count {
                 packets: 1,
                 bytes: 4096,

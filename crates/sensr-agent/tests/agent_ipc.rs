@@ -1193,3 +1193,133 @@ async fn label_set_readonly_forbidden() {
     assert_eq!(e.kind, ErrorKind::Forbidden);
     assert_eq!(fx.applied().len(), before);
 }
+
+async fn override_set(
+    c: &mut Client,
+    suffix: &str,
+    set: Option<(&str, sensr_schema::models::insight::Category)>,
+) -> Result<Response, ClientError> {
+    c.call(Op::ServiceOverrideSet {
+        suffix: suffix.into(),
+        service: set.map(|s| s.0.into()),
+        category: set.map(|s| s.1),
+    })
+    .await
+}
+
+fn overrides_of(doc: &Document) -> Vec<(String, String, sensr_schema::models::insight::Category)> {
+    doc.insight
+        .dns
+        .service_overrides
+        .values()
+        .map(|o| (o.suffix.clone(), o.service.clone(), o.category))
+        .collect()
+}
+
+#[tokio::test]
+async fn service_override_set_applies_edits_and_removes() {
+    use sensr_schema::models::insight::Category;
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    let r = override_set(
+        &mut c,
+        " Some-Game-CDN.net. ",
+        Some(("Fortnite", Category::Games)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"result": "applied"}))));
+    assert_eq!(
+        overrides_of(fx.applied().last().unwrap()),
+        [(
+            "some-game-cdn.net".to_owned(),
+            "Fortnite".to_owned(),
+            Category::Games
+        )]
+    );
+    assert_eq!(
+        history(&mut c).await[0].description,
+        "set service override some-game-cdn.net → Fortnite/games"
+    );
+    // the same suffix again edits the entry in place
+    override_set(&mut c, "some-game-cdn.net", Some(("Epic", Category::Other)))
+        .await
+        .unwrap();
+    assert_eq!(
+        overrides_of(fx.applied().last().unwrap()),
+        [(
+            "some-game-cdn.net".to_owned(),
+            "Epic".to_owned(),
+            Category::Other
+        )]
+    );
+    override_set(&mut c, "some-game-cdn.net", None)
+        .await
+        .unwrap();
+    assert!(overrides_of(fx.applied().last().unwrap()).is_empty());
+    assert_eq!(
+        history(&mut c).await[0].description,
+        "remove service override some-game-cdn.net"
+    );
+}
+
+#[tokio::test]
+async fn service_override_set_stages_when_candidate_is_dirty() {
+    use sensr_schema::models::insight::Category;
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    set(&mut c, "system.hostname", json!("half-done")).await;
+    let before = fx.applied().len();
+    let r = override_set(&mut c, "example.com", Some(("Example", Category::Shopping)))
+        .await
+        .unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"result": "staged"}))));
+    assert_eq!(fx.applied().len(), before, "nothing applied");
+    commit(&mut c, None).await.unwrap();
+    assert_eq!(
+        overrides_of(fx.applied().last().unwrap()),
+        [(
+            "example.com".to_owned(),
+            "Example".to_owned(),
+            Category::Shopping
+        )]
+    );
+}
+
+#[tokio::test]
+async fn service_override_set_rejects_bad_input() {
+    use sensr_schema::models::insight::Category;
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    let before = fx.applied().len();
+    for (suffix, set) in [
+        ("com", Some(("X", Category::Other))),
+        ("bad domain.com", Some(("X", Category::Other))),
+        ("example.com", Some(("", Category::Other))),
+        ("example.com", Some(("a\nb", Category::Other))),
+    ] {
+        let e = agent_err(override_set(&mut c, suffix, set).await);
+        assert_eq!(e.kind, ErrorKind::BadRequest, "{suffix:?} {set:?}");
+    }
+    let long = "x".repeat(49);
+    let e = agent_err(override_set(&mut c, "example.com", Some((&long, Category::Other))).await);
+    assert_eq!(e.kind, ErrorKind::BadRequest);
+    // a service without a category
+    let e = agent_err(
+        c.call(Op::ServiceOverrideSet {
+            suffix: "example.com".into(),
+            service: Some("X".into()),
+            category: None,
+        })
+        .await,
+    );
+    assert_eq!(e.kind, ErrorKind::BadRequest);
+    assert_eq!(fx.applied().len(), before);
+    // read-only principals may not
+    c.set_principal(Principal {
+        readonly: true,
+        ..c.principal().clone()
+    });
+    let e = agent_err(override_set(&mut c, "example.com", Some(("X", Category::Other))).await);
+    assert_eq!(e.kind, ErrorKind::Forbidden);
+}

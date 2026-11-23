@@ -332,8 +332,8 @@ pub fn row_candidates(doc: &serde_json::Value) -> Vec<Candidate> {
     out
 }
 
-/// Every inventory host, matched on its names, MAC, addresses and smart label, linked to the
-/// dashboard Hosts card filtered to it.
+/// Every inventory host, matched on its names, MAC, addresses and smart label, linked to its
+/// host page.
 #[cfg(feature = "ssr")]
 pub fn host_candidates(hosts: &crate::runtime::HostList) -> Vec<Candidate> {
     hosts
@@ -368,18 +368,7 @@ pub fn host_candidates(hosts: &crate::runtime::HostList) -> Vec<Candidate> {
                 ORDER_HOSTS,
                 title,
                 detail,
-                // what the Hosts card search matches: the MAC, else the IPv4, else the name
-                // (an `id:…` key filters the card to nothing)
-                format!(
-                    "/ui/core/dashboard?host={}#w-hosts",
-                    encode_component(
-                        [&h.mac, &h.ipv4, &h.name]
-                            .into_iter()
-                            .flatten()
-                            .find(|t| !t.trim().is_empty())
-                            .unwrap_or(&h.key)
-                    )
-                ),
+                crate::runtime::host_href(&h.key),
                 haystack,
             )
         })
@@ -924,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn host_links_dashboard() {
+    fn host_links_host_page() {
         let hosts = HostList {
             hosts: vec![HostRow {
                 key: "aa:bb:cc:dd:ee:ff".into(),
@@ -946,16 +935,13 @@ mod tests {
         for q in ["doorbell", "AA:BB:CC", "192.168.1.40", "fd00::40", "wyze"] {
             let r = search(&cands, q, all());
             let hit = &group(&r, HOSTS).unwrap_or_else(|| panic!("{q}")).hits[0];
-            assert_eq!(
-                hit.url,
-                "/ui/core/dashboard?host=aa%3Abb%3Acc%3Add%3Aee%3Aff#w-hosts"
-            );
+            assert_eq!(hit.url, "/ui/hosts/aa:bb:cc:dd:ee:ff");
             assert_eq!(hit.title, "doorbell");
         }
     }
 
     #[test]
-    fn host_without_mac_links_ipv4_then_name() {
+    fn host_without_mac_links_its_key() {
         let row = |key: &str, ipv4: Option<&str>, name: Option<&str>| HostRow {
             key: key.into(),
             ipv4: ipv4.map(Into::into),
@@ -971,8 +957,8 @@ mod tests {
         };
         let cands = host_candidates(&hosts);
         let url = |q: &str| search(&cands, q, all()).groups[0].hits[0].url.clone();
-        assert_eq!(url("tv"), "/ui/core/dashboard?host=192.168.1.77#w-hosts");
-        assert_eq!(url("printer2"), "/ui/core/dashboard?host=printer2#w-hosts");
+        assert_eq!(url("tv"), "/ui/hosts/id:01ab");
+        assert_eq!(url("printer2"), "/ui/hosts/id:02cd");
     }
 
     #[test]

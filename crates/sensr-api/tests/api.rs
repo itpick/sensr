@@ -62,6 +62,16 @@ async fn start() -> Fx {
             "hostreaders",
             json!(["page-sensr-hosts", "user-config-readonly"]),
         ),
+        (
+            6,
+            "activityviewers",
+            json!(["page-sensr-hosts", "page-diagnostics-networkinsight"]),
+        ),
+        (
+            7,
+            "insightviewers",
+            json!(["page-diagnostics-networkinsight"]),
+        ),
     ] {
         edits.push((
             format!("system.groups.{}", uuid(100 + n)),
@@ -74,6 +84,8 @@ async fn start() -> Fx {
         (3, "watcher", "pw", "watchers"),
         (4, "hostviewer", "pw", "hostviewers"),
         (5, "hostreader", "pw", "hostreaders"),
+        (6, "activity", "pw", "activityviewers"),
+        (7, "insightonly", "pw", "insightviewers"),
     ] {
         let mut user = json!({"name": name, "uid": if n == 1 { 0 } else { 2000 + n },
             "password_hash": hash_password(password).unwrap(), "groups": [group]});
@@ -513,6 +525,102 @@ async fn hosts_requires_privilege() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn host_activity_route() {
+    const MAC: &str = "aa:bb:cc:00:00:09";
+    let fx = start().await;
+    fx.applier.state.lock().unwrap().runtime.push((
+        sensr_ipc::RuntimeSection::Hosts,
+        json!({"now": 100, "hosts": [{"key": MAC, "mac": MAC, "name": "kid-tablet",
+            "ipv4": "192.168.1.61", "online": true, "last_seen": 99, "first_seen": 1,
+            "label": {"kind": "tablet", "maker": "Samsung", "confidence": "medium",
+                      "reasons": [], "by": "auto"}}]}),
+    ));
+    let get = |who: String, path: String| {
+        let fx = &fx;
+        async move { http(fx, "GET", &path, Some(&who), None).await }
+    };
+    let url = |mac: &str, q: &str| format!("/api/v1/hosts/{mac}/activity{q}");
+    let both = pw("activity", "pw");
+
+    let (st, body) = get(both.clone(), url(MAC, "")).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["mac"], MAC);
+    assert_eq!(body["name"], "kid-tablet");
+    assert_eq!(body["label"]["kind"], "tablet");
+    assert_eq!(body["range"], "today");
+    // no database in the test environment: empty, not an error
+    assert_eq!(body["available"], false);
+    assert!(body["services"].as_array().unwrap().is_empty());
+    let (st, body) = get(
+        both.clone(),
+        url(&MAC.to_uppercase(), "?range=7d&domains_page=1"),
+    )
+    .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        (body["range"].as_str(), body["page"].as_u64()),
+        (Some("7d"), Some(1))
+    );
+
+    // both privileges are needed
+    let (st, _) = get(pw("hostviewer", "pw"), url(MAC, "")).await;
+    assert_eq!(st, 403, "hosts without insight");
+    let (st, _) = get(pw("insightonly", "pw"), url(MAC, "")).await;
+    assert_eq!(st, 403, "insight without hosts");
+    let (st, _) = get(pw("watcher", "pw"), url(MAC, "")).await;
+    assert_eq!(st, 403);
+
+    let (st, body) = get(both.clone(), url("aa:bb:cc:00:00:99", "")).await;
+    assert_eq!(st, 404, "{body}");
+    let (st, body) = get(both, url(MAC, "?range=1y")).await;
+    assert_eq!(st, 400, "{body}");
+
+    // the UI's backend gives the same view, under the same two privileges
+    use sensr_ui::api::ApiError;
+    let b = ui_backend(&fx, "activity", "pw").await;
+    let v = b
+        .host_activity(MAC.into(), "today".into(), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        (v.name.as_deref(), v.ipv4.as_deref()),
+        (Some("kid-tablet"), Some("192.168.1.61"))
+    );
+    assert!(matches!(
+        b.host_activity("aa:bb:cc:00:00:99".into(), "today".into(), 0)
+            .await,
+        Err(ApiError::NotFound(_))
+    ));
+    assert!(matches!(
+        b.host_activity(MAC.into(), "1y".into(), 0).await,
+        Err(ApiError::Validation(_))
+    ));
+    let b = ui_backend(&fx, "hostviewer", "pw").await;
+    assert!(matches!(
+        b.host_activity(MAC.into(), "today".into(), 0).await,
+        Err(ApiError::Unauthorized)
+    ));
+}
+
+/// The wasm bundle's copy of the category list matches the schema's.
+#[test]
+fn ui_category_list_matches_the_schema() {
+    use sensr_schema::models::insight::Category;
+    let keys: Vec<(String, &str)> = Category::ALL
+        .iter()
+        .map(|c| {
+            let k = serde_json::to_value(c).unwrap();
+            (k.as_str().unwrap().to_owned(), c.display())
+        })
+        .collect();
+    let ui: Vec<(String, &str)> = sensr_ui::runtime::CATEGORIES
+        .iter()
+        .map(|(k, n)| ((*k).to_owned(), *n))
+        .collect();
+    assert_eq!(keys, ui);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn status_hosts_does_not_bypass_hosts_privilege() {
     let fx = start().await;
     let watcher = pw("watcher", "pw");
@@ -782,6 +890,104 @@ async fn ui_backend_set_host_label() {
     let reader = ui_backend(&fx, "hostreader", "pw").await;
     assert!(matches!(
         reader.set_host_label(MAC.into(), None, None).await,
+        Err(ApiError::Unauthorized)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_service_override_route() {
+    use sensr_schema::models::insight::Category;
+    let fx = start().await;
+    let post = |who: String, body: Value| {
+        let fx = &fx;
+        async move {
+            http(
+                fx,
+                "POST",
+                "/api/v1/insight/service-override",
+                Some(&who),
+                Some(body),
+            )
+            .await
+        }
+    };
+    let overrides = |fx: &Fx| {
+        fx.applier
+            .state
+            .lock()
+            .unwrap()
+            .applied
+            .last()
+            .unwrap()
+            .insight
+            .dns
+            .service_overrides
+            .values()
+            .map(|o| (o.suffix.clone(), o.service.clone(), o.category))
+            .collect::<Vec<_>>()
+    };
+    let who = pw("activity", "pw");
+    let (st, body) = post(
+        who.clone(),
+        json!({"suffix": "game-cdn.net", "service": "Fortnite", "category": "games"}),
+    )
+    .await;
+    assert_eq!((st, body), (200, json!({"result": "applied"})));
+    assert_eq!(
+        overrides(&fx),
+        [(
+            "game-cdn.net".to_owned(),
+            "Fortnite".to_owned(),
+            Category::Games
+        )]
+    );
+    // the hosts privilege alone does not cover it
+    let body = json!({"suffix": "x.net", "service": "X", "category": "other"});
+    let (st, _) = post(pw("hostviewer", "pw"), body.clone()).await;
+    assert_eq!(st, 403);
+    let (st, _) = post(pw("auditor", "pw"), body).await;
+    assert_eq!(st, 403);
+    let (st, _) = post(
+        who.clone(),
+        json!({"suffix": "x.net", "service": "X", "category": "toaster"}),
+    )
+    .await;
+    assert!(st == 400 || st == 422, "{st}");
+    // both null removes it
+    let (st, body) = post(who, json!({"suffix": "game-cdn.net"})).await;
+    assert_eq!((st, body), (200, json!({"result": "applied"})));
+    assert!(overrides(&fx).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ui_backend_set_service_override() {
+    use sensr_ui::api::ApiError;
+    let fx = start().await;
+    let b = ui_backend(&fx, "activity", "pw").await;
+    assert_eq!(
+        b.set_service_override(
+            "cdn.example.com".into(),
+            Some("Example".into()),
+            Some("video".into())
+        )
+        .await
+        .unwrap(),
+        "applied"
+    );
+    let applied = fx.applier.state.lock().unwrap().applied.clone();
+    assert_eq!(
+        applied.last().unwrap().insight.dns.service_overrides.len(),
+        1
+    );
+    assert!(matches!(
+        b.set_service_override("cdn.example.com".into(), Some("X".into()), Some("toaster".into()))
+            .await,
+        Err(ApiError::Validation(e)) if e.len() == 1 && e[0].path == "category"
+    ));
+    let b = ui_backend(&fx, "hostreader", "pw").await;
+    assert!(matches!(
+        b.set_service_override("cdn.example.com".into(), None, None)
+            .await,
         Err(ApiError::Unauthorized)
     ));
 }

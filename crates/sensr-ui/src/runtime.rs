@@ -415,6 +415,143 @@ pub struct HostRow {
     pub owner_maker: Option<String>,
     /// The staged owner label differs from the one in force (set by the UI).
     pub staged_label: bool,
+    /// Screen-time minutes since local midnight (from the insight database, set by the UI
+    /// when the caller may read it); `None` when there is no such data.
+    pub today_minutes: Option<u32>,
+    /// Lookups over the last 24 hours by category key ([`CATEGORIES`] order), for the
+    /// Hosts card's colour preview; empty when there is no DNS data.
+    #[serde(deserialize_with = "null_default")]
+    pub dns_mix: Vec<(String, u32)>,
+}
+
+/// `(key, display name)` of every DNS activity category, in display order (sensr-schema's
+/// `Category::ALL` and `display()`, which the wasm bundle does not link; a test in
+/// sensr-api keeps them equal).
+pub const CATEGORIES: [(&str, &str); 11] = [
+    ("video", "Video"),
+    ("social", "Social"),
+    ("games", "Games"),
+    ("messaging", "Messaging"),
+    ("music", "Music"),
+    ("education", "Education"),
+    ("shopping", "Shopping"),
+    ("system", "Apple/Google/Microsoft system"),
+    ("ads_tracking", "Ads & tracking"),
+    ("smart_home", "Smart home"),
+    ("other", "Other"),
+];
+
+/// The display name of category `key` (an unknown key reads as Other).
+pub fn category_name(key: &str) -> &'static str {
+    CATEGORIES
+        .iter()
+        .find(|c| c.0 == key)
+        .map_or("Other", |c| c.1)
+}
+
+/// The theme token of category `key`: `cat-video`, `cat-ads-tracking` (see
+/// [`crate::theme`]); the faint row shade is the same name with `tint-`.
+pub fn category_token(key: &str) -> String {
+    let key = if CATEGORIES.iter().any(|c| c.0 == key) {
+        key
+    } else {
+        "other"
+    };
+    format!("cat-{}", key.replace('_', "-"))
+}
+
+/// The host page of inventory key `key` (a MAC stays readable: `/ui/hosts/aa:bb:…`).
+pub fn host_href(key: &str) -> String {
+    let mut out = String::from("/ui/hosts/");
+    for b in key.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b':' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Minutes as `1 h 12 m`, `2 h 05 m`, `48 m`.
+pub fn fmt_minutes(m: u32) -> String {
+    if m < 60 {
+        format!("{m} m")
+    } else {
+        format!("{} h {:02} m", m / 60, m % 60)
+    }
+}
+
+/// `n` tenths of a percent as `72.5%`.
+fn pct10(n: u64) -> String {
+    format!("{}.{}%", n / 10, n % 10)
+}
+
+/// The Hosts card's colour preview of a DNS mix (lookups per category key): an inline
+/// `--mix` custom property holding a left-to-right stacked gradient, each category's
+/// faint tint as wide as its share, blending into the next over a few percent. `None`
+/// with no lookups.
+pub fn mix_style(mix: &[(String, u32)]) -> Option<String> {
+    let total: u64 = mix.iter().map(|m| u64::from(m.1)).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut stops = Vec::new();
+    let mut at = 0u64;
+    let mut sum = 0u64;
+    let parts: Vec<_> = mix.iter().filter(|m| m.1 > 0).collect();
+    for (i, (key, n)) in parts.iter().enumerate() {
+        sum += u64::from(*n);
+        // in tenths of a percent; the last segment ends at exactly 100%
+        let end = sum * 1000 / total;
+        // blend half-width: 2.5%, or a third of a narrow segment
+        let w = ((end - at) / 3).min(25);
+        let (from, to) = (
+            if i == 0 { 0 } else { at + w },
+            if i + 1 == parts.len() { 1000 } else { end - w },
+        );
+        let tint = category_token(key).replacen("cat-", "tint-", 1);
+        stops.push(format!(
+            "var(--{tint}) {},var(--{tint}) {}",
+            pct10(from),
+            pct10(to)
+        ));
+        at = end;
+    }
+    Some(format!("--mix:linear-gradient(90deg,{})", stops.join(",")))
+}
+
+/// The row's `title` for its colour preview: `DNS lookups (24 h): Video 62%, Games 20%`.
+/// The percentages add up to exactly 100 (largest remainder); a share that rounds to 0
+/// reads `<1%`.
+pub fn mix_title(mix: &[(String, u32)]) -> Option<String> {
+    let parts: Vec<_> = mix.iter().filter(|m| m.1 > 0).collect();
+    let total: u64 = parts.iter().map(|m| u64::from(m.1)).sum();
+    if total == 0 {
+        return None;
+    }
+    // floor of each share, then the leftover points to the largest remainders
+    let mut pct: Vec<u64> = parts.iter().map(|m| u64::from(m.1) * 100 / total).collect();
+    let mut order: Vec<usize> = (0..parts.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse((u64::from(parts[i].1) * 100) % total));
+    let left = 100 - pct.iter().sum::<u64>();
+    for &i in order.iter().take(usize::try_from(left).unwrap_or(0)) {
+        pct[i] += 1;
+    }
+    let text: Vec<String> = parts
+        .iter()
+        .zip(pct)
+        .map(|((k, _), p)| {
+            let p = if p == 0 {
+                "<1".to_owned()
+            } else {
+                p.to_string()
+            };
+            format!("{} {p}%", category_name(k))
+        })
+        .collect();
+    Some(format!("DNS lookups (24 h): {}", text.join(", ")))
 }
 
 /// `(kind, display name, icon)` for every host kind, in the order the editor lists them
@@ -840,6 +977,24 @@ mod tests {
     }
 
     #[test]
+    fn host_activity_fields_are_lenient() {
+        let l: HostList = parse(json!({"now": 1, "hosts": [
+            {"key": "a", "today_minutes": 95, "dns_mix": [["video", 7], ["other", 2]]},
+            {"key": "b", "dns_mix": null},
+            {"key": "c"}
+        ]}));
+        assert_eq!(l.hosts[0].today_minutes, Some(95));
+        assert_eq!(
+            l.hosts[0].dns_mix,
+            [("video".to_owned(), 7), ("other".to_owned(), 2)]
+        );
+        assert!(l.hosts[1].dns_mix.is_empty() && l.hosts[1].today_minutes.is_none());
+        assert!(l.hosts[2].dns_mix.is_empty());
+        assert_eq!(category_name("smart_home"), "Smart home");
+        assert_eq!(category_name("nope"), "Other");
+    }
+
+    #[test]
     fn parses_the_agent_host_list() {
         let l: HostList = parse(json!({"now": 1000, "hosts": [
             {"key": "84:47:09:38:a5:fc", "mac": "84:47:09:38:a5:fc", "name": "old-router",
@@ -1011,6 +1166,48 @@ mod tests {
             reasons: vec![],
             by: by.into(),
         }
+    }
+
+    #[test]
+    fn minutes_tokens_and_mix_title() {
+        assert_eq!(fmt_minutes(0), "0 m");
+        assert_eq!(fmt_minutes(48), "48 m");
+        assert_eq!(fmt_minutes(72), "1 h 12 m");
+        assert_eq!(fmt_minutes(125), "2 h 05 m");
+        assert_eq!(category_token("ads_tracking"), "cat-ads-tracking");
+        assert_eq!(category_token("bogus"), "cat-other");
+        let mix = vec![("video".to_owned(), 3), ("system".to_owned(), 1)];
+        assert_eq!(
+            mix_title(&mix).unwrap(),
+            "DNS lookups (24 h): Video 75%, Apple/Google/Microsoft system 25%"
+        );
+        assert_eq!(mix_title(&[]), None);
+        // thirds: 34 + 33 + 33, not 33 + 33 + 33
+        let thirds: Vec<(String, u32)> = ["video", "games", "music"]
+            .iter()
+            .map(|k| ((*k).to_owned(), 1))
+            .collect();
+        assert_eq!(
+            mix_title(&thirds).unwrap(),
+            "DNS lookups (24 h): Video 34%, Games 33%, Music 33%"
+        );
+        // 1/7 each: 15 + 15 + 14 * 5 = 100
+        let sevenths: Vec<(String, u32)> = CATEGORIES[..7]
+            .iter()
+            .map(|(k, _)| ((*k).to_owned(), 1))
+            .collect();
+        let t = mix_title(&sevenths).unwrap();
+        let sum: u32 = t
+            .split(['%', ' '])
+            .filter_map(|w| w.parse::<u32>().ok())
+            .filter(|n| *n != 24)
+            .sum();
+        assert_eq!(sum, 100, "{t}");
+        let single = mix_style(&[("music".to_owned(), 5)]).unwrap();
+        assert_eq!(
+            single,
+            "--mix:linear-gradient(90deg,var(--tint-music) 0.0%,var(--tint-music) 100.0%)"
+        );
     }
 
     #[test]

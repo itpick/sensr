@@ -88,9 +88,8 @@ test("finds a host", async ({ page }) => {
   await at(page, "/ui/core/dashboard");
   await search(page, "b8:27:eb");
   await group(page, "Hosts").getByRole("option", { name: /^bench-pi/ }).click();
-  await page.waitForURL(/\/ui\/core\/dashboard\?host=b8%3A27%3Aeb%3A7d%3A4e%3A25#w-hosts$/);
-  await hydrated(page);
-  await expect(page.locator(".hosts-card input[type=search]")).toHaveValue("b8:27:eb:7d:4e:25");
+  await page.waitForURL(/\/ui\/hosts\/b8:27:eb:7d:4e:25$/);
+  await expect(page.getByRole("heading", { level: 2, name: "bench-pi" })).toBeVisible();
 });
 
 test("keyboard", async ({ page }) => {

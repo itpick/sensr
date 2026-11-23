@@ -65,6 +65,8 @@ let
     mkdir -p $out
     printf '# synthetic blocklist\n${net.internet.blocked}\n' > $out/blocklist.txt
     printf '${net.internet.geo},${net.internet.geo},ZZ\n198.51.100.0,198.51.100.255,QQ\n' | gzip -9n > $out/geo.csv.gz
+    # a "video" for the per-host DNS activity subtest (256 KiB)
+    head -c 262144 /dev/zero > $out/video.bin
   '';
 
   client =
@@ -308,6 +310,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     import json
+    import shlex
     import time
 
     REFERENCE = ${py reference}
@@ -321,7 +324,16 @@ pkgs.testers.runNixOSTest {
     INTERNET = "${net.internet.host}"
     BLOCKED = "${net.internet.blocked}"
     GEO = "${net.internet.geo}"
-    LISTS = f"http://{INTERNET}:${toString net.internet.listsPort}"
+    LISTS_PORT = ${toString net.internet.listsPort}
+    LISTS = f"http://{INTERNET}:{LISTS_PORT}"
+    IOT_MAC = "${net.iot.mac}"
+    # bcrypt of "opnsense" (as in agent-api.nix), set as root's password for the API
+    ROOT_HASH = "$2y$10$YRVoF4SgskIsrXOvOQjGieB9XqHPRra9R7d80B3BZdbY/j21TwBfS"
+    API = "https://127.0.0.1"
+
+    def activity(mac):
+        """The curl of a host's DNS activity today (GET /api/v1/hosts/<mac>/activity)."""
+        return f"curl -skf -u root:opnsense '{API}/api/v1/hosts/{mac}/activity?range=today'"
 
     def hostname_in(source):
         out = router.succeed(f"sensr config get system.hostname --json --source {source}")
@@ -486,6 +498,97 @@ pkgs.testers.runNixOSTest {
                     f"dig +short @${net.lan.router} www.internet.example A | grep -x {INTERNET}", timeout=60
                 )
 
+            with subtest("Insight: a download counts as active minutes of its host's service"):
+                # A known root password for the API (bcrypt of "opnsense", as
+                # in agent-api.nix); the fixture's hash is synthetic.
+                users = json.loads(router.succeed("sensr config get system.users --json"))
+                root_id = next(k for k, u in users.items() if u.get("name") == "root")
+                router.succeed(
+                    f"sensr config set system.users.{root_id}.password_hash {shlex.quote(ROOT_HASH)}"
+                    " && sensr config commit -m 'slice: a known root password for the API'"
+                )
+                # The override first, so the catalogue match is deterministic;
+                # insight on makes Unbound stream dnstap to sensr-insight.
+                insight = {
+                    "enabled": True,
+                    "sample_seconds": 2,
+                    "dns": {"service_overrides": {"5b0c7f3e-2a6d-4f1b-9c8e-3d4a5b6c7d8e": {
+                        "enabled": True,
+                        "suffix": "internet.example",
+                        "service": "Test video",
+                        "category": "video",
+                    }}},
+                }
+                router.succeed(
+                    f"sensr config set --json insight {shlex.quote(json.dumps(insight))}"
+                    " && sensr config commit -m 'slice: insight on, internet.example counts as Test video'"
+                )
+                router.wait_for_unit("sensr-insight.service")
+                router.wait_until_succeeds("test -S /run/sensr-insight/dnstap.sock", timeout=60)
+                try:
+                    router.wait_until_succeeds(f"curl -skf -u root:opnsense {API}/api/v1/status >/dev/null", timeout=60)
+                except Exception:
+                    print(router.execute(
+                        f"curl -sk -o /dev/null -w '%{{http_code}}\\n' {API}/api/v1/status;"
+                        f" curl -sk -o /dev/null -w '%{{http_code}}\\n' -u root:opnsense {API}/api/v1/status;"
+                        f" curl -skv -u root:opnsense {API}/api/v1/status 2>&1 | tail -n 20;"
+                        " ss -ltnp; journalctl -b -u sensr-api --no-pager | tail -n 20"
+                    )[1])
+                    raise
+                lan_mac = lan.succeed("cat /sys/class/net/eth1/address").strip().lower()
+                # The commit reloads Unbound: a query may time out meanwhile.
+                lan.wait_until_succeeds(
+                    f"dig +short @${net.lan.router} www.internet.example A | grep -x {INTERNET}", timeout=60
+                )
+                # Look the name up and download from the address it gave,
+                # 256 KiB every few seconds for a little over a minute.
+                got = 0
+                deadline = time.monotonic() + 70
+                while time.monotonic() < deadline:
+                    ip = lan.succeed("dig +short @${net.lan.router} www.internet.example A").strip()
+                    assert ip == INTERNET, ip
+                    got += int(lan.succeed(
+                        f"curl -sf --max-time 10 -o /dev/null -w '%{{size_download}}' http://{ip}:{LISTS_PORT}/video.bin"
+                    ))
+                    time.sleep(3)
+                assert got >= 65536, got
+                try:
+                    router.wait_until_succeeds(
+                        activity(lan_mac)
+                        + " | jq -e '.services[] | select(.service == \"Test video\" and .category == \"video\" and .minutes >= 1)'",
+                        timeout=180,
+                    )
+                finally:
+                    print(router.execute(
+                        activity(lan_mac)
+                        + " | jq -c '{available, feed_stale, screen_time, services, categories, domains: [.domains[] | {qname, service, blocked}]}'"
+                    )[1])
+                    print(router.execute(
+                        "ls -ld /run/sensr-insight; ls -l /run/sensr-insight; getent group sensr-dnstap;"
+                        " grep -E '^(Uid|Gid|Groups)' /proc/$(systemctl show -p MainPID --value sensr-unbound)/status;"
+                        " journalctl -b -u sensr-insight --no-pager | tail -n 30;"
+                        " journalctl -b --no-pager | grep -i dnstap | tail -n 20"
+                    )[1])
+
+            with subtest("Insight: DNS still resolves with sensr-insight stopped"):
+                # Unbound keeps answering when the dnstap socket goes away.
+                router.succeed("systemctl stop sensr-insight.service")
+                try:
+                    for i in range(10):
+                        lan.succeed(
+                            f"dig +time=3 +tries=1 @${net.lan.router} gone-{i}.internet.example A | grep -q 'status: NXDOMAIN'"
+                        )
+                        out = lan.succeed("dig +short +time=3 +tries=1 @${net.lan.router} www.internet.example A")
+                        assert out.strip() == INTERNET, out
+                        out = lan.succeed("dig +short +time=3 +tries=1 @${net.lan.router} nas.home.example A")
+                        assert out.strip() == NAS, out
+                        time.sleep(1)
+                finally:
+                    router.succeed("systemctl start sensr-insight.service")
+                router.wait_for_unit("sensr-insight.service")
+                router.wait_until_succeeds("test -S /run/sensr-insight/dnstap.sock", timeout=60)
+                lan.succeed(f"dig +short +time=3 +tries=1 @${net.lan.router} www.internet.example A | grep -x {INTERNET}")
+
             with subtest("DNSBL: blocked names answer 0.0.0.0, allowed and local names resolve"):
                 # Custom entries of the imported policy, and a name from the
                 # list sensr downloaded and compiled.
@@ -511,6 +614,29 @@ pkgs.testers.runNixOSTest {
                 # still get the global policy's.
                 out = iot.succeed("dig +short +time=3 @${net.iot.router} x.ads.example.net A")
                 assert out.strip() == "0.0.0.0", out
+
+            with subtest("Insight: blocked lookups are marked blocked (0.0.0.0 and NXDOMAIN)"):
+                # The IoT policy answers NXDOMAIN for its own names: give it one.
+                router.succeed(
+                    "sensr config set dns.blocklists.c97bcab8-6d72-4ee2-9b82-c497270abc27.block"
+                    " --json " + shlex.quote(json.dumps(["nx.iot-blocked.example"]))
+                    + " && sensr config commit -m 'slice: a name the IoT policy blocks'"
+                )
+                iot.wait_until_succeeds(
+                    "dig +time=3 +tries=1 @${net.iot.router} nx.iot-blocked.example A | grep -q 'status: NXDOMAIN'",
+                    timeout=120,
+                )
+                lan.succeed("dig +short @${net.lan.router} x.ads.example.net A | grep -x 0.0.0.0")
+
+                def blocked_lookup(mac, name):
+                    return activity(mac) + f" | jq -e '.domains[] | select(.qname == \"{name}\") | .blocked'"
+
+                try:
+                    router.wait_until_succeeds(blocked_lookup(lan_mac, "x.ads.example.net"), timeout=180)
+                    router.wait_until_succeeds(blocked_lookup(IOT_MAC, "nx.iot-blocked.example"), timeout=180)
+                finally:
+                    for mac in [lan_mac, IOT_MAC]:
+                        print(router.execute(activity(mac) + " | jq -c '[.domains[] | {qname, service, blocked}]'")[1])
 
         with subtest("NAT: LAN reaches the internet as the router's WAN address"):
             seen = lan.wait_until_succeeds(f"curl -sf --max-time 5 http://{INTERNET}/", timeout=60).strip()

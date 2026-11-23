@@ -90,3 +90,42 @@ fn css_uses_only_defined_tokens() {
     let css = sensr_ui::theme::tokens_css();
     assert!(css.contains(":root[data-theme=dark]") && css.contains("prefers-color-scheme:dark"));
 }
+
+/// `fg` alpha-blended over `bg` (both `#rrggbb`), as `#rrggbb`.
+fn blend(fg: &str, bg: &str, alpha: f64) -> String {
+    let ch = |h: &str, i: usize| f64::from(u8::from_str_radix(&h[i..i + 2], 16).unwrap());
+    let (f, b) = (fg.trim_start_matches('#'), bg.trim_start_matches('#'));
+    let mix = |i| (ch(f, i) * alpha + ch(b, i) * (1.0 - alpha)).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", mix(0), mix(2), mix(4))
+}
+
+/// The Hosts card's row tint: every category colour at its tint alpha over the card keeps
+/// row text (body, muted, links) readable, in both themes; the colours themselves, used
+/// for legend dots and bars, stand out from the card (3:1).
+#[test]
+fn category_tint_contrast() {
+    let mut failures = Vec::new();
+    for (name, theme) in [("light", LIGHT), ("dark", DARK)] {
+        let card = token(theme, "card").unwrap();
+        for (key, _) in sensr_ui::runtime::CATEGORIES {
+            let tok = sensr_ui::runtime::category_token(key);
+            let colour = token(theme, &tok).unwrap_or_else(|| panic!("{name}: no --{tok}"));
+            let tint = blend(
+                colour,
+                card,
+                f64::from(sensr_ui::theme::CATEGORY_TINT_PCT) / 100.0,
+            );
+            for fg in ["fg", "muted", "link"] {
+                let r = ratio(token(theme, fg).unwrap(), &tint);
+                if r < 4.5 {
+                    failures.push(format!("{name}: --{fg} on {tok} tint is {r:.2}:1"));
+                }
+            }
+            let r = ratio(colour, card);
+            if r < 3.0 {
+                failures.push(format!("{name}: --{tok} on --card is {r:.2}:1"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}

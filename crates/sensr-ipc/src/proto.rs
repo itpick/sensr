@@ -289,6 +289,23 @@ pub enum Op {
         #[serde(default)]
         maker: Option<String>,
     },
+    /// Set what a domain suffix counts as on the per-host DNS activity page
+    /// (`insight.dns.service_overrides`): writes the entry for `suffix`, or
+    /// removes it when `service` and `category` are both `None`. Commits and
+    /// applies at once when nothing else is staged and no commit awaits
+    /// confirmation; otherwise only stages. Answered with
+    /// [`Response::Value`] `{"result": "applied" | "staged"}`.
+    ServiceOverrideSet {
+        /// The domain suffix (`example.com`; lowercased, a trailing dot
+        /// dropped).
+        suffix: String,
+        /// The service name shown (1-48 characters).
+        #[serde(default)]
+        service: Option<String>,
+        /// The category it counts under.
+        #[serde(default)]
+        category: Option<sensr_schema::models::insight::Category>,
+    },
 }
 
 /// A host mode other than Normal, for [`Op::HostModeSet`].
@@ -381,6 +398,7 @@ impl Op {
                 | Op::HostForget { .. }
                 | Op::HostModeSet { .. }
                 | Op::HostLabelSet { .. }
+                | Op::ServiceOverrideSet { .. }
         )
     }
 }
@@ -706,6 +724,29 @@ mod tests {
         );
         let v = serde_json::to_value(Some(HostModeMode::Quarantine)).unwrap();
         assert_eq!(v, serde_json::json!("quarantine"));
+    }
+
+    #[test]
+    fn service_override_set_is_write() {
+        let op = Op::ServiceOverrideSet {
+            suffix: "example.com".into(),
+            service: None,
+            category: None,
+        };
+        assert!(op.is_write());
+        let v: Op = serde_json::from_value(serde_json::json!({"ServiceOverrideSet": {
+            "suffix": "example.com",
+            "service": "Example",
+            "category": "ads_tracking"
+        }}))
+        .unwrap();
+        assert!(matches!(
+            v,
+            Op::ServiceOverrideSet {
+                category: Some(sensr_schema::models::insight::Category::AdsTracking),
+                ..
+            }
+        ));
     }
 
     #[test]

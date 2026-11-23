@@ -4,7 +4,8 @@
 //! **Counting happens in the kernel.** The agent loads table `inet
 //! sensr_flow` ([`nft::ruleset`]): dynamic sets with a counter per element,
 //! keyed by local host, by local host + service (protocol and the
-//! connection's original destination port) and by remote address, updated
+//! connection's original destination port), by remote address and by local
+//! host + remote address (for per-host service attribution), updated
 //! from the forward hook for traffic in from or out to a local interface.
 //! `sensr-insight` reads the sets every few seconds (one `nft -j list
 //! table`), turns counter values into deltas and adds them to 1-minute,
@@ -21,9 +22,15 @@
 //! built: [`config`] (what the agent writes for the daemon) and [`nft`]
 //! (the accounting table).
 
+pub mod attrib;
 pub mod config;
+pub mod dnstap;
 #[cfg(feature = "store")]
 pub mod eve;
+pub mod feed;
 pub mod nft;
+pub mod services;
 #[cfg(feature = "store")]
 pub mod store;
+#[cfg(all(feature = "store", unix))]
+pub mod tap;

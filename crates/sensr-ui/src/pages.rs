@@ -1175,6 +1175,27 @@ pub fn History() -> impl IntoView {
     view! { <Suspense fallback=|| ()>{load}</Suspense> }
 }
 
+/// Undoes `%XX` escapes (a malformed escape stays as it is).
+pub fn url_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let Some(v) = s
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Percent-encodes a query parameter value.
 pub fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -1274,7 +1295,8 @@ fn endpoint(ip: &str, port: Option<u16>) -> String {
     }
 }
 
-fn alerts_url(text: &str, host: &str, page: u32) -> String {
+/// The alerts tab with a filter and page (each value percent-encoded).
+pub fn alerts_url(text: &str, host: &str, page: u32) -> String {
     let mut q = Vec::new();
     if !text.is_empty() {
         q.push(format!("text={}", url_encode(text)));
@@ -1293,7 +1315,7 @@ fn alerts_url(text: &str, host: &str, page: u32) -> String {
 }
 
 fn alerts_table(p: AlertPage, text: &str, host: &str) -> AnyView {
-    let back = alerts_url(text, host, p.page);
+    let (text_v, host_v, page_v) = (text.to_owned(), host.to_owned(), p.page.to_string());
     if p.rows.is_empty() {
         return view! { <p class="muted">"No alerts match."</p> }.into_any();
     }
@@ -1311,7 +1333,9 @@ fn alerts_table(p: AlertPage, text: &str, host: &str) -> AnyView {
                         <input type="hidden" name="sid" value=sid.clone()/>
                         <input type="hidden" name="gid" value=a.gid.to_string()/>
                         <input type="hidden" name="signature" value=a.signature.clone()/>
-                        <input type="hidden" name="back" value=back.clone()/>
+                        <input type="hidden" name="text" value=text_v.clone()/>
+                        <input type="hidden" name="host" value=host_v.clone()/>
+                        <input type="hidden" name="page" value=page_v.clone()/>
                         <button type="submit" class="btn btn-sm" aria-label=format!("Suppress sid {sid}")>"Suppress"</button>
                         <button type="submit" class="btn btn-sm" name="src" value=src.clone()
                             aria-label=format!("Source only: suppress sid {sid} from {src}")>"Source only"</button>
@@ -1375,11 +1399,16 @@ pub fn IdsAlertsPage() -> impl IntoView {
     let text = q.get("text").unwrap_or_default().trim().to_owned();
     let host = q.get("host").unwrap_or_default().trim().to_owned();
     let page: u32 = q.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
-    let staged = q.get("staged");
-    let error = q.get("error");
+    let staged = q.get("staged").filter(|s| s.parse::<u32>().is_ok());
+    let error = match q.get("error").as_deref() {
+        Some("address") => Some("Not an address."),
+        Some("duplicate") => Some("This signature is already suppressed for these addresses."),
+        Some(_) => Some("The suppression could not be staged."),
+        None => None,
+    };
     let load = move || {
         let (text, host) = (text.clone(), host.clone());
-        let (staged, error) = (staged.clone(), error.clone());
+        let (staged, error) = (staged.clone(), error);
         Suspend::new(async move {
             let p = match ids_alerts(text.clone(), host.clone(), page).await {
                 Ok(p) => p,
@@ -1703,6 +1732,609 @@ pub fn UnboundOverview() -> impl IntoView {
     }
 }
 
+// ------------------------------------------------------------ Hosts › one device
+
+/// The host page's query: `?range=today|7d&page=N&q=…&edit=<name>&saved=…&error=…`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostQuery {
+    /// `today` or `7d`.
+    pub range: String,
+    /// Domains page, from 0.
+    pub page: u32,
+    /// Domain search (filters the page shown).
+    pub q: String,
+    /// The looked-up name the service override editor is open for.
+    pub edit: Option<String>,
+    /// An override was just saved: `applied`, `staged` or `removed`.
+    pub saved: Option<String>,
+    /// The override editor's refusal.
+    pub error: Option<String>,
+}
+
+impl HostQuery {
+    /// The query of a host page URL.
+    pub fn from_query(qm: &leptos_router::params::ParamsMap) -> Self {
+        Self {
+            range: if qm.get("range").as_deref() == Some("7d") {
+                "7d".into()
+            } else {
+                "today".into()
+            },
+            page: qm
+                .get("page")
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0)
+                .min(100_000),
+            q: qm.get("q").unwrap_or_default(),
+            edit: qm.get("edit").filter(|e| !e.is_empty()),
+            saved: qm.get("saved"),
+            error: qm.get("error"),
+        }
+    }
+}
+
+/// A host page's data, loaded once per request: the layout's heading and the page body
+/// both await it (provided as context by the layout).
+#[derive(Clone)]
+pub struct HostPageLoad(
+    pub  futures::future::Shared<
+        futures::future::BoxFuture<'static, Result<crate::actions::HostPageData, ServerFnError>>,
+    >,
+);
+
+/// Starts loading the page of host `key` for query `q`.
+#[cfg(feature = "ssr")]
+pub fn host_page_load(key: String, q: &HostQuery) -> HostPageLoad {
+    use futures::FutureExt;
+    HostPageLoad(
+        crate::actions::host_page(key, q.range.clone(), q.page, q.edit.clone())
+            .boxed()
+            .shared(),
+    )
+}
+
+/// The copy of the banner shown while the dnstap feed is stale.
+pub const STALE_FEED: &str = "DNS answers aren't arriving; showing lookups only.";
+
+const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/// Categories that count as screen time (everything but system and ads).
+fn screen_time(category: &str) -> bool {
+    !matches!(category, "system" | "ads_tracking")
+}
+
+/// `t` relative to `now`: `now`, `4 min ago`, `2 h ago`, `6 d ago`.
+fn ago(now: i64, t: i64) -> String {
+    let d = (now - t).max(0);
+    match d {
+        0..60 => "now".to_owned(),
+        60..3_600 => format!("{} min ago", d / 60),
+        3_600..86_400 => format!("{} h ago", d / 3_600),
+        _ => format!("{} d ago", d / 86_400),
+    }
+}
+
+/// A small category chip: its colour dot and name.
+fn category_chip(key: &str) -> impl IntoView + use<> {
+    let dot = format!("background:var(--{})", crate::runtime::category_token(key));
+    view! {
+        <span class="chip"><i class="dot" style=dot aria-hidden="true"></i>{crate::runtime::category_name(key)}</span>
+    }
+}
+
+/// The URL of the host page with `range`, domains `page` and extra query text.
+fn host_url(key: &str, range: &str, page: u32, extra: &str) -> String {
+    let mut u = format!("{}?range={range}", crate::runtime::host_href(key));
+    if page > 0 {
+        u += &format!("&page={page}");
+    }
+    u + extra
+}
+
+/// `&q=<search>` for a non-blank search, else nothing.
+fn search_param(q: &str) -> String {
+    if q.trim().is_empty() {
+        String::new()
+    } else {
+        format!("&q={}", url_encode(q))
+    }
+}
+
+/// Where the service override form goes back to: the host page of `key` with its range,
+/// domains page and search, every value percent-encoded (plain ASCII, safe for a Location
+/// header). A key that is not an inventory key (a MAC or `id:` plus letters, digits, `:`,
+/// `-`, `_`) goes back to the dashboard instead.
+pub fn host_back_url(key: &str, range: &str, page: u32, q: &str) -> String {
+    let key = key.trim();
+    let ok = !key.is_empty()
+        && key.len() <= 128
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'-' | b'_'));
+    if !ok {
+        return "/".to_owned();
+    }
+    let range = if range == "7d" { "7d" } else { "today" };
+    host_url(key, range, page.min(100_000), &search_param(q))
+}
+
+fn host_header(p: &crate::actions::HostPageData, range: &str) -> AnyView {
+    let h = &p.host;
+    let label = h.host_label.as_ref().filter(|l| !l.text().is_empty()).map(|l| {
+        view! {
+            <span class="host-label" class:host-label-guess=l.guess() title=l.reasons.join("\n")>
+                <span class="host-kind-icon" aria-hidden="true">{l.kind_display().1}</span>{l.text()}
+            </span>
+        }
+    });
+    let mode = match h.locked_mode() {
+        Some("isolated") => view! { <span class="pill pill-warn">"Isolated"</span> }.into_any(),
+        Some("quarantine") => view! { <span class="pill pill-off">"Quarantine"</span> }.into_any(),
+        _ => view! { <span class="pill pill-on">"Normal"</span> }.into_any(),
+    };
+    let seen = match h.seen(p.now).as_str() {
+        s @ ("now" | "never") => s.to_owned(),
+        s => format!("{s} ago"),
+    };
+    let tabs = [("today", "Today"), ("7d", "7 days")]
+        .map(|(k, t)| {
+            let current = k == range;
+            view! {
+                <a class="btn btn-sm" href=host_url(&h.key, k, 0, "")
+                    aria-current=current.then_some("page")>{t}</a>
+            }
+        })
+        .collect_view();
+    let has_activity = p.activity.is_some();
+    view! {
+        <section class="card hp-wide" aria-labelledby="hp-h">
+            <div class="hp-head">
+                <div>
+                    <h2 id="hp-h">{h.label()}</h2>
+                    {label}
+                    <dl class="hp-meta">
+                        {h.mac.clone().map(|m| view! { <div><dt>"MAC"</dt><dd class="num">{m}</dd></div> })}
+                        {h.ipv4.clone().map(|ip| view! { <div><dt>"IPv4"</dt><dd class="num">{ip}</dd></div> })}
+                        {h.ipv6.first().cloned().map(|ip| view! { <div><dt>"IPv6"</dt><dd class="num">{ip}</dd></div> })}
+                        {(!h.interface_name.is_empty()).then(|| view! { <div><dt>"Network"</dt><dd>{h.interface_name.clone()}</dd></div> })}
+                        <div><dt>"Mode"</dt><dd>{mode}</dd></div>
+                        <div><dt>"Last seen"</dt><dd>{seen}</dd></div>
+                    </dl>
+                </div>
+                {has_activity.then(|| view! { <nav class="seg" aria-label="Time range">{tabs}</nav> })}
+            </div>
+        </section>
+    }
+    .into_any()
+}
+
+fn screen_time_card(a: &crate::api::HostActivityView) -> AnyView {
+    let title = if a.range == "7d" {
+        "Screen time, last 7 days"
+    } else {
+        "Screen time today"
+    };
+    let cats: Vec<_> = a
+        .categories
+        .iter()
+        .filter(|c| screen_time(&c.category) && c.minutes > 0)
+        .collect();
+    let total: u32 = cats.iter().map(|c| c.minutes).sum::<u32>().max(1);
+    let label = cats
+        .iter()
+        .map(|c| {
+            format!(
+                "{} {}",
+                crate::runtime::category_name(&c.category),
+                crate::runtime::fmt_minutes(c.minutes)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let bar = cats
+        .iter()
+        .map(|c| {
+            let style = format!(
+                "width:{:.2}%;background:var(--{})",
+                f64::from(c.minutes) * 100.0 / f64::from(total),
+                crate::runtime::category_token(&c.category)
+            );
+            view! { <i style=style></i> }
+        })
+        .collect_view();
+    let legend = cats
+        .iter()
+        .map(|c| {
+            let dot = format!(
+                "background:var(--{})",
+                crate::runtime::category_token(&c.category)
+            );
+            view! {
+                <li><i class="dot" style=dot aria-hidden="true"></i>
+                    {crate::runtime::category_name(&c.category)}
+                    <b>{crate::runtime::fmt_minutes(c.minutes)}</b></li>
+            }
+        })
+        .collect_view();
+    let empty = cats.is_empty();
+    view! {
+        <section class="card" aria-labelledby="hp-s">
+            <h2 id="hp-s">{title}</h2>
+            <p class="big">{crate::runtime::fmt_minutes(a.screen_time)}</p>
+            {(!empty).then(|| view! {
+                <div class="sbar" role="img" aria-label=format!("Screen time by category: {label}")>{bar}</div>
+                <ul class="legend-row">{legend}</ul>
+            })}
+            <p class="muted small">{if empty {
+                "No screen time in this range. Apple/Google/Microsoft system and Ads & tracking are not counted."
+            } else {
+                "Apple/Google/Microsoft system and Ads & tracking are not counted."
+            }}</p>
+        </section>
+    }
+    .into_any()
+}
+
+fn services_card(a: &crate::api::HostActivityView) -> AnyView {
+    let max = a
+        .services
+        .iter()
+        .map(|s| s.minutes)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let rows = a
+        .services
+        .iter()
+        .map(|s| {
+            let style = format!(
+                "width:{:.1}%;background:var(--{})",
+                f64::from(s.minutes) * 100.0 / f64::from(max),
+                crate::runtime::category_token(&s.category)
+            );
+            view! {
+                <li class="svc">
+                    <span class="svc-name">{s.service.clone()}</span>
+                    {category_chip(&s.category)}
+                    <span class="track" aria-hidden="true"><i style=style></i></span>
+                    <span class="t num">{crate::runtime::fmt_minutes(s.minutes)}</span>
+                </li>
+            }
+        })
+        .collect_view();
+    let empty = a.services.is_empty();
+    view! {
+        <section class="card" aria-labelledby="hp-v">
+            <h2 id="hp-v">"Services"</h2>
+            {if empty {
+                view! { <p class="muted">"No active minutes in this range."</p> }.into_any()
+            } else {
+                view! { <ul class="svc-list">{rows}</ul> }.into_any()
+            }}
+        </section>
+    }
+    .into_any()
+}
+
+fn timeline_card(a: &crate::api::HostActivityView) -> AnyView {
+    const DAY: i64 = 86_400;
+    let first = (a.from + a.utc_offset).div_euclid(DAY);
+    let days = if a.range == "7d" { 7 } else { 1 };
+    // cells can repeat a (day, hour): sum them, and scale by the summed cell, as drawn
+    let mut sums: std::collections::BTreeMap<(i64, u8), u32> = Default::default();
+    for c in &a.timeline {
+        *sums.entry((c.day, c.hour)).or_default() += c.minutes;
+    }
+    let max = sums.values().copied().max().unwrap_or(0).max(1);
+    let wd = |day: i64| WEEKDAYS[usize::try_from((day + 4).rem_euclid(7)).unwrap_or(0)];
+    let mut grid = Vec::new();
+    let mut table = Vec::new();
+    for day in first..first + days {
+        let name = wd(day);
+        grid.push(view! { <span class="dl">{name}</span> }.into_any());
+        let mut busy = Vec::new();
+        for hour in 0..24u8 {
+            let m = sums.get(&(day, hour)).copied().unwrap_or(0);
+            let title = format!("{name} {hour:02}:00 — {m} min");
+            if m > 0 {
+                busy.push(format!("{hour:02}:00 {m} min"));
+                let p = 15 + m * 85 / max;
+                grid.push(
+                    view! { <span class="c a" style=format!("--p:{p}%") title=title></span> }
+                        .into_any(),
+                );
+            } else {
+                grid.push(view! { <span class="c" title=title></span> }.into_any());
+            }
+        }
+        let hours = if busy.is_empty() {
+            "none".to_owned()
+        } else {
+            busy.join(", ")
+        };
+        table.push(view! { <tr><th scope="row">{name}</th><td>{hours}</td></tr> });
+    }
+    view! {
+        <section class="card hp-wide" aria-labelledby="hp-w">
+            <h2 id="hp-w">"When"</h2>
+            <div class="heat" aria-hidden="true">
+                {grid}
+                <span></span>
+                {["0", "6", "12", "18"].map(|h| view! { <span class="hl">{h}</span> })}
+            </div>
+            <div class="heat-scale" aria-hidden="true">"less"
+                <i style="--p:15%"></i><i style="--p:40%"></i><i style="--p:70%"></i><i style="--p:100%"></i>"more"</div>
+            // a table ignores the 1px box of .sr-only, so a wrapper carries it
+            <div class="sr-only">
+                <table>
+                    <caption>"Screen time by day and hour"</caption>
+                    <thead><tr><th scope="col">"Day"</th><th scope="col">"Hours with screen time"</th></tr></thead>
+                    <tbody>{table}</tbody>
+                </table>
+            </div>
+        </section>
+    }
+    .into_any()
+}
+
+fn domains_card(
+    p: &crate::actions::HostPageData,
+    a: &crate::api::HostActivityView,
+    q: &HostQuery,
+) -> AnyView {
+    let key = p.host.key.clone();
+    let range = a.range.clone();
+    let now = i64::try_from(p.now).unwrap_or(0);
+    let needle = q.q.trim().to_lowercase();
+    let rows: Vec<_> = a
+        .domains
+        .iter()
+        .filter(|d| {
+            needle.is_empty()
+                || d.qname.contains(&needle)
+                || d.service.to_lowercase().contains(&needle)
+        })
+        .collect();
+    let shown = rows.len();
+    let count = if needle.is_empty() {
+        format!("{shown} of {} names", thousands(u64::from(a.domains_total)))
+    } else {
+        format!("{shown} matching on this page")
+    };
+    let search_extra = if needle.is_empty() {
+        String::new()
+    } else {
+        format!("&q={}", url_encode(&q.q))
+    };
+    let body = rows
+        .into_iter()
+        .map(|d| {
+            let edit = p.can_edit.then(|| {
+                let href = host_url(
+                    &key,
+                    &range,
+                    a.page,
+                    &format!("{search_extra}&edit={}", url_encode(&d.qname)),
+                );
+                view! {
+                    <a class="btn btn-sm" href=href aria-label=format!("Set service for {}", d.qname)>"Set service"</a>
+                }
+            });
+            let dot = format!("background:var(--{})", crate::runtime::category_token(&d.category));
+            view! {
+                <tr>
+                    <td class="dom-name"><code>{d.qname.clone()}</code>
+                        {d.blocked.then(|| view! { <span class="pill pill-off">"blocked"</span> })}
+                        {d.new.then(|| view! { <span class="pill pill-info">"new"</span> })}</td>
+                    <td class="dom-svc"><i class="dot" style=dot aria-hidden="true"></i>{d.service.clone()}
+                        <span class="sr-only">{format!(" ({})", crate::runtime::category_name(&d.category))}</span></td>
+                    <td class="num col-opt">{thousands(d.count)}</td>
+                    <td class="num col-opt">{ago(now, d.first_seen)}</td>
+                    <td class="num col-opt">{ago(now, d.last_seen)}</td>
+                    <td class="dom-act">{edit}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    let pages = a.domains_total.div_ceil(a.per_page.max(1));
+    let pager = (pages > 1).then(|| {
+        let prev = (a.page > 0).then(|| {
+            view! { <a class="btn btn-sm" href=host_url(&key, &range, a.page - 1, &search_extra) rel="prev">"Previous"</a> }
+        });
+        let next = (a.page + 1 < pages).then(|| {
+            view! { <a class="btn btn-sm" href=host_url(&key, &range, a.page + 1, &search_extra) rel="next">"Next"</a> }
+        });
+        view! {
+            <nav class="pager" aria-label="Domain pages">
+                <span class="muted">{format!("Page {} of {pages}", a.page + 1)}</span>
+                <span class="pager-buttons">{prev}{next}</span>
+            </nav>
+        }
+    });
+    view! {
+        <section class="card hp-wide" aria-labelledby="hp-d">
+            <h2 id="hp-d">"Domains"</h2>
+            <form method="get" action=crate::runtime::host_href(&key) class="grid-toolbar" role="search" aria-label="Search domains">
+                <input type="hidden" name="range" value=range.clone()/>
+                {(a.page > 0).then(|| view! { <input type="hidden" name="page" value=a.page.to_string()/> })}
+                <label class="search">
+                    <span class="sr-only">"Search domains"</span>
+                    <input type="search" name="q" value=q.q.clone() placeholder="Search domains on this page"/>
+                </label>
+                <span class="muted">{count}</span>
+            </form>
+            {if shown == 0 {
+                view! { <p class="muted">{if needle.is_empty() { "No lookups in this range." } else { "No name on this page matches." }}</p> }.into_any()
+            } else {
+                view! {
+                    <div class="table-wrap">
+                        <table class="dom">
+                            <thead><tr>
+                                <th scope="col">"Domain"</th>
+                                <th scope="col">"Service"</th>
+                                <th scope="col" class="num col-opt">"Queries"</th>
+                                <th scope="col" class="num col-opt">"First seen"</th>
+                                <th scope="col" class="num col-opt">"Last seen"</th>
+                                <th scope="col"><span class="sr-only">"Actions"</span></th>
+                            </tr></thead>
+                            <tbody>{body}</tbody>
+                        </table>
+                    </div>
+                }.into_any()
+            }}
+            {pager}
+        </section>
+    }
+    .into_any()
+}
+
+/// The service override editor: a dialog with a plain form, opened by the page's URL
+/// (`edit=`), so it needs no island; a line of script makes it modal when scripting is on.
+fn override_dialog(
+    p: &crate::actions::HostPageData,
+    d: &crate::actions::OverrideDraft,
+    q: &HostQuery,
+) -> AnyView {
+    let back = host_url(&p.host.key, &q.range, q.page, &search_param(&q.q));
+    let (cancel, cancel_x, cancel_btn) = (back.clone(), back.clone(), back);
+    let error = q.error.as_deref().map(|code| match code {
+        "forbidden" => "You may not change service overrides.",
+        "suffix" => "The suffix is a domain such as example.com.",
+        "service" => "The service name is 1 to 48 characters.",
+        "category" => "Pick a category.",
+        _ => "The router refused the override. Check the suffix and the service name.",
+    });
+    let options = crate::runtime::CATEGORIES
+        .iter()
+        .map(|(k, name)| view! { <option value=*k selected=*k == d.category>{*name}</option> })
+        .collect_view();
+    // Save comes first in the form, so Enter saves rather than removes.
+    view! {
+        <dialog id="set-service" class="modal modal-small" open aria-labelledby="ss-title" data-cancel=cancel>
+            <form method="post" action="/ui/fn/service_override">
+                <div class="modal-head">
+                    <h2 id="ss-title">"Set service"</h2>
+                    <a class="icon-btn" href=cancel_x aria-label="Close">"✕"</a>
+                </div>
+                <div class="modal-body">
+                    <p class="muted">"Choose what " <code>{d.qname.clone()}</code>
+                        " and the other names under the suffix count as, on every device's page."</p>
+                    {error.map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
+                    <input type="hidden" name="qname" value=d.qname.clone()/>
+                    <input type="hidden" name="key" value=p.host.key.clone()/>
+                    <input type="hidden" name="range" value=q.range.clone()/>
+                    <input type="hidden" name="page" value=q.page.to_string()/>
+                    <input type="hidden" name="q" value=q.q.clone()/>
+                    <div class="field-stack">
+                        <label for="ss-suffix">"Domain suffix"</label>
+                        <input id="ss-suffix" name="suffix" type="text" required maxlength="253"
+                            value=d.suffix.clone() aria-describedby="ss-suffix-help" autocapitalize="off" spellcheck="false"/>
+                        <p id="ss-suffix-help" class="muted small">"Matches this domain and every name under it."</p>
+                    </div>
+                    <div class="field-stack">
+                        <label for="ss-service">"Service"</label>
+                        <input id="ss-service" name="service" type="text" required maxlength="48" autofocus
+                            value=d.service.clone()/>
+                    </div>
+                    <div class="field-stack">
+                        <label for="ss-category">"Category"</label>
+                        <select id="ss-category" name="category">{options}</select>
+                    </div>
+                </div>
+                <div class="modal-foot">
+                    <button type="submit" class="btn btn-primary">"Save"</button>
+                    <a class="btn" href=cancel_btn>"Cancel"</a>
+                    {d.existing.then(|| view! {
+                        <button type="submit" class="btn modal-foot-start" name="remove" value="1" formnovalidate>"Remove override"</button>
+                    })}
+                </div>
+            </form>
+        </dialog>
+        <script inner_html="(function(){var d=document.getElementById('set-service');if(!d||!d.showModal)return;d.close();d.showModal();var i=document.getElementById('ss-service');if(i){i.focus();i.select();}d.addEventListener('cancel',function(e){e.preventDefault();location.href=d.dataset.cancel;});})();"></script>
+    }
+    .into_any()
+}
+
+/// The body of a host page.
+pub fn host_page_body(p: crate::actions::HostPageData, q: HostQuery) -> AnyView {
+    let range = p
+        .activity
+        .as_ref()
+        .map_or_else(|| q.range.clone(), |a| a.range.clone());
+    let header = host_header(&p, &range);
+    let saved = q.saved.as_deref().map(|s| {
+        let msg = match s {
+            "staged" => "Service override staged — Apply to take effect.",
+            "removed" => "Service override removed. Names are re-attributed within a minute.",
+            _ => "Service override saved. Names are re-attributed within a minute; minutes already counted keep their service.",
+        };
+        view! { <div class="banner banner-info hp-wide" role="status"><p>{msg}</p></div> }
+    });
+    let note = p.note.clone().map(|n| {
+        view! { <section class="card hp-wide"><p class="muted">{n}</p></section> }
+    });
+    let body = p.activity.as_ref().map(|a| {
+        let stale = a.feed_stale.then(|| {
+            view! { <div class="banner banner-warn hp-wide" role="status"><p>{STALE_FEED}</p></div> }
+        });
+        if !a.available {
+            return view! {
+                {stale}
+                <section class="card hp-wide">
+                    <h2>"No DNS activity yet"</h2>
+                    <p class="muted">"Per-device DNS activity is recorded by Insight once it is enabled (" <code>"insight.enabled"</code> "); the first lookups show within a minute."</p>
+                </section>
+            }
+            .into_any();
+        }
+        view! {
+            {stale}
+            {screen_time_card(a)}
+            {services_card(a)}
+            {timeline_card(a)}
+            {domains_card(&p, a, &q)}
+        }
+        .into_any()
+    });
+    let dialog = p.draft.as_ref().map(|d| override_dialog(&p, d, &q));
+    view! {
+        <div class="hp-grid">
+            {header}
+            {saved}
+            {note}
+            {body}
+        </div>
+        {dialog}
+    }
+    .into_any()
+}
+
+/// Hosts › one device: who it is and what it did (`/ui/hosts/<key>`). Server-rendered; the
+/// range, search, paging and the service override editor are links and plain forms.
+#[component]
+pub fn HostActivityPage() -> impl IntoView {
+    let key = param("mac").unwrap_or_default();
+    let q = HostQuery::from_query(&use_query_map().get_untracked());
+    // the layout started the load (and its heading uses it too)
+    let shared = use_context::<HostPageLoad>();
+    let load = move || {
+        let (key, q, shared) = (key.clone(), q.clone(), shared.clone());
+        Suspend::new(async move {
+            let data = match shared {
+                Some(l) => l.0.await,
+                None => {
+                    crate::actions::host_page(key, q.range.clone(), q.page, q.edit.clone()).await
+                }
+            };
+            match data {
+                Ok(p) => host_page_body(p, q),
+                Err(e) => load_error(e),
+            }
+        })
+    };
+    view! { <Suspense fallback=|| ()>{load}</Suspense> }
+}
+
 /// Menu entries sensr does not implement yet.
 #[component]
 pub fn NotYet() -> impl IntoView {
@@ -1769,7 +2401,8 @@ mod tests {
         assert!(html.contains("[2001:db8::7]:40000"));
         assert_eq!(html.matches("action=\"/ui/fn/ids_suppress\"").count(), 1);
         assert!(html.contains("aria-label=\"Source only: suppress sid 2001219 from 2001:db8::7\""));
-        assert!(html.contains("value=\"/ui/ids/alerts?text=ssh%20scan&amp;page=1\""));
+        assert!(html.contains("name=\"text\" value=\"ssh scan\""), "{html}");
+        assert!(html.contains("name=\"page\" value=\"1\""), "{html}");
         assert!(
             html.contains("href=\"/ui/ids/alerts?text=ssh%20scan\""),
             "previous page"

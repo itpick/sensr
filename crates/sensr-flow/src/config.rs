@@ -1,7 +1,8 @@
 //! What the agent renders for `sensr-insight` (`/run/sensr/insight/insight.json`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use sensr_schema::models::insight::ServiceOverride;
 use serde::{Deserialize, Serialize};
 
 /// Where the agent writes the daemon's configuration.
@@ -12,6 +13,14 @@ pub const DB_DIR: &str = "/var/lib/sensr-insight";
 pub const FLOWS_DB: &str = "flows.db";
 /// Alert database file name.
 pub const ALERTS_DB: &str = "alerts.db";
+/// The unix socket the daemon reads Unbound's dnstap stream from
+/// (Unbound's `dnstap-socket-path`).
+pub const DNSTAP_SOCKET: &str = "/run/sensr-insight/dnstap.sock";
+/// The group of the dnstap socket: Unbound's and the daemon's users are
+/// members, nobody else.
+pub const DNSTAP_GROUP: &str = "sensr-dnstap";
+/// The DNS feed's status file, in [`DB_DIR`] ([`DnsStatus`]).
+pub const DNS_STATUS: &str = "dns-status.json";
 
 /// The daemon's configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +81,64 @@ pub struct FlowConfig {
     /// History.
     #[serde(default)]
     pub retention: Retention,
+    /// Per-host DNS activity from Unbound's dnstap feed (`None`: off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns: Option<DnsConfig>,
+}
+
+/// Per-host DNS activity settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsConfig {
+    /// The dnstap socket to create and listen on.
+    pub socket: PathBuf,
+    /// Owner corrections of the service catalogue (enabled ones apply).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_overrides: Vec<ServiceOverride>,
+    /// Unbound's query log, read for lookups only while the dnstap feed is
+    /// stale (`None`: query logging is off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_log: Option<PathBuf>,
+    /// sensr-dns's resolver statistics (`unbound-stats.json`): the feed is
+    /// stale only when Unbound's query counter grew while no frames came
+    /// (`None`: never reported stale).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unbound_stats: Option<PathBuf>,
+}
+
+impl DnsConfig {
+    /// The defaults for `socket`: no overrides, query log or statistics.
+    pub fn new(socket: impl Into<PathBuf>) -> DnsConfig {
+        DnsConfig {
+            socket: socket.into(),
+            service_overrides: Vec::new(),
+            query_log: None,
+            unbound_stats: None,
+        }
+    }
+}
+
+/// What the daemon reports about the dnstap feed ([`DNS_STATUS`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsStatus {
+    /// No dnstap frames during 5 minutes in which Unbound's query counter
+    /// grew: lookups come
+    /// from the query log, if any, and there are no service minutes.
+    pub dns_feed_stale: bool,
+    /// Unix seconds of the newest frame (`None`: none since the start).
+    #[serde(default)]
+    pub last_frame: Option<i64>,
+}
+
+impl DnsStatus {
+    /// The status in database directory `dir`; a missing or damaged file
+    /// reads as not stale.
+    pub fn read(dir: &Path) -> DnsStatus {
+        std::fs::read(dir.join(DNS_STATUS))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
 }
 
 /// IDS alert storage settings.

@@ -316,6 +316,80 @@ pub async fn hosts(
     }
 }
 
+/// Query of `GET /api/v1/hosts/{mac}/activity`.
+#[derive(Deserialize)]
+pub struct ActivityQuery {
+    /// `today` (the default) or `7d`.
+    range: Option<String>,
+    /// Domains page, from 0.
+    domains_page: Option<u32>,
+}
+
+/// Whether `caller` may read the insight database (what the activity route needs besides the
+/// hosts privilege the middleware checked).
+///
+/// The insight privilege is `page-diagnostics-networkinsight`, whose patterns include
+/// `api/v1/insight/*`; `/api/v1/insight/top` stands for "any insight route" because the
+/// registry is queried by URL, not by privilege name.
+pub(crate) fn may_read_insight(state: &AppState, caller: &Caller) -> bool {
+    state.registry.grants(
+        caller.info.privileges.iter().map(String::as_str),
+        "/api/v1/insight/top",
+    )
+}
+
+/// `GET /api/v1/hosts/{mac}/activity?range=today|7d&domains_page=N`: one device's DNS
+/// activity (minutes per service and category, an hourly timeline, the names it looked up).
+/// Needs the hosts and the insight privileges; 404 for a MAC not in the inventory, 400 for
+/// a bad range.
+pub async fn host_activity(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    Path(mac): Path<String>,
+    Query(q): Query<ActivityQuery>,
+) -> ApiResult {
+    if !may_read_insight(&state, &caller) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            format!("{} may not read insight data", caller.info.user),
+        ));
+    }
+    let range = q.range.unwrap_or_else(|| "today".into());
+    if !matches!(range.as_str(), "today" | "7d") {
+        return Err(bad(format!("range is today or 7d, not {range:?}")));
+    }
+    let section = sensr_ipc::RuntimeSection::Hosts;
+    let hosts = match call(&state, &caller, Op::Runtime { section }).await? {
+        Response::Value(v) => v.unwrap_or(Value::Null),
+        other => return Err(unexpected(other)),
+    };
+    let page = q.domains_page.unwrap_or(0);
+    let view = tokio::task::spawn_blocking(move || {
+        let now = crate::insight::now();
+        sensr_ui::insight::host_activity(
+            &crate::insight::dir(),
+            hosts,
+            &mac,
+            &range,
+            page,
+            now,
+            sensr_ui::insight::local_offset(now),
+        )
+    })
+    .await
+    .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match view {
+        Ok(v) => Ok(to_json(&v)),
+        Err(sensr_ui::insight::ActivityError::BadRange) => Err(bad("range is today or 7d")),
+        Err(sensr_ui::insight::ActivityError::UnknownHost) => {
+            Err(ApiError::new(StatusCode::NOT_FOUND, "no such host"))
+        }
+        Err(sensr_ui::insight::ActivityError::Failed(m)) => {
+            Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, m))
+        }
+    }
+}
+
 /// Body of `POST /api/v1/hosts/forget`.
 #[derive(Deserialize)]
 pub struct ForgetBody {
@@ -408,6 +482,40 @@ pub async fn set_host_label(
         mac: b.mac,
         kind: b.kind,
         maker: b.maker,
+    };
+    match call(&state, &caller, op).await? {
+        Response::Value(Some(v)) => Ok(Json(v)),
+        other => Err(unexpected(other)),
+    }
+}
+
+/// Body of `POST /api/v1/insight/service-override`.
+#[derive(Deserialize)]
+pub struct ServiceOverrideBody {
+    /// Domain suffix (`example.com`).
+    suffix: String,
+    /// Service name (1-48 characters); `null` with `category` removes it.
+    #[serde(default)]
+    service: Option<String>,
+    /// Category key (`games`, `ads_tracking`, ...).
+    #[serde(default)]
+    category: Option<sensr_schema::models::insight::Category>,
+}
+
+/// `POST /api/v1/insight/service-override`: set what a domain suffix counts
+/// as on the per-host DNS activity page, or remove the override with both
+/// `service` and `category` `null`. The agent commits at once when nothing
+/// else is staged (`{"result": "applied"}`), else stages (`"staged"`);
+/// read-only principals get 403.
+pub async fn set_service_override(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    Json(b): Json<ServiceOverrideBody>,
+) -> ApiResult {
+    let op = Op::ServiceOverrideSet {
+        suffix: b.suffix,
+        service: b.service,
+        category: b.category,
     };
     match call(&state, &caller, op).await? {
         Response::Value(Some(v)) => Ok(Json(v)),

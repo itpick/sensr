@@ -11,7 +11,13 @@ repository.workspace = true
 default = ["store"]
 # SQLite storage, queries and the daemon; without it only the shared
 # config/nft contract (what sensr-apply renders).
-store = ["dep:rusqlite", "dep:anyhow", "dep:clap", "dep:tracing-subscriber"]
+store = [
+  "dep:rusqlite",
+  "dep:anyhow",
+  "dep:clap",
+  "dep:tracing-subscriber",
+  "dep:nix",
+]
 
 [[bin]]
 name = "sensr-insight"
@@ -21,10 +27,16 @@ required-features = ["store"]
 anyhow = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
+sensr-fingerprint.workspace = true
+sensr-schema.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# the dnstap socket's group (chown by group name)
+nix = { version = "0.32", features = ["fs", "user"], optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

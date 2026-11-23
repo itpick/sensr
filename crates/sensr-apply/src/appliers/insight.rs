@@ -3,10 +3,13 @@
 
 use std::path::PathBuf;
 
-use sensr_flow::config::{Config, FlowConfig, IdsConfig, Iface, Retention};
+use sensr_flow::config::{
+    Config, DNSTAP_SOCKET, DnsConfig, FlowConfig, IdsConfig, Iface, Retention,
+};
 use sensr_schema::Document;
 use sensr_schema::models::interfaces::InterfaceRole;
 
+use super::dns_runtime::{QUERY_LOG, STATS_FILE};
 use super::suricata::LOG_DIR;
 
 /// Live directory of the daemon's files.
@@ -37,6 +40,20 @@ pub fn config(doc: &Document) -> Option<Config> {
             })
             .collect();
         let r = &doc.insight.retention;
+        // Unbound streams dnstap whenever insight is on (`unbound.rs`)
+        let dns = doc.dns.enabled.then(|| DnsConfig {
+            service_overrides: doc
+                .insight
+                .dns
+                .service_overrides
+                .iter()
+                .map(|(_, o)| o.clone())
+                .filter(|o| o.enabled)
+                .collect(),
+            query_log: doc.dns.tuning.log_queries.then(|| PathBuf::from(QUERY_LOG)),
+            unbound_stats: doc.dns.statistics.then(|| PathBuf::from(STATS_FILE)),
+            ..DnsConfig::new(DNSTAP_SOCKET)
+        });
         FlowConfig {
             sample_seconds: u32::from(doc.insight.sample_seconds),
             max_entries: doc.insight.max_entries,
@@ -46,6 +63,7 @@ pub fn config(doc: &Document) -> Option<Config> {
                 hour_days: u32::from(r.hour_days),
                 day_days: u32::from(r.day_days),
             },
+            dns,
         }
     });
     let ids = doc.ids.enabled.then(|| IdsConfig {
@@ -87,6 +105,9 @@ mod tests {
         assert!(f.interfaces.iter().any(|i| i.local));
         assert!(c.ids.is_none());
         assert!(ruleset(&c).contains("update"));
+        let dns = f.dns.as_ref().expect("the resolver is on in the golden");
+        assert_eq!(dns.socket, PathBuf::from(DNSTAP_SOCKET));
+        assert!(dns.service_overrides.is_empty());
         d.insight.interfaces = vec!["lan".parse().unwrap()];
         let c = config(&d).unwrap();
         let locals: Vec<_> = c

@@ -712,6 +712,22 @@ pub async fn hosts() -> Result<Option<HostCard>, ServerFnError> {
     if let Ok(doc) = imp::doc().await {
         list.mark_staged(&doc);
     }
+    // Today's screen time and the DNS colour preview come from the insight database, for
+    // callers who may read it (cached: the card polls).
+    if b.may_access("/api/v1/insight/top") {
+        let dir = b.insight_dir();
+        let now = imp::now();
+        let scan = move || crate::insight::host_mix(&dir, now);
+        // Off the async threads when there is a runtime (there is not in the component tests).
+        let mix = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::spawn_blocking(scan).await.ok()
+        } else {
+            Some(scan())
+        };
+        if let Some(mix) = mix {
+            crate::insight::apply_mix(&mut list.hosts, &mix);
+        }
+    }
     let networks: std::collections::BTreeMap<String, String> = list
         .hosts
         .iter()
@@ -731,6 +747,225 @@ pub async fn hosts() -> Result<Option<HostCard>, ServerFnError> {
         arp_error: list.intercept.as_ref().and_then(|i| i.error.clone()),
         list,
     }))
+}
+
+/// A device's page (`/ui/hosts/<key>`): its inventory row and, when it has a MAC and the
+/// caller may read the insight database, what it did over the range.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostPageData {
+    /// The host as the inventory reports it.
+    pub host: crate::runtime::HostRow,
+    /// The inventory's clock (Unix seconds), for "last seen".
+    pub now: u64,
+    /// Its DNS activity; `None` with [`HostPageData::note`] saying why.
+    pub activity: Option<crate::api::HostActivityView>,
+    /// Why there is no activity to show.
+    pub note: Option<String>,
+    /// The caller may set service overrides.
+    pub can_edit: bool,
+    /// The override editor, open for one looked-up name.
+    pub draft: Option<OverrideDraft>,
+}
+
+/// The service override editor's starting values for a looked-up name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OverrideDraft {
+    /// The name the editor was opened for.
+    pub qname: String,
+    /// The suffix to set: the existing override's, else the name's registrable domain.
+    pub suffix: String,
+    /// Service name.
+    pub service: String,
+    /// Category key.
+    pub category: String,
+    /// An override of `suffix` exists (the editor offers Remove).
+    pub existing: bool,
+}
+
+/// The data of a host page: `key` is the inventory key (a MAC, or `id:…`), `range`
+/// `today` or `7d`, `page` the domains page, `edit` a looked-up name to open the service
+/// override editor for.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn host_page(
+    key: String,
+    range: String,
+    page: u32,
+    edit: Option<String>,
+) -> Result<HostPageData, ServerFnError> {
+    use serde_json::Value;
+    tracing::debug!(key, range, page, "host page load");
+    let b = imp::backend()?;
+    if !b.may_access("/api/v1/hosts") {
+        return Err(ServerFnError::new("you may not view hosts"));
+    }
+    let list: crate::runtime::HostList =
+        crate::runtime::parse(b.runtime(RuntimeSection::Hosts).await.map_err(imp::err)?);
+    let key = key.trim().to_ascii_lowercase();
+    let now = list.now;
+    let Some(host) = list.hosts.into_iter().find(|h| {
+        h.key.eq_ignore_ascii_case(&key)
+            || h.mac
+                .as_deref()
+                .is_some_and(|m| m.eq_ignore_ascii_case(&key))
+    }) else {
+        return Err(ServerFnError::new(
+            "There is no such host in the inventory.",
+        ));
+    };
+    let range = if range == "7d" { "7d" } else { "today" };
+    let mut out = HostPageData {
+        now,
+        can_edit: !b.read_only() && b.may_access("/api/v1/insight/service-override"),
+        ..HostPageData::default()
+    };
+    match host.mac.clone().filter(|_| !host.key.starts_with("id:")) {
+        None => {
+            out.note = Some(
+                "This device has no MAC address, so its DNS activity cannot be told apart.".into(),
+            );
+        }
+        Some(_) if !b.may_access("/api/v1/insight/top") => {
+            out.note = Some("You may not view DNS activity.".into());
+        }
+        Some(mac) => match b.host_activity(mac, range.to_owned(), page).await {
+            Ok(v) => out.activity = Some(v),
+            Err(e) => out.note = Some(format!("Could not read the DNS activity: {e}")),
+        },
+    }
+    if let Some(qname) = edit
+        .map(|q| q.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|q| out.can_edit && !q.is_empty() && q.len() <= 253 && q.contains('.'))
+    {
+        let insight = b.get("insight").await.unwrap_or(Value::Null);
+        let existing = insight
+            .pointer("/dns/service_overrides")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|m| m.values())
+            .filter_map(|o| {
+                Some((
+                    o["suffix"].as_str()?,
+                    o["service"].as_str()?,
+                    o["category"].as_str()?,
+                ))
+            })
+            .filter(|(sfx, ..)| {
+                qname == *sfx || qname.strip_suffix(sfx).is_some_and(|h| h.ends_with('.'))
+            })
+            .max_by_key(|(sfx, ..)| sfx.len());
+        let row = out
+            .activity
+            .as_ref()
+            .and_then(|a| a.domains.iter().find(|d| d.qname == qname));
+        out.draft = Some(match existing {
+            Some((suffix, service, category)) => OverrideDraft {
+                qname,
+                suffix: suffix.to_owned(),
+                service: service.to_owned(),
+                category: category.to_owned(),
+                existing: true,
+            },
+            None => OverrideDraft {
+                suffix: sensr_flow::attrib::registrable_domain(&qname),
+                service: row.map(|d| d.service.clone()).unwrap_or_default(),
+                category: row.map_or_else(|| "other".to_owned(), |d| d.category.clone()),
+                qname,
+                existing: false,
+            },
+        });
+    }
+    out.host = host;
+    Ok(out)
+}
+
+pub use service_override_form::*;
+
+/// The service override form post: one field per form input, so more arguments than
+/// clippy likes (the server macro also generates the browser-side stub, hence a module).
+#[allow(clippy::too_many_arguments)]
+mod service_override_form {
+    #[cfg(feature = "ssr")]
+    use super::imp;
+    use leptos::prelude::*;
+
+    /// The service override editor's form target (a plain form post: no scripting needed).
+    /// Sets what the domain `suffix` counts as, or with `remove` drops its override, then goes
+    /// back to the host page of `key` (with its `range`, domains `page` and search `q`),
+    /// reopening the editor for `qname` with an error code when it was refused. The redirect
+    /// is rebuilt here from those fields, each percent-encoded: nothing from the form reaches
+    /// the Location header as given.
+    #[server(prefix = "/ui/fn", endpoint = "service_override")]
+    pub async fn service_override(
+        suffix: String,
+        service: String,
+        category: String,
+        qname: String,
+        key: String,
+        range: Option<String>,
+        page: Option<u32>,
+        q: Option<String>,
+        remove: Option<String>,
+    ) -> Result<(), ServerFnError> {
+        use crate::api::ApiError;
+        use crate::pages::url_encode;
+        let back = crate::pages::host_back_url(
+            &key,
+            range.as_deref().unwrap_or_default(),
+            page.unwrap_or(0),
+            q.as_deref().unwrap_or_default(),
+        );
+        let sep = if back.contains('?') { '&' } else { '?' };
+        let fail = |code: &str| -> Result<(), ServerFnError> {
+            leptos_axum::redirect(&format!(
+                "{back}{sep}edit={}&error={code}",
+                url_encode(qname.trim())
+            ));
+            Ok(())
+        };
+        let b = imp::backend()?;
+        if b.read_only() || !b.may_access("/api/v1/insight/service-override") {
+            return fail("forbidden");
+        }
+        let suffix = suffix.trim().trim_end_matches('.').to_ascii_lowercase();
+        if !sensr_schema::models::insight::is_domain_suffix(&suffix) {
+            return fail("suffix");
+        }
+        let r = if remove.is_some() {
+            b.set_service_override(suffix, None, None).await
+        } else {
+            let service = service.trim().to_owned();
+            if service.is_empty()
+                || service.chars().count() > 48
+                || service.chars().any(char::is_control)
+            {
+                return fail("service");
+            }
+            if !crate::runtime::CATEGORIES
+                .iter()
+                .any(|(k, _)| *k == category)
+            {
+                return fail("category");
+            }
+            b.set_service_override(suffix, Some(service), Some(category))
+                .await
+        };
+        match r {
+            Ok(r) => {
+                let what = match (remove.is_some(), r.as_str()) {
+                    (_, "staged") => "staged",
+                    (true, _) => "removed",
+                    _ => "applied",
+                };
+                leptos_axum::redirect(&format!("{back}{sep}saved={what}"));
+                Ok(())
+            }
+            Err(ApiError::Unauthorized) => fail("forbidden"),
+            Err(e) => {
+                tracing::info!("service override refused: {e}");
+                fail("refused")
+            }
+        }
+    }
 }
 
 /// Refusal of a Quarantine for the device the request comes from (the agent's wording).
@@ -1063,25 +1298,22 @@ pub async fn ids_suppress(
     gid: u32,
     signature: String,
     src: Option<String>,
-    back: String,
+    text: Option<String>,
+    host: Option<String>,
+    page: Option<u32>,
 ) -> Result<(), ServerFnError> {
     use crate::adapt::Store;
     use serde_json::{Value, json};
-    // Only ever back to the alerts tab, keeping its filter but not an old notice.
-    let (path, query) = back.split_once('?').unwrap_or((&back, ""));
-    let path = if path == "/ui/ids/alerts" {
-        path
-    } else {
-        "/ui/ids/alerts"
-    };
-    let kept: Vec<&str> = query
-        .split('&')
-        .filter(|kv| !kv.is_empty() && !kv.starts_with("staged=") && !kv.starts_with("error="))
-        .collect();
+    // Back to the alerts tab with its filter, rebuilt here from the parsed fields (each
+    // value percent-encoded), so the Location header is always plain ASCII.
+    let back = crate::pages::alerts_url(
+        text.as_deref().unwrap_or_default().trim(),
+        host.as_deref().unwrap_or_default().trim(),
+        page.unwrap_or(0),
+    );
     let to = |notice: String| {
-        let mut q = kept.clone();
-        q.push(&notice);
-        leptos_axum::redirect(&format!("{path}?{}", q.join("&")));
+        let sep = if back.contains('?') { '&' } else { '?' };
+        leptos_axum::redirect(&format!("{back}{sep}{notice}"));
     };
     let net = match src.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         None => None,
@@ -1089,10 +1321,7 @@ pub async fn ids_suppress(
             Ok(std::net::IpAddr::V4(a)) => Some(format!("{a}/32")),
             Ok(std::net::IpAddr::V6(a)) => Some(format!("{a}/128")),
             Err(_) => {
-                to(format!(
-                    "error={}",
-                    crate::pages::url_encode("Not an address.")
-                ));
+                to("error=address".into());
                 return Ok(());
             }
         },
@@ -1118,12 +1347,7 @@ pub async fn ids_suppress(
                 && s.get("track") == item.get("track")
         });
         if dup {
-            to(format!(
-                "error={}",
-                crate::pages::url_encode(
-                    "This signature is already suppressed for these addresses."
-                )
-            ));
+            to("error=duplicate".into());
             return Ok(());
         }
         m.insert(crate::models::new_uuid(), item);
@@ -1131,7 +1355,10 @@ pub async fn ids_suppress(
     let errors = imp::store(&doc, &["ids"], |_| None).await?;
     match errors.first() {
         None => to(format!("staged={sid}")),
-        Some(e) => to(format!("error={}", crate::pages::url_encode(&e.message))),
+        Some(e) => {
+            tracing::info!("suppression for sid {sid} refused: {}", e.message);
+            to("error=invalid".into());
+        }
     }
     Ok(())
 }

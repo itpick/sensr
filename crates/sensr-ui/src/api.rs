@@ -398,6 +398,115 @@ impl TrafficRow {
     }
 }
 
+/// A device's DNS activity page: its header (from the host inventory) and what it did over
+/// a range (`today` or `7d`). Category fields are keys of [`crate::runtime::CATEGORIES`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostActivityView {
+    /// MAC address, lowercase.
+    pub mac: String,
+    /// What the host is called.
+    pub name: Option<String>,
+    /// What the router thinks it is.
+    pub label: Option<crate::runtime::HostLabelView>,
+    /// IPv4 address.
+    pub ipv4: Option<String>,
+    /// IPv6 addresses.
+    pub ipv6: Vec<String>,
+    /// `isolated` or `quarantine`; `None` is Normal.
+    pub mode: Option<String>,
+    /// Last sighting, seconds since the epoch.
+    pub last_seen: Option<u64>,
+    /// Currently on the network.
+    pub online: bool,
+    /// `today` or `7d`.
+    pub range: String,
+    /// Start of the range (Unix seconds).
+    pub from: i64,
+    /// End of the range.
+    pub to: i64,
+    /// Router local time minus UTC, in seconds (what days and hours are in).
+    pub utc_offset: i64,
+    /// The insight database has DNS activity data at all.
+    pub available: bool,
+    /// The dnstap feed is stale: lookups only, no minutes.
+    pub feed_stale: bool,
+    /// Newest dnstap frame (Unix seconds).
+    pub last_frame: Option<i64>,
+    /// Screen-time minutes in the range.
+    pub screen_time: u32,
+    /// Minutes per service, largest first.
+    pub services: Vec<ActivityService>,
+    /// Minutes per category, largest first.
+    pub categories: Vec<ActivityCategory>,
+    /// Screen-time minutes per local hour.
+    pub timeline: Vec<ActivityCell>,
+    /// One page of looked-up names, most queried first.
+    pub domains: Vec<ActivityDomain>,
+    /// Names looked up in the range, over all pages.
+    pub domains_total: u32,
+    /// The page shown, from 0.
+    pub page: u32,
+    /// Names per page.
+    pub per_page: u32,
+}
+
+/// Active minutes of one service.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ActivityService {
+    /// Service name.
+    pub service: String,
+    /// Category key.
+    pub category: String,
+    /// Active minutes.
+    pub minutes: u32,
+}
+
+/// Active minutes of one category.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ActivityCategory {
+    /// Category key.
+    pub category: String,
+    /// Active minutes.
+    pub minutes: u32,
+}
+
+/// One hour of the timeline.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ActivityCell {
+    /// Local day, as days since 1970-01-01.
+    pub day: i64,
+    /// Local hour, 0-23.
+    pub hour: u8,
+    /// Screen-time minutes in it.
+    pub minutes: u32,
+}
+
+/// One name a device looked up (untrusted text).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ActivityDomain {
+    /// The name.
+    pub qname: String,
+    /// Lookups in the range.
+    pub count: u64,
+    /// First lookup ever kept (Unix seconds).
+    pub first_seen: i64,
+    /// Latest lookup.
+    pub last_seen: i64,
+    /// Its service.
+    pub service: String,
+    /// Category key.
+    pub category: String,
+    /// First seen within the last 24 hours.
+    pub new: bool,
+    /// Answered by a blocklist.
+    pub blocked: bool,
+}
+
 /// Reporting › Insight for one time range (and optionally one local host).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InsightReport {
@@ -720,6 +829,15 @@ mod server {
             &self,
             section: crate::runtime::RuntimeSection,
         ) -> BoxFuture<'_, ApiResult<Value>>;
+        /// One device's DNS activity over `range` (`today` or `7d`), domains page `page` from
+        /// 0. The caller needs the hosts and insight privileges; an unknown MAC is
+        /// [`ApiError::NotFound`], a bad range [`ApiError::Validation`].
+        fn host_activity(
+            &self,
+            mac: String,
+            range: String,
+            page: u32,
+        ) -> BoxFuture<'_, ApiResult<HostActivityView>>;
         /// Drops an unreserved host from the inventory (`key` as in
         /// [`crate::runtime::HostRow::key`]); it comes back if it is still on the network.
         fn forget_host(&self, key: String) -> BoxFuture<'_, ApiResult<()>>;
@@ -742,6 +860,16 @@ mod server {
             mac: String,
             kind: Option<String>,
             maker: Option<String>,
+        ) -> BoxFuture<'_, ApiResult<String>>;
+        /// Sets what the domain `suffix` counts as on the DNS activity page
+        /// (`insight.dns.service_overrides`): `service` a name, `category` a
+        /// [`crate::runtime::CATEGORIES`] key; both `None` removes the override. Returns
+        /// `applied` when it took effect at once, `staged` when it waits for Apply.
+        fn set_service_override(
+            &self,
+            suffix: String,
+            service: Option<String>,
+            category: Option<String>,
         ) -> BoxFuture<'_, ApiResult<String>>;
         /// The caller may read but not change anything (`user-config-readonly`), so the
         /// UI hides actions that would be refused.

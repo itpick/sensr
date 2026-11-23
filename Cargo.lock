@@ -5185,7 +5185,10 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "nix",
  "rusqlite",
+ "sensr-fingerprint",
+ "sensr-schema",
  "serde",
  "serde_json",
  "tempfile",
@@ -5313,6 +5316,7 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "similar 3.2.1",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tower",
