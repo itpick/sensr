@@ -525,7 +525,16 @@ pkgs.testers.runNixOSTest {
                 )
                 router.wait_for_unit("sensr-insight.service")
                 router.wait_until_succeeds("test -S /run/sensr-insight/dnstap.sock", timeout=60)
-                router.wait_until_succeeds(f"curl -skf -u root:opnsense {API}/api/v1/status >/dev/null", timeout=60)
+                try:
+                    router.wait_until_succeeds(f"curl -skf -u root:opnsense {API}/api/v1/status >/dev/null", timeout=60)
+                except Exception:
+                    print(router.execute(
+                        f"curl -sk -o /dev/null -w '%{{http_code}}\\n' {API}/api/v1/status;"
+                        f" curl -sk -o /dev/null -w '%{{http_code}}\\n' -u root:opnsense {API}/api/v1/status;"
+                        f" curl -skv -u root:opnsense {API}/api/v1/status 2>&1 | tail -n 20;"
+                        " ss -ltnp; journalctl -b -u sensr-api --no-pager | tail -n 20"
+                    )[1])
+                    raise
                 lan_mac = lan.succeed("cat /sys/class/net/eth1/address").strip().lower()
                 # The commit reloads Unbound: a query may time out meanwhile.
                 lan.wait_until_succeeds(
@@ -555,7 +564,9 @@ pkgs.testers.runNixOSTest {
                         + " | jq -c '{available, feed_stale, screen_time, services, categories, domains: [.domains[] | {qname, service, blocked}]}'"
                     )[1])
                     print(router.execute(
-                        "ls -l /run/sensr-insight; journalctl -b -u sensr-insight --no-pager | tail -n 30;"
+                        "ls -ld /run/sensr-insight; ls -l /run/sensr-insight; getent group sensr-dnstap;"
+                        " grep -E '^(Uid|Gid|Groups)' /proc/$(systemctl show -p MainPID --value sensr-unbound)/status;"
+                        " journalctl -b -u sensr-insight --no-pager | tail -n 30;"
                         " journalctl -b --no-pager | grep -i dnstap | tail -n 20"
                     )[1])
 
