@@ -789,7 +789,10 @@ async fn mode_set_applies_on_clean_head() {
         [(MODE_MAC.to_owned(), HostModeKind::Isolated, true)]
     );
     let h = history(&mut c).await;
-    assert_eq!(h[0].description, "set host mode");
+    assert_eq!(
+        h[0].description,
+        format!("set host mode {MODE_MAC} → isolated")
+    );
 
     // a new mode replaces the entry; Normal removes it
     mode_set(&mut c, Some(sensr_ipc::HostModeMode::Quarantine), None)
@@ -799,9 +802,17 @@ async fn mode_set_applies_on_clean_head() {
         modes_of(fx.applied().last().unwrap()),
         [(MODE_MAC.to_owned(), HostModeKind::Quarantine, true)]
     );
+    assert_eq!(
+        history(&mut c).await[0].description,
+        format!("set host mode {MODE_MAC} → quarantine")
+    );
     let r = mode_set(&mut c, None, None).await.unwrap();
     assert_eq!(r, Response::Value(Some(json!({"result": "applied"}))));
     assert!(modes_of(fx.applied().last().unwrap()).is_empty());
+    assert_eq!(
+        history(&mut c).await[0].description,
+        format!("set host mode {MODE_MAC} → normal")
+    );
     let st = match c.call(Op::Status).await.unwrap() {
         Response::Status(s) => s,
         other => panic!("{other:?}"),

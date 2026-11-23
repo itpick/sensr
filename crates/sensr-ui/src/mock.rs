@@ -440,6 +440,10 @@ impl Backend for MockBackend {
                 crate::actions::SELF_QUARANTINE.to_owned(),
             )));
         }
+        let message = format!(
+            "set host mode {mac} → {}",
+            mode.as_deref().unwrap_or("normal")
+        );
         // Like the agent: commit at once unless other changes are staged or a commit
         // awaits confirmation, then stage beside them.
         ready(self.with(|s| {
@@ -472,7 +476,7 @@ impl Backend for MockBackend {
                 return Ok("staged".to_owned());
             }
             if doc != s.head().doc {
-                s.push("root", "set host mode", doc);
+                s.push("root", &message, doc);
             }
             Ok("applied".to_owned())
         }))

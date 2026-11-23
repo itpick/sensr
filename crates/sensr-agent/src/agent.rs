@@ -1054,10 +1054,13 @@ impl<A: Applier> Agent<A> {
         let head = inner.head.clone();
         let previous = inner.candidate.clone();
         self.stage(inner, &head.1, doc)?;
-        if let Err(e) = self
-            .commit(inner, principal, Some("set host mode".into()), None)
-            .await
-        {
+        let to = match mode {
+            None => "normal",
+            Some(HostModeMode::Isolated) => "isolated",
+            Some(HostModeMode::Quarantine) => "quarantine",
+        };
+        let message = format!("set host mode {mac} → {to}");
+        if let Err(e) = self.commit(inner, principal, Some(message), None).await {
             // refused before anything was stored: leave the candidate as it
             // was rather than holding a half-made mode change
             if inner.head.0 == head.0 {
