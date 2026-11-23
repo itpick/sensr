@@ -35,6 +35,19 @@ pub trait Applier: Send + 'static {
     /// Makes the system match `next`. Must be idempotent.
     fn apply(&mut self, running: Option<&Document>, next: &Document) -> Result<(), ApplyError>;
 
+    /// The boot apply (agent start, `SIGHUP`): makes the system match
+    /// `next` from scratch, starting every service even when its files did
+    /// not change. Fault-isolated where the pipeline can be: a backend whose
+    /// own checker rejects its configuration is held back and described in
+    /// the returned list, and the rest still applies, so one bad or
+    /// unverifiable daemon config cannot keep the whole network down. The
+    /// default plans and applies all or nothing.
+    fn apply_boot(&mut self, next: &Document) -> Result<Vec<String>, ApplyError> {
+        self.plan(None, next)?;
+        self.apply(None, next)?;
+        Ok(Vec::new())
+    }
+
     /// Run-time state of a subsystem (gateway status, alias feeds, PD), as
     /// JSON; `None` when this pipeline has none.
     fn runtime(&self, _section: sensr_ipc::RuntimeSection) -> Option<Value> {
@@ -191,11 +204,11 @@ impl FakeApplier {
     }
 }
 
-impl Applier for FakeApplier {
-    fn plan(&self, running: Option<&Document>, next: &Document) -> Result<PlanView, ApplyError> {
-        let json = serde_json::to_value(next).unwrap_or(Value::Null);
-        let issues: Vec<ValidationIssue> = self
-            .lock()
+impl FakeApplier {
+    /// What `reject_paths` makes the test checker reject in `doc`.
+    fn rejections(&self, doc: &Document) -> Vec<ValidationIssue> {
+        let json = serde_json::to_value(doc).unwrap_or(Value::Null);
+        self.lock()
             .reject_paths
             .iter()
             .filter(|p| p.lookup(&json).is_some())
@@ -203,7 +216,13 @@ impl Applier for FakeApplier {
                 path: p.to_string(),
                 message: "Rejected by the test applier.".into(),
             })
-            .collect();
+            .collect()
+    }
+}
+
+impl Applier for FakeApplier {
+    fn plan(&self, running: Option<&Document>, next: &Document) -> Result<PlanView, ApplyError> {
+        let issues = self.rejections(next);
         if !issues.is_empty() {
             return Err(ApplyError::Invalid(issues));
         }
@@ -217,6 +236,18 @@ impl Applier for FakeApplier {
         }
         st.applied.push(next.clone());
         Ok(())
+    }
+
+    /// Like the real pipeline: rejected paths are held back and reported,
+    /// the rest applies.
+    fn apply_boot(&mut self, next: &Document) -> Result<Vec<String>, ApplyError> {
+        let held = self
+            .rejections(next)
+            .into_iter()
+            .map(|i| format!("{}: {}", i.path, i.message))
+            .collect();
+        self.apply(None, next)?;
+        Ok(held)
     }
 
     fn runtime(&self, section: sensr_ipc::RuntimeSection) -> Option<Value> {

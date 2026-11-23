@@ -672,7 +672,13 @@ pub fn ApplyBanner(initial: Pending) -> impl IntoView {
         <div class="banner-slot" role="region" aria-label="Pending changes" aria-live="polite">
             {move || state.get().alert.map(|a| view! {
                 <div class="banner banner-warn" role="alert">
-                    <p><strong>"First-boot seed: "</strong>{a}</p>
+                    {a.lines().map(|line| {
+                        let (label, text) = match line.split_once(": ") {
+                            Some((l, t)) => (format!("{l}: "), t.to_owned()),
+                            None => (String::new(), line.to_owned()),
+                        };
+                        view! { <p><strong>{label}</strong>{text}</p> }
+                    }).collect::<Vec<_>>()}
                 </div>
             })}
             {move || {

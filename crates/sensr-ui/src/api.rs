@@ -106,8 +106,9 @@ pub struct Pending {
     pub confirm: Option<ConfirmWindow>,
     /// Server time when this was produced, so the browser can count down without clock skew.
     pub now: u64,
-    /// A problem the operator must know about on every page (a first-boot
-    /// seed that did not import).
+    /// Problems the operator must know about on every page (a first-boot
+    /// seed that did not import, a daemon the boot apply held back), one
+    /// `Label: message` per line.
     #[serde(default)]
     pub alert: Option<String>,
 }

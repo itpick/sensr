@@ -390,6 +390,49 @@ async fn rejected_plan_stores_nothing() {
     );
 }
 
+/// Incident 2026-11-23: one checker rejecting its config at agent start
+/// kept every daemon down. The boot apply now holds back only what was
+/// rejected and says so in `status`; commits stay all or nothing.
+#[tokio::test]
+async fn boot_apply_with_a_rejected_backend_still_applies_and_reports_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let applier = FakeApplier::default();
+    applier.state.lock().unwrap().reject_paths = vec!["system.hostname".parse().unwrap()];
+    let running = Fx::spawn(&dir, applier.clone(), true, false, true).await;
+    let mut c = Client::connect(&dir.path().join("agent.sock"), Principal::unix("t", 0))
+        .await
+        .unwrap();
+    // the rest of head was applied and recorded
+    assert_eq!(applier.state.lock().unwrap().applied.len(), 1);
+    let Response::Status(st) = c.call(Op::Status).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(st.applied, Some(1));
+    let problem = st.last_apply_error.expect("degraded boot is reported");
+    assert!(
+        problem.contains("revision 1 applied at startup without part of its configuration"),
+        "{problem}"
+    );
+    assert!(problem.contains("system.hostname"), "{problem}");
+
+    // an interactive commit is still refused as a whole
+    set(&mut c, "system.hostname", json!("h1")).await;
+    let e = agent_err(commit(&mut c, None).await);
+    assert_eq!(e.kind, ErrorKind::Validation);
+    assert_eq!(history(&mut c).await.len(), 1);
+    assert_eq!(applier.state.lock().unwrap().applied.len(), 1);
+
+    // once the cause is gone, the next commit clears the problem
+    applier.state.lock().unwrap().reject_paths.clear();
+    commit(&mut c, None).await.unwrap();
+    let Response::Status(st) = c.call(Op::Status).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(st.last_apply_error, None);
+    drop(c);
+    running.shutdown().await;
+}
+
 #[tokio::test]
 async fn failed_apply_restores_running_state() {
     let fx = Fx::start(true).await;
