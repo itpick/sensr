@@ -406,8 +406,8 @@ pub struct HostRow {
     /// the agent).
     pub staged_mode: Option<String>,
     /// What the router thinks the host is; `None` for `id:` rows (and an odd label).
-    #[serde(deserialize_with = "lenient")]
-    pub label: Option<HostLabelView>,
+    #[serde(rename = "label", deserialize_with = "lenient")]
+    pub host_label: Option<HostLabelView>,
     /// The owner's kind and maker for it in the staged document (set by the UI, never
     /// sent by the agent), to fill the label editor.
     pub owner_kind: Option<String>,
@@ -433,8 +433,11 @@ pub const HOST_KINDS: [(&str, &str, &str); 14] = [
     ("server", "Server", "🗄"),
     ("wearable", "Wearable", "⌚"),
     ("virtual", "Virtual machine", "🧩"),
-    ("unknown", "Unknown", "•"),
+    UNKNOWN_KIND,
 ];
+
+/// The kind a name that is not in [`HOST_KINDS`] reads as.
+pub const UNKNOWN_KIND: (&str, &str, &str) = ("unknown", "Unknown", "•");
 
 /// The agent's guess (or the owner's word) about what a host is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,12 +456,12 @@ pub struct HostLabelView {
 }
 
 impl HostLabelView {
-    /// The kind's `(display name, icon)`; an unknown name reads as Unknown.
+    /// The kind's `(display name, icon)`; a name not in [`HOST_KINDS`] reads as Unknown.
     pub fn kind_display(&self) -> (&'static str, &'static str) {
         let k = HOST_KINDS
             .iter()
             .find(|k| k.0 == self.kind)
-            .unwrap_or(&HOST_KINDS[13]);
+            .unwrap_or(&UNKNOWN_KIND);
         (k.1, k.2)
     }
 
@@ -471,12 +474,13 @@ impl HostLabelView {
     /// guess, just the maker for an unknown kind (empty with no maker either).
     pub fn text(&self) -> String {
         let maker = self.maker.as_deref().unwrap_or_default();
-        let kind = if self.kind == "unknown" {
+        let (display, _) = self.kind_display();
+        let kind = if display == UNKNOWN_KIND.1 {
             ""
         } else if maker == "Private MAC" && self.kind == "phone" && self.guess() {
             "Phone/laptop"
         } else {
-            self.kind_display().0
+            display
         };
         let sep = if maker.is_empty() || kind.is_empty() {
             ""
@@ -680,7 +684,7 @@ impl HostList {
             // The agent's label says only that some field is the owner's, so this is a
             // close guess: an owner label that disagrees with the shown one, or none
             // while the shown one is the owner's.
-            h.staged_label = h.label.as_ref().is_some_and(|l| {
+            h.staged_label = h.host_label.as_ref().is_some_and(|l| {
                 let owner = l.by == "owner";
                 if kind.is_none() && maker.is_none() {
                     owner
@@ -1033,7 +1037,13 @@ mod tests {
             t(Some("Brother"), "printer", "high", "owner"),
             "Brother · Printer"
         );
-        assert_eq!(t(None, "toaster", "high", "auto"), "Unknown");
+        // a kind this UI does not know reads as unknown: just the maker
+        assert_eq!(t(None, "toaster", "high", "auto"), "");
+        assert_eq!(t(Some("Acme"), "toaster", "low", "auto"), "Acme");
+        assert_eq!(
+            lbl(None, "toaster", "low", "auto").kind_display(),
+            ("Unknown", "•")
+        );
     }
 
     #[cfg(feature = "ssr")]
@@ -1059,7 +1069,7 @@ mod tests {
             {"key": "k4", "mac": "aa:bb:cc:dd:ee:04", "label": "odd"}
         ]}));
         assert_eq!(l.hosts.len(), 4, "an odd label keeps its row");
-        assert_eq!(l.hosts[3].label, None);
+        assert_eq!(l.hosts[3].host_label, None);
         l.mark_staged(&json!({"hosts": {"labels": {
             "a": {"mac": "AA:BB:CC:DD:EE:01", "kind": "printer", "maker": "Brother"},
             "b": {"mac": "aa:bb:cc:dd:ee:02", "kind": "speaker"}

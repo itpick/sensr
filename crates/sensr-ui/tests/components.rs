@@ -1548,7 +1548,93 @@ fn host_label_owner_not_guess() {
         edit.value().attr("aria-label"),
         Some("Edit label for printer")
     );
+    assert_eq!(edit.value().attr("aria-expanded"), Some("false"));
+    // it carries the owner's label to fill the editor with
+    assert_eq!(edit.value().attr("data-kind"), Some("printer"));
+    assert_eq!(edit.value().attr("data-maker"), Some("Brother"));
     assert!(doc.select(&sel(".host-label-editor")).next().is_none());
+}
+
+#[test]
+fn host_label_edit_sits_inline_after_the_label() {
+    let doc = render_hosts(Some(hosts_named(&["bench-pi"])));
+    let cell = mac_cell(host_row(&doc, "bench-pi"));
+    let lines: Vec<_> = cell.select(&sel(".host-label-line")).collect();
+    assert_eq!(lines.len(), 1, "one line under the MAC");
+    let children: Vec<String> = lines[0]
+        .children()
+        .filter_map(|c| {
+            c.value()
+                .as_element()
+                .map(|e| e.attr("class").unwrap_or("").to_owned())
+        })
+        .collect();
+    assert_eq!(
+        children,
+        ["host-label host-label-guess", "icon-btn host-label-edit"],
+        "✎ follows the label text on the same line"
+    );
+    assert_eq!(cell.value().attr("id"), Some("host-label-b827eb7d4e25"));
+}
+
+#[test]
+fn host_actions_do_not_wrap() {
+    let doc = render_hosts(Some(hosts_named(&["bench-pi"])));
+    let actions = host_row(&doc, "bench-pi")
+        .select(&sel("td.host-actions"))
+        .next()
+        .unwrap();
+    assert!(actions.select(&sel("br")).next().is_none());
+    let css = include_str!("../style/main.css");
+    assert!(
+        css.contains(".host-actions { white-space: nowrap; }"),
+        "Make static and Forget stay side by side"
+    );
+}
+
+#[test]
+fn host_label_unknown_kind_reads_as_unknown() {
+    let mut card = hosts_named(&["bench-pi", "nas"]);
+    for h in &mut card.list.hosts {
+        let l = h.host_label.as_mut().unwrap();
+        l.kind = "toaster".into();
+        if h.name.as_deref() == Some("nas") {
+            l.maker = None;
+        }
+    }
+    let doc = render_hosts(Some(card));
+    let pi = label_line(mac_cell(host_row(&doc, "bench-pi")));
+    assert_eq!(text(pi), "•Raspberry Pi", "just the maker, no kind or ?");
+    let nas = mac_cell(host_row(&doc, "nas"));
+    assert!(
+        nas.select(&sel(".host-label")).next().is_none(),
+        "nothing to say"
+    );
+    assert!(nas.select(&sel(".host-label-edit")).next().is_some());
+}
+
+#[test]
+fn host_label_editor_renders_the_draft_and_busy() {
+    // the card renders an open editor from its draft, so a re-render keeps what was typed
+    let doc = Html::parse_fragment(&sensr_ui::islands::host_label_editor_html(
+        "bench-pi",
+        "camera",
+        "Typed so far",
+        true,
+    ));
+    let selected: Vec<String> = doc.select(&sel("option[selected]")).map(text).collect();
+    assert_eq!(selected, ["Camera"]);
+    let input = doc.select(&sel("input")).next().unwrap();
+    assert_eq!(input.value().attr("value"), Some("Typed so far"));
+    // a save in flight disables both buttons; Save submits the form so Enter saves
+    let buttons: Vec<_> = doc.select(&sel("form button")).collect();
+    assert_eq!(buttons.len(), 2);
+    assert!(buttons.iter().all(|b| b.value().attr("disabled").is_some()));
+    assert_eq!(buttons[0].value().attr("type"), Some("submit"));
+    let idle = Html::parse_fragment(&sensr_ui::islands::host_label_editor_html(
+        "x", "", "", false,
+    ));
+    assert!(idle.select(&sel("button[disabled]")).next().is_none());
 }
 
 #[test]
@@ -1569,7 +1655,7 @@ fn host_label_edit_hidden_read_only() {
 #[test]
 fn host_label_editor_options() {
     let doc = Html::parse_fragment(&sensr_ui::islands::host_label_editor_html(
-        "bench-pi", "", "",
+        "bench-pi", "", "", false,
     ));
     let select = doc.select(&sel("select")).next().unwrap();
     assert_eq!(select.value().attr("aria-label"), Some("Type for bench-pi"));
@@ -1587,12 +1673,15 @@ fn host_label_editor_options() {
     let input = doc.select(&sel("input[type=text]")).next().unwrap();
     assert_eq!(input.value().attr("aria-label"), Some("Maker for bench-pi"));
     assert_eq!(input.value().attr("placeholder"), Some("Auto"));
-    let buttons: Vec<String> = doc.select(&sel("button.btn.btn-sm")).map(text).collect();
+    let buttons: Vec<String> = doc
+        .select(&sel("form.host-label-editor button.btn.btn-sm"))
+        .map(text)
+        .collect();
     assert_eq!(buttons, ["Save", "Reset to auto"]);
     assert_all_labelled(&doc, "label editor");
     // filled with the owner's label
     let doc = Html::parse_fragment(&sensr_ui::islands::host_label_editor_html(
-        "printer", "printer", "Brother",
+        "printer", "printer", "Brother", false,
     ));
     let selected: Vec<String> = doc.select(&sel("option[selected]")).map(text).collect();
     assert_eq!(selected, ["Printer"]);
@@ -1603,6 +1692,7 @@ fn host_label_editor_options() {
         "<b>\"x'",
         "",
         "a\"><script>&",
+        false,
     ));
     assert!(doc.select(&sel("script, b")).next().is_none());
     let input = doc.select(&sel("input[type=text]")).next().unwrap();
@@ -1630,7 +1720,7 @@ fn host_label_mock_set_applies_and_stages() {
         .iter()
         .find(|h| h.mac.as_deref() == Some(PI))
         .unwrap();
-    let l = pi.label.as_ref().unwrap();
+    let l = pi.host_label.as_ref().unwrap();
     assert_eq!(
         (l.text().as_str(), l.by.as_str()),
         ("Acme · TV/streaming", "owner")
@@ -1653,7 +1743,10 @@ fn host_label_mock_set_applies_and_stages() {
         .find(|h| h.mac.as_deref() == Some(PI))
         .unwrap();
     assert!(pi.staged_label);
-    assert_eq!(pi.label.as_ref().unwrap().text(), "Raspberry Pi · Server?");
+    assert_eq!(
+        pi.host_label.as_ref().unwrap().text(),
+        "Raspberry Pi · Server?"
+    );
     let doc = render_hosts(Some(card));
     let cell = mac_cell(host_row(&doc, "bench-pi"));
     assert_eq!(
@@ -1670,6 +1763,6 @@ fn host_label_mock_set_applies_and_stages() {
         .iter()
         .find(|h| h.name.as_deref() == Some("printer"))
         .unwrap();
-    assert_eq!(p.label.as_ref().unwrap().by, "auto");
+    assert_eq!(p.host_label.as_ref().unwrap().by, "auto");
     assert_eq!(p.owner_kind, None);
 }

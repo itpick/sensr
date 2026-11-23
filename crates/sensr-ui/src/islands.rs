@@ -1589,25 +1589,29 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
     let busy = RwSignal::new(None::<String>);
     // The last Mode or label change's refusal; kept across refreshes (which clear `error`).
     let mode_error = RwSignal::new(None::<String>);
-    // The MAC whose label editor is open; the periodic refresh waits while it is.
-    let editing = RwSignal::new(None::<String>);
-
-    let refresh = move || {
-        if editing.get_untracked().is_some() {
-            return;
-        }
-        spawn_local(async move {
-            match hosts().await {
-                Ok(c) => {
-                    card.set(c);
-                    error.set(None);
-                }
-                Err(e) => error.set(Some(format!("Could not read the hosts: {e}"))),
-            }
-        });
+    // The label editor: the MAC it is open for and its unsaved (type, maker), which a
+    // re-render of the row puts back.
+    let labels = LabelEditor {
+        card,
+        error,
+        busy,
+        mode_error,
+        editing: RwSignal::new(None),
+        draft: RwSignal::new(Default::default()),
     };
+    let editing = labels.editing;
+
+    let refresh = move || reload_hosts(card, error);
     Effect::new(move |_| {
-        set_interval(refresh, std::time::Duration::from_secs(3));
+        // only the periodic refresh waits while an editor is open
+        set_interval(
+            move || {
+                if editing.with_untracked(Option::is_none) {
+                    refresh();
+                }
+            },
+            std::time::Duration::from_secs(3),
+        );
     });
 
     let make_static = move |h: crate::runtime::HostRow| {
@@ -1695,61 +1699,32 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
         });
     };
 
-    let save_label = move |mac: String, kind: Option<String>, maker: Option<String>| {
-        busy.set(Some(mac.clone()));
-        spawn_local(async move {
-            match set_host_label(mac, kind, maker).await {
-                // a staged label shows its note on the row (from the staged document)
-                Ok(_) => {
-                    mode_error.set(None);
-                    editing.set(None);
-                    bump();
-                }
-                Err(e) => mode_error.set(Some(server_message(&e))),
-            }
-            busy.set(None);
-            refresh();
-        });
-    };
-
-    // The MAC cell: the MAC, the label line under it, and the ✎ button and label editor.
-    // It is markup with one click handler rather than a view tree, which keeps the island
-    // bundle small.
+    // The MAC cell: the MAC, the label line under it with ✎ after the text, and the
+    // label editor. It is markup with delegated event handlers rather than a view tree,
+    // which keeps the island bundle small.
     let mac_cell = move |h: &crate::runtime::HostRow, read_only: bool| {
         let mac = h.mac.clone().unwrap_or_default();
         // `id:` rows have no MAC to label
         let edit = !read_only && h.mac.is_some() && !h.key.starts_with("id:");
-        let base = mac_cell_html(h, edit);
-        let editor = edit.then(|| {
-            host_label_editor_html(
-                &h.label(),
-                h.owner_kind.as_deref().unwrap_or_default(),
-                h.owner_maker.as_deref().unwrap_or_default(),
-            )
-        });
+        let (closed, open) = (mac_cell_html(h, edit, false), mac_cell_html(h, edit, true));
+        let name = h.label();
         let m = mac.clone();
-        let html = move || match &editor {
-            Some(e) if editing.with(|o| o.as_deref() == Some(m.as_str())) => {
-                format!(r#"{base}<span class="host-label-editor">{e}</span>"#)
+        let html = move || {
+            if !edit || labels.editing.with(|e| e.as_deref() != Some(m.as_str())) {
+                return closed.clone();
             }
-            _ => base.clone(),
+            // untracked: typing updates the draft without rebuilding the editor
+            let (kind, maker) = labels.draft.get_untracked();
+            let busy = labels.busy.with(|b| b.as_deref() == Some(m.as_str()));
+            open.clone() + &host_label_editor_html(&name, &kind, &maker, busy)
         };
+        let (m1, m2, m3) = (mac.clone(), mac.clone(), mac.clone());
         view! {
-            <td class="num host-mac" inner_html=html
-                on:click=move |ev| {
-                    let _ = &ev;
-                    #[cfg(feature = "hydrate")]
-                    match label_click(&ev) {
-                        Some(LabelClick::Edit) => editing.update(|e| {
-                            *e = (e.as_deref() != Some(mac.as_str())).then(|| mac.clone())
-                        }),
-                        Some(LabelClick::Save(k, m)) => save_label(mac.clone(), Some(k), Some(m)),
-                        Some(LabelClick::Reset) => save_label(mac.clone(), None, None),
-                        None => {}
-                    }
-                    #[cfg(not(feature = "hydrate"))]
-                    let _ = (&mac, save_label);
-                }></td>
+            <td class="num host-mac" id=edit.then(|| label_cell_id(&mac)) inner_html=html
+                on:click=move |ev| labels.event(&m1, &ev)
+                on:submit=move |ev| labels.event(&m2, &ev)
+                on:input=move |ev| labels.event(&m3, &ev)
+                on:keydown=move |ev| labels.event(&mac, &ev)></td>
         }
     };
 
@@ -1949,14 +1924,170 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
     .into_any()
 }
 
-/// Markup of a Hosts row's MAC cell: the MAC, the label line (`title` holds the reasons,
-/// one per line), the staged note and, with `edit`, the ✎ button. Agent strings are
-/// escaped: names and makers come off the network.
-fn mac_cell_html(h: &crate::runtime::HostRow, edit: bool) -> String {
+/// The Hosts card's label editor state, shared by every row's MAC cell.
+// Saving only happens in the browser; the server build never reads the save-side fields.
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+#[derive(Clone, Copy)]
+struct LabelEditor {
+    card: RwSignal<Option<HostCard>>,
+    error: RwSignal<Option<String>>,
+    busy: RwSignal<Option<String>>,
+    mode_error: RwSignal<Option<String>>,
+    /// The MAC whose editor is open.
+    editing: RwSignal<Option<String>>,
+    /// The open editor's (type, maker) as typed.
+    draft: RwSignal<(String, String)>,
+}
+
+impl LabelEditor {
+    /// A click, submit, input or key event in the MAC cell of `mac`; events only reach
+    /// here in the browser, so the server build ignores them.
+    #[cfg(not(feature = "hydrate"))]
+    fn event<E>(&self, _mac: &str, _ev: &E) {}
+
+    #[cfg(feature = "hydrate")]
+    fn event<E: AsRef<web_sys::Event>>(&self, mac: &str, ev: &E) {
+        self.handle(mac, ev.as_ref());
+    }
+
+    #[cfg(feature = "hydrate")]
+    fn handle(&self, mac: &str, ev: &web_sys::Event) {
+        use wasm_bindgen::JsCast;
+        let Some(el) = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+        else {
+            return;
+        };
+        let open = self.editing.with_untracked(|e| e.as_deref() == Some(mac));
+        let busy = self.busy.with_untracked(|b| b.as_deref() == Some(mac));
+        match ev.type_().as_str() {
+            "click" if el.has_attribute("data-edit") => {
+                if open {
+                    self.editing.set(None);
+                    focus_in(mac, "[data-edit]");
+                } else {
+                    let data = |k| el.get_attribute(k).unwrap_or_default();
+                    self.draft.set((data("data-kind"), data("data-maker")));
+                    self.editing.set(Some(mac.to_owned()));
+                    focus_in(mac, "select");
+                }
+            }
+            "click" if el.has_attribute("data-reset") && !busy => self.save(mac, None, None),
+            "submit" => {
+                ev.prevent_default();
+                let value = |sel| {
+                    let e = el.query_selector(sel).ok()??;
+                    if let Some(s) = e.dyn_ref::<web_sys::HtmlSelectElement>() {
+                        return Some(s.value());
+                    }
+                    Some(e.dyn_ref::<web_sys::HtmlInputElement>()?.value())
+                };
+                if let (false, Some(kind), Some(maker)) = (busy, value("select"), value("input")) {
+                    self.draft.set((kind.clone(), maker.clone()));
+                    self.save(mac, Some(kind), Some(maker));
+                }
+            }
+            "input" => {
+                if let Some(s) = el.dyn_ref::<web_sys::HtmlSelectElement>() {
+                    self.draft.update(|d| d.0 = s.value());
+                } else if let Some(i) = el.dyn_ref::<web_sys::HtmlInputElement>() {
+                    self.draft.update(|d| d.1 = i.value());
+                }
+            }
+            "keydown"
+                if open
+                    && ev
+                        .dyn_ref::<web_sys::KeyboardEvent>()
+                        .is_some_and(|k| k.key() == "Escape") =>
+            {
+                self.editing.set(None);
+                focus_in(mac, "[data-edit]");
+            }
+            _ => {}
+        }
+    }
+
+    /// Saves the label (`None`, `None` is Reset to auto), then re-reads the hosts. Focus
+    /// goes back to ✎ when it worked, to the type select when it did not.
+    #[cfg(feature = "hydrate")]
+    fn save(&self, mac: &str, kind: Option<String>, maker: Option<String>) {
+        let s = *self;
+        let mac = mac.to_owned();
+        s.busy.set(Some(mac.clone()));
+        spawn_local(async move {
+            let ok = match set_host_label(mac.clone(), kind, maker).await {
+                // a staged label shows its note on the row (from the staged document)
+                Ok(_) => {
+                    s.mode_error.set(None);
+                    bump();
+                    true
+                }
+                Err(e) => {
+                    s.mode_error.set(Some(server_message(&e)));
+                    false
+                }
+            };
+            if ok
+                && s.editing
+                    .with_untracked(|e| e.as_deref() == Some(mac.as_str()))
+            {
+                s.editing.set(None);
+            }
+            s.busy.set(None);
+            match hosts().await {
+                Ok(c) => s.card.set(c),
+                Err(e) => s.error.set(Some(format!("Could not read the hosts: {e}"))),
+            }
+            focus_in(&mac, if ok { "[data-edit]" } else { "select" });
+        });
+    }
+}
+
+/// Re-reads the hosts into `card`.
+fn reload_hosts(card: RwSignal<Option<HostCard>>, error: RwSignal<Option<String>>) {
+    spawn_local(async move {
+        match hosts().await {
+            Ok(c) => {
+                card.set(c);
+                error.set(None);
+            }
+            Err(e) => error.set(Some(format!("Could not read the hosts: {e}"))),
+        }
+    });
+}
+
+/// The `id` of the MAC cell of `mac`, for moving focus into it.
+fn label_cell_id(mac: &str) -> String {
+    format!("host-label-{}", mac.replace(':', ""))
+}
+
+/// Focuses the first `selector` match in the MAC cell of `mac` once the DOM has caught up.
+#[cfg(feature = "hydrate")]
+fn focus_in(mac: &str, selector: &'static str) {
+    use wasm_bindgen::JsCast;
+    let id = label_cell_id(mac);
+    request_animation_frame(move || {
+        if let Some(el) = document()
+            .get_element_by_id(&id)
+            .and_then(|c| c.query_selector(selector).ok().flatten())
+            .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = el.focus();
+        }
+    });
+}
+
+/// Markup of a Hosts row's MAC cell: the MAC, then a line with the label (`title` holds
+/// the reasons, one per line) and, with `edit`, the ✎ button (`open`: its editor is
+/// shown; it carries the owner's type and maker to fill the editor with), then the
+/// staged note. Agent strings are escaped: names and makers come off the network.
+fn mac_cell_html(h: &crate::runtime::HostRow, edit: bool, open: bool) -> String {
     let mut out = escape_html(h.mac.as_deref().unwrap_or_default());
-    if let Some(l) = &h.label {
-        let text = l.text();
-        if !text.is_empty() {
+    let text = h.host_label.as_ref().map(|l| l.text()).unwrap_or_default();
+    if !text.is_empty() || edit {
+        out += r#"<span class="host-label-line">"#;
+        if let Some(l) = h.host_label.as_ref().filter(|_| !text.is_empty()) {
             out += &format!(
                 r#"<span class="host-label{}" title="{}"><span class="host-kind-icon" aria-hidden="true">{}</span>{}</span>"#,
                 if l.guess() { " host-label-guess" } else { "" },
@@ -1965,34 +2096,38 @@ fn mac_cell_html(h: &crate::runtime::HostRow, edit: bool) -> String {
                 escape_html(&text)
             );
         }
+        if edit {
+            out += &format!(
+                r#"<button type="button" class="icon-btn host-label-edit" aria-label="Edit label for {}" aria-expanded="{open}" data-edit="" data-kind="{}" data-maker="{}">✎</button>"#,
+                escape_html(&h.label()),
+                escape_html(h.owner_kind.as_deref().unwrap_or_default()),
+                escape_html(h.owner_maker.as_deref().unwrap_or_default()),
+            );
+        }
+        out += "</span>";
     }
     if h.staged_label {
         out += r#"<span class="muted host-label-staged">Staged — Apply to take effect</span>"#;
     }
-    if edit {
-        out += &format!(
-            r#"<button type="button" class="icon-btn host-label-edit" aria-label="Edit label for {}" data-edit="">✎</button>"#,
-            escape_html(&h.label())
-        );
-    }
     out
 }
 
-/// The label editor's controls for the host called `name`: a type select (Auto, then
-/// every kind) and a maker field, filled with the owner's `kind` and `maker` (empty for
-/// the guess), then Save and Reset to auto. `name` and `maker` are escaped.
-pub fn host_label_editor_html(name: &str, kind: &str, maker: &str) -> String {
+/// The label editor for the host called `name`: a form with a type select (Auto, then
+/// every kind) and a maker field holding `kind` and `maker`, then Save (submit, so Enter
+/// saves) and Reset to auto, disabled while `busy`. `name` and `maker` are escaped.
+pub fn host_label_editor_html(name: &str, kind: &str, maker: &str, busy: bool) -> String {
     let name = escape_html(name);
     let sel = |on: bool| if on { " selected" } else { "" };
     let mut h = format!(
-        r#"<select aria-label="Type for {name}"><option value=""{}>Auto</option>"#,
+        r#"<form class="host-label-editor"><select aria-label="Type for {name}"><option value=""{}>Auto</option>"#,
         sel(kind.is_empty())
     );
     for (v, t, _) in crate::runtime::HOST_KINDS {
         h += &format!(r#"<option value="{v}"{}>{t}</option>"#, sel(v == kind));
     }
+    let off = if busy { " disabled" } else { "" };
     h + &format!(
-        r#"</select><input type="text" aria-label="Maker for {name}" placeholder="Auto" maxlength="64" value="{}"><button type="button" class="btn btn-sm" data-save="">Save</button><button type="button" class="btn btn-sm" data-reset="">Reset to auto</button>"#,
+        r#"</select><input type="text" aria-label="Maker for {name}" placeholder="Auto" maxlength="64" value="{}"><button type="submit" class="btn btn-sm"{off}>Save</button><button type="button" class="btn btn-sm" data-reset=""{off}>Reset to auto</button></form>"#,
         escape_html(maker)
     )
 }
@@ -2011,39 +2146,6 @@ fn escape_html(s: &str) -> String {
         }
     }
     out
-}
-
-/// What a click in a MAC cell asks for.
-#[cfg(feature = "hydrate")]
-enum LabelClick {
-    /// ✎: open or close the editor.
-    Edit,
-    /// Save with this type and maker (empty is Auto).
-    Save(String, String),
-    /// Reset to auto.
-    Reset,
-}
-
-#[cfg(feature = "hydrate")]
-fn label_click(ev: &leptos::ev::MouseEvent) -> Option<LabelClick> {
-    use wasm_bindgen::JsCast;
-    let button: web_sys::Element = ev.target()?.dyn_into().ok()?;
-    if button.has_attribute("data-edit") {
-        return Some(LabelClick::Edit);
-    }
-    if button.has_attribute("data-reset") {
-        return Some(LabelClick::Reset);
-    }
-    if !button.has_attribute("data-save") {
-        return None;
-    }
-    let editor = button.parent_element()?;
-    let kind = editor.query_selector("select").ok()??;
-    let maker = editor.query_selector("input").ok()??;
-    Some(LabelClick::Save(
-        kind.dyn_into::<web_sys::HtmlSelectElement>().ok()?.value(),
-        maker.dyn_into::<web_sys::HtmlInputElement>().ok()?.value(),
-    ))
 }
 
 /// The mode select's classes: compact, tinted for a locked mode.
