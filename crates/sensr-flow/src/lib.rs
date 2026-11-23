@@ -22,6 +22,7 @@
 //! built: [`config`] (what the agent writes for the daemon) and [`nft`]
 //! (the accounting table).
 
+pub mod attrib;
 pub mod config;
 pub mod dnstap;
 #[cfg(feature = "store")]
