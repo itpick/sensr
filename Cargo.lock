@@ -5187,6 +5187,7 @@ dependencies = [
  "clap",
  "rusqlite",
  "sensr-fingerprint",
+ "sensr-schema",
  "serde",
  "serde_json",
  "tempfile",

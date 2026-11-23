@@ -1,0 +1,449 @@
+youtube.com	YouTube	video
+youtu.be	YouTube	video
+googlevideo.com	YouTube	video
+ytimg.com	YouTube	video
+youtubei.googleapis.com	YouTube	video
+youtube-nocookie.com	YouTube	video
+yt3.ggpht.com	YouTube	video
+yt3.googleusercontent.com	YouTube	video
+youtube.googleapis.com	YouTube	video
+youtubekids.com	YouTube Kids	video
+music.youtube.com	YouTube Music	video
+netflix.com	Netflix	video
+nflxvideo.net	Netflix	video
+nflximg.net	Netflix	video
+nflxso.net	Netflix	video
+nflxext.com	Netflix	video
+netflix.net	Netflix	video
+disneyplus.com	Disney+	video
+disney-plus.net	Disney+	video
+bamgrid.com	Disney+	video
+dssott.com	Disney+	video
+disneynow.com	Disney+	video
+hulu.com	Hulu	video
+huluim.com	Hulu	video
+hulustream.com	Hulu	video
+primevideo.com	Prime Video	video
+aiv-cdn.net	Prime Video	video
+pv-cdn.net	Prime Video	video
+amazonvideo.com	Prime Video	video
+atv-ps.amazon.com	Prime Video	video
+max.com	Max	video
+hbomax.com	Max	video
+hbo.com	Max	video
+hbomaxcdn.com	Max	video
+paramountplus.com	Paramount+	video
+cbsi.video	Paramount+	video
+peacocktv.com	Peacock	video
+tv.apple.com	Apple TV+	video
+twitch.tv	Twitch	video
+ttvnw.net	Twitch	video
+jtvnw.net	Twitch	video
+twitchcdn.net	Twitch	video
+twitchsvc.net	Twitch	video
+vimeo.com	Vimeo	video
+vimeocdn.com	Vimeo	video
+dailymotion.com	Dailymotion	video
+dmcdn.net	Dailymotion	video
+plex.tv	Plex	video
+plex.direct	Plex	video
+crunchyroll.com	Crunchyroll	video
+vrv.co	Crunchyroll	video
+pluto.tv	Pluto TV	video
+tubitv.com	Tubi	video
+tubi.io	Tubi	video
+roku.com	Roku	video
+kick.com	Kick	video
+pbskids.org	PBS Kids	video
+cartoonnetwork.com	Cartoon Network	video
+nick.com	Nickelodeon	video
+nickjr.com	Nickelodeon	video
+tiktok.com	TikTok	social
+tiktokv.com	TikTok	social
+tiktokcdn.com	TikTok	social
+tiktokcdn-us.com	TikTok	social
+byteoversea.com	TikTok	social
+ibytedtos.com	TikTok	social
+musical.ly	TikTok	social
+bytedance.com	TikTok	social
+ttwstatic.com	TikTok	social
+instagram.com	Instagram	social
+cdninstagram.com	Instagram	social
+snapchat.com	Snapchat	social
+sc-cdn.net	Snapchat	social
+snap-dev.net	Snapchat	social
+snapkit.com	Snapchat	social
+snapads.com	Snapchat	social
+facebook.com	Facebook	social
+fbcdn.net	Facebook	social
+facebook.net	Facebook	social
+fb.com	Facebook	social
+fbsbx.com	Facebook	social
+pinterest.com	Pinterest	social
+pinimg.com	Pinterest	social
+reddit.com	Reddit	social
+redd.it	Reddit	social
+redditmedia.com	Reddit	social
+redditstatic.com	Reddit	social
+twitter.com	X (Twitter)	social
+x.com	X (Twitter)	social
+twimg.com	X (Twitter)	social
+t.co	X (Twitter)	social
+tumblr.com	Tumblr	social
+linkedin.com	LinkedIn	social
+licdn.com	LinkedIn	social
+threads.net	Threads	social
+bereal.com	BeReal	social
+bsky.app	Bluesky	social
+bsky.social	Bluesky	social
+mastodon.social	Mastodon	social
+tinder.com	Tinder	social
+gotinder.com	Tinder	social
+quora.com	Quora	social
+yubo.live	Yubo	social
+likee.video	Likee	social
+likee.com	Likee	social
+imgur.com	Imgur	social
+flickr.com	Flickr	social
+staticflickr.com	Flickr	social
+messenger.com	Messenger	messaging
+whatsapp.com	WhatsApp	messaging
+whatsapp.net	WhatsApp	messaging
+wa.me	WhatsApp	messaging
+discord.com	Discord	messaging
+discordapp.com	Discord	messaging
+discord.gg	Discord	messaging
+discordapp.net	Discord	messaging
+discord.media	Discord	messaging
+discordstatus.com	Discord	messaging
+telegram.org	Telegram	messaging
+t.me	Telegram	messaging
+telegram.me	Telegram	messaging
+signal.org	Signal	messaging
+whispersystems.org	Signal	messaging
+zoom.us	Zoom	messaging
+zoom.com	Zoom	messaging
+zoomgov.com	Zoom	messaging
+meet.google.com	Google Meet	messaging
+chat.google.com	Google Chat	messaging
+facetime.apple.com	FaceTime	messaging
+imessage.apple.com	iMessage	messaging
+skype.com	Skype	messaging
+teams.microsoft.com	Microsoft Teams	messaging
+teams.live.com	Microsoft Teams	messaging
+slack.com	Slack	messaging
+slack-edge.com	Slack	messaging
+slack-msgs.com	Slack	messaging
+viber.com	Viber	messaging
+line.me	LINE	messaging
+line-apps.com	LINE	messaging
+wechat.com	WeChat	messaging
+weixin.qq.com	WeChat	messaging
+kik.com	Kik	messaging
+houseparty.com	Houseparty	messaging
+roblox.com	Roblox	games
+rbxcdn.com	Roblox	games
+rbx.com	Roblox	games
+robloxlabs.com	Roblox	games
+roblox.qq.com	Roblox	games
+minecraft.net	Minecraft	games
+mojang.com	Minecraft	games
+minecraftservices.com	Minecraft	games
+minecraft-services.net	Minecraft	games
+fortnite.com	Fortnite	games
+epicgames.com	Epic Games	games
+epicgames.dev	Epic Games	games
+unrealengine.com	Epic Games	games
+epicgames.net	Epic Games	games
+steampowered.com	Steam	games
+steamcommunity.com	Steam	games
+steamstatic.com	Steam	games
+steamcontent.com	Steam	games
+steamgames.com	Steam	games
+steamserver.net	Steam	games
+steam-chat.com	Steam	games
+xboxlive.com	Xbox Live	games
+xbox.com	Xbox Live	games
+xboxservices.com	Xbox Live	games
+playstation.net	PlayStation	games
+playstation.com	PlayStation	games
+sonyentertainmentnetwork.com	PlayStation	games
+nintendo.net	Nintendo	games
+nintendo.com	Nintendo	games
+nintendoswitch.com	Nintendo	games
+riotgames.com	Riot Games	games
+leagueoflegends.com	Riot Games	games
+valorant.com	Riot Games	games
+blizzard.com	Blizzard	games
+battle.net	Blizzard	games
+ea.com	Electronic Arts	games
+ubisoft.com	Ubisoft	games
+ubi.com	Ubisoft	games
+supercell.com	Supercell	games
+supercellid.com	Supercell	games
+clashofclans.com	Supercell	games
+brawlstars.com	Supercell	games
+clashroyale.com	Supercell	games
+innersloth.com	Among Us	games
+nianticlabs.com	Pokemon GO	games
+pokemongolive.com	Pokemon GO	games
+pokemon.com	Pokemon	games
+hoyoverse.com	Genshin Impact	games
+mihoyo.com	Genshin Impact	games
+callofduty.com	Call of Duty	games
+activision.com	Call of Duty	games
+rockstargames.com	Rockstar Games	games
+garena.com	Garena	games
+freefiremobile.com	Garena	games
+mobilelegends.com	Moonton	games
+moonton.com	Moonton	games
+king.com	Candy Crush	games
+zynga.com	Zynga	games
+unity3d.com	Unity Games	games
+unity.com	Unity Games	games
+poki.com	Poki	games
+friv.com	Friv	games
+coolmathgames.com	Coolmath Games	games
+itch.io	Itch.io	games
+nvidiagrid.net	GeForce Now	games
+geforcenow.com	GeForce Now	games
+tocaboca.com	Toca Boca	games
+spotify.com	Spotify	music
+scdn.co	Spotify	music
+spotifycdn.com	Spotify	music
+spotifycdn.net	Spotify	music
+music.apple.com	Apple Music	music
+music.amazon.com	Amazon Music	music
+pandora.com	Pandora	music
+soundcloud.com	SoundCloud	music
+sndcdn.com	SoundCloud	music
+deezer.com	Deezer	music
+dzcdn.net	Deezer	music
+tidal.com	Tidal	music
+iheart.com	iHeartRadio	music
+iheartradio.com	iHeartRadio	music
+audible.com	Audible	music
+tunein.com	TuneIn	music
+shazam.com	Shazam	music
+khanacademy.org	Khan Academy	education
+kastatic.org	Khan Academy	education
+kasandbox.org	Khan Academy	education
+classroom.google.com	Google Classroom	education
+duolingo.com	Duolingo	education
+openai.com	ChatGPT	education
+chatgpt.com	ChatGPT	education
+oaistatic.com	ChatGPT	education
+oaiusercontent.com	ChatGPT	education
+claude.ai	Claude	education
+anthropic.com	Claude	education
+gemini.google.com	Gemini	education
+bard.google.com	Gemini	education
+instructure.com	Canvas	education
+canvaslms.com	Canvas	education
+seesaw.me	Seesaw	education
+classdojo.com	ClassDojo	education
+quizlet.com	Quizlet	education
+kahoot.it	Kahoot	education
+kahoot.com	Kahoot	education
+wikipedia.org	Wikipedia	education
+wikimedia.org	Wikipedia	education
+scratch.mit.edu	Scratch	education
+code.org	Code.org	education
+coursera.org	Coursera	education
+brainly.com	Brainly	education
+chegg.com	Chegg	education
+prodigygame.com	Prodigy	education
+ixl.com	IXL	education
+getepic.com	Epic Reading	education
+typing.com	Typing.com	education
+schoology.com	Schoology	education
+blackboard.com	Blackboard	education
+docs.google.com	Google Docs	education
+mathletics.com	Mathletics	education
+amazon.com	Amazon	shopping
+media-amazon.com	Amazon	shopping
+ssl-images-amazon.com	Amazon	shopping
+ebay.com	eBay	shopping
+ebayimg.com	eBay	shopping
+walmart.com	Walmart	shopping
+walmartimages.com	Walmart	shopping
+target.com	Target	shopping
+etsy.com	Etsy	shopping
+etsystatic.com	Etsy	shopping
+shein.com	Shein	shopping
+ltwebstatic.com	Shein	shopping
+temu.com	Temu	shopping
+aliexpress.com	AliExpress	shopping
+alicdn.com	AliExpress	shopping
+bestbuy.com	Best Buy	shopping
+shopify.com	Shopify	shopping
+shopifycdn.com	Shopify	shopping
+myshopify.com	Shopify	shopping
+paypal.com	PayPal	shopping
+paypalobjects.com	PayPal	shopping
+wish.com	Wish	shopping
+costco.com	Costco	shopping
+store.apple.com	Apple Store	shopping
+apple.com	Apple	system
+icloud.com	Apple	system
+icloud-content.com	Apple	system
+mzstatic.com	Apple	system
+aaplimg.com	Apple	system
+push.apple.com	Apple	system
+apple-dns.net	Apple	system
+cdn-apple.com	Apple	system
+apple-cloudkit.com	Apple	system
+google.com	Google	system
+gstatic.com	Google	system
+googleapis.com	Google	system
+android.com	Google	system
+gvt1.com	Google	system
+gvt2.com	Google	system
+googleusercontent.com	Google	system
+gcr.io	Google	system
+google-analytics.com	Google	system
+microsoft.com	Microsoft	system
+windowsupdate.com	Microsoft	system
+msftconnecttest.com	Microsoft	system
+live.com	Microsoft	system
+windows.com	Microsoft	system
+windows.net	Microsoft	system
+msftncsi.com	Microsoft	system
+office.com	Microsoft	system
+office.net	Microsoft	system
+microsoftonline.com	Microsoft	system
+msedge.net	Microsoft	system
+bing.com	Microsoft	system
+skype-edge.com	Microsoft	system
+xboxab.com	Microsoft	system
+ntp.org	NTP	system
+time.nist.gov	NTP	system
+samsung.com	Samsung	system
+samsungcloudsolution.com	Samsung	system
+samsungapps.com	Samsung	system
+samsungosp.com	Samsung	system
+samsungqbe.com	Samsung	system
+mozilla.org	Mozilla	system
+mozilla.com	Mozilla	system
+mozilla.net	Mozilla	system
+firefox.com	Mozilla	system
+cloudflare-dns.com	Cloudflare DNS	system
+captive.apple.com	Connectivity checks	system
+connectivitycheck.gstatic.com	Connectivity checks	system
+detectportal.firefox.com	Connectivity checks	system
+doubleclick.net	Google Ads	ads_tracking
+googlesyndication.com	Google Ads	ads_tracking
+googleadservices.com	Google Ads	ads_tracking
+adservice.google.com	Google Ads	ads_tracking
+googletagmanager.com	Google Ads	ads_tracking
+googletagservices.com	Google Ads	ads_tracking
+app-measurement.com	Google Analytics	ads_tracking
+analytics.google.com	Google Analytics	ads_tracking
+crashlytics.com	Crashlytics	ads_tracking
+appsflyer.com	AppsFlyer	ads_tracking
+adjust.com	Adjust	ads_tracking
+adjust.io	Adjust	ads_tracking
+branch.io	Branch	ads_tracking
+app.link	Branch	ads_tracking
+scorecardresearch.com	Scorecard Research	ads_tracking
+an.facebook.com	Facebook Ads	ads_tracking
+unityads.unity3d.com	Unity Ads	ads_tracking
+applovin.com	AppLovin	ads_tracking
+ironsrc.com	ironSource	ads_tracking
+supersonicads.com	ironSource	ads_tracking
+vungle.com	Vungle	ads_tracking
+adcolony.com	AdColony	ads_tracking
+chartboost.com	Chartboost	ads_tracking
+inmobi.com	InMobi	ads_tracking
+criteo.com	Criteo	ads_tracking
+criteo.net	Criteo	ads_tracking
+taboola.com	Taboola	ads_tracking
+outbrain.com	Outbrain	ads_tracking
+amazon-adsystem.com	Amazon Ads	ads_tracking
+ads.microsoft.com	Microsoft Ads	ads_tracking
+advertising.com	Yahoo Ads	ads_tracking
+admob.com	AdMob	ads_tracking
+mixpanel.com	Mixpanel	ads_tracking
+segment.io	Segment	ads_tracking
+segment.com	Segment	ads_tracking
+amplitude.com	Amplitude	ads_tracking
+sentry.io	Sentry	ads_tracking
+hotjar.com	Hotjar	ads_tracking
+quantserve.com	Quantcast	ads_tracking
+quantcast.com	Quantcast	ads_tracking
+moatads.com	Moat	ads_tracking
+rubiconproject.com	Rubicon	ads_tracking
+pubmatic.com	PubMatic	ads_tracking
+openx.net	OpenX	ads_tracking
+omtrdc.net	Adobe Analytics	ads_tracking
+demdex.net	Adobe Analytics	ads_tracking
+singular.net	Mobile Measurement	ads_tracking
+kochava.com	Mobile Measurement	ads_tracking
+smaato.net	Smaato	ads_tracking
+connect.facebook.net	Meta Pixel	ads_tracking
+analytics.tiktok.com	TikTok Analytics	ads_tracking
+sc-static.net	Snap Ads	ads_tracking
+ring.com	Ring	smart_home
+amazonalexa.com	Amazon Alexa	smart_home
+alexa.amazon.com	Amazon Alexa	smart_home
+device-metrics-us.amazon.com	Amazon Alexa	smart_home
+wyze.com	Wyze	smart_home
+wyzecam.com	Wyze	smart_home
+nest.com	Google Nest	smart_home
+nestlabs.com	Google Nest	smart_home
+tuya.com	Tuya	smart_home
+tuyaus.com	Tuya	smart_home
+tuyaeu.com	Tuya	smart_home
+tuyacn.com	Tuya	smart_home
+tuyain.com	Tuya	smart_home
+iot-dns.com	Tuya	smart_home
+smartthings.com	SmartThings	smart_home
+meethue.com	Philips Hue	smart_home
+sonos.com	Sonos	smart_home
+tplinkcloud.com	TP-Link Kasa	smart_home
+tplinkra.com	TP-Link Kasa	smart_home
+kasasmart.com	TP-Link Kasa	smart_home
+tp-link.com	TP-Link Kasa	smart_home
+myq-cloud.com	MyQ	smart_home
+myqdevice.com	MyQ	smart_home
+chamberlain.com	MyQ	smart_home
+chamberlaingroup.com	MyQ	smart_home
+arlo.com	Arlo	smart_home
+eufylife.com	Eufy	smart_home
+anker.com	Eufy	smart_home
+immedia-semi.com	Blink	smart_home
+irobotapi.com	Roomba	smart_home
+irobot.com	Roomba	smart_home
+ecobee.com	Ecobee	smart_home
+home-assistant.io	Home Assistant	smart_home
+lifx.com	LIFX	smart_home
+shelly.cloud	Shelly	smart_home
+govee.com	Govee	smart_home
+homekit.apple.com	Apple HomeKit	smart_home
+cast.google.com	Chromecast	smart_home
+firetv.com	Amazon Fire TV	smart_home
+vizio.com	Vizio	smart_home
+lgthinq.com	LG ThinQ	smart_home
+lgtvsdp.com	LG ThinQ	smart_home
+samsungacr.com	Samsung TV	smart_home
+samsungcloud.tv	Samsung TV	smart_home
+netgear.com	Netgear	smart_home
+belkin.com	Wemo	smart_home
+xbcs.net	Wemo	smart_home
+yalehome.com	Yale	smart_home
+august.com	August	smart_home
+simplisafe.com	SimpliSafe	smart_home
+rachio.com	Rachio	smart_home
+neatorobotics.com	Neato	smart_home
+ui.com	Ubiquiti	smart_home
+ubnt.com	Ubiquiti	smart_home
+eero.com	Eero	smart_home
+roborock.com	Roborock	smart_home
+reolink.com	Reolink	smart_home
+hik-connect.com	Hikvision	smart_home
+hikvision.com	Hikvision	smart_home
+dahuasecurity.com	Dahua	smart_home
+easy4ip.com	Dahua	smart_home
+mi.com	Xiaomi	smart_home
+xiaomi.com	Xiaomi	smart_home
+miui.com	Xiaomi	smart_home

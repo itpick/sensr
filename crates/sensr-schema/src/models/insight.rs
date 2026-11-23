@@ -7,10 +7,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::check;
+use super::{check, yes};
+use crate::array::ArrayField;
 use crate::fields::InterfaceId;
 use crate::refs::{RefContext, Validate};
-use crate::validation::{FieldPath, Validations};
+use crate::validation::{FieldPath, Validations, ValidatorKind};
 
 /// How long each resolution is kept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -69,6 +70,121 @@ pub struct Insight {
     /// History kept.
     #[serde(default)]
     pub retention: InsightRetention,
+    /// Per-host DNS activity settings.
+    #[serde(default, skip_serializing_if = "InsightDns::is_empty")]
+    pub dns: InsightDns,
+}
+
+/// What kind of thing a service is, for the per-host DNS activity page.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Category {
+    /// Streaming and video sites.
+    Video,
+    /// Social networks.
+    Social,
+    /// Games and game platforms.
+    Games,
+    /// Messaging and calls.
+    Messaging,
+    /// Music and audio.
+    Music,
+    /// Learning.
+    Education,
+    /// Shopping.
+    Shopping,
+    /// Apple, Google and Microsoft system traffic.
+    System,
+    /// Advertising and tracking.
+    AdsTracking,
+    /// Smart-home and IoT clouds.
+    SmartHome,
+    /// Anything else.
+    Other,
+}
+
+impl Category {
+    /// Every category, in display order.
+    pub const ALL: [Category; 11] = [
+        Category::Video,
+        Category::Social,
+        Category::Games,
+        Category::Messaging,
+        Category::Music,
+        Category::Education,
+        Category::Shopping,
+        Category::System,
+        Category::AdsTracking,
+        Category::SmartHome,
+        Category::Other,
+    ];
+
+    /// The name shown to people.
+    pub fn display(self) -> &'static str {
+        match self {
+            Category::Video => "Video",
+            Category::Social => "Social",
+            Category::Games => "Games",
+            Category::Messaging => "Messaging",
+            Category::Music => "Music",
+            Category::Education => "Education",
+            Category::Shopping => "Shopping",
+            Category::System => "Apple/Google/Microsoft system",
+            Category::AdsTracking => "Ads & tracking",
+            Category::SmartHome => "Smart home",
+            Category::Other => "Other",
+        }
+    }
+}
+
+/// An owner-set service name and category for every domain under a suffix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceOverride {
+    /// Whether the override is in force.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Domain suffix, lowercase (`example.com` matches it and everything
+    /// under it).
+    pub suffix: String,
+    /// Service name shown (1-48 characters, no control characters).
+    pub service: String,
+    /// Category the service counts under.
+    pub category: Category,
+}
+
+/// Per-host DNS activity settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InsightDns {
+    /// Owner overrides of the built-in service catalogue. The longest
+    /// matching suffix wins; an override beats the built-in entry.
+    #[serde(default, skip_serializing_if = "ArrayField::is_empty")]
+    pub service_overrides: ArrayField<ServiceOverride>,
+}
+
+impl InsightDns {
+    /// True when nothing differs from the defaults.
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// True for a lowercase domain suffix: dot-separated labels of 1-63
+/// letters, digits and hyphens, none starting or ending with a hyphen,
+/// 253 characters at most.
+pub fn is_domain_suffix(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 253
+        && s.split('.').all(|l| {
+            (1..=63).contains(&l.len())
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
 }
 
 fn sample_seconds() -> u16 {
@@ -86,6 +202,7 @@ impl Default for Insight {
             sample_seconds: sample_seconds(),
             max_entries: max_entries(),
             retention: InsightRetention::default(),
+            dns: InsightDns::default(),
         }
     }
 }
@@ -122,6 +239,40 @@ impl Validate for Insight {
         );
         check::range(self.retention.hour_days, 1..=366, &r.join("hour_days"), out);
         check::range(self.retention.day_days, 1..=3660, &r.join("day_days"), out);
+        let o = at.join("dns").join("service_overrides");
+        check::unique(
+            self.dns
+                .service_overrides
+                .iter()
+                .map(|(id, v)| (o.join(id), Some(v.suffix.clone()))),
+            "suffix",
+            "An override for this suffix already exists.",
+            out,
+        );
+        for (id, v) in &self.dns.service_overrides {
+            if !is_domain_suffix(&v.suffix) {
+                out.add(
+                    &o.join(id).join("suffix"),
+                    ValidatorKind::Callback,
+                    "The suffix must be a lowercase domain such as example.com.",
+                );
+            }
+            let n = v.service.chars().count();
+            if !(1..=48).contains(&n) {
+                out.add(
+                    &o.join(id).join("service"),
+                    ValidatorKind::Callback,
+                    "The service name must be 1 to 48 characters.",
+                );
+            }
+            if v.service.chars().any(char::is_control) {
+                out.add(
+                    &o.join(id).join("service"),
+                    ValidatorKind::Callback,
+                    "The service name must not contain control characters (tabs, line breaks).",
+                );
+            }
+        }
     }
 }
 
@@ -129,6 +280,7 @@ impl Validate for Insight {
 mod tests {
     use super::*;
     use crate::Document;
+    use serde_json::json;
 
     #[test]
     fn defaults_and_validation() {
@@ -144,5 +296,90 @@ mod tests {
         d.insight.interfaces = vec!["opt9".parse().unwrap()];
         let v = format!("{:?}", d.validate());
         assert!(v.contains("between 1 and 300") && v.contains("opt9"), "{v}");
+    }
+
+    const U1: &str = "6d0de000-0000-4000-8000-000000000001";
+    const U2: &str = "6d0de000-0000-4000-8000-000000000002";
+
+    fn doc_with(o: serde_json::Value) -> Document {
+        let mut d = Document::factory();
+        d.insight.dns = serde_json::from_value(json!({ "service_overrides": o })).unwrap();
+        d
+    }
+
+    #[test]
+    fn service_override_round_trips() {
+        let src = json!({"service_overrides":{U1:{"suffix":"example.com","service":"Example","category":"ads_tracking"}}});
+        let h: InsightDns = serde_json::from_value(src).unwrap();
+        let first = h.service_overrides.iter().next().unwrap().1;
+        assert!(first.enabled);
+        assert_eq!(first.category, Category::AdsTracking);
+        let out = serde_json::to_value(&h).unwrap();
+        assert_eq!(out["service_overrides"][U1]["enabled"], true);
+        assert_eq!(serde_json::from_value::<InsightDns>(out).unwrap(), h);
+        assert!(
+            doc_with(json!({U1:{"suffix":"example.com","service":"Example","category":"video"}}))
+                .validate()
+                .is_empty()
+        );
+        assert!(
+            serde_json::to_value(Insight::default())
+                .unwrap()
+                .get("dns")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn category_names_in_order() {
+        let names: Vec<_> = Category::ALL.iter().map(|c| c.display()).collect();
+        assert_eq!(
+            names,
+            [
+                "Video",
+                "Social",
+                "Games",
+                "Messaging",
+                "Music",
+                "Education",
+                "Shopping",
+                "Apple/Google/Microsoft system",
+                "Ads & tracking",
+                "Smart home",
+                "Other"
+            ]
+        );
+    }
+
+    #[test]
+    fn bad_suffix_rejected() {
+        for bad in [
+            "",
+            "Example.com",
+            "-a.com",
+            "a..com",
+            ".com",
+            "a b.com",
+            "a.com.",
+        ] {
+            let d = doc_with(json!({U1:{"suffix":bad,"service":"X","category":"other"}}));
+            assert!(
+                format!("{}", d.validate()).contains("lowercase domain"),
+                "{bad:?}"
+            );
+        }
+        let d = doc_with(json!({U1:{"suffix":"example.com","service":"","category":"other"}}));
+        assert!(format!("{}", d.validate()).contains("1 to 48"));
+        let d = doc_with(json!({U1:{"suffix":"example.com","service":"a\tb","category":"other"}}));
+        assert!(format!("{}", d.validate()).contains("control"));
+    }
+
+    #[test]
+    fn duplicate_suffix_rejected() {
+        let d = doc_with(json!({
+            U1: {"suffix":"example.com","service":"A","category":"other"},
+            U2: {"suffix":"example.com","service":"B","category":"video"}
+        }));
+        assert!(format!("{}", d.validate()).contains("already exists"));
     }
 }
