@@ -901,6 +901,38 @@ impl Engine {
         nft::load(self.runner.as_ref(), &buf)?;
         Ok(())
     }
+
+    /// Cuts the established flows of `addrs` (a host entering Isolated or
+    /// Quarantine): without this they keep matching the conntrack entry and
+    /// skip the new rules. Runs `conntrack -D -s <ip>` and `-D -d <ip>` per
+    /// address. Deleting a conntrack entry also drops its flowtable offload
+    /// (the offloaded flow is torn down with the entry), so no separate
+    /// flowtable delete is needed. `conntrack` exits non-zero when nothing
+    /// matched ("0 flow entries"); that is not an error. A box without the
+    /// binary (a dev machine) is skipped with a warning.
+    pub fn cut_host(&self, addrs: &[IpAddr]) -> Result<(), EngineError> {
+        if addrs.is_empty() {
+            return Ok(());
+        }
+        if !self.runner.has_program("conntrack") {
+            tracing::warn!("conntrack not found; established flows of locked hosts are not cut");
+            return Ok(());
+        }
+        for addr in addrs {
+            let ip = addr.to_string();
+            for flag in ["-s", "-d"] {
+                let cmd = Cmd::new("conntrack").args(["-D", flag, ip.as_str()]);
+                let out = self.runner.run(&cmd, None)?;
+                if out.code != Some(0) {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    if !err.contains("0 flow entries") {
+                        tracing::warn!(cmd = %cmd.display(), stderr = %err.trim(), "conntrack delete failed");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A group's id from `<root>/etc/group`.
@@ -1223,6 +1255,38 @@ mod tests {
             "{err}"
         );
         assert!(!root.path().join("run/systemd/network").exists());
+    }
+
+    #[test]
+    fn cut_host_deletes_conntrack() {
+        let root = tempfile::tempdir().unwrap();
+        let (e, runner) = engine(root.path());
+        runner.push(
+            "conntrack",
+            Output::failed(
+                1,
+                "conntrack v1.4.8 (conntrack-tools): 0 flow entries have been deleted.",
+            ),
+        );
+        e.cut_host(&["192.168.68.50".parse().unwrap()]).unwrap();
+        assert_eq!(
+            runner.call_lines(),
+            [
+                "conntrack '-D' '-s' '192.168.68.50'",
+                "conntrack '-D' '-d' '192.168.68.50'"
+            ]
+        );
+        e.cut_host(&[]).unwrap();
+        assert_eq!(runner.calls().len(), 2, "no addresses, no commands");
+    }
+
+    #[test]
+    fn cut_host_skips_a_missing_conntrack() {
+        let root = tempfile::tempdir().unwrap();
+        let (e, runner) = engine(root.path());
+        runner.without_program("conntrack");
+        e.cut_host(&["fd00::20".parse().unwrap()]).unwrap();
+        assert!(runner.calls().is_empty());
     }
 
     #[test]

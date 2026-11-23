@@ -296,6 +296,61 @@ fn with_locked(sets: &HostModeSets, table: &[(String, std::net::IpAddr)]) -> Hos
     }
 }
 
+/// The addresses whose established flows must be cut when `prev` becomes
+/// `next`: those new to the locked set, and those of a host that entered a
+/// mode or moved Isolated to Quarantine. Leaving a mode, or Quarantine to
+/// Isolated, cuts nothing.
+fn newly_locked(
+    prev: &HostModeSets,
+    next: &HostModeSets,
+    table: &[(String, std::net::IpAddr)],
+) -> Vec<std::net::IpAddr> {
+    use std::collections::BTreeSet;
+    use std::net::IpAddr;
+    let was_locked = |m: &MacAddr| prev.isolated.contains(m) || prev.quarantine.contains(m);
+    let tightened: BTreeSet<MacAddr> = next
+        .isolated
+        .iter()
+        .filter(|m| !was_locked(m))
+        .chain(
+            next.quarantine
+                .iter()
+                .filter(|m| !was_locked(m) || prev.isolated.contains(m)),
+        )
+        .copied()
+        .collect();
+    let known: BTreeSet<IpAddr> = prev
+        .locked_v4
+        .iter()
+        .map(|a| IpAddr::V4(*a))
+        .chain(prev.locked_v6.iter().map(|a| IpAddr::V6(*a)))
+        .collect();
+    let mut out: BTreeSet<IpAddr> = next
+        .locked_v4
+        .iter()
+        .map(|a| IpAddr::V4(*a))
+        .chain(next.locked_v6.iter().map(|a| IpAddr::V6(*a)))
+        .filter(|a| !known.contains(a))
+        .collect();
+    for (mac, ip) in table {
+        if mac.parse().is_ok_and(|m: MacAddr| tightened.contains(&m)) {
+            out.insert(*ip);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Cuts `addrs`' established flows; a failure is logged, never fatal.
+fn cut(engine: &Engine, addrs: &[std::net::IpAddr]) {
+    if addrs.is_empty() {
+        return;
+    }
+    match engine.cut_host(addrs) {
+        Ok(()) => tracing::info!(?addrs, "cut existing connections of locked hosts"),
+        Err(e) => tracing::warn!(error = %e, "cutting connections of locked hosts failed"),
+    }
+}
+
 /// One host-mode tick: re-reads the locked hosts' addresses and pushes the
 /// sets when they changed (a new lease, a released one). Nothing when no
 /// host is in a mode, since the ruleset then declares none of the sets.
@@ -317,9 +372,12 @@ pub fn refresh_host_modes(
     if next == *pushed {
         return;
     }
-    match lock(engine).update_host_mode_sets(&next) {
+    let engine = lock(engine);
+    match engine.update_host_mode_sets(&next) {
         Ok(()) => {
             tracing::info!(v4 = ?next.locked_v4, v6 = ?next.locked_v6, "locked host addresses updated");
+            // a locked host's new address may already hold an open flow
+            cut(&engine, &newly_locked(&pushed, &next, &table));
             *pushed = next;
         }
         Err(e) => tracing::warn!(error = %e, "host-mode set update failed; retrying next tick"),
@@ -498,6 +556,8 @@ impl Applier for SliceApplier {
         // fill them now, not on the next tick.
         let table = self.neighbours.as_ref().map(|n| n()).unwrap_or_default();
         let sets = with_locked(&host_modes, &table);
+        // cut whether or not the push worked: the ruleset holds the MACs
+        cut(&engine, &newly_locked(&pushed, &sets, &table));
         match engine.update_host_mode_sets(&sets) {
             Ok(()) => *pushed = sets,
             Err(e) => {
@@ -858,5 +918,57 @@ mod tests {
         let n = runner.calls().len();
         tick(&a);
         assert_eq!(runner.calls().len(), n);
+    }
+
+    #[test]
+    fn apply_cuts_newly_locked_hosts() {
+        use sensr_schema::PathAccess;
+        let root = fake_root();
+        let (mut a, runner, table) = moded_applier(&root);
+        lock(&table).push((LOCKED.into(), "192.168.1.20".parse().unwrap()));
+        let conntrack = |r: &FakeRunner| -> Vec<String> {
+            r.call_lines()
+                .into_iter()
+                .filter(|l| l.starts_with("conntrack"))
+                .collect()
+        };
+        a.apply(None, &home_router()).unwrap();
+        assert!(conntrack(&runner).is_empty(), "no mode, no cut");
+
+        let doc = quarantined();
+        a.apply(Some(&home_router()), &doc).unwrap();
+        assert_eq!(
+            conntrack(&runner),
+            [
+                "conntrack '-D' '-s' '192.168.1.20'",
+                "conntrack '-D' '-d' '192.168.1.20'"
+            ]
+        );
+        a.apply(Some(&doc), &doc).unwrap();
+        assert_eq!(conntrack(&runner).len(), 2, "re-applying cuts nothing");
+
+        // the tick finds a new lease: that address is cut too
+        lock(&table)[0].1 = "192.168.1.21".parse().unwrap();
+        refresh_host_modes(a.neighbours.as_deref().unwrap(), &a.engine, &a.host_modes);
+        let c = conntrack(&runner);
+        assert_eq!(c.len(), 4, "{c:?}");
+        assert!(c[2].contains("192.168.1.21"));
+
+        // Quarantine -> Isolated and leaving a mode cut nothing
+        let mut iso = doc.clone();
+        iso.set_by_path(
+            "firewall.host_modes.6d0de000-0000-4000-8000-000000000001.mode",
+            serde_json::json!("isolated"),
+        )
+        .unwrap();
+        a.apply(Some(&doc), &iso).unwrap();
+        a.apply(Some(&iso), &home_router()).unwrap();
+        assert_eq!(conntrack(&runner).len(), 4);
+
+        // Isolated -> Quarantine cuts
+        a.apply(Some(&home_router()), &iso).unwrap();
+        let n = conntrack(&runner).len();
+        a.apply(Some(&iso), &doc).unwrap();
+        assert_eq!(conntrack(&runner).len(), n + 2);
     }
 }
