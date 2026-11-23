@@ -22,6 +22,7 @@ use sensr_schema::fields::MacAddr;
 use serde_json::Value;
 
 use crate::applier::{Applier, ApplyError};
+use crate::arp_intercept::LinkLookup as LinkFn;
 use crate::diff::unified_text;
 
 /// The applied document and the link addresses its ruleset knows.
@@ -43,6 +44,116 @@ pub struct SliceApplier {
     neighbours: Option<Arc<NeighbourFn>>,
     /// The host-mode sets last pushed to the ruleset.
     host_modes: Arc<Mutex<HostModeSets>>,
+    /// Same-LAN enforcement of host modes.
+    intercept: Option<Intercept>,
+}
+
+/// Reads the kernel neighbour table.
+type NeighEntries = dyn Fn() -> Vec<sensr_feeds::neigh::NeighEntry> + Send + Sync;
+
+/// The ARP interceptor and what its inputs are read from.
+#[derive(Clone)]
+struct Intercept {
+    interceptor: Arc<crate::arp_intercept::Interceptor>,
+    /// A direct read of the neighbour table, when the caller has none.
+    neigh: Arc<NeighEntries>,
+    link: Arc<LinkFn>,
+    /// The inventory, for hosts seen within `ONLINE_SECS`.
+    hosts: Option<std::sync::Weak<crate::hosts::HostCollector>>,
+    /// Held across a whole refresh (state read to `set_inputs`): the apply,
+    /// the refresher and the inventory poll each refresh in their own
+    /// thread, and an older snapshot must never land after a newer one.
+    serial: Arc<Mutex<()>>,
+}
+
+impl Intercept {
+    /// Recomputes the interceptor's inputs: `sets` are the locked MACs (the
+    /// pushed host-mode sets), `table` the neighbour table and leases the
+    /// caller read for their addresses, `neigh` the kernel table if the
+    /// caller already has it. Off (`arp_intercept` false or no locked MAC),
+    /// it is told only the internal interfaces, so it heals and idles.
+    fn update(
+        &self,
+        doc: &Document,
+        addrs: &BTreeMap<String, Vec<IfAddr>>,
+        sets: &HostModeSets,
+        table: &[(String, std::net::IpAddr)],
+        neigh: Option<&[sensr_feeds::neigh::NeighEntry]>,
+    ) {
+        let on = doc.firewall.host_mode_settings.arp_intercept
+            && !(sets.isolated.is_empty() && sets.quarantine.is_empty());
+        let macs: Vec<MacAddr> = if on {
+            sets.isolated
+                .iter()
+                .chain(&sets.quarantine)
+                .copied()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let read;
+        let neigh = match (on, neigh) {
+            (false, _) => &[][..],
+            (true, Some(n)) => n,
+            (true, None) => {
+                read = (self.neigh)();
+                &read[..]
+            }
+        };
+        let online = match self.hosts.as_ref().and_then(std::sync::Weak::upgrade) {
+            Some(h) if on => h.online_v4(unix_now()),
+            _ => Vec::new(),
+        };
+        let internal = sensr_rules::document::internal_interfaces(doc);
+        let (views, locked) = crate::arp_intercept::inputs(&crate::arp_intercept::Sources {
+            internal: &internal,
+            addrs,
+            link: &*self.link,
+            neigh,
+            online: &online,
+            locked_macs: &macs,
+            table,
+        });
+        self.interceptor.set_inputs(views, locked);
+    }
+
+    /// [`Self::update`] from the applied state (apply, refresher tick,
+    /// inventory poll). Takes `applied` and `host_modes` one after the
+    /// other, never together and never with the engine; callers hold no
+    /// other lock.
+    fn update_from(
+        &self,
+        applied: &Mutex<Applied>,
+        host_modes: &Mutex<HostModeSets>,
+        table: &[(String, std::net::IpAddr)],
+        neigh: Option<&[sensr_feeds::neigh::NeighEntry]>,
+    ) {
+        let _serial = lock(&self.serial);
+        let Some((doc, addrs)) = lock(applied).clone() else {
+            return;
+        };
+        let sets = lock(host_modes).clone();
+        self.update(&doc, &addrs, &sets, table, neigh);
+    }
+}
+
+/// The `(mac, address)` table of one inventory poll's reads, as the feeds'
+/// neighbour function builds it: usable neighbour entries and active leases.
+fn poll_table(
+    neigh: &[sensr_feeds::neigh::NeighEntry],
+    leases: &[sensr_feeds::neigh::KeaLease],
+) -> Vec<(String, std::net::IpAddr)> {
+    neigh
+        .iter()
+        .filter(|e| !e.state.iter().any(|s| s == "FAILED" || s == "INCOMPLETE"))
+        .map(|e| (e.mac.to_ascii_lowercase(), e.ip))
+        .chain(
+            leases
+                .iter()
+                .filter(|l| l.active)
+                .filter_map(|l| Some((l.mac.clone()?.to_ascii_lowercase(), l.address.into()))),
+        )
+        .collect()
 }
 
 /// How often link addresses are compared with the ruleset's sets.
@@ -77,6 +188,23 @@ impl SliceApplier {
                 crate::hosts::HostStore::new(state.join("hosts.json")),
                 Arc::new(host_sources(Arc::new(SystemRunner))),
             );
+            let interceptor = crate::arp_intercept::Interceptor::system();
+            interceptor.start();
+            let runner: Arc<dyn Runner> = Arc::new(SystemRunner);
+            let ic = Intercept {
+                interceptor,
+                neigh: Arc::new(move || {
+                    runner
+                        .run(&Cmd::new("ip").args(["-j", "neigh", "show"]), None)
+                        .map(|o| sensr_feeds::neigh::parse_ip_neigh_entries(&o.stdout))
+                        .unwrap_or_default()
+                }),
+                link: Arc::new(crate::arp_intercept::link),
+                hosts: Some(Arc::downgrade(&hosts)),
+                serial: Arc::default(),
+            };
+            feed_from_polls(&hosts, &ic, &a.applied, &a.host_modes);
+            a.intercept = Some(ic);
             hosts.start();
             a.hosts = Some(hosts);
         }
@@ -121,6 +249,24 @@ impl SliceApplier {
         self
     }
 
+    /// With an ARP interceptor fed from `neigh` and `link` (tests).
+    #[cfg(test)]
+    fn with_interceptor(
+        mut self,
+        interceptor: Arc<crate::arp_intercept::Interceptor>,
+        neigh: Arc<NeighEntries>,
+        link: Arc<LinkFn>,
+    ) -> SliceApplier {
+        self.intercept = Some(Intercept {
+            interceptor,
+            neigh,
+            link,
+            hosts: None,
+            serial: Arc::default(),
+        });
+        self
+    }
+
     /// Alias feed status of the applied document (API, UI).
     pub fn alias_status(&self) -> Vec<sensr_feeds::AliasStatus> {
         let (Some(f), Some((doc, _))) = (&self.feeds, lock(&self.applied).as_ref().cloned()) else {
@@ -157,6 +303,7 @@ impl SliceApplier {
             hosts: None,
             neighbours: None,
             host_modes: Arc::new(Mutex::new(HostModeSets::default())),
+            intercept: None,
         })
     }
 
@@ -177,6 +324,7 @@ impl SliceApplier {
         let engine = Arc::clone(&self.engine);
         let applied = Arc::clone(&self.applied);
         let host_modes = Arc::clone(&self.host_modes);
+        let intercept = self.intercept.clone();
         std::thread::Builder::new()
             .name("sensr-alias-feeds".into())
             .spawn(move || {
@@ -186,7 +334,13 @@ impl SliceApplier {
                         refresh_once(feeds, &engine, &doc, unix_now());
                     }
                     if let Some(n) = &neighbours {
-                        refresh_host_modes(n.as_ref(), &engine, &host_modes);
+                        host_mode_tick(
+                            n.as_ref(),
+                            &engine,
+                            &host_modes,
+                            &applied,
+                            intercept.as_ref(),
+                        );
                     }
                     std::thread::sleep(FEED_TICK);
                 }
@@ -354,23 +508,24 @@ fn cut(engine: &Engine, addrs: &[std::net::IpAddr]) {
 /// One host-mode tick: re-reads the locked hosts' addresses and pushes the
 /// sets when they changed (a new lease, a released one). Nothing when no
 /// host is in a mode, since the ruleset then declares none of the sets.
+/// Returns the table read (empty when none was), for the ARP interceptor.
 pub fn refresh_host_modes(
     neighbours: &NeighbourFn,
     engine: &Mutex<Engine>,
     pushed: &Mutex<HostModeSets>,
-) {
+) -> Vec<(String, std::net::IpAddr)> {
     if lock(pushed).is_empty() {
-        return;
+        return Vec::new();
     }
     // outside the locks: this runs `ip` and reads Kea's files
     let table = neighbours();
     let mut pushed = lock(pushed);
     if pushed.is_empty() {
-        return;
+        return table;
     }
     let next = with_locked(&pushed, &table);
     if next == *pushed {
-        return;
+        return table;
     }
     let engine = lock(engine);
     match engine.update_host_mode_sets(&next) {
@@ -382,6 +537,42 @@ pub fn refresh_host_modes(
         }
         Err(e) => tracing::warn!(error = %e, "host-mode set update failed; retrying next tick"),
     }
+    table
+}
+
+/// The refresher's host-mode step: the locked addresses, then the ARP
+/// interceptor's inputs from the same table (a new neighbour is covered
+/// within a tick).
+fn host_mode_tick(
+    neighbours: &NeighbourFn,
+    engine: &Mutex<Engine>,
+    host_modes: &Mutex<HostModeSets>,
+    applied: &Mutex<Applied>,
+    intercept: Option<&Intercept>,
+) {
+    let table = refresh_host_modes(neighbours, engine, host_modes);
+    if let Some(ic) = intercept {
+        ic.update_from(applied, host_modes, &table, None);
+    }
+}
+
+/// Refreshes the interceptor's inputs after every inventory poll, from what
+/// the poll read.
+fn feed_from_polls(
+    hosts: &crate::hosts::HostCollector,
+    ic: &Intercept,
+    applied: &Arc<Mutex<Applied>>,
+    host_modes: &Arc<Mutex<HostModeSets>>,
+) {
+    let (ic, applied, host_modes) = (ic.clone(), Arc::clone(applied), Arc::clone(host_modes));
+    hosts.on_poll(Arc::new(move |neigh, leases| {
+        ic.update_from(
+            &applied,
+            &host_modes,
+            &poll_table(neigh, leases),
+            Some(neigh),
+        );
+    }));
 }
 
 fn issue(path: &str, message: impl Into<String>) -> ValidationIssue {
@@ -518,7 +709,14 @@ impl Applier for SliceApplier {
                 .pd
                 .as_ref()
                 .and_then(|p| serde_json::to_value(p.view(unix_now())).ok()),
-            sensr_ipc::RuntimeSection::Hosts => self.hosts.as_ref().map(|h| h.view(unix_now())),
+            sensr_ipc::RuntimeSection::Hosts => self.hosts.as_ref().map(|h| {
+                let mut v = h.view(unix_now());
+                if let Some(ic) = &self.intercept {
+                    v["intercept"] =
+                        serde_json::to_value(ic.interceptor.status()).unwrap_or_default();
+                }
+                v
+            }),
         }
     }
 
@@ -581,6 +779,10 @@ impl Applier for SliceApplier {
             h.set_document(&doc);
         }
         *lock(&self.applied) = Some((doc, addrs));
+        if let Some(ic) = &self.intercept {
+            // after `applied`, so no refresh can land an older document later
+            ic.update_from(&self.applied, &self.host_modes, &table, None);
+        }
         self.start_watcher();
         self.start_refresher();
         Ok(())
@@ -592,6 +794,10 @@ impl Drop for SliceApplier {
         // clean shutdown: keep the last `last_seen`s the throttle held back
         if let Some(h) = &self.hosts {
             h.shutdown();
+        }
+        // and leave no neighbour pointing at the router (blocks 2 s)
+        if let Some(ic) = &self.intercept {
+            ic.interceptor.stop_and_heal();
         }
     }
 }
@@ -970,5 +1176,226 @@ mod tests {
         let n = conntrack(&runner).len();
         a.apply(Some(&iso), &doc).unwrap();
         assert_eq!(conntrack(&runner).len(), n + 2);
+    }
+
+    mod intercept {
+        use super::*;
+        use crate::arp_intercept::{ArpFrame, Clock, Interceptor, PacketSocket};
+        use sensr_apply::cmd::Output;
+        use std::time::{Duration, Instant};
+
+        const ROUTER: [u8; 6] = [0x02, 0, 0, 0, 0, 0x01];
+        const OTHER: &str = "02:00:5e:10:00:0a";
+
+        #[derive(Default)]
+        struct Recorder(Mutex<Vec<(u32, Vec<u8>)>>);
+
+        impl PacketSocket for Recorder {
+            fn send(&self, index: u32, frame: &[u8]) -> std::io::Result<()> {
+                lock(&self.0).push((index, frame.to_vec()));
+                Ok(())
+            }
+            fn recv(&self, _: &mut [u8]) -> std::io::Result<(usize, u32)> {
+                Err(std::io::ErrorKind::WouldBlock.into())
+            }
+        }
+
+        /// Fixed time; sleeps are only counted.
+        struct NoSleep(Instant, Mutex<Vec<Duration>>);
+
+        impl Clock for NoSleep {
+            fn now(&self) -> Instant {
+                self.0
+            }
+            fn sleep(&self, d: Duration) {
+                lock(&self.1).push(d);
+            }
+        }
+
+        /// A quarantining applier whose LAN (`igc1`, index 5) holds the
+        /// locked host at .20 and one other host at .10.
+        fn applier(
+            root: &tempfile::TempDir,
+            open: crate::arp_intercept::OpenFn,
+        ) -> (SliceApplier, Arc<FakeRunner>, Arc<Interceptor>, Table) {
+            let (a, runner, table) = moded_applier(root);
+            runner.respond(|c, _| {
+                (c.display() == "ip '-j' 'addr' 'show'").then(|| Output {
+                    code: Some(0),
+                    stdout: br#"[{"ifname":"igc1","addr_info":[{"local":"192.168.1.1","prefixlen":24,"scope":"global"}]}]"#.to_vec(),
+                    stderr: Vec::new(),
+                })
+            });
+            lock(&table).push((LOCKED.into(), "192.168.1.20".parse().unwrap()));
+            let entry = |mac: &str, ip: &str| sensr_feeds::neigh::NeighEntry {
+                mac: mac.into(),
+                ip: ip.parse().unwrap(),
+                dev: "igc1".into(),
+                state: vec!["REACHABLE".into()],
+            };
+            let neigh = vec![entry(LOCKED, "192.168.1.20"), entry(OTHER, "192.168.1.10")];
+            let i = Interceptor::new(
+                open,
+                Arc::new(NoSleep(Instant::now(), Mutex::new(Vec::new()))),
+            );
+            let mut a = a.with_interceptor(
+                Arc::clone(&i),
+                Arc::new(move || neigh.clone()),
+                Arc::new(|dev: &str| (dev == "igc1").then_some((5, ROUTER))),
+            );
+            a.hosts = Some(crate::hosts::HostCollector::new(
+                crate::hosts::HostStore::new(root.path().join("hosts.json")),
+                Arc::new(|| (Vec::new(), Vec::new())),
+            ));
+            (a, runner, i, table)
+        }
+
+        fn intercept_view(a: &SliceApplier) -> Value {
+            a.runtime(sensr_ipc::RuntimeSection::Hosts).unwrap()["intercept"].clone()
+        }
+
+        #[test]
+        fn apply_drives_the_interceptor_and_drop_heals() {
+            use sensr_schema::PathAccess;
+            let root = fake_root();
+            let sock = Arc::new(Recorder::default());
+            let s = Arc::clone(&sock);
+            let (mut a, _, _, _) = applier(
+                &root,
+                Arc::new(move || Ok(Arc::clone(&s) as Arc<dyn PacketSocket>)),
+            );
+            a.apply(None, &home_router()).unwrap();
+            assert_eq!(
+                intercept_view(&a),
+                serde_json::json!({"active": false, "interfaces": [], "error": null}),
+                "no host locked: idle"
+            );
+            let doc = quarantined();
+            a.apply(Some(&home_router()), &doc).unwrap();
+            assert_eq!(
+                intercept_view(&a),
+                serde_json::json!({"active": true, "interfaces": ["lan"], "error": null})
+            );
+            // arp_intercept off: idle again (and healing)
+            let mut off = doc.clone();
+            off.set_by_path(
+                "firewall.host_mode_settings.arp_intercept",
+                serde_json::json!(false),
+            )
+            .unwrap();
+            a.apply(Some(&doc), &off).unwrap();
+            assert_eq!(intercept_view(&a)["active"], false);
+            a.apply(Some(&off), &doc).unwrap();
+            assert_eq!(intercept_view(&a)["active"], true);
+            assert!(lock(&sock.0).is_empty(), "no tick ran: nothing sent yet");
+
+            drop(a);
+            let sent = std::mem::take(&mut *lock(&sock.0));
+            assert_eq!(sent.len(), 6, "three rounds of two heals");
+            let other: MacAddr = OTHER.parse().unwrap();
+            let locked: MacAddr = LOCKED.parse().unwrap();
+            for (index, f) in &sent {
+                assert_eq!(*index, 5, "only on the LAN");
+                assert_eq!(&f[6..12], &ROUTER);
+                let f = ArpFrame::parse(f).unwrap();
+                assert_eq!(f.op, 2);
+                let want = if f.target_ip == std::net::Ipv4Addr::new(192, 168, 1, 20) {
+                    other.octets()
+                } else {
+                    locked.octets()
+                };
+                assert_eq!(f.sender_mac, want, "the true owner's MAC");
+            }
+        }
+
+        fn recorder() -> (Arc<Recorder>, crate::arp_intercept::OpenFn) {
+            let sock = Arc::new(Recorder::default());
+            let s = Arc::clone(&sock);
+            (
+                sock,
+                Arc::new(move || Ok(Arc::clone(&s) as Arc<dyn PacketSocket>)),
+            )
+        }
+
+        #[test]
+        fn the_refresher_tick_follows_the_table() {
+            let root = fake_root();
+            let (_sock, open) = recorder();
+            let (mut a, _, i, table) = applier(&root, open);
+            // the locked host has no address yet: nothing to intercept
+            lock(&table).clear();
+            a.apply(None, &quarantined()).unwrap();
+            assert!(!i.status().active);
+            lock(&table).push((LOCKED.into(), "192.168.1.20".parse().unwrap()));
+            host_mode_tick(
+                a.neighbours.as_deref().unwrap(),
+                &a.engine,
+                &a.host_modes,
+                &a.applied,
+                a.intercept.as_ref(),
+            );
+            assert!(i.status().active);
+            assert_eq!(i.status().interfaces, ["lan"]);
+        }
+
+        #[test]
+        fn each_inventory_poll_refreshes_the_inputs() {
+            let root = fake_root();
+            let (_sock, open) = recorder();
+            let (mut a, _, i, table) = applier(&root, open);
+            lock(&table).clear();
+            a.apply(None, &quarantined()).unwrap();
+            assert!(!i.status().active);
+            // the inventory's poll sees the locked host's lease
+            let hosts = crate::hosts::HostCollector::new(
+                crate::hosts::HostStore::new(root.path().join("hosts2.json")),
+                Arc::new(|| {
+                    (
+                        Vec::new(),
+                        vec![sensr_feeds::neigh::KeaLease {
+                            address: "192.168.1.20".parse().unwrap(),
+                            mac: Some(LOCKED.to_uppercase()),
+                            client_id: None,
+                            hostname: None,
+                            subnet_id: 1,
+                            expire: u64::MAX,
+                            active: true,
+                        }],
+                    )
+                }),
+            );
+            hosts.set_document(&quarantined());
+            feed_from_polls(
+                &hosts,
+                a.intercept.as_ref().unwrap(),
+                &a.applied,
+                &a.host_modes,
+            );
+            hosts.poll(1_000);
+            assert!(i.status().active);
+        }
+
+        #[test]
+        fn a_socket_failure_shows_in_the_view_and_the_nft_layer_still_applies() {
+            let root = fake_root();
+            let (mut a, runner, _, _) = applier(
+                &root,
+                Arc::new(|| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "Operation not permitted",
+                    ))
+                }),
+            );
+            a.apply(None, &quarantined()).unwrap();
+            let last = nft_loads(&runner).last().cloned().unwrap();
+            assert!(
+                last.contains("host_locked_v4") && last.contains("192.168.1.20"),
+                "{last}"
+            );
+            let v = intercept_view(&a);
+            assert_eq!(v["active"], false);
+            assert_eq!(v["error"], "raw socket: Operation not permitted");
+        }
     }
 }

@@ -684,7 +684,13 @@ struct Collected {
 pub struct HostCollector {
     sources: Sources,
     state: Mutex<Collected>,
+    /// Called after each poll with what it read (the ARP interceptor's
+    /// inputs follow the inventory's).
+    on_poll: Mutex<Option<PollHook>>,
 }
+
+/// Sees each poll's neighbour table and leases.
+pub type PollHook = Arc<dyn Fn(&[NeighEntry], &[KeaLease]) + Send + Sync>;
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -715,7 +721,13 @@ impl HostCollector {
                 ready: false,
                 modes: BTreeMap::new(),
             }),
+            on_poll: Mutex::new(None),
         })
+    }
+
+    /// Runs `hook` after every poll, outside the inventory lock.
+    pub fn on_poll(&self, hook: PollHook) {
+        *lock(&self.on_poll) = Some(hook);
     }
 
     /// After an apply: the document's internal interfaces, Kea subnets,
@@ -739,19 +751,28 @@ impl HostCollector {
         }
         // outside the lock: this runs `ip` and reads Kea's files
         let (neigh, leases) = (self.sources)();
-        let mut st = lock(&self.state);
-        let st = &mut *st;
-        st.snap.neigh = neigh;
-        st.snap.leases = leases;
-        let change = st.inv.observe(&st.snap, now);
-        st.snap.neigh.clear();
-        st.snap.leases.clear();
-        st.store.note(change);
-        if st.inv.prune(now) {
-            st.store.note(Change::Structural);
-        }
-        if let Err(e) = st.store.maybe_flush(&st.inv, now) {
-            tracing::warn!(error = %e, "saving the host inventory");
+        let (neigh, leases) = {
+            let mut st = lock(&self.state);
+            let st = &mut *st;
+            st.snap.neigh = neigh;
+            st.snap.leases = leases;
+            let change = st.inv.observe(&st.snap, now);
+            let read = (
+                std::mem::take(&mut st.snap.neigh),
+                std::mem::take(&mut st.snap.leases),
+            );
+            st.store.note(change);
+            if st.inv.prune(now) {
+                st.store.note(Change::Structural);
+            }
+            if let Err(e) = st.store.maybe_flush(&st.inv, now) {
+                tracing::warn!(error = %e, "saving the host inventory");
+            }
+            read
+        };
+        let hook = lock(&self.on_poll).clone();
+        if let Some(hook) = hook {
+            hook(&neigh, &leases);
         }
     }
 
@@ -784,6 +805,20 @@ impl HostCollector {
             }
         }
         v
+    }
+
+    /// Hosts seen within [`ONLINE_SECS`] of `now` with a MAC, an IPv4
+    /// address and an interface: `(mac, ipv4, interface id)`.
+    pub fn online_v4(&self, now: u64) -> Vec<(String, Ipv4Addr, String)> {
+        let st = lock(&self.state);
+        st.inv
+            .hosts()
+            .filter(|h| {
+                h.last_seen
+                    .is_some_and(|t| now.saturating_sub(t) <= ONLINE_SECS)
+            })
+            .filter_map(|h| Some((h.mac.clone()?, h.ipv4?, h.interface.clone()?)))
+            .collect()
     }
 
     /// The MAC of the inventory host holding `ip`; when a stale row still
@@ -1720,6 +1755,22 @@ mod collector {
                 .iter()
                 .any(|h| h["key"] == MAC)
         );
+    }
+
+    #[test]
+    fn poll_hook_sees_the_read_and_online_v4_lists_recent_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, _) = collector(&dir);
+        let seen: Arc<Mutex<Vec<NeighEntry>>> = Arc::default();
+        let s = Arc::clone(&seen);
+        c.on_poll(Arc::new(move |neigh, _| lock(&s).extend_from_slice(neigh)));
+        c.poll(1000);
+        assert_eq!(lock(&seen).len(), 1);
+        assert_eq!(lock(&seen)[0].mac, MAC);
+        let online = c.online_v4(1000);
+        assert_eq!(online.len(), 1);
+        assert_eq!((online[0].0.as_str(), online[0].2.as_str()), (MAC, "lan"));
+        assert!(c.online_v4(1000 + ONLINE_SECS + 1).is_empty());
     }
 
     #[test]
