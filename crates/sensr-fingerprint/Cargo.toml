@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# sensr-schema (HostKind) is added with the first rule that returns a kind.
+[dependencies]
+regex.workspace = true
+sensr-schema.workspace = true
+
 [lints]
 workspace = true

@@ -5173,6 +5173,10 @@ dependencies = [
 [[package]]
 name = "sensr-fingerprint"
 version = "0.0.0"
+dependencies = [
+ "regex",
+ "sensr-schema",
+]
 
 [[package]]
 name = "sensr-flow"
