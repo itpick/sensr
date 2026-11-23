@@ -36,9 +36,10 @@ const TYPE_TXT: u16 = 16;
 const TYPE_SRV: u16 = 33;
 /// Pointer hops allowed while reading one name.
 const MAX_HOPS: usize = 16;
-/// RFC 1035 limits.
-const MAX_LABEL: usize = 63;
+/// RFC 1035 name length limit.
 const MAX_NAME: usize = 255;
+/// Service types kept per packet.
+pub const MAX_SERVICES: usize = 16;
 
 fn u16_at(p: &[u8], at: usize) -> Option<u16> {
     let b = p.get(at..at.checked_add(2)?)?;
@@ -63,11 +64,15 @@ fn walk(p: &[u8], questions: u16, records: usize, info: &mut MdnsInfo) -> Option
         match rtype {
             TYPE_PTR => {
                 let service = if is_services_meta(&owner) {
-                    read_name(p, start).and_then(|(target, _)| service_type(&target))
+                    // The target's uncompressed part must lie inside rdata.
+                    read_name(p, start)
+                        .filter(|&(_, after)| after <= end)
+                        .and_then(|(target, _)| service_type(&target))
                 } else {
                     service_type(&owner)
                 };
                 if let Some(s) = service
+                    && info.services.len() < MAX_SERVICES
                     && !info.services.contains(&s)
                 {
                     info.services.push(s);
@@ -75,10 +80,10 @@ fn walk(p: &[u8], questions: u16, records: usize, info: &mut MdnsInfo) -> Option
             }
             TYPE_TXT | TYPE_SRV => {
                 if info.instance.is_none() {
-                    info.instance = instance(&owner);
+                    info.instance = instance(&owner).map(crate::cap);
                 }
                 if rtype == TYPE_TXT && info.model.is_none() {
-                    info.model = txt_model(rdata);
+                    info.model = txt_model(rdata).map(crate::cap);
                 }
             }
             _ => {}
@@ -100,11 +105,9 @@ fn read_name(p: &[u8], pos: usize) -> Option<(Vec<String>, usize)> {
         let len = *p.get(at)?;
         match len & 0xc0 {
             0x00 if len == 0 => return Some((labels, after.unwrap_or(at + 1))),
+            // Top bits 00: a plain label, so its length is at most 63.
             0x00 => {
                 let n = usize::from(len);
-                if n > MAX_LABEL {
-                    return None;
-                }
                 total += n + 1;
                 if total > MAX_NAME {
                     return None;
@@ -122,8 +125,9 @@ fn read_name(p: &[u8], pos: usize) -> Option<(Vec<String>, usize)> {
                 }
                 at = (usize::from(len & 0x3f) << 8) | usize::from(lo);
             }
-            // 0x40 / 0x80: extended or reserved label types (or a length
-            // byte over 63); not valid in mDNS.
+            // Top bits 01 / 10: extended or reserved label types, not valid
+            // in mDNS. A length byte of 64..=191 lands here, which is how a
+            // label over 63 bytes is rejected.
             _ => return None,
         }
     }
@@ -322,6 +326,8 @@ pub(crate) mod tests {
         assert!(!i.services.iter().any(|s| s.contains("dns-sd")));
     }
 
+    /// A length byte of 64 has top bits 01, a reserved label type, so the
+    /// name is rejected (and the walk stops at that owner).
     #[test]
     fn mdns_label_over_63_bytes_is_rejected() {
         let long = "a".repeat(64);
@@ -347,5 +353,43 @@ pub(crate) mod tests {
             i.services,
             vec!["_hap._tcp".to_string(), "_raop._tcp".into()]
         );
+    }
+
+    #[test]
+    fn mdns_services_meta_target_is_bounded_to_rdata() {
+        let mut p = header(0x8400, 0, 1, 0, 0);
+        let target = name(&["_hap", "_tcp", "local"]);
+        // rdlen covers only the first 3 bytes; the rest of the name follows
+        // the record, where an unbounded read would still find it.
+        record(
+            &mut p,
+            &name(&["_services", "_dns-sd", "_udp", "local"]),
+            12,
+            &target[..3],
+        );
+        p.extend_from_slice(&target[3..]);
+        let i = parse(&p).expect("header is fine");
+        assert!(i.services.is_empty(), "{:?}", i.services);
+    }
+
+    #[test]
+    fn mdns_caps_services_and_strings() {
+        let mut p = header(0x8400, 0, 21, 0, 0);
+        let meta = name(&["_services", "_dns-sd", "_udp", "local"]);
+        for n in 0..20 {
+            let svc = format!("_svc{n}");
+            record(&mut p, &meta, 12, &name(&[&svc, "_tcp", "local"]));
+        }
+        let model = format!("model={}", "ü".repeat(100)); // 206 bytes
+        record(
+            &mut p,
+            &name(&["Box", "_device-info", "_tcp", "local"]),
+            16,
+            &txt(&[&model]),
+        );
+        let i = parse(&p).expect("parses");
+        assert_eq!(i.services.len(), MAX_SERVICES);
+        assert_eq!(i.services.first().map(String::as_str), Some("_svc0._tcp"));
+        assert_eq!(i.model.as_deref(), Some("ü".repeat(64).as_str()));
     }
 }

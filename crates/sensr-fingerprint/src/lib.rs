@@ -7,6 +7,21 @@ pub mod oui;
 
 pub use classify::{Confidence, Evidence, Label, classify};
 
+/// Longest string a parser returns, in bytes.
+pub const MAX_STRING: usize = 128;
+
+/// Truncate to [`MAX_STRING`] bytes at a char boundary.
+pub(crate) fn cap(mut s: String) -> String {
+    if s.len() > MAX_STRING {
+        let mut at = MAX_STRING;
+        while !s.is_char_boundary(at) {
+            at -= 1;
+        }
+        s.truncate(at);
+    }
+    s
+}
+
 #[cfg(test)]
 mod garbage {
     /// Review focus 3: hostile bytes never panic.

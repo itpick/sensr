@@ -73,11 +73,12 @@ const OPT_PRL: u8 = 55;
 const OPT_VENDOR_CLASS: u8 = 60;
 const OPT_END: u8 = 255;
 
-/// Lossy UTF-8 with trailing NULs removed; empty gives `None`.
+/// Lossy UTF-8 with trailing NULs removed, capped at [`crate::MAX_STRING`]
+/// bytes; empty gives `None`.
 fn text(data: &[u8]) -> Option<String> {
     let end = data.iter().rposition(|&b| b != 0).map_or(0, |n| n + 1);
     let s = String::from_utf8_lossy(data.get(..end)?).into_owned();
-    (!s.is_empty()).then_some(s)
+    (!s.is_empty()).then(|| crate::cap(s))
 }
 
 #[cfg(test)]
@@ -168,5 +169,16 @@ pub(crate) mod tests {
         opt(&mut p, 12, b"pi\xff\0");
         let i = parse_bootp(&p).expect("parses");
         assert_eq!(i.hostname.as_deref(), Some("pi\u{fffd}"));
+    }
+
+    #[test]
+    fn dhcp_strings_are_capped_at_a_char_boundary() {
+        let mut p = header([0xb8, 0x27, 0xeb, 1, 2, 3]);
+        let long = "é".repeat(100); // 200 bytes
+        opt(&mut p, 12, long.as_bytes());
+        opt(&mut p, 60, &[b'v'; 255]);
+        let i = parse_bootp(&p).expect("parses");
+        assert_eq!(i.hostname.as_deref(), Some("é".repeat(64).as_str()));
+        assert_eq!(i.vendor_class.map(|v| v.len()), Some(crate::MAX_STRING));
     }
 }

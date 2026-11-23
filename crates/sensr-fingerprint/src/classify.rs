@@ -65,19 +65,16 @@ pub fn classify(e: &Evidence) -> Label {
     } else {
         registered.map(str::to_string)
     };
-    if (private || maker.is_none())
-        && e.mdns_model
-            .is_some_and(|m| APPLE_MODELS.iter().any(|a| starts_with_ci(m, a)))
-    {
+    if (private || maker.is_none()) && e.mdns_model.and_then(model_rule).is_some_and(|r| r.apple) {
         maker = Some("Apple".to_string());
     }
 
     // Pushed in signal order; the stable sort below keeps that order on ties.
     let mut found: Vec<Candidate> = Vec::new();
     if let Some(model) = e.mdns_model
-        && let Some(&(_, kind)) = MDNS_MODELS.iter().find(|(p, _)| starts_with_ci(model, p))
+        && let Some(rule) = model_rule(model)
     {
-        found.push((kind, High, format!("mDNS model: {model}")));
+        found.push((rule.kind, High, format!("mDNS model: {model}")));
     }
     found.extend(service_candidates(e.mdns_services));
     if let Some(vendor) = e.dhcp_vendor
@@ -139,46 +136,73 @@ const RANDOMISED_REASON: &str = "Randomised address (phones, tablets and laptops
 /// Locally administered prefixes that mean a VM or container, checked first.
 const VIRTUAL_PREFIXES: &[(&str, &str)] = &[("02:42:", "Docker"), ("52:54:00:", "QEMU/KVM")];
 
-/// Apple model families; one on a private or unknown MAC makes the maker Apple.
-const APPLE_MODELS: &[&str] = &[
-    "iPhone",
-    "iPad",
-    "Mac",
-    "MacBook",
-    "iMac",
-    "AppleTV",
-    "AudioAccessory",
-    "Watch",
+/// One mDNS TXT model rule (case-insensitive prefix), all High.
+struct ModelRule {
+    prefix: &'static str,
+    /// After the prefix there must be a digit, a comma or the end, so
+    /// "Mac14,3" matches "Mac" but "Machine" does not.
+    bounded: bool,
+    kind: HostKind,
+    /// An Apple model family: on a private or unknown MAC the maker is Apple.
+    apple: bool,
+}
+
+const fn m(prefix: &'static str, bounded: bool, kind: HostKind, apple: bool) -> ModelRule {
+    ModelRule {
+        prefix,
+        bounded,
+        kind,
+        apple,
+    }
+}
+
+/// First match wins, so longer prefixes come before shorter ones.
+const MDNS_MODELS: &[ModelRule] = &[
+    m("iPhone", true, Phone, true),
+    m("iPad", true, Tablet, true),
+    m("MacBook", false, Computer, true),
+    m("Macmini", true, Computer, true),
+    m("MacPro", true, Computer, true),
+    m("Mac", true, Computer, true),
+    m("iMacPro", true, Computer, true),
+    m("iMac", true, Computer, true),
+    m("AppleTV", true, Tv, true),
+    m("AudioAccessory", false, Speaker, true), // HomePod
+    m("Watch", true, Wearable, true),
+    m("Chromecast", false, Tv, false),
+    m("Google TV", false, Tv, false),
+    m("Google Home", false, Speaker, false),
+    m("Google Nest Cam", false, Camera, false),
+    m("Google Nest", false, Speaker, false),
+    m("Nest Cam", false, Camera, false),
+    m("Nest Hub", false, Speaker, false),
+    m("Nest Audio", false, Speaker, false),
+    m("Nest Mini", false, Speaker, false),
 ];
 
-/// mDNS TXT model prefixes (case-insensitive), all High.
-const MDNS_MODELS: &[(&str, HostKind)] = &[
-    ("iPhone", Phone),
-    ("iPad", Tablet),
-    ("MacBook", Computer),
-    ("Mac", Computer),
-    ("iMac", Computer),
-    ("AppleTV", Tv),
-    ("AudioAccessory", Speaker), // HomePod
-    ("Watch", Wearable),
-    ("Chromecast", Tv),
-    ("Google TV", Tv),
-    ("Google Home", Speaker),
-    ("Google Nest", Speaker),
-    ("Nest", Speaker),
-];
+fn model_rule(model: &str) -> Option<&'static ModelRule> {
+    MDNS_MODELS.iter().find(|r| {
+        starts_with_ci(model, r.prefix)
+            && (!r.bounded
+                || model
+                    .get(r.prefix.len()..)
+                    .and_then(|rest| rest.chars().next())
+                    .is_none_or(|c| c.is_ascii_digit() || c == ','))
+    })
+}
 
-/// Single mDNS service types that settle the kind on their own, all High.
-const MDNS_SERVICES: &[(&str, HostKind)] = &[
-    ("_ipp._tcp", Printer),
-    ("_ipps._tcp", Printer),
-    ("_printer._tcp", Printer),
-    ("_pdl-datastream._tcp", Printer),
-    ("_googlecast._tcp", Tv),
-    ("_androidtvremote2._tcp", Tv),
-    ("_sonos._tcp", Speaker),
-    ("_spotify-connect._tcp", Speaker),
-    ("_hap._tcp", SmartHome),
+/// Single mDNS service types that settle the kind on their own.
+const MDNS_SERVICES: &[(&str, HostKind, Confidence)] = &[
+    ("_ipp._tcp", Printer, High),
+    ("_ipps._tcp", Printer, High),
+    ("_printer._tcp", Printer, High),
+    ("_pdl-datastream._tcp", Printer, High),
+    ("_googlecast._tcp", Tv, High),
+    ("_androidtvremote2._tcp", Tv, High),
+    ("_sonos._tcp", Speaker, High),
+    // Spotify Connect also runs on computers, phones and TVs.
+    ("_spotify-connect._tcp", Speaker, Medium),
+    ("_hap._tcp", SmartHome, High),
 ];
 
 const COMPANION: &str = "_companion-link._tcp";
@@ -187,17 +211,24 @@ fn service_candidates(services: &[String]) -> Vec<Candidate> {
     let has = |want: &str| services.iter().any(|s| s.eq_ignore_ascii_case(want));
     let mut out = Vec::new();
     for svc in services {
-        if let Some(&(_, kind)) = MDNS_SERVICES
+        if let Some(&(_, kind, conf)) = MDNS_SERVICES
             .iter()
-            .find(|(n, _)| svc.eq_ignore_ascii_case(n))
+            .find(|(n, _, _)| svc.eq_ignore_ascii_case(n))
         {
-            out.push((kind, High, format!("mDNS service: {svc}")));
+            out.push((kind, conf, format!("mDNS service: {svc}")));
         }
     }
-    // AirPlay audio alone is a speaker; iPhones, iPads and Macs also
-    // advertise _raop but always with _companion-link.
-    if has("_raop._tcp") && !has(COMPANION) {
-        out.push((Speaker, High, "mDNS service: _raop._tcp".to_string()));
+    // iPhones, iPads and Macs advertise AirPlay too, but always with
+    // _companion-link. AirPlay audio alone (_raop) is a speaker; AirPlay
+    // video (_airplay) without companion is usually a TV (LG, Samsung, Roku),
+    // though HomePods advertise it too, hence Medium (their model wins).
+    if !has(COMPANION) {
+        if has("_raop._tcp") && !has("_airplay._tcp") {
+            out.push((Speaker, High, "mDNS service: _raop._tcp".to_string()));
+        }
+        if has("_airplay._tcp") {
+            out.push((Tv, Medium, "mDNS service: _airplay._tcp".to_string()));
+        }
     }
     // Time Machine share on SMB: a NAS.
     if has("_smb._tcp") && has("_adisk._tcp") {
@@ -231,6 +262,8 @@ impl VendorMatch {
 const DHCP_VENDORS: &[(VendorMatch, HostKind, Confidence)] = &[
     (VendorMatch::Prefix("android-dhcp-"), Phone, High),
     (VendorMatch::Exact("MSFT 5.0"), Computer, High),
+    // Huawei phones send "HUAWEI:android:<model>"; routers "HUAWEI:<model>".
+    (VendorMatch::Prefix("HUAWEI:android"), Phone, High),
     (VendorMatch::Prefix("HUAWEI:"), Network, Medium),
     (VendorMatch::Exact("ubnt"), Network, Medium),
     (VendorMatch::Prefix("dhcpcd-"), Computer, Low),
@@ -242,20 +275,33 @@ const HOSTNAMES: &[(&str, HostKind, Confidence)] = &[
     // Unanchored: Apple defaults look like "Lucass-iPhone" / "Johns-iPad".
     ("iphone", Phone, Medium),
     ("ipad", Tablet, Medium),
+    ("^(galaxy-?tab|sm-t)", Tablet, Medium), // Samsung tablets, before phones
     ("^(galaxy|sm-[a-z0-9]+|pixel|oneplus)", Phone, Medium),
     ("^(desktop|laptop)-[a-z0-9]{7}$", Computer, Medium), // Windows defaults
     ("macbook|imac|mac-?mini", Computer, Medium),
     ("^hp[0-9a-f]{6}$", Printer, Medium),
     ("^(brw|epson|canon)", Printer, Medium),
     ("^(chromecast|roku|appletv|fire-?tv)", Tv, Medium),
+    ("^(xbox|playstation|ps[45]|nintendo)", Console, Medium),
+    // Prefix rules below end at a separator, a digit or the end of the name,
+    // so "ringo-pc" and "espresso" stay out.
     (
-        "^(xbox|playstation|ps[45]|nintendo|switch)",
-        Console,
+        "^((ring|wyze|reolink|camera)([-_0-9]|$)|cam-)",
+        Camera,
         Medium,
     ),
-    ("^(ring|wyze|reolink|camera|cam-)", Camera, Medium),
-    ("^(sonos|homepod|echo)", Speaker, Medium),
-    ("^(esp|tasmota|shelly|tuya)", SmartHome, Medium),
+    // Echo only by its product names, so "echo-server" stays out.
+    (
+        "^((sonos|homepod)([-_0-9]|$)|echo([-_]?(dot|show|pop|studio|plus|spot|flex|auto|input|sub|link)|[_0-9]|$))",
+        Speaker,
+        Medium,
+    ),
+    // Shelly names carry the model first: "shellyplus1pm-a8032ab12345".
+    (
+        "^((esp|tasmota|tuya)([-_0-9]|$)|shelly[a-z0-9]*([-_]|$))",
+        SmartHome,
+        Medium,
+    ),
     // Short prefixes need a separator so "apollo" / "swift-laptop" stay out.
     (
         "^((sw|ap)[-_]|(switch|unifi|usw|uap|ism-sw)([-_]|$))",
@@ -595,6 +641,15 @@ mod tests {
             ("Google Home Mini", Speaker),
             ("Google Nest Mini", Speaker),
             ("Nest Audio", Speaker),
+            ("Nest Hub Max", Speaker),
+            ("Nest Mini", Speaker),
+            ("Nest Cam Outdoor", Camera),
+            ("Google Nest Cam", Camera),
+            ("Macmini9,1", Computer),
+            ("MacPro7,1", Computer),
+            ("iMacPro1,1", Computer),
+            ("Mac", Computer),
+            ("iPhone", Phone),
         ] {
             let l = classify(&Evidence {
                 mdns_model: Some(model),
@@ -603,6 +658,73 @@ mod tests {
             assert_eq!((l.kind, l.confidence), (kind, Confidence::High), "{model}");
             assert_eq!(l.reasons, vec![format!("mDNS model: {model}")]);
         }
+    }
+
+    #[test]
+    fn mdns_model_prefixes_need_a_boundary() {
+        for model in [
+            "Machine",
+            "iMachine",
+            "Watchdog",
+            "iPadding",
+            "iPhoneish",
+            "AppleTVBox",
+            "Nest Thermostat",
+            "Nestle",
+            "Nest",
+        ] {
+            let l = classify(&Evidence {
+                mdns_model: Some(model),
+                ..ev("02:11:22:33:44:55")
+            });
+            assert_eq!(l.maker.as_deref(), Some("Private MAC"), "{model}");
+            assert_eq!((l.kind, l.confidence), (Phone, Confidence::Low), "{model}");
+            assert!(
+                l.reasons.iter().all(|r| !r.starts_with("mDNS model")),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn spotify_does_not_beat_windows() {
+        let services = vec!["_spotify-connect._tcp".to_string()];
+        let l = classify(&Evidence {
+            dhcp_vendor: Some("MSFT 5.0"),
+            mdns_services: &services,
+            ..ev("00:00:5e:00:53:01")
+        });
+        assert_eq!((l.kind, l.confidence), (Computer, Confidence::High));
+    }
+
+    #[test]
+    fn airplay_devices() {
+        let svcs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // LG TV: AirPlay video and audio, no companion link.
+        let lg = svcs(&["_airplay._tcp", "_raop._tcp"]);
+        let l = classify(&Evidence {
+            mdns_services: &lg,
+            ..ev("00:00:5e:00:53:01")
+        });
+        assert_eq!(l.kind, Tv);
+        // AirPort Express: audio only.
+        let airport = svcs(&["_raop._tcp"]);
+        let l = classify(&Evidence {
+            mdns_services: &airport,
+            ..ev("00:00:5e:00:53:01")
+        });
+        assert_eq!((l.kind, l.confidence), (Speaker, Confidence::High));
+        // HomePod: advertises both, but its model settles it.
+        let l = classify(&Evidence {
+            mdns_services: &lg,
+            mdns_model: Some("AudioAccessory1,1"),
+            ..ev("02:11:22:33:44:55")
+        });
+        assert_eq!(short(&l), (Some("Apple"), Speaker, Confidence::High));
+        assert_eq!(
+            l.reasons.first().map(String::as_str),
+            Some("mDNS model: AudioAccessory1,1")
+        );
     }
 
     #[test]
@@ -616,7 +738,14 @@ mod tests {
             (&["_androidtvremote2._tcp"], Tv, Confidence::High),
             (&["_raop._tcp"], Speaker, Confidence::High),
             (&["_sonos._tcp"], Speaker, Confidence::High),
-            (&["_spotify-connect._tcp"], Speaker, Confidence::High),
+            (&["_spotify-connect._tcp"], Speaker, Confidence::Medium),
+            (&["_airplay._tcp", "_raop._tcp"], Tv, Confidence::Medium),
+            (&["_airplay._tcp"], Tv, Confidence::Medium),
+            (
+                &["_airplay._tcp", "_raop._tcp", "_companion-link._tcp"],
+                Phone,
+                Confidence::Medium,
+            ),
             (&["_hap._tcp"], SmartHome, Confidence::High),
             (&["_smb._tcp", "_adisk._tcp"], Server, Confidence::High),
             (&["_companion-link._tcp"], Phone, Confidence::Medium),
@@ -649,7 +778,8 @@ mod tests {
                 Confidence::Low,
             ),
             ("udhcp 1.36.1", Network, Confidence::Low),
-            ("HUAWEI:android:P30", Network, Confidence::Medium),
+            ("HUAWEI:android:P30", Phone, Confidence::High),
+            ("HUAWEI:HG8245", Network, Confidence::Medium),
             ("ubnt", Network, Confidence::Medium),
             ("something-else", Unknown, Confidence::Low),
         ] {
@@ -670,6 +800,9 @@ mod tests {
             ("Johns-iPad", Tablet, Medium),
             ("iPad-2", Tablet, Medium),
             ("Galaxy-S23", Phone, Medium),
+            ("Galaxy-Tab-S9", Tablet, Medium),
+            ("galaxytab", Tablet, Medium),
+            ("SM-T870", Tablet, Medium),
             ("SM-G991B", Phone, Medium),
             ("Pixel-8", Phone, Medium),
             ("OnePlus-12", Phone, Medium),
@@ -711,6 +844,17 @@ mod tests {
             ("UAP-AC-Lite", Network, Medium),
             ("ap-upstairs", Network, Medium),
             ("ap_garage", Network, Medium),
+            ("switch-core", Network, Medium),
+            ("ringo-pc", Unknown, Low),
+            ("ring-doorbell", Camera, Medium),
+            ("echo-server", Unknown, Low),
+            ("echo", Speaker, Medium),
+            ("echoshow-kitchen", Speaker, Medium),
+            ("espresso", Unknown, Low),
+            ("esp_1234", SmartHome, Medium),
+            ("esp32-abcd", SmartHome, Medium),
+            ("shellyplus1pm-a8032ab12345", SmartHome, Medium),
+            ("sonosity", Unknown, Low),
             ("apollo", Unknown, Low),
             ("swift-laptop", Unknown, Low),
             ("piano", Unknown, Low),
