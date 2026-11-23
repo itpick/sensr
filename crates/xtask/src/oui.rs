@@ -102,6 +102,9 @@ fn build_table(bodies: &[String]) -> Result<String> {
             {
                 bail!("bad assignment {:?} in {rec:?}", rec[1]);
             }
+            if placeholder(&rec[2]) {
+                continue;
+            }
             let name = short_name(&rec[2]).replace(['\t', '\n', '\r'], " ");
             if name.is_empty() {
                 continue;
@@ -228,8 +231,19 @@ const ALIASES_MORE: [(&str, &str); 3] = [
     ("AzureWave", "AzureWave"),
 ];
 
+/// Organisation names that name nobody: IEEE's hidden ("Private")
+/// registrations, and the 6-digit parents of MA-M / MA-S blocks, whose
+/// children carry the real names. Left out, a lookup finds the child or
+/// nothing.
+fn placeholder(raw: &str) -> bool {
+    let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    name.eq_ignore_ascii_case("Private") || name.eq_ignore_ascii_case("IEEE Registration Authority")
+}
+
+/// Trimmed off the end of a name, before and after each suffix: what a
+/// removed `& Co. KG` or `+ Co` leaves dangling.
 fn is_sep(c: char) -> bool {
-    matches!(c, ',' | '.' | ' ')
+    matches!(c, ',' | '.' | ' ' | '&' | '-' | '+' | '/')
 }
 
 /// True when `name` starts with `prefix` (ASCII case-insensitive) and the
@@ -306,6 +320,40 @@ mod tests {
         assert_eq!(short_name("Applied Materials Inc"), "Applied Materials");
         assert_eq!(short_name("Acme S.A."), "Acme");
         assert_eq!(short_name("Cisco Systems, Inc"), "Cisco Systems");
+    }
+
+    #[test]
+    fn short_name_drops_dangling_joiners() {
+        assert_eq!(short_name("Pilz GmbH & Co. KG"), "Pilz");
+        assert_eq!(short_name("HOB ELECTRONIC GMBH & CO. KG"), "HOB ELECTRONIC");
+        assert_eq!(
+            short_name("ELZET80 Mikrocomputer GmbH&Co. KG"),
+            "ELZET80 Mikrocomputer"
+        );
+        assert_eq!(short_name("Canal +"), "Canal");
+        assert_eq!(short_name("CDS-"), "CDS");
+        assert_eq!(short_name("Foo /"), "Foo");
+        assert_eq!(
+            short_name("Endress & Hauser GmbH & Co. KG"),
+            "Endress & Hauser"
+        );
+        // inside a name they stay
+        assert_eq!(short_name("TP-Link Systems Inc"), "TP-Link");
+        assert_eq!(short_name("Black & Decker Inc"), "Black & Decker");
+    }
+
+    #[test]
+    fn placeholder_organisations_are_left_out() {
+        let csv = "Registry,Assignment,Organization Name,Organization Address\n\
+                   MA-L,000101,Private,x\n\
+                   MA-L,0055DA,IEEE Registration Authority,x\n\
+                   MA-M,0055DA1,\"Foo, Inc.\",x\n\
+                   MA-L,B827EB,\"Raspberry Pi Trading Ltd\",x\n";
+        let t = build_table(&[csv.to_owned()]).unwrap();
+        let lines: Vec<&str> = t.lines().skip(1).collect();
+        assert_eq!(lines, ["0055DA1\tFoo", "B827EB\tRaspberry Pi"]);
+        assert!(placeholder(" private "));
+        assert!(!placeholder("Private Networks Ltd"));
     }
 
     #[test]

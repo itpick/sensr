@@ -83,19 +83,24 @@ mod tests {
         );
     }
 
+    /// MA-S blocks resolve to their own holder; their 6-digit parents
+    /// ("IEEE Registration Authority") and hidden ("Private") registrations
+    /// are not in the table, so they never name a host.
     #[test]
-    fn nine_digit_prefix_beats_its_parent() {
+    fn nine_digit_prefix_is_found_and_placeholders_are_absent() {
         let rows: Vec<(&str, &str)> = TABLE
             .lines()
             .filter(|l| !l.starts_with('#'))
             .filter_map(|l| l.split_once('\t'))
             .collect();
+        assert!(
+            rows.iter()
+                .all(|(_, n)| *n != "Private" && *n != "IEEE Registration Authority")
+        );
         let (long, name) = rows
             .iter()
-            .find(|(p, _)| {
-                p.len() == 9 && rows.iter().any(|(q, _)| q.len() == 6 && p.starts_with(q))
-            })
-            .expect("a MA-S block inside a MA-L block");
+            .find(|(p, _)| p.len() == 9)
+            .expect("a MA-S block");
         let mac = format!(
             "{}:{}:{}:{}:{}0:00",
             &long[0..2],
@@ -105,5 +110,7 @@ mod tests {
             &long[8..9]
         );
         assert_eq!(lookup(&mac), Some(*name));
+        // Raspberry Pi's MA-L block is unaffected
+        assert_eq!(lookup("b8:27:eb:00:00:01"), Some("Raspberry Pi"));
     }
 }
