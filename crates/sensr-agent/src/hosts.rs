@@ -123,6 +123,153 @@ pub struct Host {
     /// Last real activity, Unix seconds; `None` if never seen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<u64>,
+    /// What the device said about itself in DHCP and mDNS (MAC rows only).
+    #[serde(default, skip_serializing_if = "HostEvidence::is_empty")]
+    pub evidence: HostEvidence,
+}
+
+/// Most MACs whose evidence waits for their inventory row.
+pub const MAX_PENDING_EVIDENCE: usize = 256;
+/// How long evidence waits for its row (a DHCP DISCOVER arrives before the
+/// lease and the neighbour entry the next poll turns into a row).
+pub const PENDING_EVIDENCE_SECS: u64 = 600;
+
+/// Most mDNS service types kept per host.
+pub const MAX_MDNS_SERVICES: usize = 16;
+
+/// Passive evidence about a host, kept on its row: what its DHCP requests
+/// and mDNS announcements said. Strings are at most 128 bytes.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
+pub struct HostEvidence {
+    /// DHCP option 60.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dhcp_vendor: Option<String>,
+    /// DHCP option 55, comma-joined decimal option codes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dhcp_prl: Option<String>,
+    /// DHCP option 12.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dhcp_hostname: Option<String>,
+    /// Advertised service types (`_ipp._tcp`), at most [`MAX_MDNS_SERVICES`].
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub mdns_services: BTreeSet<String>,
+    /// TXT `model=` / `md=` / `am=`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mdns_model: Option<String>,
+    /// The instance name it announces (`Living Room`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mdns_name: Option<String>,
+}
+
+/// One packet's worth of evidence for [`HostCollector::record_evidence`].
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct EvidenceUpdate {
+    pub dhcp_vendor: Option<String>,
+    pub dhcp_prl: Option<String>,
+    pub dhcp_hostname: Option<String>,
+    pub mdns_services: Vec<String>,
+    pub mdns_model: Option<String>,
+    pub mdns_name: Option<String>,
+}
+
+impl EvidenceUpdate {
+    /// Carries nothing.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn cap(s: &str) -> String {
+    let mut at = s.len().min(sensr_fingerprint::MAX_STRING);
+    while !s.is_char_boundary(at) {
+        at -= 1;
+    }
+    s[..at].to_owned()
+}
+
+impl HostEvidence {
+    /// Nothing recorded.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Merges one packet's evidence. DHCP fields take the latest value (a
+    /// client sends the same ones in every request); the mDNS model and
+    /// name keep the first one, since one device announces several
+    /// instances and alternating between them would rewrite the inventory
+    /// every few seconds; services accumulate up to [`MAX_MDNS_SERVICES`].
+    pub fn merge(&mut self, u: &EvidenceUpdate) {
+        let latest = |f: &mut Option<String>, v: &Option<String>| {
+            if let Some(v) = v {
+                *f = Some(cap(v));
+            }
+        };
+        latest(&mut self.dhcp_vendor, &u.dhcp_vendor);
+        latest(&mut self.dhcp_prl, &u.dhcp_prl);
+        latest(&mut self.dhcp_hostname, &u.dhcp_hostname);
+        let first = |f: &mut Option<String>, v: &Option<String>| {
+            if f.is_none() {
+                *f = v.as_deref().map(cap);
+            }
+        };
+        first(&mut self.mdns_model, &u.mdns_model);
+        first(&mut self.mdns_name, &u.mdns_name);
+        self.add_services(u.mdns_services.iter().map(String::as_str));
+    }
+
+    fn add_services<'a>(&mut self, services: impl Iterator<Item = &'a str>) {
+        for s in services {
+            if self.mdns_services.len() >= MAX_MDNS_SERVICES {
+                break;
+            }
+            self.mdns_services.insert(cap(s));
+        }
+    }
+
+    /// Takes in another row's evidence; this row's values win.
+    fn absorb(&mut self, other: HostEvidence) {
+        self.dhcp_vendor = self.dhcp_vendor.take().or(other.dhcp_vendor);
+        self.dhcp_prl = self.dhcp_prl.take().or(other.dhcp_prl);
+        self.dhcp_hostname = self.dhcp_hostname.take().or(other.dhcp_hostname);
+        self.mdns_model = self.mdns_model.take().or(other.mdns_model);
+        self.mdns_name = self.mdns_name.take().or(other.mdns_name);
+        self.add_services(other.mdns_services.iter().map(String::as_str));
+    }
+}
+
+fn confidence_str(c: sensr_fingerprint::Confidence) -> &'static str {
+    match c {
+        sensr_fingerprint::Confidence::High => "high",
+        sensr_fingerprint::Confidence::Medium => "medium",
+        sensr_fingerprint::Confidence::Low => "low",
+    }
+}
+
+/// The automatic label of a MAC row: its maker and evidence through
+/// [`sensr_fingerprint::classify`]. `None` for `id:` rows.
+pub fn auto_label(h: &Host) -> Option<sensr_fingerprint::Label> {
+    let mac = h.mac.as_deref()?.to_ascii_lowercase();
+    let e = &h.evidence;
+    let services: Vec<String> = e.mdns_services.iter().cloned().collect();
+    Some(sensr_fingerprint::classify(&sensr_fingerprint::Evidence {
+        mac: &mac,
+        hostname: h.lease_hostname.as_deref().or(e.dhcp_hostname.as_deref()),
+        dhcp_vendor: e.dhcp_vendor.as_deref(),
+        dhcp_prl: e.dhcp_prl.as_deref(),
+        mdns_services: &services,
+        mdns_model: e.mdns_model.as_deref(),
+    }))
+}
+
+/// The wire shape of a label (`by`: `auto` or `owner`).
+pub fn label_json(l: &sensr_fingerprint::Label, by: &str) -> serde_json::Value {
+    serde_json::json!({
+        "maker": l.maker,
+        "kind": l.kind,
+        "confidence": confidence_str(l.confidence),
+        "reasons": l.reasons,
+        "by": by,
+    })
 }
 
 impl Host {
@@ -141,6 +288,7 @@ impl Host {
             lease: None,
             first_seen: now,
             last_seen: None,
+            evidence: HostEvidence::default(),
         }
     }
 
@@ -179,6 +327,7 @@ impl Host {
         self.ipv4 = self.ipv4.or(other.ipv4);
         self.lease = self.lease.take().or(other.lease);
         self.client_id = self.client_id.take().or(other.client_id);
+        self.evidence.absorb(other.evidence);
         let mine = std::mem::replace(&mut self.ipv6, other.ipv6);
         for a in mine.into_iter().rev() {
             self.add_ipv6(a);
@@ -278,6 +427,10 @@ pub struct Inventory {
     /// Set after the first poll; until then lease expiries are only recorded,
     /// so leases existing at start-up are not mistaken for activity.
     primed: bool,
+    /// Evidence for MACs without a row yet, with when it last arrived:
+    /// merged once a poll creates the row, dropped after
+    /// [`PENDING_EVIDENCE_SECS`], at most [`MAX_PENDING_EVIDENCE`] MACs.
+    pending: BTreeMap<String, (u64, HostEvidence)>,
 }
 
 impl Inventory {
@@ -287,6 +440,7 @@ impl Inventory {
             hosts: hosts.into_iter().map(|h| (h.key.clone(), h)).collect(),
             expires: BTreeMap::new(),
             primed: false,
+            pending: BTreeMap::new(),
         }
     }
 
@@ -416,6 +570,7 @@ impl Inventory {
             h.name = h.reserved_name.clone().or_else(|| h.lease_hostname.clone());
         }
         self.primed = true;
+        let adopted = self.adopt_pending(now);
 
         if self.hosts.len() != before.len()
             || self
@@ -430,6 +585,7 @@ impl Inventory {
             .values()
             .zip(before.values())
             .any(|(h, b)| h.last_seen != b.last_seen || h.lease != b.lease)
+            || adopted
         {
             Change::Seen
         } else {
@@ -441,6 +597,77 @@ impl Inventory {
         self.hosts
             .entry(key.to_owned())
             .or_insert_with(|| Host::new(key.to_owned(), now))
+    }
+
+    /// Drops expired pending evidence and merges the rest into rows that
+    /// now exist. Whether any row's evidence changed.
+    fn adopt_pending(&mut self, now: u64) -> bool {
+        self.pending
+            .retain(|_, (at, _)| now.saturating_sub(*at) <= PENDING_EVIDENCE_SECS);
+        let mut changed = false;
+        let ready: Vec<String> = self
+            .pending
+            .keys()
+            .filter(|k| self.hosts.get(*k).is_some_and(|h| h.mac.is_some()))
+            .cloned()
+            .collect();
+        for key in ready {
+            let (Some((_, ev)), Some(h)) = (self.pending.remove(&key), self.hosts.get_mut(&key))
+            else {
+                continue;
+            };
+            let before = h.evidence.clone();
+            // the row's own (later) evidence wins
+            h.evidence.absorb(ev);
+            changed |= h.evidence != before;
+        }
+        changed
+    }
+
+    /// Merges evidence into the row keyed `mac` (lowercase colon form).
+    /// Never creates a row: the inventory follows leases and neighbours.
+    /// Evidence for a MAC without a row waits (bounded, see
+    /// [`Inventory::pending`]) for the poll that creates it.
+    /// [`Change::Seen`] when the merged evidence differs, so a host
+    /// re-announcing the same thing writes nothing and a new detail is
+    /// saved within the `last_seen` throttle.
+    pub fn record_evidence(&mut self, mac: &str, u: &EvidenceUpdate, now: u64) -> Change {
+        let Some(h) = self.hosts.get_mut(mac).filter(|h| h.mac.is_some()) else {
+            if !self.hosts.contains_key(mac) {
+                self.hold(mac, u, now);
+            }
+            return Change::None;
+        };
+        let before = h.evidence.clone();
+        h.evidence.merge(u);
+        if h.evidence == before {
+            Change::None
+        } else {
+            Change::Seen
+        }
+    }
+
+    /// Keeps evidence for a MAC that has no row yet.
+    fn hold(&mut self, mac: &str, u: &EvidenceUpdate, now: u64) {
+        self.pending
+            .retain(|_, (at, _)| now.saturating_sub(*at) <= PENDING_EVIDENCE_SECS);
+        if !self.pending.contains_key(mac) && self.pending.len() >= MAX_PENDING_EVIDENCE {
+            // make room: the stalest goes
+            if let Some(oldest) = self
+                .pending
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone())
+            {
+                self.pending.remove(&oldest);
+            }
+        }
+        let (at, ev) = self
+            .pending
+            .entry(mac.to_owned())
+            .or_insert_with(|| (now, HostEvidence::default()));
+        *at = now;
+        ev.merge(u);
     }
 
     /// Removes an unreserved host; `false` if `key` is unknown or reserved.
@@ -519,6 +746,9 @@ impl Inventory {
                 v["interface"] = id.into();
                 v["interface_name"] = name.into();
                 v["online"] = online(h).into();
+                if let Some(l) = auto_label(h) {
+                    v["label"] = label_json(&l, "auto");
+                }
                 v
             })
             .collect();
@@ -659,6 +889,45 @@ fn host_modes(doc: &Document) -> BTreeMap<String, &'static str> {
         .collect()
 }
 
+/// Enabled owner labels of `doc`: lowercase MAC → the entry. An entry for a
+/// MAC that is not in the inventory is kept and applies when that host
+/// appears.
+fn host_labels(doc: &Document) -> BTreeMap<String, sensr_schema::models::hosts::HostLabel> {
+    doc.hosts
+        .labels
+        .values()
+        .filter(|l| l.enabled)
+        .map(|l| (l.mac.to_string(), l.clone()))
+        .collect()
+}
+
+/// `label` (the automatic one, as wire JSON) with the owner's fields laid
+/// over it: a set field wins, `by` becomes `owner`, confidence `high` and
+/// the first reason `Set by you`.
+fn overlay_label(label: &mut serde_json::Value, owner: &sensr_schema::models::hosts::HostLabel) {
+    let maker = owner
+        .maker
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    if owner.kind.is_none() && maker.is_none() {
+        return;
+    }
+    if let Some(k) = owner.kind {
+        label["kind"] = serde_json::json!(k);
+    }
+    if let Some(m) = maker {
+        label["maker"] = m.into();
+    }
+    let mut reasons = vec![serde_json::Value::from("Set by you")];
+    if let Some(auto) = label["reasons"].as_array() {
+        reasons.extend(auto.iter().cloned());
+    }
+    label["reasons"] = reasons.into();
+    label["confidence"] = "high".into();
+    label["by"] = "owner".into();
+}
+
 /// How often the collector polls its sources.
 const POLL: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -677,6 +946,9 @@ struct Collected {
     /// Hosts in a mode (enabled `firewall.host_modes` entries of the
     /// applied document): MAC → `isolated` / `quarantine`.
     modes: BTreeMap<String, &'static str>,
+    /// Owner labels (enabled `hosts.labels` entries of the applied
+    /// document), by lowercase MAC.
+    labels: BTreeMap<String, sensr_schema::models::hosts::HostLabel>,
 }
 
 /// The host inventory service: polls [`Sources`] every 30 s, merges them into
@@ -720,6 +992,7 @@ impl HostCollector {
                 },
                 ready: false,
                 modes: BTreeMap::new(),
+                labels: BTreeMap::new(),
             }),
             on_poll: Mutex::new(None),
         })
@@ -735,8 +1008,10 @@ impl HostCollector {
     pub fn set_document(&self, doc: &Document) {
         let internal = internal_interfaces(doc);
         let modes = host_modes(doc);
+        let labels = host_labels(doc);
         let mut st = lock(&self.state);
         st.modes = modes;
+        st.labels = labels;
         st.snap.subnet_iface = subnet_ifaces(doc, &internal);
         st.snap.reservations = reservations(doc);
         st.snap.internal = internal;
@@ -802,6 +1077,12 @@ impl HostCollector {
                 if let Some(mode) = h["mac"].as_str().and_then(|m| st.modes.get(m)) {
                     h["mode"] = (*mode).into();
                 }
+                let owner = h["mac"]
+                    .as_str()
+                    .and_then(|m| st.labels.get(&m.to_ascii_lowercase()));
+                if let (Some(owner), Some(label)) = (owner, h.get_mut("label")) {
+                    overlay_label(label, owner);
+                }
             }
         }
         v
@@ -849,6 +1130,15 @@ impl HostCollector {
             tracing::warn!(error = %e, "saving the host inventory");
         }
         true
+    }
+
+    /// Merges one packet's evidence into an existing MAC row
+    /// ([`Inventory::record_evidence`]); saved with the next poll's flush.
+    pub fn record_evidence(&self, mac: &str, u: &EvidenceUpdate) -> Change {
+        let mut st = lock(&self.state);
+        let c = st.inv.record_evidence(mac, u, unix_now());
+        st.store.note(c);
+        c
     }
 
     /// Final save (clean shutdown).
@@ -951,6 +1241,7 @@ mod tests {
             lease: None,
             first_seen,
             last_seen,
+            evidence: HostEvidence::default(),
         }
     }
 
@@ -1530,6 +1821,219 @@ mod tests {
         let ids: BTreeSet<&str> = m.values().map(String::as_str).collect();
         assert_eq!(ids, BTreeSet::from(["lan", "opt1", "opt2"]));
     }
+    fn dhcp_update() -> EvidenceUpdate {
+        EvidenceUpdate {
+            dhcp_vendor: Some("android-dhcp-14".into()),
+            dhcp_prl: Some("1,3,6,15,26,28,51,58,59,43".into()),
+            dhcp_hostname: Some("Pixel-8".into()),
+            ..EvidenceUpdate::default()
+        }
+    }
+
+    /// Review focus 4: a host repeating itself never marks the inventory.
+    #[test]
+    fn same_evidence_is_not_a_change() {
+        let mut inv = Inventory::from_hosts(vec![host(MAC, 1, Some(2))]);
+        assert_eq!(inv.record_evidence(MAC, &dhcp_update(), 3), Change::Seen);
+        assert_eq!(inv.record_evidence(MAC, &dhcp_update(), 3), Change::None);
+        let mdns = EvidenceUpdate {
+            mdns_services: vec!["_googlecast._tcp".into()],
+            mdns_name: Some("Living Room".into()),
+            ..EvidenceUpdate::default()
+        };
+        assert_eq!(inv.record_evidence(MAC, &mdns, 3), Change::Seen);
+        for _ in 0..5 {
+            assert_eq!(inv.record_evidence(MAC, &mdns, 3), Change::None);
+        }
+        // another instance of the same device does not flip the name back and forth
+        let other = EvidenceUpdate {
+            mdns_name: Some("Living Room speaker group".into()),
+            ..mdns.clone()
+        };
+        assert_eq!(inv.record_evidence(MAC, &other, 3), Change::None);
+        assert_eq!(
+            only(&inv).evidence.mdns_name.as_deref(),
+            Some("Living Room")
+        );
+        // through the collector: nothing pending, nothing written
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts.json");
+        let mut store = HostStore::new(path.clone());
+        store.flush(&inv, 1).unwrap();
+        let c = HostCollector::new(HostStore::new(path), Arc::new(|| (Vec::new(), Vec::new())));
+        assert_eq!(c.record_evidence(MAC, &mdns), Change::None);
+        assert_eq!(lock(&c.state).store.dirty, Change::None);
+        assert_eq!(
+            c.record_evidence(
+                MAC,
+                &EvidenceUpdate {
+                    mdns_services: vec!["_airplay._tcp".into()],
+                    ..EvidenceUpdate::default()
+                }
+            ),
+            Change::Seen
+        );
+        assert_eq!(lock(&c.state).store.dirty, Change::Seen);
+    }
+
+    #[test]
+    fn evidence_for_unknown_mac_creates_no_row() {
+        let mut inv = Inventory::from_hosts(vec![host(MAC, 1, Some(2))]);
+        assert_eq!(
+            inv.record_evidence("aa:bb:cc:dd:ee:77", &dhcp_update(), 3),
+            Change::None
+        );
+        let mut cid = host("id:01:aa", 1, None);
+        cid.mac = None;
+        let mut inv2 = Inventory::from_hosts(vec![cid]);
+        assert_eq!(
+            inv2.record_evidence("id:01:aa", &dhcp_update(), 3),
+            Change::None
+        );
+        assert_eq!(inv.hosts().count(), 1);
+        assert!(only(&inv).evidence.is_empty());
+    }
+
+    /// A DISCOVER arrives before the lease and the neighbour entry: its
+    /// evidence waits for the poll that creates the row.
+    #[test]
+    fn evidence_before_the_row_lands_once_the_poll_creates_it() {
+        let mut inv = Inventory::default();
+        assert_eq!(inv.record_evidence(MAC, &dhcp_update(), 100), Change::None);
+        assert_eq!(inv.hosts().count(), 0, "no row from evidence alone");
+        inv.observe(&with_neigh("REACHABLE"), 200);
+        let h = only(&inv);
+        assert_eq!(h.evidence.dhcp_hostname.as_deref(), Some("Pixel-8"));
+        assert_eq!(h.evidence.dhcp_vendor.as_deref(), Some("android-dhcp-14"));
+        assert!(inv.pending.is_empty(), "merged once");
+    }
+
+    #[test]
+    fn pending_evidence_expires() {
+        let mut inv = Inventory::default();
+        inv.record_evidence(MAC, &dhcp_update(), 100);
+        inv.observe(&with_neigh("REACHABLE"), 100 + PENDING_EVIDENCE_SECS + 1);
+        assert!(only(&inv).evidence.is_empty());
+        assert!(inv.pending.is_empty());
+    }
+
+    #[test]
+    fn pending_evidence_is_bounded() {
+        let mut inv = Inventory::default();
+        for i in 0..MAX_PENDING_EVIDENCE + 10 {
+            let mac = format!("aa:bb:cc:00:{:02x}:{:02x}", i / 256, i % 256);
+            inv.record_evidence(&mac, &dhcp_update(), 100 + i as u64);
+        }
+        assert_eq!(inv.pending.len(), MAX_PENDING_EVIDENCE);
+        // the oldest went, the newest stayed
+        assert!(!inv.pending.contains_key("aa:bb:cc:00:00:00"));
+        let last = MAX_PENDING_EVIDENCE + 9;
+        assert!(inv.pending.contains_key(&format!(
+            "aa:bb:cc:00:{:02x}:{:02x}",
+            last / 256,
+            last % 256
+        )));
+    }
+
+    #[test]
+    fn evidence_merges_and_caps_services() {
+        let mut e = HostEvidence::default();
+        e.merge(&EvidenceUpdate {
+            mdns_services: (0..10).map(|i| format!("_a{i}._tcp")).collect(),
+            mdns_model: Some("x".repeat(300)),
+            ..EvidenceUpdate::default()
+        });
+        e.merge(&EvidenceUpdate {
+            mdns_services: (0..10).map(|i| format!("_b{i}._tcp")).collect(),
+            ..EvidenceUpdate::default()
+        });
+        assert_eq!(e.mdns_services.len(), MAX_MDNS_SERVICES);
+        assert_eq!(e.mdns_model.as_deref().map(str::len), Some(128));
+        // a DHCP update without a field keeps the old value
+        e.merge(&dhcp_update());
+        e.merge(&EvidenceUpdate {
+            dhcp_hostname: Some("pixel".into()),
+            ..EvidenceUpdate::default()
+        });
+        assert_eq!(e.dhcp_vendor.as_deref(), Some("android-dhcp-14"));
+        assert_eq!(e.dhcp_hostname.as_deref(), Some("pixel"));
+    }
+
+    #[test]
+    fn absorb_merges_evidence_mac_row_wins() {
+        let mut mac_row = host(MAC, 1, Some(2));
+        mac_row.evidence.dhcp_vendor = Some("MSFT 5.0".into());
+        mac_row.evidence.mdns_services.insert("_smb._tcp".into());
+        let mut cid = host("id:01:aa", 1, None);
+        cid.mac = None;
+        cid.evidence.dhcp_vendor = Some("other".into());
+        cid.evidence.dhcp_prl = Some("1,3,6".into());
+        cid.evidence.mdns_services.insert("_ipp._tcp".into());
+        mac_row.absorb(cid);
+        let e = &mac_row.evidence;
+        assert_eq!(e.dhcp_vendor.as_deref(), Some("MSFT 5.0"));
+        assert_eq!(e.dhcp_prl.as_deref(), Some("1,3,6"));
+        assert_eq!(e.mdns_services.len(), 2);
+    }
+
+    #[test]
+    fn evidence_is_omitted_when_empty_and_old_files_load() {
+        let h = host(MAC, 1, Some(2));
+        let v = serde_json::to_value(&h).unwrap();
+        assert!(v.get("evidence").is_none(), "{v}");
+        // a hosts.json row from before evidence existed
+        let old = serde_json::json!({"key": MAC, "mac": MAC, "first_seen": 1});
+        let h: Host = serde_json::from_value(old).unwrap();
+        assert!(h.evidence.is_empty());
+        let mut h = host(MAC, 1, Some(2));
+        h.evidence.mdns_services.insert("_ipp._tcp".into());
+        let back: Host = serde_json::from_value(serde_json::to_value(&h).unwrap()).unwrap();
+        assert_eq!(back, h);
+    }
+
+    #[test]
+    fn view_has_auto_label() {
+        let cam = "7c:78:b2:00:00:01";
+        let mut cid = host("id:01:aa", 900, None);
+        cid.mac = None;
+        let v = Inventory::from_hosts(vec![host(cam, 900, Some(950)), cid]).view(1000, &lan());
+        let hosts = v["hosts"].as_array().unwrap();
+        let c = hosts.iter().find(|h| h["key"] == cam).unwrap();
+        assert_eq!(c["label"]["kind"], "camera");
+        assert_eq!(c["label"]["by"], "auto");
+        assert_eq!(c["label"]["maker"], "Wyze");
+        assert_eq!(c["label"]["confidence"], "medium");
+        assert_eq!(
+            c["label"]["reasons"],
+            serde_json::json!(["MAC maker: Wyze"])
+        );
+        let id = hosts.iter().find(|h| h["key"] == "id:01:aa").unwrap();
+        assert!(id.get("label").is_none(), "{id}");
+    }
+
+    #[test]
+    fn label_uses_evidence_and_dhcp_hostname() {
+        // a private MAC with only a DHCP host name: the name decides
+        let mut h = host("da:a1:19:00:00:01", 1, Some(2));
+        h.evidence.dhcp_hostname = Some("iPhone".into());
+        let l = auto_label(&h).unwrap();
+        assert_eq!(l.maker.as_deref(), Some("Private MAC"));
+        assert_eq!(l.kind, sensr_schema::models::hosts::HostKind::Phone);
+        assert!(l.reasons.iter().any(|r| r.contains("iPhone")), "{l:?}");
+        // the lease's host name wins over the DHCP option seen on the wire
+        h.lease_hostname = Some("Johns-iPad".into());
+        let l = auto_label(&h).unwrap();
+        assert_eq!(l.kind, sensr_schema::models::hosts::HostKind::Tablet);
+        assert!(l.reasons.iter().any(|r| r.contains("Johns-iPad")), "{l:?}");
+        assert!(!l.reasons.iter().any(|r| r.contains("iPhone")), "{l:?}");
+        // an uppercase MAC is classified in lowercase colon form
+        let mut docker = host("02:42:ac:11:00:02", 1, None);
+        docker.mac = Some("02:42:AC:11:00:02".into());
+        assert_eq!(
+            auto_label(&docker).unwrap().maker.as_deref(),
+            Some("Docker")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1829,6 +2333,90 @@ mod collector {
         assert!(row(&c, MAC).get("mode").is_none());
         c.set_document(&doc);
         assert!(row(&c, MAC).get("mode").is_none());
+    }
+
+    fn with_label(mut doc: Document, mac: &str, label: serde_json::Value) -> Document {
+        use sensr_schema::PathAccess;
+        let mut l = label;
+        l["mac"] = mac.into();
+        doc.set_by_path("hosts.labels.6d0de000-0000-4000-8000-000000000001", l)
+            .unwrap();
+        doc
+    }
+
+    fn row(c: &HostCollector, key: &str) -> serde_json::Value {
+        c.view(1000)["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["key"] == key)
+            .cloned()
+            .expect("row")
+    }
+
+    #[test]
+    fn view_overlays_owner_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, doc) = collector(&dir);
+        c.poll(1000);
+        let auto = row(&c, MAC)["label"].clone();
+        assert_eq!(auto["by"], "auto");
+
+        // kind set, maker unset: kind from the owner, maker from the OUI
+        c.set_document(&with_label(
+            doc.clone(),
+            MAC,
+            serde_json::json!({"kind": "camera"}),
+        ));
+        let l = row(&c, MAC)["label"].clone();
+        assert_eq!(l["kind"], "camera");
+        assert_eq!(l["maker"], auto["maker"]);
+        assert_eq!(l["by"], "owner");
+        assert_eq!(l["confidence"], "high");
+        assert_eq!(l["reasons"][0], "Set by you");
+        assert!(
+            l["reasons"].as_array().unwrap().len() > 1,
+            "the guess is kept after Set by you"
+        );
+
+        // maker set, kind unset; an upper-case entry still matches
+        c.set_document(&with_label(
+            doc.clone(),
+            &MAC.to_uppercase(),
+            serde_json::json!({"maker": "Home brew"}),
+        ));
+        let l = row(&c, MAC)["label"].clone();
+        assert_eq!(l["maker"], "Home brew");
+        assert_eq!(l["kind"], auto["kind"]);
+        assert_eq!(l["by"], "owner");
+
+        // other rows are untouched
+        assert_eq!(row(&c, "02:00:5e:10:00:0a")["label"]["by"], "auto");
+
+        // a disabled entry is ignored
+        let mut off = with_label(doc.clone(), MAC, serde_json::json!({"kind": "camera"}));
+        for l in off.hosts.labels.iter_mut() {
+            l.1.enabled = false;
+        }
+        c.set_document(&off);
+        assert_eq!(row(&c, MAC)["label"], auto);
+    }
+
+    #[test]
+    fn override_for_unknown_mac_is_kept_but_not_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, doc) = collector(&dir);
+        c.poll(1000);
+        let before = c.view(1000);
+        let stranger = "aa:bb:cc:00:99:99";
+        c.set_document(&with_label(
+            doc.clone(),
+            stranger,
+            serde_json::json!({"kind": "tv", "maker": "Nobody"}),
+        ));
+        // no row is invented and none changes
+        assert_eq!(c.view(1000), before);
+        assert_eq!(lock(&c.state).labels.len(), 1, "the override is kept");
     }
 
     #[test]

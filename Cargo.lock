@@ -4995,6 +4995,7 @@ dependencies = [
  "sensr-auth",
  "sensr-config",
  "sensr-feeds",
+ "sensr-fingerprint",
  "sensr-import-opnsense",
  "sensr-ipc",
  "sensr-monitor",
@@ -5171,6 +5172,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sensr-fingerprint"
+version = "0.0.0"
+dependencies = [
+ "regex",
+ "sensr-schema",
+]
+
+[[package]]
 name = "sensr-flow"
 version = "0.0.0"
 dependencies = [
@@ -5204,6 +5213,7 @@ version = "0.0.0"
 dependencies = [
  "ciborium",
  "proptest",
+ "sensr-schema",
  "serde",
  "serde_json",
  "tempfile",
@@ -7151,6 +7161,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+ "ureq",
 ]
 
 [[package]]

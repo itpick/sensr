@@ -704,3 +704,84 @@ async fn set_host_mode_route() {
     let applied = fx.applier.state.lock().unwrap().applied.clone();
     assert!(applied.last().unwrap().firewall.host_modes.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_host_label_route() {
+    const MAC: &str = "aa:bb:cc:00:00:03";
+    let fx = start().await;
+    let post = |who: String, body: Value| {
+        let fx = &fx;
+        async move { http(fx, "POST", "/api/v1/hosts/label", Some(&who), Some(body)).await }
+    };
+    let labels = |fx: &Fx| {
+        fx.applier
+            .state
+            .lock()
+            .unwrap()
+            .applied
+            .last()
+            .unwrap()
+            .hosts
+            .labels
+            .values()
+            .map(|l| (l.mac.to_string(), l.kind, l.maker.clone()))
+            .collect::<Vec<_>>()
+    };
+    let viewer = pw("hostviewer", "pw");
+    let (st, body) = post(
+        viewer.clone(),
+        json!({"mac": MAC, "kind": "camera", "maker": " Wyze "}),
+    )
+    .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body, json!({"result": "applied"}));
+    assert_eq!(
+        labels(&fx),
+        [(
+            MAC.to_owned(),
+            Some(sensr_schema::models::hosts::HostKind::Camera),
+            Some("Wyze".to_owned())
+        )]
+    );
+
+    // read-only config and no hosts privilege are both refused
+    let body = json!({"mac": MAC, "kind": "tv"});
+    let (st, b) = post(pw("hostreader", "pw"), body.clone()).await;
+    assert_eq!(st, 403, "{b}");
+    let (st, _) = post(pw("watcher", "pw"), body).await;
+    assert_eq!(st, 403);
+    // an unknown kind is a bad request, not a stored label
+    let (st, _) = post(viewer.clone(), json!({"mac": MAC, "kind": "toaster"})).await;
+    assert!(st == 400 || st == 422, "{st}");
+
+    // both null clears it
+    let (st, body) = post(viewer, json!({"mac": MAC, "kind": null, "maker": null})).await;
+    assert_eq!((st, body), (200, json!({"result": "applied"})));
+    assert!(labels(&fx).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ui_backend_set_host_label() {
+    use sensr_ui::api::ApiError;
+    const MAC: &str = "aa:bb:cc:00:00:04";
+    let fx = start().await;
+    let b = ui_backend(&fx, "hostviewer", "pw").await;
+    assert_eq!(
+        b.set_host_label(MAC.into(), Some("smart_home".into()), None)
+            .await
+            .unwrap(),
+        "applied"
+    );
+    let applied = fx.applier.state.lock().unwrap().applied.clone();
+    assert_eq!(applied.last().unwrap().hosts.labels.len(), 1);
+    // a field error, not a backend failure
+    assert!(matches!(
+        b.set_host_label(MAC.into(), Some("toaster".into()), None).await,
+        Err(ApiError::Validation(e)) if e.len() == 1 && e[0].path == "kind"
+    ));
+    let reader = ui_backend(&fx, "hostreader", "pw").await;
+    assert!(matches!(
+        reader.set_host_label(MAC.into(), None, None).await,
+        Err(ApiError::Unauthorized)
+    ));
+}

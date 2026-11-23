@@ -253,6 +253,17 @@ ul.plain { list-style: none; padding: 0; margin: 8px 0; }
 .host-reserved { cursor: help; border-bottom: 1px dotted var(--muted); }
 .host-mode-staged { display: block; font-size: 12px; }
 .hosts-footer p { margin: 8px 0 0; }
+.host-actions { white-space: nowrap; }
+.host-label-line { display: block; font-size: 12px; line-height: 20px; white-space: nowrap; }
+.host-label { color: var(--muted); cursor: help; }
+.host-label-guess { font-style: italic; }
+.host-kind-icon { margin-right: 4px; font-style: normal; }
+.host-label-staged { display: block; font-size: 12px; }
+.icon-btn.host-label-edit { width: 20px; min-width: 20px; height: 20px; padding: 0; margin-left: 4px; font-size: 12px; vertical-align: top; color: var(--muted); }
+.host-label-edit:hover, .host-label-edit:focus-visible { color: inherit; }
+.host-label-editor { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 0; }
+.host-label-editor input { width: 10em; }
+.host-label-editor select { width: auto; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; }
@@ -394,6 +405,7 @@ span.btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
   }
   input[type="checkbox"], input[type="radio"] { width: 20px; height: 20px; }
   .mode-select { min-height: 44px; font-size: 16px; }
+  .icon-btn.host-label-edit { width: 44px; min-width: 44px; height: 44px; }
   .multi-opt { padding: 4px 0; }
   .row-actions { flex-direction: row; flex-wrap: wrap; }
   .row-actions .btn { flex: 1 1 auto; }
@@ -405,6 +417,8 @@ span.btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
   .meter-row { grid-template-columns: 90px minmax(0, 1fr) auto; font-size: 12.5px; }
 }
 @media (max-width: 600px) {
+  /* a long maker wraps instead of widening the MAC column */
+  .host-label-line { white-space: normal; overflow-wrap: anywhere; }
   .wordmark { height: 28px; }
   .topbar { padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px)); }
   .page-head { padding-top: 12px; }

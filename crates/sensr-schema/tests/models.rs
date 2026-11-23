@@ -139,6 +139,16 @@ fn changed_sections_tracks_edits() {
 }
 
 #[test]
+fn hosts_only_change_is_a_section() {
+    let a = Document::factory();
+    let mut b = a.clone();
+    b.hosts.fingerprint.enabled = false;
+    assert_eq!(a.changed_sections(&b), [Section::Hosts]);
+    assert_eq!(Section::Hosts.key(), "hosts");
+    assert!(Section::ALL.contains(&Section::Hosts));
+}
+
+#[test]
 fn interface_rules() {
     let mut doc = Document::factory();
     doc.set_by_path_text("interfaces.lan.device", "eth0")

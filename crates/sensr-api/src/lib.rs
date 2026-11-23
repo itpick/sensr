@@ -80,6 +80,7 @@ pub const ROUTES: &[Route] = &[
     ("/api/v1/hosts", || get(native::hosts)),
     ("/api/v1/hosts/forget", || post(native::forget_host)),
     ("/api/v1/hosts/mode", || post(native::set_host_mode)),
+    ("/api/v1/hosts/label", || post(native::set_host_label)),
     ("/api/v1/insight/top", || get(insight::top)),
     ("/api/v1/insight/series", || get(insight::series)),
     ("/api/v1/ids/alerts", || get(insight::alerts)),

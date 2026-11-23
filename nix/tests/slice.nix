@@ -259,6 +259,9 @@ pkgs.testers.runNixOSTest {
       systemd.network.networks."10-eth1" = {
         matchConfig.Name = "eth1";
         networkConfig.DHCP = "ipv4";
+        # What a Raspberry Pi OS client sends: evidence for the router's
+        # host labels (the "Host labels" subtest).
+        dhcpV4Config.VendorClassIdentifier = "dhcpcd-9.4.1:Linux-6.1.0:aarch64:Raspberry Pi";
       };
     };
 
@@ -305,6 +308,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     import json
+    import time
 
     REFERENCE = ${py reference}
     PENDING = {
@@ -439,6 +443,35 @@ pkgs.testers.runNixOSTest {
                 )
                 out = lan.succeed(f"dig +short @${net.lan.router} -x {lan_ip}")
                 assert out.strip() == "lan.home.example.", out
+
+            with subtest("Host labels: the LAN client's DHCP request labels it"):
+                # The passive sniffer (AF_PACKET) reads the client's DHCP
+                # vendor class. The DISCOVER at boot may predate it, so the
+                # client renews (a fresh REQUEST) until the label carries a
+                # DHCP reason; the 30 s inventory poll creates the row.
+                mac = lan.succeed("cat /sys/class/net/eth1/address").strip().lower()
+                labelled = (
+                    "sensr runtime hosts | jq -e"
+                    f" '.hosts[] | select(.mac==\"{mac}\") | .label.reasons | any(startswith(\"DHCP\"))'"
+                )
+                deadline = time.monotonic() + 120
+                while True:
+                    lan.succeed("networkctl renew eth1")
+                    if router.execute(labelled)[0] == 0:
+                        break
+                    if time.monotonic() > deadline:
+                        print(router.succeed("sensr runtime hosts"))
+                        print(router.execute("journalctl -b -u sensr-agent --no-pager | grep -i -E 'fingerprint|sniff' | tail -n 20")[1])
+                        raise AssertionError(f"no DHCP reason on {mac}'s label")
+                    time.sleep(10)
+                host = [h for h in json.loads(router.succeed("sensr runtime hosts"))["hosts"] if h.get("mac") == mac][0]
+                label = host["label"]
+                print(json.dumps(label))
+                # A QEMU (52:54:00) MAC that sends DHCP evidence is not taken
+                # for a VM; the vendor class makes it a computer.
+                assert label["by"] == "auto", label
+                assert label["kind"] == "computer", label
+                assert "DHCP vendor class: dhcpcd-9.4.1:Linux-6.1.0:aarch64:Raspberry Pi" in label["reasons"], label
 
             with subtest("DNS: a domain override forwards (names outside the network resolve)"):
                 router.succeed(

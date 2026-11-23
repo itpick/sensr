@@ -958,3 +958,195 @@ async fn mode_set_readonly_forbidden() {
     assert_eq!(e.kind, ErrorKind::Forbidden);
     assert_eq!(fx.applied().len(), before);
 }
+
+const LABEL_MAC: &str = "aa:bb:cc:dd:ee:ff";
+
+async fn label_set(
+    c: &mut Client,
+    kind: Option<sensr_schema::models::hosts::HostKind>,
+    maker: Option<&str>,
+) -> Result<Response, ClientError> {
+    c.call(Op::HostLabelSet {
+        mac: LABEL_MAC.to_uppercase(),
+        kind,
+        maker: maker.map(Into::into),
+    })
+    .await
+}
+
+fn labels_of(
+    doc: &Document,
+) -> Vec<(
+    String,
+    Option<sensr_schema::models::hosts::HostKind>,
+    Option<String>,
+)> {
+    doc.hosts
+        .labels
+        .values()
+        .map(|l| (l.mac.to_string(), l.kind, l.maker.clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn label_set_applies_on_clean_head() {
+    use sensr_schema::models::hosts::HostKind;
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    let before = fx.applied().len();
+    let r = label_set(&mut c, Some(HostKind::Camera), None)
+        .await
+        .unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"result": "applied"}))));
+    let applied = fx.applied();
+    assert_eq!(applied.len(), before + 1);
+    assert_eq!(
+        labels_of(applied.last().unwrap()),
+        [(LABEL_MAC.to_owned(), Some(HostKind::Camera), None)]
+    );
+    assert_eq!(
+        history(&mut c).await[0].description,
+        format!("set host label {LABEL_MAC} → camera/auto")
+    );
+
+    // a second set edits the entry in place; the maker is trimmed
+    label_set(&mut c, None, Some("  Wyze  ")).await.unwrap();
+    assert_eq!(
+        labels_of(fx.applied().last().unwrap()),
+        [(LABEL_MAC.to_owned(), None, Some("Wyze".to_owned()))]
+    );
+    assert_eq!(
+        history(&mut c).await[0].description,
+        format!("set host label {LABEL_MAC} → auto/Wyze")
+    );
+    let st = match c.call(Op::Status).await.unwrap() {
+        Response::Status(s) => s,
+        other => panic!("{other:?}"),
+    };
+    assert!(!st.candidate_dirty);
+
+    // the same label again: nothing to commit
+    let n = fx.applied().len();
+    let r = label_set(&mut c, None, Some("Wyze")).await.unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"result": "applied"}))));
+    assert_eq!(fx.applied().len(), n);
+}
+
+#[tokio::test]
+async fn label_set_both_none_removes_entry() {
+    use sensr_schema::models::hosts::HostKind;
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    label_set(&mut c, Some(HostKind::Tv), Some("LG"))
+        .await
+        .unwrap();
+    assert_eq!(labels_of(fx.applied().last().unwrap()).len(), 1);
+    label_set(&mut c, None, None).await.unwrap();
+    assert!(labels_of(fx.applied().last().unwrap()).is_empty());
+    assert_eq!(
+        history(&mut c).await[0].description,
+        format!("set host label {LABEL_MAC} → auto/auto")
+    );
+    // a blank maker counts as unset
+    label_set(&mut c, Some(HostKind::Tv), Some("   "))
+        .await
+        .unwrap();
+    assert_eq!(
+        labels_of(fx.applied().last().unwrap()),
+        [(LABEL_MAC.to_owned(), Some(HostKind::Tv), None)]
+    );
+    label_set(&mut c, None, Some("  ")).await.unwrap();
+    assert!(labels_of(fx.applied().last().unwrap()).is_empty());
+}
+
+#[tokio::test]
+async fn label_set_rejects_a_bad_mac_and_a_long_maker() {
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    let e = agent_err(
+        c.call(Op::HostLabelSet {
+            mac: "id:01aabb".into(),
+            kind: None,
+            maker: Some("x".into()),
+        })
+        .await,
+    );
+    assert_eq!(e.kind, ErrorKind::BadRequest);
+    let before = fx.applied().len();
+    assert!(
+        label_set(&mut c, None, Some(&"m".repeat(65)))
+            .await
+            .is_err()
+    );
+    assert_eq!(fx.applied().len(), before);
+    // control characters inside the maker (a trailing newline is trimmed)
+    for bad in ["Wy\nze", "Wy\tze", "Wyze\u{1b}[0m"] {
+        let e = agent_err(label_set(&mut c, None, Some(bad)).await);
+        assert_eq!(e.kind, ErrorKind::BadRequest, "{bad:?}");
+    }
+    assert_eq!(fx.applied().len(), before);
+}
+
+#[tokio::test]
+async fn label_set_stages_when_candidate_is_dirty() {
+    use sensr_schema::models::hosts::HostKind;
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    set(&mut c, "system.hostname", json!("half-done")).await;
+    let before = fx.applied().len();
+    let r = label_set(&mut c, Some(HostKind::Printer), None)
+        .await
+        .unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"result": "staged"}))));
+    assert_eq!(fx.applied().len(), before, "nothing applied");
+    assert_eq!(host(&mut c, Source::Candidate).await, json!("half-done"));
+    let labels = get(&mut c, "hosts.labels", Source::Candidate)
+        .await
+        .unwrap();
+    let entry = labels.as_object().unwrap().values().next().unwrap().clone();
+    assert_eq!(entry["mac"], LABEL_MAC);
+    assert_eq!(entry["kind"], "printer");
+    commit(&mut c, None).await.unwrap();
+    assert_eq!(
+        labels_of(fx.applied().last().unwrap()),
+        [(LABEL_MAC.to_owned(), Some(HostKind::Printer), None)]
+    );
+}
+
+#[tokio::test]
+async fn label_set_stages_when_confirm_pending() {
+    use sensr_schema::models::hosts::HostKind;
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    set(&mut c, "system.hostname", json!("a")).await;
+    commit(&mut c, None).await.unwrap();
+    set(&mut c, "system.hostname", json!("b")).await;
+    commit(&mut c, Some(60)).await.unwrap();
+    let before = fx.applied().len();
+    let r = label_set(&mut c, Some(HostKind::Speaker), None)
+        .await
+        .unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"result": "staged"}))));
+    assert_eq!(fx.applied().len(), before, "nothing applied");
+    let st = match c.call(Op::Status).await.unwrap() {
+        Response::Status(s) => s,
+        other => panic!("{other:?}"),
+    };
+    assert!(st.candidate_dirty);
+    assert!(st.pending_confirm.is_some());
+}
+
+#[tokio::test]
+async fn label_set_readonly_forbidden() {
+    use sensr_schema::models::hosts::HostKind;
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    c.set_principal(Principal {
+        readonly: true,
+        ..c.principal().clone()
+    });
+    let before = fx.applied().len();
+    let e = agent_err(label_set(&mut c, Some(HostKind::Tv), None).await);
+    assert_eq!(e.kind, ErrorKind::Forbidden);
+    assert_eq!(fx.applied().len(), before);
+}

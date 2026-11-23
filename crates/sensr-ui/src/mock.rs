@@ -377,7 +377,8 @@ impl Backend for MockBackend {
                         .into_iter()
                         .filter(|h| !s.forgotten.contains(h["key"].as_str().unwrap_or_default()))
                         .collect();
-                    // the applied document's modes, as the agent reports them
+                    // the applied document's owner labels and modes, as the agent reports them
+                    apply_host_labels(&mut hosts, &s.head().doc);
                     let modes = host_modes(&s.head().doc);
                     let mut interfaces = std::collections::BTreeSet::new();
                     for h in &mut hosts {
@@ -412,6 +413,84 @@ impl Backend for MockBackend {
             } else {
                 Err(ApiError::Conflict("host is reserved or unknown".into()))
             }
+        }))
+    }
+
+    fn set_host_label(
+        &self,
+        mac: String,
+        kind: Option<String>,
+        maker: Option<String>,
+    ) -> BoxFuture<'_, ApiResult<String>> {
+        if self.read_only() {
+            return ready(Err(ApiError::Unauthorized));
+        }
+        let mac = mac.to_ascii_lowercase();
+        let kind = kind.filter(|k| !k.is_empty());
+        if let Some(k) = &kind
+            && !crate::runtime::HOST_KINDS.iter().any(|(n, ..)| n == k)
+        {
+            return ready(Err(ApiError::Validation(vec![FieldError::new(
+                "kind",
+                format!("Unknown type {k:?}."),
+            )])));
+        }
+        let maker = maker.map(|m| m.trim().to_owned()).filter(|m| !m.is_empty());
+        let message = format!(
+            "set host label {mac} → {}/{}",
+            kind.as_deref().unwrap_or("auto"),
+            maker.as_deref().unwrap_or("auto")
+        );
+        // Like the agent (and set_host_mode): commit at once unless something is staged.
+        ready(self.with(|s| {
+            let dirty = !s.changed().is_empty() || s.confirm.is_some();
+            let mut doc = s.staged.clone();
+            let root = doc
+                .as_object_mut()
+                .ok_or_else(|| ApiError::Backend("no document".into()))?;
+            let hosts = root.entry("hosts").or_insert_with(|| json!({}));
+            let entries = hosts
+                .as_object_mut()
+                .map(|h| h.entry("labels").or_insert_with(|| json!({})))
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| ApiError::Backend("no hosts section".into()))?;
+            let id = entries
+                .iter()
+                .find(|(_, l)| l["mac"].as_str() == Some(mac.as_str()))
+                .map(|(id, _)| id.clone());
+            if kind.is_none() && maker.is_none() {
+                if let Some(id) = id {
+                    entries.remove(&id);
+                }
+            } else {
+                let id = id
+                    .unwrap_or_else(|| format!("6d1abe10-0000-4000-8000-{}", mac.replace(':', "")));
+                let mut l = json!({"enabled": true, "mac": mac});
+                if let Some(k) = &kind {
+                    l["kind"] = json!(k);
+                }
+                if let Some(m) = &maker {
+                    l["maker"] = json!(m);
+                }
+                entries.insert(id, l);
+            }
+            if hosts.as_object().is_some_and(|h| {
+                h.get("labels")
+                    .and_then(Value::as_object)
+                    .is_some_and(|l| l.is_empty())
+                    && h.len() == 1
+            }) {
+                root.remove("hosts");
+            }
+            validate(&doc).map_err(ApiError::Validation)?;
+            if dirty {
+                s.staged = doc;
+                return Ok("staged".to_owned());
+            }
+            if doc != s.head().doc {
+                s.push("root", &message, doc);
+            }
+            Ok("applied".to_owned())
         }))
     }
 
@@ -526,6 +605,44 @@ pub fn host_modes(doc: &Value) -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
+/// Lays the enabled owner labels of `doc` over the guessed `label` of each host, as
+/// the agent does: a set field wins, with confidence `high` and the reason `Set by you`
+/// ahead of the guessed ones.
+pub fn apply_host_labels(hosts: &mut [Value], doc: &Value) {
+    let Some(labels) = doc.pointer("/hosts/labels").and_then(Value::as_object) else {
+        return;
+    };
+    for l in labels
+        .values()
+        .filter(|l| l["enabled"].as_bool().unwrap_or(true))
+    {
+        let Some(mac) = l["mac"].as_str().map(str::to_ascii_lowercase) else {
+            continue;
+        };
+        // an override for a host not in the inventory is kept but not rendered
+        let Some(h) = hosts.iter_mut().find(|h| h["mac"] == mac.as_str()) else {
+            continue;
+        };
+        let label = &mut h["label"];
+        let mut owner = false;
+        for field in ["kind", "maker"] {
+            if let Some(v) = l.get(field).filter(|v| v.is_string()) {
+                label[field] = v.clone();
+                owner = true;
+            }
+        }
+        if owner {
+            label["confidence"] = json!("high");
+            label["by"] = json!("owner");
+            let mut reasons = vec![json!("Set by you")];
+            if let Some(guessed) = label["reasons"].as_array() {
+                reasons.extend(guessed.iter().filter(|r| *r != "Set by you").cloned());
+            }
+            label["reasons"] = Value::Array(reasons);
+        }
+    }
+}
+
 /// The MAC of the device the mock pretends every request comes from (`device-01`):
 /// quarantining it is refused, as the agent refuses the caller's own device.
 pub const MOCK_CLIENT_MAC: &str = "02:00:00:00:00:01";
@@ -550,12 +667,12 @@ pub fn simulated_hosts(now: u64) -> Vec<Value> {
                "lease": {"state": "active", "expires": now + 1_800},
                "first_seen": now - 86_400 * 2, "last_seen": now - 12, "online": true}),
         // Only seen in the neighbour table: no name.
-        json!({"key": "3c:22:fb:10:9e:41", "mac": "3c:22:fb:10:9e:41",
+        json!({"key": "7c:78:b2:10:9e:41", "mac": "7c:78:b2:10:9e:41",
                "interface": "opt1", "interface_name": "LAN2", "ipv4": "192.168.72.40",
-               "ipv6": ["fe80::3e22:fbff:fe10:9e41"], "sources": ["neighbour"],
+               "ipv6": ["fe80::7e78:b2ff:fe10:9e41"], "sources": ["neighbour"],
                "first_seen": now - 3_600, "last_seen": now - 20, "online": true}),
         // Gone two hours ago.
-        json!({"key": "84:47:09:38:a5:fc", "mac": "84:47:09:38:a5:fc", "name": "old-router",
+        json!({"key": "00:14:78:38:a5:fc", "mac": "00:14:78:38:a5:fc", "name": "old-router",
                "lease_hostname": "old-router", "interface": "opt1", "interface_name": "LAN2",
                "ipv4": "192.168.72.2", "sources": ["lease"],
                "lease": {"state": "expired", "expires": now - 3_600},
@@ -580,6 +697,47 @@ pub fn simulated_hosts(now: u64) -> Vec<Value> {
             "lease": {"state": "active", "expires": now + 3_600},
             "first_seen": now - 86_400, "last_seen": now - 30 - i, "online": true,
         }));
+    }
+    // What the agent's classifier makes of these MACs and names (only reasons it
+    // produces); the printer's owner label comes from the seeded document, see
+    // [`apply_host_labels`].
+    for h in &mut hosts {
+        let mac = h["mac"].as_str().unwrap_or_default();
+        let (maker, kind, confidence, reasons): (Option<&str>, _, _, &[&str]) = match mac {
+            "52:54:00:aa:bb:01" => (
+                Some("QEMU/KVM"),
+                "virtual",
+                "high",
+                &["MAC maker: QEMU/KVM"],
+            ),
+            "b8:27:eb:7d:4e:25" => (
+                Some("Raspberry Pi"),
+                "server",
+                "low",
+                &["MAC maker: Raspberry Pi"],
+            ),
+            "7c:78:b2:10:9e:41" => (Some("Wyze"), "camera", "medium", &["MAC maker: Wyze"]),
+            "00:14:78:38:a5:fc" => (
+                Some("TP-Link"),
+                "network",
+                "medium",
+                &["MAC maker: TP-Link"],
+            ),
+            "00:1b:a9:44:02:7c" => (
+                Some("Brother industries"),
+                "printer",
+                "medium",
+                &["MAC maker: Brother industries"],
+            ),
+            _ => (
+                Some("Private MAC"),
+                "phone",
+                "low",
+                &["Randomised address (phones, tablets and laptops do this)"],
+            ),
+        };
+        h["label"] = json!({"maker": maker, "kind": kind, "confidence": confidence,
+                            "reasons": reasons, "by": "auto"});
     }
     hosts.sort_by_key(|h| {
         (
@@ -1314,6 +1472,12 @@ pub fn seed() -> Value {
                     "ipv6": {"mode": "track", "interface": "wan"}},
             "opt1": {"enabled": true, "role": "other", "description": "WireGuard", "device": "wg0", "mtu": 1420,
                      "ipv4": {"mode": "static", "address": "10.10.0.1/24"}, "ipv6": {"mode": "none"}}
+        },
+        "hosts": {
+            "labels": {
+                "6d1abe10-0000-4000-8000-001ba944027c": {"enabled": true,
+                    "mac": "00:1b:a9:44:02:7c", "kind": "printer", "maker": "Brother"}
+            }
         },
         "firewall": {
             "host_modes": {

@@ -470,6 +470,26 @@ fn commits_are_broadcast_with_changed_sections() {
 }
 
 #[test]
+fn host_label_commit_reports_the_hosts_section() {
+    use sensr_schema::fields::MacAddr;
+    use sensr_schema::models::hosts::HostLabel;
+    let store = mem();
+    let mut rx = store.subscribe();
+    let mut d = store.head().unwrap().document;
+    d.hosts.labels.push(HostLabel {
+        enabled: true,
+        mac: "aa:bb:cc:dd:ee:ff".parse::<MacAddr>().unwrap(),
+        kind: None,
+        maker: Some("Wyze".into()),
+        description: None,
+    });
+    store.commit(&d, meta("label")).unwrap();
+    assert_eq!(rx.try_recv().unwrap().changed, [Section::Hosts]);
+    let diff = store.diff(RevisionId(1), RevisionId(2)).unwrap();
+    assert_eq!(diff.sections, [Section::Hosts]);
+}
+
+#[test]
 fn audit_records_every_change() {
     let store = mem();
     let base = store.head().unwrap().document;

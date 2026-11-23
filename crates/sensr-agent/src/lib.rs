@@ -12,6 +12,7 @@ pub mod applier;
 pub mod arp_intercept;
 pub mod auth;
 pub mod diff;
+pub mod fingerprint;
 pub mod gateways;
 pub mod hosts;
 pub mod ifnames;

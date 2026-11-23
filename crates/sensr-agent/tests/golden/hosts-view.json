@@ -15,7 +15,16 @@
       "first_seen": 1000,
       "last_seen": 1000,
       "interface_name": "LAN",
-      "online": true
+      "online": true,
+      "label": {
+        "maker": "Private MAC",
+        "kind": "phone",
+        "confidence": "low",
+        "reasons": [
+          "Randomised address (phones, tablets and laptops do this)"
+        ],
+        "by": "auto"
+      }
     },
     {
       "key": "aa:bb:cc:dd:ee:09",
@@ -31,7 +40,16 @@
       ],
       "first_seen": 1000,
       "interface_name": "OPT9",
-      "online": false
+      "online": false,
+      "label": {
+        "maker": "Private MAC",
+        "kind": "phone",
+        "confidence": "low",
+        "reasons": [
+          "Randomised address (phones, tablets and laptops do this)"
+        ],
+        "by": "auto"
+      }
     },
     {
       "key": "id:01:cc",

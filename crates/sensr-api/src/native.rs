@@ -383,6 +383,38 @@ pub async fn set_host_mode(
     }
 }
 
+/// Body of `POST /api/v1/hosts/label`.
+#[derive(Deserialize)]
+pub struct HostLabelBody {
+    mac: String,
+    /// The owner's kind (`phone`, `camera`, `smart_home`, ...); `null` keeps the guess.
+    #[serde(default)]
+    kind: Option<sensr_schema::models::hosts::HostKind>,
+    /// The owner's maker (1-64 characters); `null` keeps the guess.
+    #[serde(default)]
+    maker: Option<String>,
+}
+
+/// `POST /api/v1/hosts/label`: set what a host is called, or clear it with
+/// both fields `null`. The agent commits at once when nothing else is staged
+/// (`{"result": "applied"}`), else stages (`"staged"`); read-only principals
+/// get 403.
+pub async fn set_host_label(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    Json(b): Json<HostLabelBody>,
+) -> ApiResult {
+    let op = Op::HostLabelSet {
+        mac: b.mac,
+        kind: b.kind,
+        maker: b.maker,
+    };
+    match call(&state, &caller, op).await? {
+        Response::Value(Some(v)) => Ok(Json(v)),
+        other => Err(unexpected(other)),
+    }
+}
+
 /// Body of `POST /api/v1/session`.
 #[derive(Deserialize)]
 pub struct LoginBody {

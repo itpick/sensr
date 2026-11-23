@@ -12,6 +12,7 @@ use super::dhcpv6::{Dhcpv6, RouterAdvertisements};
 use super::dns::DnsResolver;
 use super::firewall::{AliasType, Endpoint, FilterRule, Firewall};
 use super::gateways::Gateways;
+use super::hosts::Hosts;
 use super::ids::Ids;
 use super::insight::Insight;
 use super::interfaces::{Interface, InterfaceRole, Interfaces, Ipv4Config, Ipv6Config};
@@ -126,11 +127,13 @@ pub enum Section {
     Ids,
     /// `insight`.
     Insight,
+    /// `hosts`.
+    Hosts,
 }
 
 impl Section {
     /// Every section, in document order.
-    pub const ALL: [Section; 17] = [
+    pub const ALL: [Section; 18] = [
         Self::System,
         Self::Interfaces,
         Self::Firewall,
@@ -148,6 +151,7 @@ impl Section {
         Self::Ntp,
         Self::Ids,
         Self::Insight,
+        Self::Hosts,
     ];
 
     /// The section's key in the JSON document.
@@ -170,6 +174,7 @@ impl Section {
             Self::Ntp => "ntp",
             Self::Ids => "ids",
             Self::Insight => "insight",
+            Self::Hosts => "hosts",
         }
     }
 }
@@ -233,6 +238,9 @@ pub struct Document {
     /// Traffic accounting (omitted while at defaults).
     #[serde(default, skip_serializing_if = "Insight::is_empty")]
     pub insight: Insight,
+    /// Host labels and the fingerprint switch (omitted while at defaults).
+    #[serde(default, skip_serializing_if = "Hosts::is_default")]
+    pub hosts: Hosts,
 }
 
 impl Default for Document {
@@ -256,6 +264,7 @@ impl Default for Document {
             ntp: Ntp::default(),
             ids: Ids::default(),
             insight: Insight::default(),
+            hosts: Hosts::default(),
         }
     }
 }
@@ -377,6 +386,7 @@ impl Document {
             .validate_with(&self.system.time_servers, self, &root.join("ntp"), &mut out);
         self.ids.validate(self, &root.join("ids"), &mut out);
         self.insight.validate(self, &root.join("insight"), &mut out);
+        self.hosts.validate(self, &root.join("hosts"), &mut out);
         out
     }
 
@@ -410,6 +420,7 @@ impl Document {
                 Section::Ntp => self.ntp != other.ntp,
                 Section::Ids => self.ids != other.ids,
                 Section::Insight => self.insight != other.insight,
+                Section::Hosts => self.hosts != other.hosts,
             })
             .collect()
     }

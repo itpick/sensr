@@ -274,6 +274,21 @@ pub enum Op {
         #[serde(default)]
         remote_addr: Option<std::net::IpAddr>,
     },
+    /// Set what a host is called (Hosts › Label): writes or removes its
+    /// `hosts.labels` entry. Both fields `None` removes it. Commits and
+    /// applies at once when nothing else is staged and no commit awaits
+    /// confirmation; otherwise only stages. Answered with
+    /// [`Response::Value`] `{"result": "applied" | "staged"}`.
+    HostLabelSet {
+        /// The host's MAC address.
+        mac: String,
+        /// The owner's kind, replacing the guess; `None` keeps the guess.
+        #[serde(default)]
+        kind: Option<sensr_schema::models::hosts::HostKind>,
+        /// The owner's maker, replacing the guess (trimmed; blank is `None`).
+        #[serde(default)]
+        maker: Option<String>,
+    },
 }
 
 /// A host mode other than Normal, for [`Op::HostModeSet`].
@@ -365,6 +380,7 @@ impl Op {
                 | Op::InterfacesAssign { .. }
                 | Op::HostForget { .. }
                 | Op::HostModeSet { .. }
+                | Op::HostLabelSet { .. }
         )
     }
 }
@@ -690,5 +706,17 @@ mod tests {
         );
         let v = serde_json::to_value(Some(HostModeMode::Quarantine)).unwrap();
         assert_eq!(v, serde_json::json!("quarantine"));
+    }
+
+    #[test]
+    fn host_label_set_is_write() {
+        assert!(
+            Op::HostLabelSet {
+                mac: "x".into(),
+                kind: None,
+                maker: None
+            }
+            .is_write()
+        );
     }
 }
