@@ -299,7 +299,7 @@ let
     )
     print(out)
     print(desk.succeed("ls -la /tmp/screenshots"))
-    desk.copy_from_vm("/tmp/screenshots")
+    desk.copy_from_machine("/tmp/screenshots")
     desk.succeed("test -s /tmp/screenshots/dashboard-1440-light.png")
     print(f"screenshots: {rc} failed")
   '';
