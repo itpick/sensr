@@ -274,6 +274,28 @@ fn key_of<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
     row.get(key).and_then(Value::as_str)
 }
 
+/// Index of the row whose key is the `?edit=` deep-link parameter. A key that is not
+/// (or no longer) in `rows` gives `None`, so the grid just loads.
+pub fn edit_target(rows: &[String], param: Option<&str>) -> Option<usize> {
+    let p = param.filter(|p| !p.is_empty())?;
+    rows.iter().position(|k| k == p)
+}
+
+/// A query string (`?a=1&b=2`, `?` optional) without `name`: the URL a used deep link is
+/// `history.replaceState`d to.
+pub fn without_param(search: &str, name: &str) -> String {
+    let kept: Vec<&str> = search
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|kv| !kv.is_empty() && kv.split('=').next() != Some(name))
+        .collect();
+    if kept.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", kept.join("&"))
+    }
+}
+
 /// Sets `field` to `enabled` on every row whose key is in `keys`; returns how many changed.
 pub fn set_enabled(
     rows: &mut [Value],
@@ -353,6 +375,24 @@ mod tests {
         (0..30)
             .map(|i| json!({"uuid": format!("u{i}"), "name": format!("host{:02}", 29 - i), "n": i, "enabled": i % 2 == 0, "if": if i < 15 {"lan"} else {"wan"}}))
             .collect()
+    }
+
+    #[test]
+    fn edit_param_unknown_uuid_is_ignored() {
+        let keys: Vec<String> = ["a1", "b2", "c3"].map(str::to_owned).into();
+        assert_eq!(edit_target(&keys, Some("b2")), Some(1));
+        assert_eq!(edit_target(&keys, Some("gone-since-search")), None);
+        assert_eq!(edit_target(&keys, Some("")), None);
+        assert_eq!(edit_target(&keys, None), None);
+        assert_eq!(edit_target(&[], Some("a1")), None);
+    }
+
+    #[test]
+    fn without_param_drops_only_that_param() {
+        assert_eq!(without_param("?edit=u1", "edit"), "");
+        assert_eq!(without_param("?q=web&edit=u1&x=2", "edit"), "?q=web&x=2");
+        assert_eq!(without_param("?editor=1&edit", "edit"), "?editor=1");
+        assert_eq!(without_param("", "edit"), "");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! page header and the Apply banner.
 
 use crate::actions::{LayoutData, chrome_data};
-use crate::islands::{ApplyBanner, NavToggle, ThemeToggle};
+use crate::islands::{ApplyBanner, GlobalSearch, NavToggle, ThemeToggle};
 use crate::menu::{self, Icon, MenuItem};
 use crate::pages::*;
 use leptos::prelude::*;
@@ -215,7 +215,8 @@ pub fn MenuTree(menu: Vec<MenuItem>, path: String) -> impl IntoView {
     }
 }
 
-/// The top bar: wordmark, host, theme switch, user and logout.
+/// The top bar: wordmark, global search, theme switch, user and logout. Only the signed-in
+/// layout has one, so the login page has no search.
 #[component]
 pub fn TopBar(user: String) -> impl IntoView {
     #[cfg(feature = "ssr")]
@@ -226,6 +227,7 @@ pub fn TopBar(user: String) -> impl IntoView {
         <header class="topbar">
             <NavToggle/>
             <a class="brand" href="/"><Wordmark/></a>
+            <GlobalSearch/>
             <div class="topbar-right">
                 <ThemeToggle initial=theme/>
                 <span class="user" title="Signed in user">

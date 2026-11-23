@@ -67,24 +67,80 @@ pub fn Grid<T: GridKind>(
     title: Option<String>,
     #[prop(optional)] _t: PhantomData<T>,
 ) -> impl IntoView {
+    // Deep links from the global search: `?q=` fills the search box, `?edit=<key>` opens
+    // that row's edit dialog once the island hydrates (an unknown key is ignored).
+    let (search, edit) =
+        use_query_map().with_untracked(|q| (q.get("q").unwrap_or_default(), q.get("edit")));
+    let here = leptos_router::hooks::use_location();
+    let clean_url = format!(
+        "{}{}",
+        here.pathname.get_untracked(),
+        crate::grid::without_param(&here.search.get_untracked(), "edit")
+    );
     let load = move || {
         let scope = scope.clone();
         let title = title.clone();
+        let search = search.clone();
+        let edit = edit.clone();
+        let clean_url = clean_url.clone();
         Suspend::new(async move {
             let choices = field_choices().await.unwrap_or_default();
-            match grid_fetch(T::ID, scope.clone(), GridQuery::default()).await {
-                Ok(initial) => view! {
-                    <section class="card">
-                        {title.map(|t| view! { <h2>{t}</h2> })}
-                        <GridIsland grid=T::ID scope initial label=T::NOUN.to_owned() choices/>
-                    </section>
+            let query = GridQuery {
+                search: search.clone(),
+                ..Default::default()
+            };
+            match grid_fetch(T::ID, scope.clone(), query).await {
+                Ok(initial) => {
+                    let edit = match edit {
+                        Some(k) => edit_row::<T>(&scope, &initial, &k)
+                            .await
+                            .map(|r| (r, clean_url)),
+                        None => None,
+                    };
+                    view! {
+                        <section class="card">
+                            {title.map(|t| view! { <h2>{t}</h2> })}
+                            <GridIsland grid=T::ID scope initial label=T::NOUN.to_owned() choices search edit/>
+                        </section>
+                    }
+                    .into_any()
                 }
-                .into_any(),
                 Err(e) => load_error(e),
             }
         })
     };
     view! { <Suspense fallback=|| ()>{load}</Suspense> }
+}
+
+/// The row a `?edit=<key>` deep link names: from the shown page, else from the whole grid
+/// (it may sit on a later page or be filtered out by `?q=`).
+async fn edit_row<T: GridKind>(
+    scope: &Option<String>,
+    shown: &crate::grid::GridPage,
+    key: &str,
+) -> Option<serde_json::Value> {
+    let key_field = T::ID.meta().key;
+    let find = |rows: &[serde_json::Value]| {
+        let keys: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                r.get(key_field)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect();
+        crate::grid::edit_target(&keys, Some(key)).map(|i| rows[i].clone())
+    };
+    if let Some(r) = find(&shown.rows) {
+        return Some(r);
+    }
+    let all = GridQuery {
+        per_page: 500,
+        ..Default::default()
+    };
+    let page = grid_fetch(T::ID, scope.clone(), all).await.ok()?;
+    find(&page.rows)
 }
 
 fn param(name: &'static str) -> Option<String> {
@@ -94,14 +150,17 @@ fn param(name: &'static str) -> Option<String> {
 /// Lobby › Dashboard.
 #[component]
 pub fn Dashboard() -> impl IntoView {
-    let load = || {
+    // `?host=` (a global search hit) fills the Hosts card's search box.
+    let search = use_query_map().with_untracked(|q| q.get("host").unwrap_or_default());
+    let load = move || {
+        let search = search.clone();
         Suspend::new(async move {
             let (status, hosts) = futures::join!(live_status(), hosts());
             match status {
                 Ok(initial) => {
                     // The Hosts card is optional: an inventory error only leaves it out.
                     let hosts = hosts.ok().flatten();
-                    view! { <DashboardLive initial/><HostsCard initial=hosts/> }.into_any()
+                    view! { <DashboardLive initial/><HostsCard initial=hosts search/> }.into_any()
                 }
                 Err(e) => load_error(e),
             }

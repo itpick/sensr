@@ -11,6 +11,7 @@ use crate::form::{Choices, FieldKind, FieldSpec, Inputs, to_inputs};
 use crate::grid::{ColumnKind, GridPage, GridQuery, SortDir, cell_text};
 use crate::models::{FormId, GridId};
 use crate::runtime::{GatewayRow, GatewayState, GatewaysView, UpdateStatus, ms, pct, until};
+use crate::search::{SearchGroup, SearchResults};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde_json::Value;
@@ -157,6 +158,440 @@ pub fn NavToggle() -> impl IntoView {
                 <path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
             </svg>
         </button>
+    }
+}
+
+// ------------------------------------------------------------------ global search
+
+/// The "Show all" link of a group that has more matches than it shows.
+fn gsearch_more(g: &SearchGroup) -> Option<&str> {
+    g.more_url.as_deref().filter(|_| g.total > g.hits.len())
+}
+
+/// Where each option of `r` leads, in the order [`gsearch_results`] numbers them.
+fn gsearch_urls(r: &SearchResults) -> Vec<String> {
+    r.groups
+        .iter()
+        .flat_map(|g| {
+            g.hits
+                .iter()
+                .map(|h| h.url.as_str())
+                .chain(gsearch_more(g))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// The grouped options of the global search listbox, plain views from data: config text goes
+/// in as text nodes and never becomes markup. Option `N` is `#gsearch-opt-N`; a click finds
+/// its target in `data-url`.
+pub fn gsearch_results(r: &SearchResults, active: Option<usize>) -> impl IntoView + use<> {
+    let mut n = 0usize;
+    r.groups
+        .iter()
+        .map(|g| {
+            let options = g
+                .hits
+                .iter()
+                .map(|h| (h.title.clone(), Some(h.detail.clone()), h.url.clone()))
+                .chain(
+                    gsearch_more(g)
+                        .map(|u| (format!("Show all ({})", g.total), None, u.to_owned())),
+                )
+                .map(|(title, detail, url)| {
+                    let i = n;
+                    n += 1;
+                    let more = detail.is_none();
+                    view! {
+                        <div role="option" id=format!("gsearch-opt-{i}") class="gsearch-opt"
+                            class:gsearch-more=more aria-selected=(active == Some(i)).to_string()
+                            data-url=url>
+                            <span class="gsearch-title">{title}</span>
+                            {detail.map(|d| view! { <span class="gsearch-detail">{d}</span> })}
+                        </div>
+                    }
+                })
+                .collect_view();
+            view! {
+                <div role="group" aria-label=g.name.clone() class="gsearch-group">
+                    <div class="gsearch-head" aria-hidden="true">{g.name.clone()}</div>
+                    {options}
+                </div>
+            }
+        })
+        .collect_view()
+}
+
+/// What the search box last got back: results or the server's message.
+type Found = Option<Result<SearchResults, String>>;
+
+/// The search box's state, shared by its handlers.
+#[derive(Clone, Copy)]
+struct Gs {
+    query: RwSignal<String>,
+    found: RwSignal<Found>,
+    open: RwSignal<bool>,
+    active: RwSignal<Option<usize>>,
+    sheet: RwSignal<bool>,
+    /// A request is out.
+    busy: StoredValue<bool>,
+    /// The debounce fired while one was out: ask again when it is back.
+    again: StoredValue<bool>,
+}
+
+fn gsearch_short(q: &str) -> bool {
+    q.trim().chars().count() < crate::search::MIN_QUERY
+}
+
+/// Asks the server for the current query: one request at a time, and a response for a query
+/// that has changed since is dropped.
+fn gsearch_fetch(s: Gs) {
+    if s.busy.get_value() {
+        s.again.set_value(true);
+        return;
+    }
+    let q = s.query.get_untracked();
+    if gsearch_short(&q) {
+        return;
+    }
+    s.busy.set_value(true);
+    spawn_local(async move {
+        let r = global_search(q.clone()).await;
+        s.busy.set_value(false);
+        if s.query.get_untracked() == q {
+            s.active.set(None);
+            s.found.set(Some(
+                r.map(|mut r| {
+                    q.trim().clone_into(&mut r.query);
+                    r
+                })
+                .map_err(|e| server_message(&e)),
+            ));
+        }
+        if s.again.get_value() {
+            s.again.set_value(false);
+            gsearch_fetch(s);
+        }
+    });
+}
+
+/// Opens a hit. A full navigation, so the target page's own deep-link readers run; on the
+/// page already open only the hash moves, and the settings form flashes on `hashchange`.
+#[allow(unused_variables)]
+fn gsearch_go(s: Gs, url: &str) {
+    s.open.set(false);
+    s.sheet.set(false);
+    #[cfg(feature = "hydrate")]
+    if let Some(w) = web_sys::window() {
+        let loc = w.location();
+        let here = format!(
+            "{}{}",
+            loc.pathname().unwrap_or_default(),
+            loc.search().unwrap_or_default()
+        );
+        match url.split_once('#') {
+            Some((page, hash)) if page == here => {
+                if loc.hash().ok().as_deref() == Some(&format!("#{hash}")) {
+                    // same hash: no event of its own, so send one
+                    if let Ok(e) = web_sys::Event::new("hashchange") {
+                        let _ = w.dispatch_event(&e);
+                    }
+                } else {
+                    let _ = loc.set_hash(hash);
+                }
+            }
+            _ => {
+                let _ = loc.assign(url);
+            }
+        }
+    }
+}
+
+/// Keeps the active option inside the scrolled dropdown.
+#[allow(unused_variables)]
+fn gsearch_reveal(i: usize) {
+    #[cfg(feature = "hydrate")]
+    request_animation_frame(move || {
+        use wasm_bindgen::JsCast;
+        let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+        let (Some(pop), Some(opt)) = (
+            doc.get_element_by_id("gsearch-pop"),
+            doc.get_element_by_id(&format!("gsearch-opt-{i}"))
+                .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok()),
+        ) else {
+            return;
+        };
+        let (top, h) = (opt.offset_top(), opt.offset_height());
+        let (scroll, view) = (pop.scroll_top(), pop.client_height());
+        if top < scroll {
+            pop.set_scroll_top(top);
+        } else if top + h > scroll + view {
+            pop.set_scroll_top(top + h - view);
+        }
+    });
+}
+
+/// The search box right of the wordmark: pages, settings, objects and hosts as you type.
+/// `/` and Ctrl/⌘K focus it; on phones it is a magnifier that opens a full-width sheet.
+#[island]
+pub fn GlobalSearch() -> impl IntoView {
+    mark_hydrated();
+    let s = Gs {
+        query: RwSignal::new(String::new()),
+        found: RwSignal::new(None),
+        open: RwSignal::new(false),
+        active: RwSignal::new(None),
+        sheet: RwSignal::new(false),
+        busy: StoredValue::new(false),
+        again: StoredValue::new(false),
+    };
+    let input = NodeRef::<leptos::html::Input>::new();
+    let opener = NodeRef::<leptos::html::Button>::new();
+    let timer = StoredValue::new(None::<TimeoutHandle>);
+    let urls = Memo::new(move |_| {
+        s.found.with(|f| match f {
+            Some(Ok(r)) => gsearch_urls(r),
+            _ => vec![],
+        })
+    });
+    let shown = move || s.open.get() && s.found.with(Option::is_some);
+
+    // Focus the box at once, so keys typed right after the shortcut land in it. On a phone
+    // the box is hidden until the sheet opens: show it on the element itself first, as
+    // the reactive class only lands on the next tick.
+    let focus = move || {
+        let Some(el) = input.get_untracked() else {
+            return;
+        };
+        #[cfg(feature = "hydrate")]
+        if web_sys::window()
+            .and_then(|w| w.inner_width().ok())
+            .and_then(|v| v.as_f64())
+            .is_some_and(|w| w <= 600.0)
+        {
+            s.sheet.set(true);
+            if let Ok(Some(gs)) = el.closest(".gsearch") {
+                let _ = gs.class_list().add_1("sheet");
+            }
+        }
+        let _ = el.focus();
+        el.select();
+    };
+    let close_sheet = move || {
+        s.sheet.set(false);
+        s.open.set(false);
+        request_animation_frame(move || {
+            if let Some(b) = opener.get_untracked() {
+                let _ = b.focus();
+            }
+        });
+    };
+
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::JsCast;
+        let keys = window_event_listener(leptos::ev::keydown, move |ev| {
+            let k = ev.key();
+            let typing = ev
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok())
+                .is_some_and(|el| {
+                    el.is_content_editable()
+                        || matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+                });
+            let slash = k == "/" && !typing && !ev.ctrl_key() && !ev.meta_key() && !ev.alt_key();
+            let cmd_k = (ev.ctrl_key() || ev.meta_key())
+                && !ev.shift_key()
+                && !ev.alt_key()
+                && k.eq_ignore_ascii_case("k");
+            // someone else took the key, or a modal dialog owns the keyboard
+            let busy = ev.default_prevented()
+                || document()
+                    .query_selector("dialog[open]")
+                    .ok()
+                    .flatten()
+                    .is_some();
+            if (slash || cmd_k) && !busy {
+                ev.prevent_default();
+                focus();
+            }
+        });
+        on_cleanup(move || drop(keys));
+    }
+
+    let on_input = move |ev: leptos::ev::Event| {
+        let v = event_target_value(&ev);
+        s.query.set(v.clone());
+        if let Some(h) = timer.get_value() {
+            h.clear();
+        }
+        timer.set_value(None);
+        if gsearch_short(&v) {
+            s.found.set(None);
+            s.active.set(None);
+            return;
+        }
+        s.open.set(true);
+        timer.set_value(
+            set_timeout_with_handle(
+                move || gsearch_fetch(s),
+                std::time::Duration::from_millis(150),
+            )
+            .ok(),
+        );
+    };
+    let on_key = move |ev: leptos::ev::KeyboardEvent| {
+        let n = urls.with_untracked(Vec::len);
+        match ev.key().as_str() {
+            k @ ("ArrowDown" | "ArrowUp") if n > 0 => {
+                ev.prevent_default();
+                s.open.set(true);
+                let i = match (s.active.get_untracked(), k == "ArrowDown") {
+                    (None, true) => 0,
+                    (None, false) => n - 1,
+                    (Some(i), true) => (i + 1) % n,
+                    (Some(i), false) => (i + n - 1) % n,
+                };
+                s.active.set(Some(i));
+                gsearch_reveal(i);
+            }
+            "Enter" if n > 0 && s.open.get_untracked() => {
+                ev.prevent_default();
+                // the list is for an older query until the response for this one is in
+                let q = s.query.get_untracked();
+                if !s
+                    .found
+                    .with_untracked(|f| matches!(f, Some(Ok(r)) if r.query == q.trim()))
+                {
+                    return;
+                }
+                let i = s.active.get_untracked().unwrap_or(0).min(n - 1);
+                if let Some(url) = urls.with_untracked(|u| u.get(i).cloned()) {
+                    gsearch_go(s, &url);
+                }
+            }
+            _ => {}
+        }
+    };
+    // On the root, so Esc works from the box, the popup and the close button alike.
+    let on_esc = move |ev: leptos::ev::KeyboardEvent| {
+        if ev.key() != "Escape" {
+            return;
+        }
+        ev.prevent_default();
+        if s.sheet.get_untracked() {
+            close_sheet();
+        } else if s.open.get_untracked() && s.found.with_untracked(Option::is_some) {
+            s.open.set(false);
+            s.active.set(None);
+        } else {
+            s.query.set(String::new());
+            s.found.set(None);
+            s.active.set(None);
+        }
+    };
+    // Focus leaving the search (Tab, a click elsewhere) closes the popup. The phone sheet
+    // closes only when focus lands on something else: on iOS, putting the keyboard away
+    // blurs the box with nowhere to go, and must not throw the results away.
+    let on_leave = move |ev: leptos::ev::FocusEvent| {
+        #[cfg(not(feature = "hydrate"))]
+        let _ = ev;
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::JsCast;
+            let to = ev
+                .related_target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+            let away = match &to {
+                Some(el) => el.closest(".gsearch").ok().flatten().is_none(),
+                None => !s.sheet.get_untracked(),
+            };
+            if away {
+                s.open.set(false);
+                s.sheet.set(false);
+            }
+        }
+    };
+    let on_pick = move |ev: leptos::ev::MouseEvent| {
+        #[cfg(not(feature = "hydrate"))]
+        let _ = (ev, s);
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::JsCast;
+            if let Some(url) = ev
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .and_then(|el| el.closest("[role=option]").ok().flatten())
+                .and_then(|o| o.get_attribute("data-url"))
+            {
+                gsearch_go(s, &url);
+            }
+        }
+    };
+    let status = move || {
+        s.found.with(|f| match f {
+            Some(Ok(r)) if r.groups.is_empty() => format!("No matches for “{}”", r.query),
+            Some(Err(e)) => format!("Search failed: {e}"),
+            _ => String::new(),
+        })
+    };
+    // Read out by screen readers as results come in (the region is there from the start).
+    let announce = move || {
+        s.found.with(|f| match f {
+            Some(Ok(r)) if !r.groups.is_empty() => {
+                let n: usize = r.groups.iter().map(|g| g.hits.len()).sum();
+                format!("{n} result{}", if n == 1 { "" } else { "s" })
+            }
+            _ => status(),
+        })
+    };
+    let magnifier = "M7 2.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zM10.3 10.3l3.2 3.2";
+
+    view! {
+        <div class="gsearch" class:sheet=move || s.sheet.get() on:keydown=on_esc on:focusout=on_leave>
+            <p class="sr-only" aria-live="polite">{announce}</p>
+            <button type="button" class="icon-btn gsearch-open" aria-label="Search" node_ref=opener
+                on:click=move |_| focus()>
+                {icon(magnifier)}
+            </button>
+            <div class="gsearch-box">
+                <span class="gsearch-icon">{icon(magnifier)}</span>
+                <input type="search" role="combobox" aria-label="Search sensr" aria-autocomplete="list"
+                    aria-controls="gsearch-list" placeholder="Search  /" autocomplete="off"
+                    spellcheck="false" node_ref=input
+                    aria-expanded=move || shown().to_string()
+                    aria-activedescendant=move || {
+                        s.active.get().filter(|_| shown()).map(|i| format!("gsearch-opt-{i}"))
+                    }
+                    prop:value=move || s.query.get()
+                    on:input=on_input on:keydown=on_key
+                    on:focus=move |_| {
+                        if !gsearch_short(&s.query.get_untracked()) {
+                            s.open.set(true);
+                        }
+                    }/>
+                <button type="button" class="icon-btn gsearch-close" aria-label="Close search"
+                    on:click=move |_| close_sheet()>
+                    {icon("M4 4l8 8M12 4l-8 8")}
+                </button>
+                // mousedown would blur the box (and shrink it under the pointer) before the click.
+                // Arrows move through the options from the box; tabindex lets a keyboard
+                // also scroll a long list.
+                <div id="gsearch-pop" class="gsearch-pop" tabindex="0" hidden=move || !shown()
+                    on:mousedown=|ev| ev.prevent_default() on:click=on_pick>
+                    <div id="gsearch-list" role="listbox" aria-label="Search results">
+                        {move || s.found.with(|f| match f {
+                            Some(Ok(r)) => Some(gsearch_results(r, s.active.get())),
+                            _ => None,
+                        })}
+                    </div>
+                    <p class="gsearch-status" class:error=move || s.found.with(|f| matches!(f, Some(Err(_))))
+                        hidden=move || status().is_empty()>{status}</p>
+                </div>
+            </div>
+        </div>
     }
 }
 
@@ -486,6 +921,42 @@ fn general_errors(
 
 // ------------------------------------------------------------------ settings form
 
+/// A `#<field dom id>` link (a global search hit) into this form: scroll to the field,
+/// focus it and flash its row for 2 s.
+#[cfg(feature = "hydrate")]
+fn flash_field(form: &str) {
+    use wasm_bindgen::JsCast;
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let hash = doc
+        .location()
+        .and_then(|l| l.hash().ok())
+        .unwrap_or_default();
+    let Some(id) = hash
+        .strip_prefix('#')
+        .filter(|id| id.strip_prefix(form).is_some_and(|r| r.starts_with("--")))
+    else {
+        return;
+    };
+    let Some(el) = doc.get_element_by_id(id) else {
+        return;
+    };
+    el.scroll_into_view();
+    if let Some(h) = el.dyn_ref::<web_sys::HtmlElement>() {
+        let _ = h.focus();
+    }
+    if let Ok(Some(row)) = el.closest(".field") {
+        let _ = row.class_list().add_1("field-flash");
+        set_timeout(
+            move || {
+                let _ = row.class_list().remove_1("field-flash");
+            },
+            std::time::Duration::from_secs(2),
+        );
+    }
+}
+
 /// A generated settings form (`<SettingsForm<T>>` renders this with `T`'s id).
 #[island]
 pub fn SettingsFormIsland(
@@ -500,7 +971,16 @@ pub fn SettingsFormIsland(
     let errors = RwSignal::new(Vec::<FieldError>::new());
     let status = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
-    let form_dom = format!("form-{form:?}").to_lowercase();
+    let form_dom = form.dom_id();
+    #[cfg(feature = "hydrate")]
+    {
+        let form_dom = form_dom.clone();
+        let on_hash = form_dom.clone();
+        Effect::new(move || flash_field(&form_dom));
+        // A search hit on this very page moves only the hash: no reload, so flash here.
+        let hash = window_event_listener(leptos::ev::hashchange, move |_| flash_field(&on_hash));
+        on_cleanup(move || drop(hash));
+    }
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         let inputs = values.get_untracked();
@@ -571,6 +1051,13 @@ pub fn GridIsland(
     initial: GridPage,
     label: String,
     choices: Choices,
+    /// `?q=`: the initial search (`initial` is already filtered by it).
+    #[prop(optional)]
+    search: Option<String>,
+    /// `?edit=`: the row whose edit dialog opens on hydrate, and the page URL without
+    /// `edit` (built on the server, keeping the wasm small) to `replaceState` to.
+    #[prop(optional_no_strip)]
+    edit: Option<(Value, String)>,
 ) -> impl IntoView {
     mark_hydrated();
     let meta = grid.meta();
@@ -582,6 +1069,7 @@ pub fn GridIsland(
 
     let query = RwSignal::new(GridQuery {
         per_page: initial.per_page,
+        search: search.clone().unwrap_or_default(),
         ..Default::default()
     });
     let page = RwSignal::new(initial);
@@ -651,6 +1139,19 @@ pub fn GridIsland(
             let _ = d.show_modal();
         }
     };
+    // A `?edit=` deep link opens the row as its Edit button would, then leaves the URL
+    // so a reload does not reopen it.
+    #[cfg(feature = "hydrate")]
+    if let Some((row, url)) = edit {
+        Effect::new(move || {
+            untrack(|| open_dialog(Editing::Row(key_of(&row), row.clone())));
+            if let Some(h) = web_sys::window().and_then(|w| w.history().ok()) {
+                let _ = h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url));
+            }
+        });
+    }
+    #[cfg(not(feature = "hydrate"))]
+    let _ = edit;
     let close_dialog = move || {
         editing.set(Editing::Closed);
         #[cfg(feature = "hydrate")]
@@ -908,7 +1409,7 @@ pub fn GridIsland(
             <div class="grid-toolbar">
                 <label class="search">
                     <span class="sr-only">{format!("Search {label_for_aria}")}</span>
-                    <input type="search" placeholder="Search"
+                    <input type="search" placeholder="Search" value=search
                         prop:value=move || query.with(|q| q.search.clone())
                         on:input=move |ev| {
                             let s = event_target_value(&ev);
@@ -1576,13 +2077,18 @@ pub fn DhcpLeases(initial: LeaseTable) -> impl IntoView {
 /// (Normal / Isolated / Quarantine) for hosts with a MAC. Refreshed with the other
 /// dashboard widgets; renders nothing when the caller may not see hosts.
 #[island]
-pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
+pub fn HostsCard(
+    initial: Option<HostCard>,
+    /// `?host=`: the initial search.
+    #[prop(optional)]
+    search: Option<String>,
+) -> impl IntoView {
     if initial.is_none() {
         return ().into_any();
     }
     mark_hydrated();
     let card = RwSignal::new(initial);
-    let search = RwSignal::new(String::new());
+    let search = RwSignal::new(search.unwrap_or_default());
     let network = RwSignal::new(String::new());
     let show_all = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
@@ -1874,7 +2380,7 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
             <div class="grid-toolbar">
                 <label class="search">
                     <span class="sr-only">"Search hosts"</span>
-                    <input type="search" placeholder="Search name, MAC or IP"
+                    <input type="search" placeholder="Search name, MAC or IP" value=search.get_untracked()
                         prop:value=move || search.get()
                         on:input=move |ev| { search.set(event_target_value(&ev)); show_all.set(false); }/>
                 </label>

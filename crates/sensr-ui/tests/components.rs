@@ -1769,3 +1769,188 @@ fn host_label_mock_set_applies_and_stages() {
     assert_eq!(p.host_label.as_ref().unwrap().by, "auto");
     assert_eq!(p.owner_kind, None);
 }
+
+#[test]
+fn grid_q_param_prefills_search() {
+    let seed = sensr_ui::mock::seed();
+    let rows: Vec<serde_json::Value> =
+        sensr_ui::adapt::rows(GridId::Aliases, &GridId::Aliases.scope(&None), &seed)
+            .into_iter()
+            .map(|r| r.view)
+            .collect();
+    let q = GridQuery {
+        search: "web".to_owned(),
+        ..Default::default()
+    };
+    let page = run_query(&rows, GridId::Aliases.columns(), &q);
+    let doc = render(|| {
+        view! {
+            <GridIsland grid=GridId::Aliases scope=None initial=page label="alias".to_owned()
+                choices=Default::default() search="web".to_owned()/>
+        }
+        .into_any()
+    });
+    let input = doc
+        .select(&sel(".grid-toolbar input[type=search]"))
+        .next()
+        .unwrap();
+    assert_eq!(input.value().attr("value"), Some("web"));
+}
+
+#[test]
+fn hosts_card_host_param_prefills_search() {
+    use sensr_ui::islands::HostsCard;
+    let card = hosts_from(hosts_mock()).expect("root may see hosts");
+    let mac = card.list.hosts[3].mac.clone().expect("mock host has a MAC");
+    let doc = render(|| view! { <HostsCard initial=Some(card) search=mac.clone()/> }.into_any());
+    let input = doc
+        .select(&sel(".grid-toolbar input[type=search]"))
+        .next()
+        .unwrap();
+    assert_eq!(input.value().attr("value"), Some(mac.as_str()));
+    assert_eq!(
+        doc.select(&sel("tbody tr")).count(),
+        1,
+        "filtered to that host"
+    );
+}
+
+// ------------------------------------------------------------------ global search
+
+#[test]
+fn gsearch_renders_after_wordmark() {
+    use sensr_ui::app::TopBar;
+    let doc = render(|| view! { <TopBar user="root".to_owned()/> }.into_any());
+    let brand = doc
+        .select(&sel(".topbar > a.brand"))
+        .next()
+        .expect("wordmark");
+    let next = brand
+        .next_siblings()
+        .find_map(scraper::ElementRef::wrap)
+        .expect("something after the wordmark");
+    let gs = if next.value().classes().any(|c| c == "gsearch") {
+        next
+    } else {
+        next.select(&sel(".gsearch"))
+            .next()
+            .expect(".gsearch right after the wordmark")
+    };
+    let input = gs.select(&sel("input")).next().expect("search input");
+    let a = input.value();
+    assert_eq!(a.attr("type"), Some("search"));
+    assert_eq!(a.attr("role"), Some("combobox"));
+    assert_eq!(a.attr("aria-label"), Some("Search sensr"));
+    assert_eq!(a.attr("aria-autocomplete"), Some("list"));
+    assert_eq!(a.attr("aria-controls"), Some("gsearch-list"));
+    assert_eq!(a.attr("aria-expanded"), Some("false"));
+    assert_eq!(a.attr("placeholder"), Some("Search  /"));
+    let list = gs.select(&sel("#gsearch-list")).next().expect("listbox");
+    assert_eq!(list.value().attr("role"), Some("listbox"));
+    let phone = gs
+        .select(&sel("button.icon-btn[aria-label=Search]"))
+        .next()
+        .expect("phone magnifier");
+    assert_eq!(phone.value().attr("type"), Some("button"));
+    // the live region is there before any results, so screen readers pick up changes
+    let live = gs
+        .select(&sel("[aria-live=polite]"))
+        .next()
+        .expect("live region");
+    assert!(live.value().classes().any(|c| c == "sr-only"));
+    assert_eq!(text(live).trim(), "");
+    // the search box sits on the left: everything else stays in .topbar-right
+    assert!(gs.select(&sel(".topbar-right")).next().is_none());
+}
+
+#[test]
+fn gsearch_absent_on_login() {
+    use sensr_ui::app::App;
+    // the real routes at /login, so a search box added to any shared chrome would show
+    let doc = render(|| {
+        provide_context(leptos_router::location::RequestUrl::new("/login"));
+        view! { <App/> }.into_any()
+    });
+    assert!(
+        doc.select(&sel(".login-card")).next().is_some(),
+        "login renders"
+    );
+    assert!(
+        doc.select(&sel(".gsearch, [role=combobox]"))
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
+fn results_escape_text() {
+    use sensr_ui::islands::gsearch_results;
+    use sensr_ui::search::{SearchGroup, SearchHit, SearchResults};
+    let evil = "<img src=x onerror=alert(1)>";
+    let r = SearchResults {
+        query: "img".to_owned(),
+        groups: vec![SearchGroup {
+            name: evil.to_owned(),
+            total: 9,
+            more_url: Some("/ui/firewall/alias?q=img".to_owned()),
+            hits: vec![SearchHit {
+                title: evil.to_owned(),
+                detail: evil.to_owned(),
+                url: "/ui/firewall/alias?edit=1".to_owned(),
+            }],
+        }],
+    };
+    let doc = render(|| gsearch_results(&r, Some(0)).into_any());
+    assert!(doc.select(&sel("img")).next().is_none(), "no <img> element");
+    let opts: Vec<_> = doc.select(&sel("[role=option]")).collect();
+    assert_eq!(opts.len(), 2, "the hit and Show all");
+    assert_eq!(opts[0].value().attr("id"), Some("gsearch-opt-0"));
+    assert_eq!(opts[0].value().attr("aria-selected"), Some("true"));
+    assert!(text(opts[0]).contains(evil), "shown as text");
+    assert_eq!(opts[1].value().attr("id"), Some("gsearch-opt-1"));
+    assert_eq!(text(opts[1]), "Show all (9)");
+    let group = doc.select(&sel("[role=group]")).next().unwrap();
+    assert_eq!(group.value().attr("aria-label"), Some(evil));
+}
+
+#[test]
+fn gsearch_no_show_all_when_everything_is_shown() {
+    use sensr_ui::islands::gsearch_results;
+    use sensr_ui::search::{SearchGroup, SearchHit, SearchResults};
+    let hit = SearchHit {
+        title: "DHCPv4".to_owned(),
+        detail: "Services › DHCPv4".to_owned(),
+        url: "/ui/dhcpv4/lan".to_owned(),
+    };
+    let r = SearchResults {
+        query: "dhcp".to_owned(),
+        groups: vec![
+            SearchGroup {
+                name: "Pages".to_owned(),
+                total: 1,
+                more_url: None,
+                hits: vec![hit.clone()],
+            },
+            SearchGroup {
+                name: "Settings".to_owned(),
+                total: 8,
+                more_url: None,
+                hits: vec![hit],
+            },
+        ],
+    };
+    let doc = render(|| gsearch_results(&r, None).into_any());
+    let ids: Vec<_> = doc
+        .select(&sel("[role=option]"))
+        .map(|o| o.value().attr("id").unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, ["gsearch-opt-0", "gsearch-opt-1"]);
+    assert!(!doc.html().contains("Show all"));
+}
+
+#[test]
+fn topbar_controls_are_labelled() {
+    use sensr_ui::app::TopBar;
+    let doc = render(|| view! { <TopBar user="root".to_owned()/> }.into_any());
+    assert_all_labelled(&doc, "top bar");
+}

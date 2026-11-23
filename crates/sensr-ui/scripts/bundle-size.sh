@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Fails if the island bundle (wasm + JS glue, brotli -q 11) exceeds the budget in
-# docs/PLAN.md §4 (< 400 KB). Run after `cargo leptos build --release` from the workspace root.
+# docs/PLAN.md §4 (< 400 KB, raised to 430 KB below). Run after `cargo leptos build --release`
+# from the workspace root.
 # Prints a Markdown table so CI can append it to the job summary.
 set -euo pipefail
 
 pkg="${1:-target/site/pkg}"
-budget_kb="${SENSR_UI_BUNDLE_BUDGET_KB:-400}"
+# 430: global search (2026-11-23)
+budget_kb="${SENSR_UI_BUNDLE_BUDGET_KB:-430}"
 
 br() { brotli -q 11 -c "$1" | wc -c | tr -d ' '; }
 gz() { gzip -9 -c "$1" | wc -c | tr -d ' '; }

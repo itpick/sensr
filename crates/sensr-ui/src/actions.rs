@@ -19,10 +19,8 @@ use leptos::server_fn::codec::Json;
 
 #[cfg(feature = "ssr")]
 mod imp {
-    use crate::adapt::{self, Store};
+    use crate::adapt::Store;
     use crate::api::{ApiError, BackendHandle, FieldError};
-    use crate::form::get_path;
-    use crate::models::GridId;
     use leptos::prelude::*;
     use serde_json::{Map, Value};
 
@@ -182,54 +180,7 @@ mod imp {
         Ok(())
     }
 
-    /// One grid row: its key, the stored item and the view.
-    pub struct Row {
-        pub key: String,
-        pub item: Value,
-        pub view: Value,
-    }
-
-    /// Rows of `grid` in `scope`, in display order (by `sequence` where the schema has one).
-    pub fn rows(grid: GridId, scope: &str, doc: &Value) -> Vec<Row> {
-        let key_field = grid.meta().key;
-        let mut out: Vec<Row> = match adapt::store(grid, scope, doc) {
-            Store::Map(path) => get_path(doc, &path)
-                .and_then(Value::as_object)
-                .into_iter()
-                .flatten()
-                .filter(|(_, item)| adapt::in_scope(grid, scope, doc, item))
-                .map(|(k, item)| (k.clone(), item.clone()))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|(key, item)| {
-                    let mut view = adapt::to_view(grid, doc, &item);
-                    view[key_field] = Value::String(key.clone());
-                    adapt::decorate(grid, doc, &key, &mut view);
-                    Row { key, item, view }
-                })
-                .collect(),
-            Store::Array(path) => get_path(doc, &path)
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .enumerate()
-                .map(|(i, item)| {
-                    let key = i.to_string();
-                    let mut view = adapt::to_view(grid, doc, item);
-                    view[key_field] = Value::String(key.clone());
-                    Row {
-                        key,
-                        item: item.clone(),
-                        view,
-                    }
-                })
-                .collect(),
-        };
-        if adapt::sequenced(grid) {
-            out.sort_by_key(|r| r.item.get("sequence").and_then(Value::as_u64).unwrap_or(1));
-        }
-        out
-    }
+    pub use crate::adapt::rows;
 
     /// The top-level section a path lives in.
     pub fn section(path: &str) -> &str {
@@ -1483,35 +1434,22 @@ pub struct LayoutData {
 /// Chrome data for the page being rendered.
 #[server(prefix = "/ui/fn", input = Json)]
 pub async fn chrome_data() -> Result<LayoutData, ServerFnError> {
-    use serde_json::Value;
     let b = imp::backend()?;
     let doc = b.get("interfaces").await.map_err(imp::err)?;
-    let interfaces = doc
-        .as_object()
-        .into_iter()
-        .flatten()
-        .map(|(id, r)| {
-            let desc = r
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            crate::menu::MenuInterface {
-                id: id.clone(),
-                description: if desc.is_empty() {
-                    id.to_uppercase()
-                } else {
-                    desc.to_owned()
-                },
-                dhcp_capable: crate::form::get_path(r, "ipv4.mode").and_then(Value::as_str)
-                    == Some("static"),
-            }
-        })
-        .collect();
+    let interfaces = crate::search::menu_interfaces(&doc);
     Ok(LayoutData {
         user: imp::user(),
         interfaces,
         pending: b.pending().await.map_err(imp::err)?,
     })
+}
+
+/// Global search: pages, settings, the caller's objects and hosts matching `q`, each only if
+/// the caller may open its page.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn global_search(q: String) -> Result<crate::search::SearchResults, ServerFnError> {
+    let b = imp::backend()?;
+    crate::search::run(b.as_ref(), &q).await.map_err(imp::err)
 }
 
 /// Current value of a settings form, secrets blanked.

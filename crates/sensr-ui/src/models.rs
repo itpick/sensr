@@ -3509,6 +3509,167 @@ impl GridId {
     }
 }
 
+// ---------------------------------------------------------------- page registry
+//
+// Which page shows each form and grid. The router (`app.rs`) owns the routes; this is the one
+// place that knows which route a model lives on, for links that point into a page (global
+// search). `registry_follows_the_menu` checks every URL against the menu.
+
+impl FormId {
+    /// Every form, in menu order.
+    pub const ALL: [Self; 14] = [
+        Self::OidcSettings,
+        Self::SamlSettings,
+        Self::SystemGeneral,
+        Self::Interface,
+        Self::SourceNatMode,
+        Self::DhcpSettings,
+        Self::IdsSettings,
+        Self::UnboundGeneral,
+        Self::UnboundAdvanced,
+        Self::UnboundServeExpired,
+        Self::UnboundLogging,
+        Self::UnboundCache,
+        Self::UnboundAclDefault,
+        Self::UnboundForwarding,
+    ];
+
+    /// The page the form is on; scoped forms at their default scope ([`FormId::scope`]).
+    pub fn page_url(self) -> &'static str {
+        match self {
+            Self::SystemGeneral => "/ui/system/general",
+            Self::Interface => "/ui/interfaces/if/lan",
+            Self::SourceNatMode => "/ui/firewall/source_nat",
+            Self::DhcpSettings => "/ui/dhcpv4/lan",
+            Self::UnboundGeneral => "/ui/unbound/general",
+            Self::UnboundAdvanced
+            | Self::UnboundServeExpired
+            | Self::UnboundLogging
+            | Self::UnboundCache => "/ui/unbound/advanced",
+            Self::UnboundAclDefault => "/ui/unbound/acl",
+            Self::UnboundForwarding => "/ui/unbound/forward",
+            Self::IdsSettings => "/ui/ids",
+            Self::OidcSettings => "/ui/system/oidc",
+            Self::SamlSettings => "/ui/system/saml",
+        }
+    }
+
+    /// The `id` of the form element ([`crate::form::FieldSpec::dom_id`] builds on it).
+    pub fn dom_id(self) -> String {
+        format!("form-{self:?}").to_lowercase()
+    }
+}
+
+impl GridId {
+    /// Every grid, in menu order (grids sharing a page in the order the page shows them).
+    pub const ALL: [Self; 28] = [
+        Self::Gateways,
+        Self::GatewayGroups,
+        Self::StaticRoutes,
+        Self::Users,
+        Self::UserGroups,
+        Self::OidcProviders,
+        Self::SamlProviders,
+        Self::Assignments,
+        Self::Bridges,
+        Self::Laggs,
+        Self::Loopbacks,
+        Self::VirtualIps,
+        Self::Aliases,
+        Self::FirewallGroups,
+        Self::FirewallIsolation,
+        Self::SourceNat,
+        Self::PortForwards,
+        Self::FilterRules,
+        Self::WgInstances,
+        Self::WgPeers,
+        Self::DhcpRanges,
+        Self::StaticMaps,
+        Self::IdsSuppressions,
+        Self::IdsUserRules,
+        Self::HostOverrides,
+        Self::AccessLists,
+        Self::Blocklists,
+        Self::Forwarders,
+    ];
+
+    /// The page the grid is on; scoped grids at their default scope ([`GridId::scope`]).
+    pub fn page_url(self) -> &'static str {
+        match self {
+            Self::Assignments => "/ui/interfaces/assignment",
+            Self::Aliases => "/ui/firewall/alias",
+            Self::FilterRules => "/ui/firewall/filter",
+            Self::SourceNat => "/ui/firewall/source_nat",
+            Self::PortForwards => "/ui/firewall/d_nat",
+            Self::DhcpRanges | Self::StaticMaps => "/ui/dhcpv4/lan",
+            Self::HostOverrides => "/ui/unbound/overrides",
+            Self::AccessLists => "/ui/unbound/acl",
+            Self::Forwarders => "/ui/unbound/forward",
+            Self::Blocklists => "/ui/unbound/dnsbl",
+            Self::WgInstances => "/ui/wireguard/instances",
+            Self::WgPeers => "/ui/wireguard/peers",
+            Self::IdsSuppressions => "/ui/ids/rules",
+            Self::IdsUserRules => "/ui/ids/userdefined",
+            Self::Gateways => "/ui/routing/configuration",
+            Self::GatewayGroups => "/ui/routing/gateway_groups",
+            Self::StaticRoutes => "/ui/routes",
+            Self::Bridges => "/ui/interfaces/bridge",
+            Self::Laggs => "/ui/interfaces/lagg",
+            Self::Loopbacks => "/ui/interfaces/loopback",
+            Self::VirtualIps => "/ui/interfaces/vip",
+            Self::FirewallGroups => "/ui/firewall/group",
+            Self::FirewallIsolation => "/ui/firewall/isolation",
+            Self::Users => "/ui/system/user",
+            Self::UserGroups => "/ui/system/group",
+            Self::OidcProviders => "/ui/system/oidc",
+            Self::SamlProviders => "/ui/system/saml",
+        }
+    }
+
+    /// The page showing the grid for `scope` (an interface id); unscoped grids ignore it.
+    pub fn scoped_url(self, scope: &str) -> String {
+        match self {
+            Self::FilterRules => format!("/ui/firewall/filter/{scope}"),
+            Self::DhcpRanges | Self::StaticMaps => format!("/ui/dhcpv4/{scope}"),
+            _ => self.page_url().to_owned(),
+        }
+    }
+
+    /// Plural name for the grid's rows, after its menu entry ("Aliases", "WireGuard peers").
+    pub fn group_name(self) -> &'static str {
+        match self {
+            Self::Assignments => "Assignments",
+            Self::Aliases => "Aliases",
+            Self::FilterRules => "Rules",
+            Self::SourceNat => "Source NAT",
+            Self::PortForwards => "Port Forward",
+            Self::DhcpRanges => "DHCP pools",
+            Self::StaticMaps => "DHCP reservations",
+            Self::HostOverrides => "Host Overrides",
+            Self::AccessLists => "Access Lists",
+            Self::Forwarders => "Query Forwarding",
+            Self::Blocklists => "Blocklists",
+            Self::WgInstances => "WireGuard instances",
+            Self::WgPeers => "WireGuard peers",
+            Self::IdsSuppressions => "Suppressions",
+            Self::IdsUserRules => "User defined rules",
+            Self::Gateways => "Gateways",
+            Self::GatewayGroups => "Gateway groups",
+            Self::StaticRoutes => "Routes",
+            Self::Bridges => "Bridges",
+            Self::Laggs => "LAGG",
+            Self::Loopbacks => "Loopback",
+            Self::VirtualIps => "Virtual IPs",
+            Self::FirewallGroups => "Firewall groups",
+            Self::FirewallIsolation => "Isolation",
+            Self::Users => "Users",
+            Self::UserGroups => "User groups",
+            Self::OidcProviders => "OpenID Connect",
+            Self::SamlProviders => "SAML",
+        }
+    }
+}
+
 /// Static facts about a grid's row type.
 #[derive(Debug, Clone)]
 pub struct GridMeta {
@@ -3728,6 +3889,49 @@ mod tests {
         all.sort_unstable();
         all.dedup();
         assert_eq!(all.len(), n);
+    }
+
+    #[test]
+    fn registry_follows_the_menu() {
+        use crate::menu::{MenuInterface, MenuItem, best_url, build};
+        let menu = build(&[MenuInterface {
+            id: "lan".into(),
+            description: "LAN".into(),
+            dhcp_capable: true,
+        }]);
+        fn urls(items: &[MenuItem], out: &mut Vec<String>) {
+            for i in items {
+                out.extend(i.url.clone());
+                urls(&i.children, out);
+            }
+        }
+        let mut order = Vec::new();
+        urls(&menu, &mut order);
+        let pos = |url: &str| {
+            let item = best_url(&menu, url).unwrap_or_else(|| panic!("{url} is not in the menu"));
+            order.iter().position(|u| *u == item).unwrap()
+        };
+        let grid_pos: Vec<_> = GridId::ALL.iter().map(|g| pos(g.page_url())).collect();
+        assert!(grid_pos.is_sorted(), "GridId::ALL is not in menu order");
+        let form_pos: Vec<_> = FormId::ALL.iter().map(|f| pos(f.page_url())).collect();
+        assert!(form_pos.is_sorted(), "FormId::ALL is not in menu order");
+        for g in GridId::ALL {
+            assert_eq!(pos(&g.scoped_url("lan")), pos(g.page_url()), "{g:?}");
+        }
+        // Every id is listed once, and group names are unique.
+        let mut names: Vec<_> = GridId::ALL.iter().map(|g| g.group_name()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), GridId::ALL.len());
+        let mut g: Vec<_> = GridId::ALL.iter().map(|g| format!("{g:?}")).collect();
+        g.sort_unstable();
+        g.dedup();
+        assert_eq!(g.len(), GridId::ALL.len());
+        let mut f: Vec<_> = FormId::ALL.iter().map(|f| format!("{f:?}")).collect();
+        f.sort_unstable();
+        f.dedup();
+        assert_eq!(f.len(), FormId::ALL.len());
+        assert_eq!(FormId::SystemGeneral.dom_id(), "form-systemgeneral");
     }
 
     #[test]

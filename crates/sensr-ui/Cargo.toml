@@ -73,7 +73,7 @@ tracing-subscriber = { workspace = true, optional = true }
 # hydrate
 console_error_panic_hook = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
-web-sys = { workspace = true, optional = true, features = ["Document", "DragEvent", "DataTransfer", "Element", "HtmlElement", "HtmlDocument", "Window", "Storage", "HtmlDialogElement", "DomTokenList", "Location", "HtmlSelectElement", "HtmlInputElement"] }
+web-sys = { workspace = true, optional = true, features = ["Document", "DragEvent", "Event", "DataTransfer", "Element", "HtmlElement", "HtmlDocument", "Window", "Storage", "HtmlDialogElement", "DomTokenList", "Location", "HtmlSelectElement", "HtmlInputElement", "History"] }
 
 [dev-dependencies]
 scraper.workspace = true
