@@ -136,8 +136,7 @@ pub struct Prepared {
     /// host-mode MAC sets the ruleset was rendered with (the locked
     /// addresses are empty: [`Engine::update_host_mode_sets`] fills them)
     pub host_modes: HostModeSets,
-    /// devices of the enabled non-WAN interfaces (the emergency firewall
-    /// serves them)
+    /// devices the emergency firewall serves ([`emergency::inside`])
     pub inside: Vec<String>,
     secrets: Vec<(PathBuf, String)>,
 }
@@ -313,6 +312,9 @@ pub struct Engine {
     staging: Staging,
     runner: Arc<dyn Runner>,
     applied: Option<Applied>,
+    /// the emergency firewall is loaded (this engine loaded it and no real
+    /// ruleset replaced it yet)
+    emergency: std::sync::atomic::AtomicBool,
 }
 
 impl Engine {
@@ -324,6 +326,7 @@ impl Engine {
             opts,
             runner,
             applied: None,
+            emergency: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -379,14 +382,7 @@ impl Engine {
             alias_failed: compiled.aliases.failed.iter().cloned().collect(),
             aliases: compiled.aliases.aliases.clone(),
             host_modes: compiled.host_modes.clone(),
-            inside: doc
-                .interfaces
-                .iter()
-                .filter(|(_, i)| {
-                    i.enabled && i.role != sensr_schema::models::interfaces::InterfaceRole::Wan
-                })
-                .map(|(_, i)| i.device.as_str().to_owned())
-                .collect(),
+            inside: emergency::inside(doc),
             secrets,
         })
     }
@@ -640,6 +636,39 @@ impl Engine {
         }
     }
 
+    /// Whether the emergency firewall loaded by this engine is in force.
+    pub fn emergency_active(&self) -> bool {
+        self.emergency.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A fresh boot (the kernel holds no sensr ruleset) gets the emergency
+    /// firewall before anything else of the boot apply runs, so no failure
+    /// on the way (rendering, links, sysctls, a rejected or failing ruleset
+    /// load) leaves the box unfiltered; the real ruleset's load drops it.
+    /// After an agent restart the running ruleset stays. Returns whether the
+    /// emergency firewall is in force.
+    pub fn guard_fresh_boot(&self, inside: &[String]) -> bool {
+        if self.emergency_active() {
+            return true;
+        }
+        let r = self.runner.as_ref();
+        if !r.has_program("nft") || self.sensr_table_loaded() {
+            return false;
+        }
+        match nft::load(r, emergency::ruleset(inside).as_bytes()) {
+            Ok(_) => {
+                tracing::warn!("fresh boot: emergency firewall loaded until the ruleset applies");
+                self.emergency
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                true
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "loading the emergency firewall");
+                false
+            }
+        }
+    }
+
     /// Whether the kernel holds the sensr ruleset's table.
     fn sensr_table_loaded(&self) -> bool {
         let table = rules_nft::Options::default().table;
@@ -751,10 +780,13 @@ impl Engine {
     /// their files did not change. A daemon whose file its checker rejects
     /// does not get the new file: it is restarted with the file already on
     /// disk if there is one, else left stopped. A checker that cannot run
-    /// counts as that backend's rejection. A rejected ruleset is not loaded:
-    /// the kernel keeps the sensr ruleset it has (agent restart) or, when it
-    /// has none (fresh boot), gets the [`emergency`] firewall, so the box is
-    /// never left unfiltered; everything else still applies. A unit that
+    /// counts as that backend's rejection. On a fresh boot (no sensr
+    /// ruleset in the kernel) the [`emergency`] firewall is loaded first
+    /// ([`guard_fresh_boot`](Self::guard_fresh_boot)) and stays until the
+    /// real ruleset loads, so neither a rejected ruleset nor an error on
+    /// the way leaves the box unfiltered; after an agent restart the
+    /// running sensr ruleset stays instead. A rejected ruleset is not loaded
+    /// and everything else still applies. A unit that
     /// fails to start or a side table that fails to load is recorded and the
     /// rest carries on. What was held back is returned, and left out of the
     /// applied state so the next commit writes (and checks) it again; that
@@ -764,6 +796,7 @@ impl Engine {
         mut p: Prepared,
     ) -> Result<(CommitReport, Vec<Degraded>), EngineError> {
         self.applied = None;
+        self.guard_fresh_boot(&p.inside);
         let mut iso = Isolation::default();
         if self.opts.check {
             self.check_isolated(&p, &mut iso)?;
@@ -916,10 +949,12 @@ impl Engine {
             nft::load(r, &p.ruleset)?;
             report.commands.push("nft -j -f -".into());
             report.nft_loaded = true;
-            if applied.plan.nft.is_none() {
+            if applied.plan.nft.is_none() || self.emergency_active() {
                 // first ruleset of this engine, or after a boot that had
                 // to run the emergency firewall: drop it if it is there
                 nft::load(r, emergency::removal().as_bytes())?;
+                self.emergency
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 report
                     .commands
                     .push("nft -j -f - (emergency firewall removed)".into());
@@ -928,7 +963,14 @@ impl Engine {
             && let Some(message) = iso.nft_rejected.clone()
         {
             // a rejected ruleset never leaves the box unfiltered
-            if self.sensr_table_loaded() {
+            if self.emergency_active() {
+                iso.degraded.push(Degraded {
+                    backend: "nft",
+                    unit: None,
+                    message,
+                    outcome: Outcome::EmergencyFirewall,
+                });
+            } else if self.sensr_table_loaded() {
                 iso.degraded.push(Degraded {
                     backend: "nft",
                     unit: None,
@@ -939,6 +981,8 @@ impl Engine {
                 let loaded = nft::load(r, emergency::ruleset(&p.inside).as_bytes());
                 match loaded {
                     Ok(_) => {
+                        self.emergency
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
                         report
                             .commands
                             .push("nft -j -f - (emergency firewall)".into());
@@ -1841,6 +1885,70 @@ mod tests {
             degraded[1].to_string(),
             "emergency firewall active: Error: syntax error in line 3"
         );
+    }
+
+    #[test]
+    fn a_fresh_boot_is_filtered_before_anything_can_fail() {
+        // networkctl fails before the ruleset stage: the emergency firewall
+        // went in first and stays
+        let root = tempfile::tempdir().unwrap();
+        let (mut e, runner) = engine(root.path());
+        runner.respond(|cmd, _| {
+            let line = cmd.display();
+            if line.starts_with("nft 'list'") {
+                return Some(Output::failed(1, "Error: No such file or directory"));
+            }
+            line.starts_with("networkctl ")
+                .then(|| Output::failed(1, "Failed to reload network settings"))
+        });
+        let p = e.prepare(&home_router(), &Runtime::default()).unwrap();
+        let inside = p.inside.clone();
+        assert!(e.commit_isolated(p).is_err());
+        assert!(e.emergency_active());
+        assert_eq!(nft_loads(&runner), [emergency::ruleset(&inside)]);
+
+        // `nft -c` passes but the load fails: still filtered
+        let root = tempfile::tempdir().unwrap();
+        let (mut e, runner) = engine(root.path());
+        runner.respond(|cmd, _| {
+            let line = cmd.display();
+            if line.starts_with("nft 'list'") {
+                return Some(Output::failed(1, "Error: No such file or directory"));
+            }
+            None
+        });
+        let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = loads.clone();
+        runner.respond(move |cmd, _| {
+            // the first load (the emergency firewall) works, the second
+            // (the real ruleset) fails
+            (cmd.display() == "nft '-j' '-f' '-'"
+                && n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1)
+                .then(|| Output::failed(1, "Error: Could not process rule"))
+        });
+        let p = e.prepare(&home_router(), &Runtime::default()).unwrap();
+        assert!(matches!(e.commit_isolated(p), Err(EngineError::Nft(_))));
+        assert!(e.emergency_active());
+        let lines = runner.call_lines();
+        assert!(!has(&lines, "systemctl"), "{lines:#?}");
+
+        // a good fresh boot loads it first and drops it after the ruleset
+        let root = tempfile::tempdir().unwrap();
+        let (mut e, runner) = engine(root.path());
+        runner.respond(|cmd, _| {
+            cmd.display()
+                .starts_with("nft 'list'")
+                .then(|| Output::failed(1, "Error: No such file or directory"))
+        });
+        let p = e.prepare(&home_router(), &Runtime::default()).unwrap();
+        let (_, degraded) = e.commit_isolated(p).unwrap();
+        assert!(degraded.is_empty(), "{degraded:?}");
+        assert!(!e.emergency_active());
+        let loads = nft_loads(&runner);
+        assert_eq!(loads.len(), 3, "{loads:#?}");
+        assert!(loads[0].contains(emergency::TABLE));
+        assert!(loads[1].contains("\"name\":\"sensr\""));
+        assert_eq!(loads[2], emergency::removal());
     }
 
     #[test]

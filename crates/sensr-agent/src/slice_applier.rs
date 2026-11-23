@@ -851,6 +851,34 @@ impl SliceApplier {
         next: &Document,
         isolated: bool,
     ) -> Result<Vec<sensr_apply::engine::Degraded>, ApplyError> {
+        if !isolated {
+            return self.apply_doc(next, false);
+        }
+        // a fresh boot is filtered before anything can fail
+        self.engine()
+            .guard_fresh_boot(&sensr_apply::appliers::emergency::inside(next));
+        self.apply_doc(next, true).map_err(|e| {
+            if !self.engine().emergency_active() {
+                return e;
+            }
+            let what = match e {
+                ApplyError::Failed(m) => m,
+                ApplyError::Invalid(v) => v
+                    .iter()
+                    .map(|i| format!("{}: {}", i.path, i.message))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            };
+            tracing::error!(error = %what, "boot apply failed; emergency firewall active");
+            ApplyError::Failed(format!("emergency firewall active: {what}"))
+        })
+    }
+
+    fn apply_doc(
+        &mut self,
+        next: &Document,
+        isolated: bool,
+    ) -> Result<Vec<sensr_apply::engine::Degraded>, ApplyError> {
         let doc = document(next)?.clone();
         // before the engine, as in the refresher: no tick pushes stale sets
         // between the reload and the push below
@@ -1151,6 +1179,59 @@ mod tests {
         assert!(!lines.iter().any(|l| l.contains("sensr-unbound.service")));
         // and a later commit of a document is still refused whole
         assert!(matches!(a.apply(None, &doc), Err(ApplyError::Invalid(_))));
+    }
+
+    #[test]
+    fn a_fresh_boot_that_cannot_render_still_gets_the_emergency_firewall() {
+        use sensr_schema::PathAccess;
+        let root = fake_root();
+        let runner = Arc::new(FakeRunner::new());
+        runner.respond(|cmd, _| {
+            cmd.display()
+                .starts_with("nft 'list'")
+                .then(|| sensr_apply::cmd::Output::failed(1, "No such file or directory"))
+        });
+        let mut a = SliceApplier::new(
+            EngineOptions {
+                root: root.path().to_owned(),
+                ..EngineOptions::default()
+            },
+            runner.clone(),
+        )
+        .unwrap();
+        // a document written by an older build that no longer validates
+        let mut doc = home_router();
+        doc.set_by_path("dhcpv4.interfaces", serde_json::json!(["opt9"]))
+            .unwrap();
+        let err = a.apply_boot(&doc).unwrap_err();
+        let ApplyError::Failed(msg) = err else {
+            panic!("{err:?}")
+        };
+        assert!(msg.starts_with("emergency firewall active: "), "{msg}");
+        let loads: Vec<String> = runner
+            .calls()
+            .into_iter()
+            .filter(|c| c.cmd.display() == "nft '-j' '-f' '-'")
+            .map(|c| String::from_utf8(c.stdin.unwrap_or_default()).unwrap())
+            .collect();
+        assert_eq!(
+            loads,
+            [sensr_apply::appliers::emergency::ruleset(
+                &sensr_apply::appliers::emergency::inside(&doc)
+            )]
+        );
+        // a commit never loads it
+        let runner = Arc::new(FakeRunner::new());
+        let mut a = SliceApplier::new(
+            EngineOptions {
+                root: root.path().to_owned(),
+                ..EngineOptions::default()
+            },
+            runner.clone(),
+        )
+        .unwrap();
+        assert!(a.apply(None, &doc).is_err());
+        assert!(runner.calls().is_empty(), "{:?}", runner.call_lines());
     }
 
     #[test]
