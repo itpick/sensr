@@ -238,6 +238,8 @@ ul.plain { list-style: none; padding: 0; margin: 8px 0; }
 .dashboard .card { margin: 0; }
 .card-wide { grid-column: span 2; }
 .hosts-card { margin-top: 18px; }
+/* filters sit together beside the search, not pushed to the far edge */
+.hosts-card .grid-toolbar { justify-content: flex-start; }
 .host-actions .btn + * { margin-left: 6px; }
 .host-mode { white-space: nowrap; }
 .host-mode .pill + select { margin-left: 6px; }

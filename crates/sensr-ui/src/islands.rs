@@ -1871,7 +1871,7 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
     view! {
         {move || visible.get().then(|| view! {
             <section class="card card-wide hosts-card" aria-labelledby="w-hosts">
-                <h2 id="w-hosts">{move || card.with(|c| format!("Hosts ({})", c.as_ref().map_or(0, |c| c.list.hosts.len())))}</h2>
+                <h2 id="w-hosts">{move || card.with(|c| format!("Hosts ({})", c.as_ref().map_or(0, |c| network.with(|n| c.count_in(n)))))}</h2>
                 {toolbar}
                 {body}
                 {footer}

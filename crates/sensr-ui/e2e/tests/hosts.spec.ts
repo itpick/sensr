@@ -38,6 +38,12 @@ test("network filter shows only LAN2", async ({ page }) => {
   await expect(lan).toHaveCount(0);
   await expect(rows(page).first()).toBeVisible();
   await expect(rows(page).filter({ hasText: "nas" })).toHaveCount(0);
+  // the heading counts only LAN2's hosts
+  const heading = card(page).getByRole("heading", { name: /^Hosts \(\d+\)$/ });
+  const n = Number((await heading.textContent())!.match(/\d+/)![0]);
+  expect(n).toBeLessThan(25);
+  await card(page).getByRole("combobox", { name: "Network", exact: true }).selectOption({ label: "All networks" });
+  await expect(card(page).getByRole("heading", { name: "Hosts (25)" })).toBeVisible();
 });
 
 test("forget removes a dynamic host", async ({ page }) => {

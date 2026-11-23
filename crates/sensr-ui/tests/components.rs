@@ -868,6 +868,11 @@ fn hosts_card_filter_search_and_show_all() {
     assert!(!rows.is_empty() && rows.iter().all(|h| h.interface_name == "LAN2"));
     assert_eq!(rows.len(), m);
     assert!(m <= sensr_ui::actions::HostCard::SHOWN);
+    // the heading count follows the network filter, not the search
+    assert_eq!(card.count_in("opt1"), m);
+    assert_eq!(card.count_in(""), 25);
+    assert_eq!(card.visible("opt1", "zzz-no-match", false).1, 0);
+    assert_eq!(card.count_in("opt1"), m);
     let lan2 = render_hosts(Some(sensr_ui::actions::HostCard {
         list: sensr_ui::runtime::HostList {
             now: card.list.now,
