@@ -297,20 +297,49 @@ fn category_key(c: Category) -> String {
         .unwrap_or_else(|| "other".into())
 }
 
+type CatalogueCache = Option<(std::time::Instant, std::sync::Arc<Catalogue>)>;
+static CATALOGUE: Mutex<CatalogueCache> = Mutex::new(None);
+static CATALOGUE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The catalogue the daemon attributes with: the built-in one plus the enabled overrides in
 /// the configuration the agent rendered for it (`SENSR_INSIGHT_CONFIG` overrides the path).
-/// Unreadable configuration means the built-in catalogue.
-pub fn catalogue() -> Catalogue {
+/// Unreadable configuration means the built-in catalogue (a warning is logged once). The
+/// result is reused for [`MIX_CACHE_SECS`].
+pub fn catalogue() -> std::sync::Arc<Catalogue> {
+    let window = std::time::Duration::from_secs(MIX_CACHE_SECS.unsigned_abs());
+    {
+        let c = CATALOGUE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, cat)) = &*c
+            && at.elapsed() < window
+        {
+            return cat.clone();
+        }
+    }
     let path = std::env::var_os("SENSR_INSIGHT_CONFIG")
         .map_or_else(|| Path::new(CONFIG_PATH).to_owned(), Into::into);
-    let overrides = std::fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Config>(&b).ok())
-        .and_then(|c| c.flows)
-        .and_then(|f| f.dns)
-        .map(|d| d.service_overrides)
-        .unwrap_or_default();
-    Catalogue::builtin().with_overrides(&overrides)
+    let overrides = match std::fs::read(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|b| serde_json::from_slice::<Config>(&b).map_err(|e| e.to_string()))
+    {
+        Ok(c) => c
+            .flows
+            .and_then(|f| f.dns)
+            .map(|d| d.service_overrides)
+            .unwrap_or_default(),
+        Err(e) => {
+            if !CATALOGUE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    "cannot read {}: {e}; using the built-in service catalogue",
+                    path.display()
+                );
+            }
+            Vec::new()
+        }
+    };
+    let cat = std::sync::Arc::new(Catalogue::builtin().with_overrides(&overrides));
+    *CATALOGUE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((std::time::Instant::now(), cat.clone()));
+    cat
 }
 
 /// Whether a store error only says the activity tables do not exist yet (a database from
@@ -319,25 +348,30 @@ fn no_table(e: &impl std::fmt::Display) -> bool {
     e.to_string().contains("no such table")
 }
 
-static OFFSET: Mutex<Option<(i64, i64)>> = Mutex::new(None);
+static OFFSET: Mutex<Option<(i64, i64, bool)>> = Mutex::new(None);
 
 /// The router's local time minus UTC in seconds, from `date +%z` (so the system timezone
-/// and its daylight saving apply); 0 when that does not work. Cached for ten minutes.
+/// and its daylight saving apply); 0 when that does not work. Cached for ten minutes, a
+/// failure for one. One offset is applied to a whole range, so in a week with a daylight
+/// saving change the hours before the change are shifted by an hour.
 pub fn local_offset(now: i64) -> i64 {
-    let mut c = OFFSET.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((at, off)) = *c
-        && (0..600).contains(&(now - at))
     {
-        return off;
+        let c = OFFSET.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, off, ok)) = *c
+            && (0..if ok { 600 } else { 60 }).contains(&(now - at))
+        {
+            return off;
+        }
     }
-    let off = std::process::Command::new("date")
+    // The subprocess runs outside the lock.
+    let got = std::process::Command::new("date")
         .arg("+%z")
         .output()
         .ok()
-        .and_then(|o| parse_offset(String::from_utf8_lossy(&o.stdout).trim()))
-        .unwrap_or(0);
-    *c = Some((now, off));
-    off
+        .and_then(|o| parse_offset(String::from_utf8_lossy(&o.stdout).trim()));
+    *OFFSET.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((now, got.unwrap_or(0), got.is_some()));
+    got.unwrap_or(0)
 }
 
 /// `+0530` as seconds.
@@ -455,26 +489,16 @@ pub fn host_activity(
     };
     match s.host_activity(&v.mac, &r, page, &catalogue()) {
         Ok(a) => {
-            v.available = true;
+            let body = view_of(a);
             Ok(HostActivityView {
-                mac: v.mac,
-                name: v.name,
-                label: v.label,
-                ipv4: v.ipv4,
-                ipv6: v.ipv6,
-                mode: v.mode,
-                last_seen: v.last_seen,
-                online: v.online,
-                range: v.range,
-                from: v.from,
-                to: v.to,
-                utc_offset,
                 available: true,
-                feed_stale: v.feed_stale,
-                last_frame: v.last_frame,
-                page,
-                per_page: DOMAINS_PAGE,
-                ..view_of(a)
+                screen_time: body.screen_time,
+                services: body.services,
+                categories: body.categories,
+                timeline: body.timeline,
+                domains: body.domains,
+                domains_total: body.domains_total,
+                ..v
             })
         }
         Err(e) if no_table(&e) => Ok(v),
@@ -499,7 +523,9 @@ type MixCache = Option<(std::path::PathBuf, i64, HostMix)>;
 static MIX: Mutex<MixCache> = Mutex::new(None);
 
 /// [`HostMix`] from the database in `dir` (empty when there is none, or it predates
-/// per-host DNS activity), reused for [`MIX_CACHE_SECS`].
+/// per-host DNS activity), reused for [`MIX_CACHE_SECS`]. A scan that fails (a busy
+/// database, say) is logged and not cached; the last good scan of `dir` is returned if
+/// there is one, else an empty mix.
 pub fn host_mix(dir: &Path, now: i64) -> HostMix {
     {
         let c = MIX.lock().unwrap_or_else(|e| e.into_inner());
@@ -510,21 +536,45 @@ pub fn host_mix(dir: &Path, now: i64) -> HostMix {
             return m.clone();
         }
     }
-    let m = scan_mix(dir, now);
-    *MIX.lock().unwrap_or_else(|e| e.into_inner()) = Some((dir.to_owned(), now, m.clone()));
-    m
+    match scan_mix(dir, now) {
+        Ok(m) => {
+            *MIX.lock().unwrap_or_else(|e| e.into_inner()) = Some((dir.to_owned(), now, m.clone()));
+            m
+        }
+        Err(e) => {
+            tracing::warn!("host DNS mix scan failed: {e}");
+            let c = MIX.lock().unwrap_or_else(|e| e.into_inner());
+            match &*c {
+                Some((d, _, m)) if d == dir => m.clone(),
+                _ => HostMix::default(),
+            }
+        }
+    }
 }
 
-fn scan_mix(dir: &Path, now: i64) -> HostMix {
+/// An old database without the activity tables counts as empty; any other error is one.
+fn scan_ok<T: Default>(r: sensr_flow::store::Result<T>) -> Result<T, String> {
+    match r {
+        Ok(v) => Ok(v),
+        Err(e) if no_table(&e) => Ok(T::default()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn scan_mix(dir: &Path, now: i64) -> Result<HostMix, String> {
     let Some(s) = flows(dir) else {
-        return HostMix::default();
+        return Ok(HostMix::default());
     };
     let cat = catalogue();
-    let since = ActivityRange::today(now, local_offset(now)).from;
-    let today = s.today_minutes(since, &cat).unwrap_or_default();
-    let mix = s
-        .dns_mix_24h(now, &cat)
-        .unwrap_or_default()
+    let stale = DnsStatus::read(dir).dns_feed_stale;
+    // A stale feed has no minutes to count.
+    let today = if stale {
+        BTreeMap::new()
+    } else {
+        let since = ActivityRange::today(now, local_offset(now)).from;
+        scan_ok(s.today_minutes(since, &cat))?
+    };
+    let mix = scan_ok(s.dns_mix_24h(now, &cat))?
         .into_iter()
         .map(|(h, v)| {
             (
@@ -533,7 +583,7 @@ fn scan_mix(dir: &Path, now: i64) -> HostMix {
             )
         })
         .collect();
-    HostMix { today, mix }
+    Ok(HostMix { today, mix })
 }
 
 /// Fills `today_minutes` and `dns_mix` of the rows that have data.
@@ -562,6 +612,43 @@ mod activity_tests {
     fn hosts() -> serde_json::Value {
         json!({"now": 0, "hosts": [{"key": MAC, "mac": MAC, "name": "kid-tablet",
             "ipv4": "192.168.1.50", "online": true, "last_seen": 10}]})
+    }
+
+    #[test]
+    fn stale_feed_has_no_today_minutes_and_failures_are_not_cached() {
+        let d = tempfile::tempdir().unwrap();
+        let now = 1_800_000_000;
+        let mut s = sensr_flow::store::FlowStore::open(&d.path().join(FLOWS_DB)).unwrap();
+        let mut r = MinuteResult::default();
+        r.per_host.insert(
+            MAC.into(),
+            HostMinute {
+                services_active: ["YouTube".to_owned()].into(),
+                queries: vec![("www.youtube.com".into(), 1, false)],
+                ..HostMinute::default()
+            },
+        );
+        s.write_activity_minute(now - 120, &r).unwrap();
+        std::fs::write(
+            d.path().join(sensr_flow::config::DNS_STATUS),
+            r#"{"dns_feed_stale":true}"#,
+        )
+        .unwrap();
+        let m = scan_mix(d.path(), now).unwrap();
+        assert!(m.today.is_empty());
+        assert_eq!(m.mix[MAC], vec![("video".to_owned(), 1)]);
+        // a database that cannot be read is an error, not an empty answer to cache
+        let bad = tempfile::tempdir().unwrap();
+        std::fs::write(bad.path().join(FLOWS_DB), b"not a database").unwrap();
+        assert!(scan_mix(bad.path(), now).is_err());
+        assert_eq!(host_mix(bad.path(), now), HostMix::default());
+        assert!(
+            MIX.lock()
+                .unwrap()
+                .as_ref()
+                .is_none_or(|c| c.0 != bad.path()),
+            "failure not cached"
+        );
     }
 
     #[test]

@@ -327,6 +327,10 @@ pub struct ActivityQuery {
 
 /// Whether `caller` may read the insight database (what the activity route needs besides the
 /// hosts privilege the middleware checked).
+///
+/// The insight privilege is `page-diagnostics-networkinsight`, whose patterns include
+/// `api/v1/insight/*`; `/api/v1/insight/top` stands for "any insight route" because the
+/// registry is queried by URL, not by privilege name.
 pub(crate) fn may_read_insight(state: &AppState, caller: &Caller) -> bool {
     state.registry.grants(
         caller.info.privileges.iter().map(String::as_str),

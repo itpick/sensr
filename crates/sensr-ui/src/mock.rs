@@ -390,8 +390,11 @@ impl Backend for MockBackend {
                         .collect();
                     // the applied document's owner labels and modes, as the agent reports them
                     apply_host_labels(&mut hosts, &s.head().doc);
-                    for h in &mut hosts {
-                        apply_mock_mix(h, self.stale_feed);
+                    // the figures come from the insight database: only for callers who may read it
+                    if self.may_access("/api/v1/insight/top") {
+                        for h in &mut hosts {
+                            apply_mock_mix(h, self.stale_feed);
+                        }
                     }
                     let modes = host_modes(&s.head().doc);
                     let mut interfaces = std::collections::BTreeSet::new();
@@ -419,6 +422,9 @@ impl Backend for MockBackend {
         range: String,
         page: u32,
     ) -> BoxFuture<'_, ApiResult<HostActivityView>> {
+        if !self.may_access("/api/v1/insight/top") || !self.may_access("/api/v1/hosts") {
+            return ready(Err(ApiError::Unauthorized));
+        }
         ready(self.with(|s| {
             if !matches!(range.as_str(), "today" | "7d") {
                 return Err(ApiError::Validation(vec![FieldError::new(
@@ -959,8 +965,17 @@ const MOCK_ACTIVITY: &[MockActivity] = &[
             ("Spotify", "music", 90),
             ("Khan Academy", "education", 25),
         ],
-        prior_days: [9, 10, 4, 3, 11, 10],
-        hours: &[(9, 25), (10, 25), (13, 20), (14, 15), (21, 15)],
+        prior_days: [9, 10, 4, 3, 8, 7],
+        hours: &[
+            (9, 15),
+            (10, 15),
+            (11, 12),
+            (13, 12),
+            (14, 12),
+            (15, 12),
+            (16, 12),
+            (21, 10),
+        ],
         domains: &[
             ("api.github.com", 540, "GitHub", "other", false, false),
             ("slack-edge.com", 310, "Slack", "messaging", false, false),
@@ -1126,24 +1141,29 @@ pub fn simulated_activity(
             })
             .collect();
         categories.sort_by(|x, y| y.minutes.cmp(&x.minutes).then(x.category.cmp(&y.category)));
-        v.screen_time = services
-            .iter()
-            .filter(|s| mock_screen_time(&s.category))
-            .map(|s| s.minutes)
-            .sum();
         let today_total = mock_today_minutes(a).unwrap_or(0);
         for (offset, factor) in day_factors {
             let day = (today_start / DAY) + offset;
             let total = (today_total * factor).div_ceil(10);
-            for (hour, share) in a.hours {
+            // shares of the day's total; the last hour takes the rounding remainder, so
+            // the cells add up to the day
+            let mut left = total;
+            for (i, (hour, share)) in a.hours.iter().enumerate() {
+                let m = if i + 1 == a.hours.len() {
+                    left
+                } else {
+                    (total * share / 100).min(left)
+                };
+                left -= m;
                 v.timeline.push(ActivityCell {
                     day,
                     hour: *hour,
-                    minutes: (total * share / 100).clamp(0, 60),
+                    minutes: m,
                 });
             }
         }
         v.timeline.sort_by_key(|c| (c.day, c.hour));
+        v.screen_time = v.timeline.iter().map(|c| c.minutes).sum();
         v.services = services;
         v.categories = categories;
     }
@@ -2166,6 +2186,7 @@ mod tests {
             [82, 48, 13, 14, 6, 4]
         );
         assert_eq!(v.screen_time, 167);
+        assert_eq!(v.timeline.iter().map(|c| c.minutes).sum::<u32>(), 167);
         assert_eq!(v.categories[0].category, "video");
         let d = |n: &str| v.domains.iter().find(|d| d.qname == n).unwrap();
         assert!(d("ads.tiktok.com").blocked);
@@ -2239,6 +2260,31 @@ mod tests {
         assert!(row(CAMERA).dns_mix.iter().any(|c| c.0 == "smart_home"));
         assert!(row(LAPTOP).dns_mix.len() >= 8, "a mixed day");
         assert!(row("02:00:00:00:00:01").dns_mix.is_empty());
+        // the laptop's hours add up to its headline, for every range
+        for range in ["today", "7d"] {
+            let l = activity(&m, LAPTOP, range).unwrap();
+            assert_eq!(
+                l.timeline.iter().map(|c| c.minutes).sum::<u32>(),
+                l.screen_time
+            );
+            assert!(l.timeline.iter().all(|c| c.minutes <= 60));
+        }
+        assert_eq!(activity(&m, LAPTOP, "today").unwrap().screen_time, 338);
+        assert_eq!(row(LAPTOP).today_minutes, Some(338));
+        // without the insight privilege the card gets no figures and the page is refused
+        let blind = MockBackend::new().with_privileges(&["page-sensr-hosts"]);
+        let hosts: crate::runtime::HostList =
+            crate::runtime::parse(block(blind.runtime(RuntimeSection::Hosts)).unwrap());
+        assert!(
+            hosts
+                .hosts
+                .iter()
+                .all(|h| h.dns_mix.is_empty() && h.today_minutes.is_none())
+        );
+        assert!(matches!(
+            activity(&blind, KID_TABLET, "today"),
+            Err(ApiError::Unauthorized)
+        ));
         // every mix key is a known category
         for h in &hosts.hosts {
             for (k, _) in &h.dns_mix {
