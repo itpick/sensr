@@ -27,7 +27,10 @@ pub mod config;
 pub mod dnstap;
 #[cfg(feature = "store")]
 pub mod eve;
+pub mod feed;
 pub mod nft;
 pub mod services;
 #[cfg(feature = "store")]
 pub mod store;
+#[cfg(all(feature = "store", unix))]
+pub mod tap;

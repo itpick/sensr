@@ -37,11 +37,11 @@ const MAX_CONTROL: usize = 512;
 /// Fields allowed in one control frame.
 const MAX_CONTENT_TYPES: usize = 8;
 
-const ACCEPT: u32 = 0x01;
-const START: u32 = 0x02;
-const STOP: u32 = 0x03;
-const READY: u32 = 0x04;
-const FINISH: u32 = 0x05;
+pub(crate) const ACCEPT: u32 = 0x01;
+pub(crate) const START: u32 = 0x02;
+pub(crate) const STOP: u32 = 0x03;
+pub(crate) const READY: u32 = 0x04;
+pub(crate) const FINISH: u32 = 0x05;
 const FIELD_CONTENT_TYPE: u32 = 0x01;
 
 /// What [`FrameReader::push`] hands out.
@@ -441,7 +441,7 @@ pub fn is_blocked(ev: &DnstapEvent) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // ---- builders ----------------------------------------------------------
@@ -466,7 +466,7 @@ mod tests {
     }
 
     /// A `Dnstap { type: MESSAGE, message }` around `Message` fields.
-    fn dnstap(kind: u64, client: &[u8], time: u64, dns: &[u8]) -> Vec<u8> {
+    pub(crate) fn dnstap(kind: u64, client: &[u8], time: u64, dns: &[u8]) -> Vec<u8> {
         let mut m = Vec::new();
         pb_varint(&mut m, 1, kind);
         pb_varint(&mut m, 2, if client.len() == 4 { 1 } else { 2 });
@@ -522,7 +522,7 @@ mod tests {
     }
 
     /// `www.youtube.com` CNAME `youtube-ui.l.google.com`, two A records.
-    fn youtube_response() -> Vec<u8> {
+    pub(crate) fn youtube_response() -> Vec<u8> {
         let mut p = dns_header(0x8180, 1, 3, 0);
         question(&mut p, &["www", "youtube", "com"], 1);
         let cname_at = p.len();
@@ -545,7 +545,7 @@ mod tests {
         p
     }
 
-    fn control(ctype: u32, content_types: &[&[u8]]) -> Vec<u8> {
+    pub(crate) fn control(ctype: u32, content_types: &[&[u8]]) -> Vec<u8> {
         let mut body = ctype.to_be_bytes().to_vec();
         for ct in content_types {
             body.extend_from_slice(&1u32.to_be_bytes());
@@ -558,7 +558,7 @@ mod tests {
         f
     }
 
-    fn data(payload: &[u8]) -> Vec<u8> {
+    pub(crate) fn data(payload: &[u8]) -> Vec<u8> {
         let mut f = (payload.len() as u32).to_be_bytes().to_vec();
         f.extend_from_slice(payload);
         f

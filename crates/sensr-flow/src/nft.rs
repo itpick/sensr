@@ -684,12 +684,12 @@ impl Deltas {
                     _ => *c,
                 };
                 if d.bytes > 0 || d.packets > 0 {
-                    out.push((k.clone(), d));
+                    out.push((*k, d));
                 }
             }
         }
         self.last = Some(now);
-        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.sort_by_key(|a| a.0);
         out
     }
 }
@@ -716,6 +716,7 @@ mod tests {
                 },
             ],
             retention: Retention::default(),
+            dns: None,
         }
     }
 
@@ -863,7 +864,7 @@ mod cost {
                 }
                 s.push_str(&format!(
                     r#"{{"elem":{{"val":{{"concat":["192.168.{}.{}","{}.{}.{}.{}"]}},"timeout":3600,"expires":{},"counter":{{"packets":{},"bytes":{}}}}}}}"#,
-                    (i >> 8) & 0xff % 4, i & 0xff, 11 + (i >> 16), (i >> 8) & 0xff, i & 0xff, (i * 7) & 0xff,
+                    (i >> 8) & 3, i & 0xff, 11 + (i >> 16), (i >> 8) & 0xff, i & 0xff, (i * 7) & 0xff,
                     3000 + i % 600, i * 3, i * 1400
                 ));
             }

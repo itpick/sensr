@@ -171,7 +171,7 @@ pub struct UnboundModel {
 /// The unix socket `sensr-insight` listens on for Unbound's dnstap stream.
 /// Its directory is the insight unit's RuntimeDirectory, group
 /// `sensr-dnstap` (see nix/modules/sensr.nix).
-pub const DNSTAP_SOCKET: &str = "/run/sensr-insight/dnstap.sock";
+pub const DNSTAP_SOCKET: &str = sensr_flow::config::DNSTAP_SOCKET;
 
 /// Model errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

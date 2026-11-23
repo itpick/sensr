@@ -1219,6 +1219,12 @@ in
           "${runtimeDir}/insight/insight.json"
           "--nft"
           "${pkgs.nftables}/bin/nft"
+          # the neighbour table (client address -> MAC for DNS activity)
+          "--ip"
+          "${pkgs.iproute2}/bin/ip"
+          # whether Unbound runs (the DNS feed's staleness)
+          "--systemctl"
+          "${config.systemd.package}/bin/systemctl"
         ];
         Restart = "on-failure";
         RestartSec = 5;
