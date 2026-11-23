@@ -27,8 +27,12 @@ use crate::dnstap::{DnstapEvent, EventKind, Frame, FrameReader, decode};
 
 /// Connections served at once (Unbound uses one; a restart briefly two).
 pub const MAX_CONNECTIONS: usize = 4;
-/// Events waiting for the main loop at most.
-pub const QUEUE: usize = 16_384;
+/// Events waiting for the main loop at most. An event is a name (≤ 253
+/// bytes) and at most 32 answers (`dns::MAX_ANSWERS`, addresses or CNAME
+/// targets), so about 0.5 KB typically and under 9 KB at worst: the queue
+/// holds ~2 MB typically, ~36 MB at the very worst. The main loop empties
+/// it every sample.
+pub const QUEUE: usize = 4096;
 /// Bytes read from a connection at a time.
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -104,18 +108,19 @@ pub fn serve(listener: UnixListener, tx: SyncSender<DnstapEvent>, shared: Arc<Sh
             continue;
         }
         shared.connections.fetch_add(1, Ordering::Relaxed);
-        let (tx, shared) = (tx.clone(), Arc::clone(&shared));
+        let (tx, conn_shared) = (tx.clone(), Arc::clone(&shared));
         let spawned = std::thread::Builder::new()
             .name("dnstap-conn".into())
             .spawn(move || {
-                let r = serve_stream(stream, &tx, &shared);
-                shared.connections.fetch_sub(1, Ordering::Relaxed);
+                let r = serve_stream(stream, &tx, &conn_shared);
+                conn_shared.connections.fetch_sub(1, Ordering::Relaxed);
                 match r {
                     Ok(()) => tracing::info!("dnstap connection closed"),
                     Err(e) => tracing::info!(error = %e, "dnstap connection ended"),
                 }
             });
         if let Err(e) = spawned {
+            shared.connections.fetch_sub(1, Ordering::Relaxed);
             tracing::warn!(error = %e, "starting a dnstap connection thread");
         }
     }

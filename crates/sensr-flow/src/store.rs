@@ -195,6 +195,7 @@ CREATE TABLE IF NOT EXISTS service_minutes (
     PRIMARY KEY (host, minute, service)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS service_minutes_minute ON service_minutes (minute);
+CREATE INDEX IF NOT EXISTS service_minutes_service ON service_minutes (host, service, minute);
 CREATE TABLE IF NOT EXISTS service_days (
     host TEXT NOT NULL,
     day INTEGER NOT NULL,
@@ -343,9 +344,34 @@ impl FlowStore {
     /// Stores one drained minute of per-host DNS activity (idempotent; see
     /// the module notes).
     pub fn write_activity_minute(&mut self, minute: i64, r: &MinuteResult) -> Result<()> {
+        let tx = self.db.transaction()?;
+        Self::put_activity(&tx, minute, r)?;
+        tx.commit()
+    }
+
+    /// One sample's writes in one transaction: the traffic counts (as
+    /// [`FlowStore::write_minute`]) and the activity minutes that closed.
+    pub fn write_minute_and_activity(
+        &mut self,
+        ts: i64,
+        batch: &Batch,
+        activity: &[(i64, MinuteResult)],
+    ) -> Result<()> {
+        let tx = self.db.transaction()?;
+        if !batch.is_empty() {
+            for res in [MINUTE, HOUR, DAY] {
+                Self::upsert(&tx, res, floor(ts, res), batch, |_| true)?;
+            }
+        }
+        for (minute, r) in activity {
+            Self::put_activity(&tx, *minute, r)?;
+        }
+        tx.commit()
+    }
+
+    fn put_activity(tx: &rusqlite::Transaction<'_>, minute: i64, r: &MinuteResult) -> Result<()> {
         let minute = floor(minute, MINUTE);
         let day = floor(minute, DAY);
-        let tx = self.db.transaction()?;
         {
             let mut old_q = tx.prepare_cached(
                 "SELECT count, blocked FROM dns_queries WHERE host = ?1 AND minute = ?2 AND qname = ?3",
@@ -400,7 +426,7 @@ impl FlowStore {
                 }
             }
         }
-        tx.commit()
+        Ok(())
     }
 
     /// The daily rollup of `host` for the UTC day starting at `day`:
@@ -1121,6 +1147,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(total, 12);
+    }
+
+    #[test]
+    fn traffic_and_activity_written_together() {
+        let mut s = FlowStore::memory().unwrap();
+        let mut b = Batch::default();
+        b.add_iface("lan", 1, 2);
+        let t = D0 + HOUR;
+        let act = [(t, result(vec![(KID, minute(&["YouTube"], &[]))]))];
+        s.write_minute_and_activity(t, &b, &act).unwrap();
+        assert_eq!(s.top(RowKind::Iface, None, t, t + 60, 5).unwrap()[0].up, 2);
+        let a = s
+            .host_activity(KID, &ActivityRange::today(t, 0), 0, cat())
+            .unwrap();
+        assert_eq!(a.services[0].minutes, 1);
+        // activity alone (no traffic this sample)
+        s.write_minute_and_activity(t + MINUTE, &Batch::default(), &act)
+            .unwrap();
     }
 
     #[test]

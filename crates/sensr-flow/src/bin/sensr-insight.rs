@@ -13,13 +13,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use clap::Parser;
+use sensr_flow::attrib::MinuteResult;
 use sensr_flow::config::{
     ALERTS_DB, CONFIG_PATH, Config, DB_DIR, DNS_STATUS, DNSTAP_GROUP, DnsConfig, DnsStatus,
     FLOWS_DB, FlowConfig, IdsConfig,
 };
 use sensr_flow::dnstap::DnstapEvent;
 use sensr_flow::eve::{AlertStore, Event, Tailer, parse_line};
-use sensr_flow::feed::{Feed, Neighbours, QueryLog};
+use sensr_flow::feed::{Feed, Neighbours, QueryLog, StaleWatch, read_query_counter};
 use sensr_flow::nft::{self, Count, Deltas, Key};
 use sensr_flow::services::Catalogue;
 use sensr_flow::store::{Batch, FlowStore};
@@ -40,9 +41,6 @@ struct Args {
     /// The ip binary (the neighbour table, for per-host DNS activity).
     #[arg(long, default_value = "ip")]
     ip: PathBuf,
-    /// The systemctl binary (whether Unbound is running).
-    #[arg(long, default_value = "systemctl")]
-    systemctl: PathBuf,
     /// Interface counters (a test can point this elsewhere).
     #[arg(long, default_value = "/sys/class/net")]
     sysfs: PathBuf,
@@ -53,14 +51,8 @@ struct Args {
 struct Tools {
     nft: PathBuf,
     ip: PathBuf,
-    systemctl: PathBuf,
 }
 
-/// No dnstap frames for this long while Unbound is active: the feed is
-/// stale.
-const STALE_SECS: i64 = 300;
-/// How often Unbound's state is asked while the feed is quiet.
-const UNIT_CHECK_SECS: i64 = 60;
 /// How old the status file's `last_frame` may get while frames arrive.
 const STATUS_REFRESH_SECS: i64 = 300;
 
@@ -131,10 +123,9 @@ struct Dns {
     rx: Receiver<DnstapEvent>,
     shared: Arc<tap::Shared>,
     log: Option<QueryLog>,
-    unit: String,
-    started: i64,
+    stats: Option<PathBuf>,
+    watch: StaleWatch,
     frames_seen: u64,
-    unit_active: Option<(i64, bool)>,
     status: Option<DnsStatus>,
     status_path: PathBuf,
 }
@@ -149,10 +140,12 @@ impl Dns {
                 let spawned = std::thread::Builder::new()
                     .name("dnstap".into())
                     .spawn(move || tap::serve(l, tx, s));
-                if let Err(e) = spawned {
-                    tracing::error!(error = %e, "starting the dnstap listener");
+                match spawned {
+                    Ok(_) => {
+                        tracing::info!(socket = %cfg.socket.display(), "listening for dnstap");
+                    }
+                    Err(e) => tracing::error!(error = %e, "starting the dnstap listener"),
                 }
-                tracing::info!(socket = %cfg.socket.display(), "listening for dnstap");
             }
             // the page says the feed is stale; traffic accounting goes on
             Err(e) => tracing::error!(
@@ -165,10 +158,9 @@ impl Dns {
             rx,
             shared,
             log: cfg.query_log.as_deref().map(QueryLog::new),
-            unit: cfg.unbound_unit.clone(),
-            started: now(),
+            stats: cfg.unbound_stats.clone(),
+            watch: StaleWatch::default(),
             frames_seen: 0,
-            unit_active: None,
             status: None,
             status_path: db_dir.join(DNS_STATUS),
         }
@@ -189,34 +181,15 @@ impl Dns {
         }
     }
 
-    fn unbound_active(&mut self, systemctl: &Path, t: i64) -> bool {
-        if let Some((at, active)) = self.unit_active
-            && t - at < UNIT_CHECK_SECS
-            && t >= at
-        {
-            return active;
-        }
-        let active = Command::new(systemctl)
-            .args(["is-active", "--quiet", &self.unit])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        self.unit_active = Some((t, active));
-        active
-    }
-
     /// One sample: neighbours, then the DNS events gathered since the last
     /// sample (or the query log while stale), then the pair deltas, then
-    /// the minutes that are over.
+    /// the minutes that are over, which it returns for writing.
     fn sample(
         &mut self,
         t: i64,
         deltas: &[(Key, Count)],
         tools: &Tools,
-        store: &mut FlowStore,
-    ) -> anyhow::Result<()> {
+    ) -> Vec<(i64, MinuteResult)> {
         self.refresh_neighbours(&tools.ip);
         // the events first: an answer and the bytes that follow it meet in
         // the same minute (the channel is bounded, so is this loop)
@@ -227,21 +200,19 @@ impl Dns {
         let fresh = frames != self.frames_seen;
         self.frames_seen = frames;
         let last = self.shared.last_frame.load(Ordering::Relaxed);
-        let quiet = feed_quiet(t, last, self.started);
-        let stale = quiet && self.unbound_active(&tools.systemctl, t);
+        let queries = self.stats.as_deref().and_then(read_query_counter);
+        let stale = self.watch.observe(t, queries, frames);
         if let Some(log) = &mut self.log {
             if fresh {
                 log.skip();
             } else if stale {
-                for (client, qname) in log.read_new() {
-                    self.feed.on_logged_query(client, &qname, t);
+                for (time, client, qname) in log.read_new() {
+                    self.feed.on_logged_query(client, &qname, time.unwrap_or(t));
                 }
             }
         }
         self.feed.on_pairs(deltas, t);
-        for (minute, r) in self.feed.due(t) {
-            store.write_activity_minute(minute, &r)?;
-        }
+        let due = self.feed.due(t);
         let status = DnsStatus {
             dns_feed_stale: stale,
             last_frame: (last > 0).then_some(last),
@@ -256,14 +227,14 @@ impl Dns {
         });
         if refresh {
             if stale && self.status.is_none_or(|s| !s.dns_feed_stale) {
-                tracing::warn!("no dnstap frames for 5 minutes while Unbound runs");
+                tracing::warn!("no dnstap frames for 5 minutes while Unbound answered queries");
             }
             match write_status(&self.status_path, &status) {
                 Ok(()) => self.status = Some(status),
                 Err(e) => tracing::warn!(error = %e, "writing the DNS feed status"),
             }
         }
-        Ok(())
+        due
     }
 
     fn cost_fields(&self) -> String {
@@ -276,12 +247,6 @@ impl Dns {
             self.shared.connections.load(Ordering::Relaxed),
         )
     }
-}
-
-/// No frame (or start) for [`STALE_SECS`]: `last` is the newest frame's
-/// time (0: none), `started` the daemon's start.
-fn feed_quiet(t: i64, last: i64, started: i64) -> bool {
-    t - last.max(started) >= STALE_SECS
 }
 
 /// Replaces the status file in one step (the API may read it any time).
@@ -312,9 +277,10 @@ fn flows(cfg: FlowConfig, db_dir: PathBuf, tools: Tools, sysfs: PathBuf) -> anyh
             .map(|m| deltas.next(m))
             .unwrap_or_default();
         batch.add_counters(&changed);
-        if let Some(d) = &mut dns {
-            d.sample(t, &changed, &tools, &mut store)?;
-        }
+        let activity = dns
+            .as_mut()
+            .map(|d| d.sample(t, &changed, &tools))
+            .unwrap_or_default();
         drop(changed);
         let mut sample = Batch::default();
         for i in &cfg.interfaces {
@@ -337,9 +303,20 @@ fn flows(cfg: FlowConfig, db_dir: PathBuf, tools: Tools, sysfs: PathBuf) -> anyh
         if !sample.is_empty() {
             store.write_samples(t, &sample)?;
         }
-        if !batch.is_empty() {
-            // buckets accumulate, so writing every sample loses nothing on a stop
-            store.write_minute(t, &batch)?;
+        // buckets accumulate, so writing every sample loses nothing on a
+        // stop; the closed activity minutes go in the same transaction
+        if !batch.is_empty() || !activity.is_empty() {
+            match store.write_minute_and_activity(t, &batch, &activity) {
+                Ok(()) => {}
+                // DNS activity never takes traffic accounting down
+                Err(e) if !activity.is_empty() => {
+                    tracing::warn!(error = %e, "writing DNS activity; traffic written alone");
+                    if !batch.is_empty() {
+                        store.write_minute(t, &batch)?;
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
         if t - last_prune >= 3600 {
             match store.prune(t, &cfg.retention) {
@@ -407,7 +384,6 @@ fn main() -> anyhow::Result<()> {
         let tools = Tools {
             nft: args.nft.clone(),
             ip: args.ip.clone(),
-            systemctl: args.systemctl.clone(),
         };
         let (dir, sysfs) = (args.db_dir.clone(), args.sysfs.clone());
         threads.push(std::thread::spawn(move || flows(f, dir, tools, sysfs)));
@@ -434,15 +410,6 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn feed_goes_quiet_after_five_minutes_without_frames() {
-        let start = 1_800_000_000;
-        assert!(!feed_quiet(start + 299, 0, start), "just started");
-        assert!(feed_quiet(start + 300, 0, start), "never a frame");
-        assert!(!feed_quiet(start + 600, start + 400, start));
-        assert!(feed_quiet(start + 700, start + 400, start));
-    }
 
     #[test]
     fn status_file_replaced_whole() {

@@ -116,7 +116,8 @@ New tables in the insight SQLite, retention-pruned like `traffic`:
 
 - `dns_queries(host, minute, qname, count, blocked)`, kept 7 days.
 - `service_minutes(host, minute, service)`, kept 7 days.
-- `service_days(host, day, service, minutes)`, kept 90 days.
+- `service_days(host, day, service, minutes)`, kept 90 days. Days are UTC days for now; the today and 7-day
+  views are computed from `service_minutes` in local time, so they do not depend on it.
 - `domains_seen(host, qname, first_seen, last_seen, count)`, kept 90 days.
 
 ### API and UI
@@ -127,7 +128,7 @@ New tables in the insight SQLite, retention-pruned like `traffic`:
   search, reusing the existing grid/table styles. Charts are simple bars and a heat strip made of CSS
   grid cells: no chart library, minimal wasm.
 - **Hosts card link.** The Hosts card name becomes a link to the host page, and the "today" figure comes
-  from `service_days`.
+  from `service_minutes` since local midnight (screen-time categories only, each minute once).
 
 ## Constraints
 

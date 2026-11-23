@@ -9,7 +9,7 @@ use sensr_flow::config::{
 use sensr_schema::Document;
 use sensr_schema::models::interfaces::InterfaceRole;
 
-use super::dns_runtime::QUERY_LOG;
+use super::dns_runtime::{QUERY_LOG, STATS_FILE};
 use super::suricata::LOG_DIR;
 
 /// Live directory of the daemon's files.
@@ -51,6 +51,7 @@ pub fn config(doc: &Document) -> Option<Config> {
                 .filter(|o| o.enabled)
                 .collect(),
             query_log: doc.dns.tuning.log_queries.then(|| PathBuf::from(QUERY_LOG)),
+            unbound_stats: doc.dns.statistics.then(|| PathBuf::from(STATS_FILE)),
             ..DnsConfig::new(DNSTAP_SOCKET)
         });
         FlowConfig {

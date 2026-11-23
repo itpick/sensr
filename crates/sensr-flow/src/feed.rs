@@ -13,7 +13,7 @@
 //! the same sample, so an answer and the bytes that follow it meet in the
 //! same minute; a minute is returned once it ended [`LATE_SECS`] ago.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -24,7 +24,15 @@ use crate::nft::{Count, Key, Kind};
 use crate::services::Catalogue;
 
 /// Seconds after a minute's end before it is drained (late frames).
+/// Anything that arrives for a minute after it was drained (a frame
+/// delayed longer than this, a query-log line read late) is dropped by the
+/// [`Attributor`], which returns each minute once: the store's writes are
+/// idempotent per minute, not additive, so a second partial result for a
+/// written minute could not be merged correctly.
 pub const LATE_SECS: i64 = 5;
+/// The window of the staleness watch: no frames over this long while
+/// Unbound's query counter grew means the feed is stale.
+pub const STALE_SECS: i64 = 300;
 /// Minutes older than this when drained are not returned (the store keeps
 /// minute detail for 7 days; a clock that jumped is not trusted further).
 pub const MAX_AGE_SECS: i64 = 6 * 86_400;
@@ -126,9 +134,9 @@ impl Feed {
     }
 
     /// A lookup read from Unbound's query log (the fallback while dnstap is
-    /// stale): counted as a lookup with no answer, so it lists the name
-    /// but maps no address.
-    pub fn on_logged_query(&mut self, client: IpAddr, qname: &str, now: i64) -> bool {
+    /// stale), at the line's own `time`: counted as a lookup with no
+    /// answer, so it lists the name but maps no address.
+    pub fn on_logged_query(&mut self, client: IpAddr, qname: &str, time: i64) -> bool {
         let qname = qname.trim_end_matches('.').to_ascii_lowercase();
         if qname.is_empty() || qname.len() > 253 {
             return false;
@@ -136,7 +144,7 @@ impl Feed {
         self.on_dns(&DnstapEvent {
             kind: EventKind::ClientResponse,
             client,
-            time: now,
+            time,
             qname,
             qtype: 0,
             rcode: 0,
@@ -185,13 +193,73 @@ impl Feed {
     }
 }
 
+/// Unbound's total query counter (`queries`) from sensr-dns's
+/// `unbound-stats.json`; `None` when the file is missing or unreadable.
+pub fn read_query_counter(path: &std::path::Path) -> Option<u64> {
+    #[derive(serde::Deserialize)]
+    struct Stats {
+        queries: u64,
+    }
+    let b = std::fs::read(path).ok()?;
+    serde_json::from_slice::<Stats>(&b).ok().map(|s| s.queries)
+}
+
+/// Decides whether the dnstap feed is stale: Unbound answered queries (its
+/// counter grew) during a whole [`STALE_SECS`] window in which no dnstap
+/// frame arrived. A quiet network (no counter growth) is not stale, and
+/// neither is an unknown counter.
+#[derive(Debug, Default)]
+pub struct StaleWatch {
+    /// (time, query counter, frames read), oldest first, spanning just over
+    /// one window.
+    hist: VecDeque<(i64, Option<u64>, u64)>,
+}
+
+impl StaleWatch {
+    /// Records one sample and says whether the feed is stale now.
+    pub fn observe(&mut self, t: i64, queries: Option<u64>, frames: u64) -> bool {
+        if self.hist.back().is_some_and(|b| t < b.0) {
+            // the clock went back: start over
+            self.hist.clear();
+        }
+        self.hist.push_back((t, queries, frames));
+        // keep one sample at or before the window's start
+        while self.hist.len() > 1 && self.hist.get(1).is_some_and(|s| s.0 <= t - STALE_SECS) {
+            self.hist.pop_front();
+        }
+        while self.hist.len() > 4096 {
+            self.hist.pop_front();
+        }
+        let Some(&(t0, q0, f0)) = self.hist.front() else {
+            return false;
+        };
+        if t - t0 < STALE_SECS || frames != f0 {
+            return false;
+        }
+        match (q0, queries) {
+            (Some(before), Some(now)) if now >= before => now > before,
+            // Unbound restarted (the counter reset): queries since then
+            (Some(_), Some(now)) => now > 0,
+            _ => false,
+        }
+    }
+}
+
 /// Bytes of the query log read per call at most.
 pub const MAX_LOG_READ: u64 = 1024 * 1024;
 
+/// A lookup from the query log: its own time (the line's `[epoch]`, if
+/// any), the client and the name as logged.
+pub type LoggedQuery = (Option<i64>, IpAddr, String);
+
 /// One lookup line of Unbound's query log (`log-queries: yes`):
-/// `[<time>] unbound[<pid>:<n>] info: <client> <name> <type> <class>`.
+/// `[<epoch>] unbound[<pid>:<n>] info: <client> <name> <type> <class>`.
 /// Reply lines (more fields) and anything else give `None`.
-pub fn parse_query_line(line: &str) -> Option<(IpAddr, String)> {
+pub fn parse_query_line(line: &str) -> Option<LoggedQuery> {
+    let time = line
+        .strip_prefix('[')
+        .and_then(|r| r.split_once(']'))
+        .and_then(|(t, _)| t.parse::<i64>().ok());
     let body = line.split_once(" info: ")?.1.trim();
     let mut f = body.split_whitespace();
     let (Some(client), Some(name), Some(_kind), Some(class), None) =
@@ -202,7 +270,7 @@ pub fn parse_query_line(line: &str) -> Option<(IpAddr, String)> {
     if !matches!(class, "IN" | "CH" | "HS") || name.len() > 255 {
         return None;
     }
-    Some((client.parse().ok()?, name.to_string()))
+    Some((time, client.parse().ok()?, name.to_string()))
 }
 
 /// Unbound's query log, followed from where it was last read. The fallback
@@ -232,7 +300,7 @@ impl QueryLog {
     /// Lookups in the complete lines appended since the last call (at most
     /// [`MAX_LOG_READ`] bytes). A shorter file was rotated: reading starts
     /// over. A missing or unreadable file gives nothing.
-    pub fn read_new(&mut self) -> Vec<(IpAddr, String)> {
+    pub fn read_new(&mut self) -> Vec<LoggedQuery> {
         let Ok(mut f) = std::fs::File::open(&self.path) else {
             return Vec::new();
         };
@@ -424,16 +492,78 @@ mod tests {
         std::fs::write(&p, &text).unwrap();
         assert_eq!(
             q.read_new(),
-            [(ip("192.168.1.100"), "www.youtube.com.".to_string())],
+            [(
+                Some(1_700_000_000),
+                ip("192.168.1.100"),
+                "www.youtube.com.".to_string()
+            )],
             "replies and the unfinished line are left out"
         );
         text.push_str(" IN\n");
         std::fs::write(&p, &text).unwrap();
-        assert_eq!(q.read_new()[0].1, "half.example.");
+        assert_eq!(q.read_new()[0].2, "half.example.");
         // rotated
         std::fs::write(&p, line("fd00::5", "new.example.")).unwrap();
-        assert_eq!(q.read_new(), [(ip("fd00::5"), "new.example.".to_string())]);
+        assert_eq!(
+            q.read_new(),
+            [(
+                Some(1_700_000_000),
+                ip("fd00::5"),
+                "new.example.".to_string()
+            )]
+        );
+        assert_eq!(
+            parse_query_line("unbound[1:0] info: 10.0.0.1 a.example. A IN"),
+            Some((None, ip("10.0.0.1"), "a.example.".to_string())),
+            "no time stamp"
+        );
         assert_eq!(parse_query_line("garbage"), None);
         assert_eq!(parse_query_line("x info: not-an-ip a.example. A IN"), None);
+    }
+
+    #[test]
+    fn quiet_night_is_not_stale_but_lost_frames_are() {
+        let t0 = T0;
+        // a quiet night: no frames, and Unbound answered nothing either
+        let mut w = StaleWatch::default();
+        for i in 0..100 {
+            assert!(!w.observe(t0 + i * 10, Some(5_000), 0), "sample {i}");
+        }
+        // Unbound answers queries but no frames arrive: stale once a whole
+        // window has passed
+        let mut w = StaleWatch::default();
+        let mut stale_at = None;
+        for i in 0..60 {
+            let t = t0 + i * 10;
+            if w.observe(t, Some(5_000 + 3 * i as u64), 0) && stale_at.is_none() {
+                stale_at = Some(t - t0);
+            }
+        }
+        assert_eq!(stale_at, Some(STALE_SECS));
+        // frames come back: not stale
+        assert!(!w.observe(t0 + 600, Some(5_400), 7));
+        // the counter is unknown (statistics off): never stale
+        let mut w = StaleWatch::default();
+        for i in 0..60 {
+            assert!(!w.observe(t0 + i * 10, None, 0));
+        }
+        // Unbound restarted (counter reset) and answers: stale
+        let mut w = StaleWatch::default();
+        w.observe(t0, Some(9_000), 3);
+        assert!(w.observe(t0 + STALE_SECS, Some(40), 3));
+        assert!(w.hist.len() <= 32);
+    }
+
+    #[test]
+    fn query_counter_read_from_the_stats_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("unbound-stats.json");
+        assert_eq!(read_query_counter(&p), None);
+        std::fs::write(
+            &p,
+            r#"{"at":"2026-11-23T10:00:00Z","queries":1234,"cache_hits":1000,"nxdomain":0,"uptime_seconds":5.0}"#,
+        )
+        .unwrap();
+        assert_eq!(read_query_counter(&p), Some(1234));
     }
 }

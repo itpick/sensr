@@ -99,23 +99,21 @@ pub struct DnsConfig {
     /// stale (`None`: query logging is off).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_log: Option<PathBuf>,
-    /// Unbound's unit: the feed is stale only while it is active.
-    #[serde(default = "unbound_unit")]
-    pub unbound_unit: String,
-}
-
-fn unbound_unit() -> String {
-    "sensr-unbound.service".into()
+    /// sensr-dns's resolver statistics (`unbound-stats.json`): the feed is
+    /// stale only when Unbound's query counter grew while no frames came
+    /// (`None`: never reported stale).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unbound_stats: Option<PathBuf>,
 }
 
 impl DnsConfig {
-    /// The defaults for `socket`, with no overrides and no query log.
+    /// The defaults for `socket`: no overrides, query log or statistics.
     pub fn new(socket: impl Into<PathBuf>) -> DnsConfig {
         DnsConfig {
             socket: socket.into(),
             service_overrides: Vec::new(),
             query_log: None,
-            unbound_unit: unbound_unit(),
+            unbound_stats: None,
         }
     }
 }
@@ -123,7 +121,8 @@ impl DnsConfig {
 /// What the daemon reports about the dnstap feed ([`DNS_STATUS`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DnsStatus {
-    /// No dnstap frames for 5 minutes while Unbound is active: lookups come
+    /// No dnstap frames during 5 minutes in which Unbound's query counter
+    /// grew: lookups come
     /// from the query log, if any, and there are no service minutes.
     pub dns_feed_stale: bool,
     /// Unix seconds of the newest frame (`None`: none since the start).
