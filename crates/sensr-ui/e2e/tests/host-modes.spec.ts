@@ -31,13 +31,12 @@ async function open(page: Page) {
 test.describe("host modes", () => {
   test("set a host to Isolated", async ({ page }) => {
     await open(page);
-    const pi = rows(page).filter({ hasText: "bench-pi" });
     await modeSelect(page, "bench-pi").selectOption("isolated");
-    await expect(pi.locator(".pill-warn")).toHaveText("Isolated");
+    await expect(modeSelect(page, "bench-pi")).toHaveClass(/\bmode-isolated\b/);
     await expect(modeSelect(page, "bench-pi")).toHaveValue("isolated");
 
     await modeSelect(page, "bench-pi").selectOption("normal");
-    await expect(pi.locator(".pill-warn")).toHaveCount(0);
+    await expect(modeSelect(page, "bench-pi")).not.toHaveClass(/\bmode-isolated\b/);
     await expect(modeSelect(page, "bench-pi")).toHaveValue("normal");
   });
 

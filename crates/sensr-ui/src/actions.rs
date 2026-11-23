@@ -714,6 +714,15 @@ impl HostCard {
     /// The rows to render for a `network` filter (interface id, empty for all) and a
     /// search `query`: the first [`HostCard::SHOWN`] matches, or all with `show_all`,
     /// plus how many match in total.
+    /// Hosts on `network` (all of them when empty), for the card heading.
+    pub fn count_in(&self, network: &str) -> usize {
+        self.list
+            .hosts
+            .iter()
+            .filter(|h| network.is_empty() || h.interface == network)
+            .count()
+    }
+
     pub fn visible(
         &self,
         network: &str,
