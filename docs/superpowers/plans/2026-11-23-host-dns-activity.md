@@ -38,6 +38,10 @@
   - Pruning works the same way as `traffic`.
 - **Categories (exact names, in this order):** Video, Social, Games, Messaging, Music, Education, Shopping, Apple/Google/Microsoft system, Ads & tracking, Smart home, Other.
 - **Fallback buckets:** unattributed traffic goes to service `Other (by address)` in category Other.
+- **Hosts-card colour preview (owner request, 2026-11-23):** each Hosts-card row's background carries a faint, left-to-right stacked gradient of that device's DNS mix for today, by category, proportional to query counts over the last 24 h (minutes are not used, so IoT devices with no "screen time" still show their mix).
+  - Colours are one token per category (`--cat-video`, `--cat-social`, …, defined in theme.rs for light and dark) at about 14% alpha, so row text contrast is unaffected; the a11y contrast test must still pass.
+  - A legend sits under the card, the row `title` lists the percentages, and hosts with no DNS data stay plain.
+  - Every host row, MAC-keyed or not, links to its host page.
 - **Badges:** **new** = first seen within the last 24 h. **blocked** = answered by a blocklist (A/AAAA `0.0.0.0` or `::`, or NXDOMAIN from a blocklisted name; compare against sensr-dns's blocklist semantics).
 - **Override config:** `insight.dns.service_overrides: ArrayField<ServiceOverride { enabled, suffix: String (domain suffix, lowercase), service: String (1–48), category: <Category> }>`. An override beats the built-in catalogue, and the longest matching suffix wins.
 - **API:** `GET /api/v1/hosts/<mac>/activity?range=today|7d&domains_page=N`. It needs both the hosts and the insight privileges.
@@ -216,7 +220,7 @@
 - Modify: `crates/sensr-ui/src/api.rs`. Add Backend `fn host_activity(&self, mac: String, range: String, page: u32) -> BoxFuture<'_, ApiResult<HostActivityView>>`, implement it in `crates/sensr-api/src/ui.rs`, and add a mock in `mock.rs` with rich seeded data:
   - a "kid-tablet" host with YouTube, Roblox, Discord and TikTok minutes over 7 days;
   - an IoT host with only domains, one of them new and one blocked.
-- Modify: the hosts view or `today_minutes` exposure, so the Hosts card can show the today figure as row field `today_minutes: Option<u32>`.
+- Modify: the hosts view or `today_minutes` exposure, so the Hosts card can show the today figure as row field `today_minutes: Option<u32>`, plus `dns_mix: Vec<(Category, u32 /*query count, last 24 h*/)>` for the colour preview. Store: `dns_mix_24h() -> BTreeMap<mac, Vec<(Category, u32)>>` from `dns_queries` joined to the catalogue (Task 5 adds the query; Task 6 exposes it).
 - Test: in `crates/sensr-api/tests/api.rs`, `host_activity_route` (200, 403 without the insight privilege, 404 unknown MAC, 400 bad range); a mock unit test.
 
 - [ ] **Step 1:** Write the failing tests.
@@ -237,7 +241,9 @@
   5. **Timeline:** a 7 × 24 CSS grid heat strip with intensity by minutes. Each cell has a title `Tue 15:00 — 42 min` and an accessible table alternative (a visually hidden table or `aria-label`s).
   6. **Domains card:** a table with search, `new` and `blocked` pills, and paging.
   7. **Stale banner:** shown when the API says the feed is stale, with the exact copy from Global Constraints.
-- **Hosts card:** the name links to `/ui/hosts/<mac>`, and rows with `today_minutes` show `1 h 12 m` in muted text.
+- **Hosts card:** the name links to `/ui/hosts/<mac>` (every row), and rows with `today_minutes` show `1 h 12 m` in muted text.
+  - Each row with `dns_mix` gets the colour-preview background per Global Constraints. It is an inline `style="--mix: linear-gradient(...)"` computed server-side; keep the hydrate cost near zero.
+  - Add the category legend under the card. Category colour tokens are defined in theme.rs, and tests/a11y_contrast.rs is extended to check row text on each tinted background.
 - **Overrides editor (spec Part B):**
   - On the Domains card, each row has a "Set service" button. It opens a small dialog with suffix (prefilled with the registrable domain), service and category.
   - Saving stages and commits `insight.dns.service_overrides` through a new op. Follow the `HostLabelSet` stage-or-commit pattern and reuse its helper.
@@ -247,6 +253,8 @@
   - `host_page_stale_banner`;
   - `hosts_card_links_to_host_page`;
   - `hosts_card_today_minutes`;
+  - `hosts_card_row_tinted_by_dns_mix` (the gradient stops follow the proportions; a host without data has no tint);
+  - `category_tint_contrast` (in a11y_contrast);
   - `assert_all_labelled` and the contrast test.
 
 - [ ] **Step 1:** Write the failing tests.
