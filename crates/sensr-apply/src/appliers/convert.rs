@@ -392,6 +392,7 @@ pub fn unbound(doc: &Document) -> Result<Option<UnboundModel>, ConvertError> {
         tuning: d.tuning.clone(),
         register_dhcp_leases: leases.is_some(),
         blocklist: blocklist.is_some(),
+        dnstap: doc.insight.enabled,
         runtime: DnsRuntime {
             control_conf: dns_runtime::CONTROL_CONF.into(),
             state_dir: dns_runtime::STATE_DIR.into(),

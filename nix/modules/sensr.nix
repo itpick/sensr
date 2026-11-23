@@ -77,10 +77,13 @@ let
       fi
     done
   '';
+  # Unbound with dnstap: the resolver streams client queries/responses to
+  # sensr-insight (per-host DNS activity). withDNSTAP pulls in protobuf-c.
+  unboundPkg = pkgs.unbound.override { withDNSTAP = true; };
   appliedPackages = with pkgs; [
     nftables
     kea
-    unbound
+    unboundPkg
     cfg.ntp.package
     wireguard-tools
     iproute2
@@ -423,10 +426,17 @@ in
 
     users.groups.sensr.gid = sensrGid;
     users.groups.suricata = { };
+    # Unbound (DynamicUser sensr-unbound) connects to the dnstap socket that
+    # sensr-insight creates. Both units list this group as a supplementary
+    # group (a dynamic user has no /etc/group membership to rely on).
+    users.groups.sensr-dnstap = { };
     users.users.sensr-insight = {
       isSystemUser = true;
       group = "sensr";
-      extraGroups = [ "suricata" ];
+      extraGroups = [
+        "suricata"
+        "sensr-dnstap"
+      ];
       description = "sensr traffic insight";
     };
     users.users.suricata = {
@@ -900,14 +910,19 @@ in
               ${pkgs.coreutils}/bin/install -m 0644 ${pkgs.dns-root-data}/root.key /var/lib/unbound/root.key
             fi
           ''}"
-          "${pkgs.unbound}/bin/unbound-checkconf ${runtimeDir}/unbound/unbound.conf"
+          "${unboundPkg}/bin/unbound-checkconf ${runtimeDir}/unbound/unbound.conf"
         ];
-        ExecStart = "${pkgs.unbound}/bin/unbound -d -p -c ${runtimeDir}/unbound/unbound.conf";
+        ExecStart = "${unboundPkg}/bin/unbound -d -p -c ${runtimeDir}/unbound/unbound.conf";
         ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
         Restart = "on-failure";
         DynamicUser = true;
         StateDirectory = "unbound";
         RuntimeDirectory = "unbound";
+        # dnstap socket of sensr-insight (/run/sensr-insight/dnstap.sock,
+        # group sensr-dnstap, mode 0660). Unix sockets are not restricted
+        # here (no RestrictAddressFamilies) and ProtectSystem=strict only
+        # makes the path read-only, which connect() does not need.
+        SupplementaryGroups = [ "sensr-dnstap" ];
         AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
         CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
         ProtectSystem = "strict";
@@ -1135,7 +1150,7 @@ in
       ];
       wants = [ "network-online.target" ];
       unitConfig.ConditionPathExists = "${runtimeDir}/unbound/sensr-dns.json";
-      path = [ pkgs.unbound ];
+      path = [ unboundPkg ];
       serviceConfig = commonHardening // {
         Type = "oneshot";
         ExecStart = "${cfg.package}/bin/sensr-dns blocklist-update";
@@ -1174,7 +1189,7 @@ in
         "sensr-kea-dhcp4.service"
       ];
       unitConfig.ConditionPathExists = "${runtimeDir}/unbound/sensr-dns.json";
-      path = [ pkgs.unbound ];
+      path = [ unboundPkg ];
       serviceConfig = commonHardening // {
         ExecStart = "${cfg.package}/bin/sensr-dns watch";
         Restart = "always";
@@ -1209,7 +1224,19 @@ in
         RestartSec = 5;
         User = "sensr-insight";
         Group = "sensr";
-        SupplementaryGroups = [ "suricata" ];
+        SupplementaryGroups = [
+          "suricata"
+          "sensr-dnstap"
+        ];
+        # /run/sensr-insight holds the dnstap socket Unbound connects to.
+        # systemd creates it as sensr-insight:sensr; Unbound is not in group
+        # sensr, so ExecStartPre regroups it to sensr-dnstap (0750: insight
+        # rwx, Unbound r-x to traverse, nobody else). "+" runs it unsandboxed
+        # as root, after systemd has (re)created the directory. The socket
+        # itself is created 0660 group sensr-dnstap by sensr-insight.
+        RuntimeDirectory = "sensr-insight";
+        RuntimeDirectoryMode = "0750";
+        ExecStartPre = "+${pkgs.coreutils}/bin/chgrp sensr-dnstap /run/sensr-insight";
         StateDirectory = "sensr-insight";
         StateDirectoryMode = "0750";
         UMask = "0027";
