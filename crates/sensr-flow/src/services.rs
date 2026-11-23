@@ -4,6 +4,12 @@
 //! API hosts (cloudfront, akamai, fastly, amazonaws) are deliberately absent:
 //! a name there says nothing about which service the device uses.
 //!
+//! Known limits: `amazon.com` is Shopping, so Amazon subdomains without a
+//! longer entry (Prime Video, Alexa and Fire TV have their own) count as
+//! shopping; the shared media hosts (`media-amazon.com`) are Other because
+//! IMDb and Prime Video use them too. `fbcdn.net` is Facebook but also serves
+//! Instagram and WhatsApp media, so it is a best guess.
+//!
 //! Matching is on the longest suffix at a label boundary, so
 //! `classroom.google.com` is Google Classroom while `mail.google.com` falls
 //! back to `google.com`, and `notyoutube.com` never matches `youtube.com`.
@@ -89,7 +95,8 @@ impl Catalogue {
         }
     }
 
-    /// Distinct service names per category (for tests and the UI legend).
+    /// Every (service, category) entry, one per suffix, so a service with
+    /// several suffixes appears several times (for tests and the UI legend).
     pub fn services(&self) -> impl Iterator<Item = (&str, Category)> {
         self.map.values().map(|(s, c)| (s.as_str(), *c))
     }
@@ -204,12 +211,96 @@ mod tests {
     }
 
     #[test]
+    fn review_fixes_regression() {
+        let c = Catalogue::builtin();
+        let at = |n: &str| c.lookup(n).map(|x| (x.0.to_string(), x.1));
+        let is = |n: &str, s: &str, k: Category| assert_eq!(at(n), Some((s.to_string(), k)), "{n}");
+        is(
+            "www.google-analytics.com",
+            "Google Analytics",
+            Category::AdsTracking,
+        );
+        for n in [
+            "atv-ext.amazon.com",
+            "atv-ps.amazon.com",
+            "x.aiv-cdn.net",
+            "aiv-delivery.net",
+            "www.primevideo.com",
+            "amazonvideo.com",
+        ] {
+            is(n, "Prime Video", Category::Video);
+        }
+        is(
+            "device-metrics-us.amazon.com",
+            "Amazon Alexa",
+            Category::SmartHome,
+        );
+        is(
+            "device-metrics-us-2.amazon.com",
+            "Amazon Alexa",
+            Category::SmartHome,
+        );
+        is(
+            "softwareupdates.amazon.com",
+            "Amazon Fire TV",
+            Category::SmartHome,
+        );
+        is(
+            "fireoscaptiveportal.com",
+            "Amazon Fire TV",
+            Category::SmartHome,
+        );
+        is(
+            "m.media-amazon.com",
+            "Amazon media (shared)",
+            Category::Other,
+        );
+        is("www.amazon.com", "Amazon", Category::Shopping);
+        assert_eq!(at("x.blob.core.windows.net"), None);
+        assert_eq!(at("x.msedge.net"), None);
+        for n in [
+            "update.microsoft.com",
+            "delivery.mp.microsoft.com",
+            "v10.events.data.microsoft.com",
+            "settings-win.data.microsoft.com",
+        ] {
+            is(n, "Microsoft", Category::System);
+        }
+        is("graph.facebook.com", "Meta SDK", Category::AdsTracking);
+        is("graph.instagram.com", "Meta SDK", Category::AdsTracking);
+        is("www.facebook.com", "Facebook", Category::Social);
+        for n in ["chatgpt.com", "claude.ai", "gemini.google.com"] {
+            assert_eq!(c.lookup(n).unwrap().1, Category::Other, "{n}");
+        }
+        is("music.youtube.com", "YouTube Music", Category::Music);
+        is("docs.google.com", "Google Docs", Category::Other);
+        is(
+            "classroom.google.com",
+            "Google Classroom",
+            Category::Education,
+        );
+        assert_eq!(at("unity.com"), None);
+        assert_eq!(at("x.unity3d.com"), None);
+        for n in ["ui.com", "ubnt.com", "eero.com", "netgear.com"] {
+            assert_eq!(c.lookup(n).unwrap().1, Category::Other, "{n}");
+        }
+    }
+
+    #[test]
+    fn shorter_override_loses_to_longer_builtin() {
+        let c = Catalogue::builtin().with_overrides(&[ov("google.com", "Mine", Category::Games)]);
+        assert_eq!(c.lookup("www.google.com").map(|x| x.0), Some("Mine"));
+        assert_eq!(
+            c.lookup("classroom.google.com").map(|x| x.0),
+            Some("Google Classroom")
+        );
+    }
+
+    #[test]
     fn every_category_has_services() {
         let have: HashSet<_> = Catalogue::builtin().services().map(|(_, c)| c).collect();
         for c in Category::ALL {
-            if c != Category::Other {
-                assert!(have.contains(&c), "{}", c.display());
-            }
+            assert!(have.contains(&c), "{}", c.display());
         }
     }
 

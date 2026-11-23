@@ -146,8 +146,11 @@ pub struct ServiceOverride {
     /// Whether the override is in force.
     #[serde(default = "yes")]
     pub enabled: bool,
-    /// Domain suffix, lowercase (`example.com` matches it and everything
-    /// under it).
+    /// Domain suffix, lowercase, at least two labels (`example.com` matches
+    /// it and everything under it). Matching is by longest suffix: a longer
+    /// built-in suffix still beats a shorter override (an override of
+    /// `google.com` does not change `classroom.google.com`; override that
+    /// name too).
     pub suffix: String,
     /// Service name shown (1-48 characters, no control characters).
     pub service: String,
@@ -172,11 +175,12 @@ impl InsightDns {
     }
 }
 
-/// True for a lowercase domain suffix: dot-separated labels of 1-63
+/// True for a lowercase domain suffix of at least two labels (so a bare
+/// `com` is refused): dot-separated labels of 1-63
 /// letters, digits and hyphens, none starting or ending with a hyphen,
 /// 253 characters at most.
 pub fn is_domain_suffix(s: &str) -> bool {
-    !s.is_empty()
+    s.contains('.')
         && s.len() <= 253
         && s.split('.').all(|l| {
             (1..=63).contains(&l.len())

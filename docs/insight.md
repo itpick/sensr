@@ -65,6 +65,17 @@ The IDS alerts that the same daemon tails from eve.json are guarded by
 
 `since` and `until` are in Unix milliseconds.
 
+## Service overrides
+
+`insight.dns.service_overrides` renames or recategorises domains in the
+built-in service catalogue used by per-host DNS activity. Each entry has a
+lowercase `suffix` of at least two labels (`example.com`; a bare `com` is
+rejected), a `service` name (1-48 characters) and a `category`. An override
+beats a built-in entry with the same suffix. Matching is by longest suffix, so
+a longer built-in suffix still wins over a shorter override: overriding
+`google.com` leaves `classroom.google.com` as Google Classroom unless you
+override that name too. Suffixes must be unique.
+
 ## Not yet
 
 - Host names from DHCP leases. The UI shows addresses.
