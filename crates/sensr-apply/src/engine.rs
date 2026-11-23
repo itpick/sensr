@@ -148,6 +148,85 @@ pub struct CommitReport {
     pub nft_loaded: bool,
 }
 
+/// A backend the boot apply left without its new configuration because
+/// the backend's own checker rejected it ([`Engine::commit_isolated`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Degraded {
+    /// The checker: `nft`, `kea-dhcp4`, `unbound-checkconf`, `ntp-ctl`.
+    pub backend: &'static str,
+    /// The unit that did not get the new configuration (`None` for the
+    /// ruleset, which has no unit).
+    pub unit: Option<String>,
+    /// The checker's message.
+    pub message: String,
+    /// The unit was (re)started with the configuration already on disk
+    /// (an agent restart within a boot); `false` means it was left stopped
+    /// (fresh boot, nothing to fall back to). For `nft`: the kernel keeps
+    /// whatever ruleset it holds.
+    pub kept_previous: bool,
+}
+
+impl std::fmt::Display for Degraded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match (&self.unit, self.kept_previous) {
+            (None, _) => "the firewall keeps the ruleset already loaded".to_owned(),
+            (Some(u), true) => format!("{u} runs its previous configuration"),
+            (Some(u), false) => format!("{u} was not started"),
+        };
+        write!(
+            f,
+            "{} rejected the configuration ({what}): {}",
+            self.backend,
+            self.message.trim()
+        )
+    }
+}
+
+/// What a fault-isolated commit held back.
+#[derive(Debug, Default)]
+struct Isolation {
+    degraded: Vec<Degraded>,
+    /// planned files not written (their checker rejected them)
+    withheld_files: std::collections::BTreeSet<PathBuf>,
+    /// units not started (rejected, and no previous file to run with)
+    withheld_units: std::collections::BTreeSet<String>,
+    /// the ruleset was rejected: not loaded
+    skip_nft: bool,
+}
+
+impl Isolation {
+    /// Holds `path` back; the units reading it run their previous file if
+    /// there is one, else stay stopped.
+    fn withhold(&mut self, plan: &Plan, path: &Path, backend: &'static str, message: String) {
+        self.withheld_files.insert(path.to_owned());
+        let kept = path.exists();
+        for (unit, spec) in &plan.units {
+            if !spec.inputs.contains(path) {
+                continue;
+            }
+            if !kept {
+                self.withheld_units.insert(unit.clone());
+            }
+            self.degraded.push(Degraded {
+                backend,
+                unit: Some(unit.clone()),
+                message: message.clone(),
+                kept_previous: kept,
+            });
+        }
+    }
+}
+
+/// The checker for a rendered file, by file name.
+fn checker_for(name: &str) -> Option<(&'static str, Checker)> {
+    match name {
+        "kea-dhcp4.conf" => Some(("kea-dhcp4", kea::check)),
+        "unbound.conf" => Some(("unbound-checkconf", unbound::check)),
+        "ntp.toml" => Some(("ntp-ctl", ntp::check)),
+        _ => None,
+    }
+}
+
 /// The apply engine.
 pub struct Engine {
     opts: EngineOptions,
@@ -389,43 +468,81 @@ impl Engine {
 
     /// Stages the named files, runs their checkers, throws the copies away.
     fn check_files(&self, p: &Prepared, which: &[&str]) -> Result<(), EngineError> {
-        let r = self.runner.as_ref();
-        let scratch = self.opts.root.join("run/sensr/.check");
-        let mut staged = Vec::new();
         for (path, spec) in &p.plan.files {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
             if !name.as_deref().is_some_and(|n| which.contains(&n)) {
                 continue;
             }
-            let checker: Option<(&'static str, Checker)> = match name.as_deref() {
-                Some("kea-dhcp4.conf") => Some(("kea-dhcp4", kea::check)),
-                Some("unbound.conf") => Some(("unbound-checkconf", unbound::check)),
-                Some("ntp.toml") => Some(("ntp-ctl", ntp::check)),
-                _ => None,
-            };
-            if let Some((backend, f)) = checker {
-                let tmp = scratch.join(name.unwrap_or_default());
-                let mut contents = spec.contents.clone();
-                if backend == "unbound-checkconf" {
-                    contents = self.unbound_check_copy(&contents, &scratch, &mut staged)?;
-                }
-                write_atomic(&tmp, &contents, spec.mode)?;
-                staged.push(tmp.clone());
-                if let Some(msg) = f(r, &tmp)?
-                    && !msg.is_empty()
-                {
-                    for s in &staged {
-                        let _ = std::fs::remove_file(s);
-                    }
-                    return Err(EngineError::Rejected {
-                        backend,
-                        message: msg,
-                    });
-                }
+            if let Some((backend, message)) = self.check_file(path, spec)? {
+                return Err(EngineError::Rejected { backend, message });
             }
         }
+        Ok(())
+    }
+
+    /// Runs the checker of one planned file on a scratch copy: the
+    /// checker's name and complaint when it rejects the file, `None` when it
+    /// accepts it (or the file has no checker, or the checker is absent).
+    fn check_file(
+        &self,
+        path: &Path,
+        spec: &FileSpec,
+    ) -> Result<Option<(&'static str, String)>, EngineError> {
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            return Ok(None);
+        };
+        let Some((backend, f)) = checker_for(&name) else {
+            return Ok(None);
+        };
+        let scratch = self.opts.root.join("run/sensr/.check");
+        let mut staged = Vec::new();
+        let result = (|| {
+            let mut contents = spec.contents.clone();
+            if backend == "unbound-checkconf" {
+                contents = self.unbound_check_copy(&contents, &scratch, &mut staged)?;
+            }
+            let tmp = scratch.join(&name);
+            write_atomic(&tmp, &contents, spec.mode)?;
+            staged.push(tmp.clone());
+            Ok(f(self.runner.as_ref(), &tmp)?
+                .filter(|m| !m.is_empty())
+                .map(|m| (backend, m)))
+        })();
         for s in &staged {
             let _ = std::fs::remove_file(s);
+        }
+        result
+    }
+
+    /// [`check`](Self::check) for a fault-isolated commit: a rejection is
+    /// recorded in `iso` instead of failing.
+    fn check_isolated(&self, p: &Prepared, iso: &mut Isolation) -> Result<(), EngineError> {
+        let r = self.runner.as_ref();
+        if r.has_program("nft") {
+            match nft::check(r, &p.ruleset) {
+                Ok(()) => {}
+                Err(nft::NftError::Rejected { message, .. }) => {
+                    iso.skip_nft = true;
+                    iso.degraded.push(Degraded {
+                        backend: "nft",
+                        unit: None,
+                        message,
+                        kept_previous: true,
+                    });
+                }
+                Err(other) => return Err(other.into()),
+            }
+        }
+        for (path, spec) in &p.plan.files {
+            let early = path
+                .file_name()
+                .is_some_and(|n| n == "unbound.conf" || n == "ntp.toml");
+            if !early {
+                continue;
+            }
+            if let Some((backend, message)) = self.check_file(path, spec)? {
+                iso.withhold(&p.plan, path, backend, message);
+            }
         }
         Ok(())
     }
@@ -502,12 +619,13 @@ impl Engine {
         Ok(())
     }
 
-    /// Checks (when enabled), then makes the system match `p`.
+    /// Checks (when enabled), then makes the system match `p`. All or
+    /// nothing: any checker's rejection changes nothing.
     pub fn commit(&mut self, p: Prepared) -> Result<CommitReport, EngineError> {
         if self.opts.check {
             self.check(&p)?;
         }
-        let result = self.commit_inner(&p);
+        let result = self.commit_inner(&p, None);
         match &result {
             Ok(_) => {
                 self.applied = Some(Applied {
@@ -522,9 +640,57 @@ impl Engine {
         result
     }
 
-    fn commit_inner(&self, p: &Prepared) -> Result<CommitReport, EngineError> {
+    /// The boot apply: makes the system match `p` from scratch, isolating
+    /// checker rejections instead of refusing everything. Every stage runs
+    /// (the applied state is forgotten first), so units that were stopped
+    /// (a NixOS switch stops them with the agent) are started even when
+    /// their files did not change. A daemon whose file its checker rejects
+    /// does not get the new file: it is restarted with the file already on
+    /// disk if there is one, else left stopped. A rejected ruleset is not
+    /// loaded (the kernel keeps what it has) but everything else still
+    /// applies. What was held back is returned, and left out of the applied
+    /// state so the next commit writes (and checks) it again.
+    pub fn commit_isolated(
+        &mut self,
+        mut p: Prepared,
+    ) -> Result<(CommitReport, Vec<Degraded>), EngineError> {
+        self.applied = None;
+        let mut iso = Isolation::default();
+        if self.opts.check {
+            self.check_isolated(&p, &mut iso)?;
+        }
+        let report = self.commit_inner(&p, Some(&mut iso))?;
+        for f in &iso.withheld_files {
+            p.plan.files.remove(f);
+        }
+        for u in &iso.withheld_units {
+            p.plan.units.remove(u);
+        }
+        if iso.skip_nft {
+            p.plan.nft = None;
+        }
+        self.applied = Some(Applied {
+            plan: p.plan,
+            models: p.models,
+            interfaces: p.interfaces,
+        });
+        Ok((report, iso.degraded))
+    }
+
+    fn commit_inner(
+        &self,
+        p: &Prepared,
+        iso: Option<&mut Isolation>,
+    ) -> Result<CommitReport, EngineError> {
         let mut report = CommitReport::default();
-        let delta = self.delta(p);
+        let mut delta = self.delta(p);
+        if let Some(iso) = iso.as_deref() {
+            delta.files.retain(|f, _| !iso.withheld_files.contains(f));
+            delta.units.retain(|u, _| !iso.withheld_units.contains(u));
+            if iso.skip_nft {
+                delta.nft = None;
+            }
+        }
         let empty = Applied {
             plan: Plan::default(),
             models: SliceModels::default(),
@@ -611,7 +777,24 @@ impl Engine {
         if self.opts.check && delta.files.keys().any(|f| f.ends_with("kea-dhcp4.conf")) {
             // networkd creates VLANs asynchronously after the reload
             self.wait_for_links(&p.interfaces);
-            self.check_files(p, &["kea-dhcp4.conf"])?;
+            match iso {
+                None => self.check_files(p, &["kea-dhcp4.conf"])?,
+                Some(iso) => {
+                    let kea: Vec<_> = delta
+                        .files
+                        .iter()
+                        .filter(|(f, _)| f.ends_with("kea-dhcp4.conf"))
+                        .map(|(f, spec)| (f.clone(), spec.clone()))
+                        .collect();
+                    for (path, spec) in kea {
+                        if let Some((backend, message)) = self.check_file(&path, &spec)? {
+                            iso.withhold(&p.plan, &path, backend, message);
+                            delta.files.remove(&path);
+                        }
+                    }
+                    delta.units.retain(|u, _| !iso.withheld_units.contains(u));
+                }
+            }
         }
 
         if !delta.qdiscs.is_empty() || p.models.qdisc != applied.models.qdisc {
@@ -1288,6 +1471,179 @@ mod tests {
         );
         assert!(r.commands.iter().any(|c| c.contains("ids queue removed")));
         assert!(!dir.join("suricata.yaml").exists());
+    }
+
+    /// Makes `program`'s checker reject everything while `on` holds.
+    fn reject_while(
+        runner: &FakeRunner,
+        program: &'static str,
+        on: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        runner.respond(move |cmd, _| {
+            (cmd.display().starts_with(&format!("{program} "))
+                && on.load(std::sync::atomic::Ordering::SeqCst))
+            .then(|| Output::failed(1, format!("{program}: environment problem")))
+        });
+    }
+
+    fn has(lines: &[String], needle: &str) -> bool {
+        lines.iter().any(|l| l.contains(needle))
+    }
+
+    const UNBOUND_CONF: &str = "run/sensr/unbound/unbound.conf";
+
+    #[test]
+    fn boot_apply_on_a_fresh_boot_skips_only_the_rejected_daemon() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut e, runner) = engine(root.path());
+        let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        reject_while(&runner, "unbound-checkconf", failing.clone());
+        let doc = home_router();
+        let p = e.prepare(&doc, &Runtime::default()).unwrap();
+        let (report, degraded) = e.commit_isolated(p).unwrap();
+
+        // everything else applied and started
+        assert!(report.nft_loaded);
+        let lines = runner.call_lines();
+        assert!(has(&lines, "nft '-j'"), "{lines:#?}");
+        assert!(
+            has(&lines, "'reload-or-restart' 'sensr-kea-dhcp4.service'"),
+            "{lines:#?}"
+        );
+        assert!(has(&lines, "'restart' 'sensr-ntpd.service'"), "{lines:#?}");
+        assert!(root.path().join("run/sensr/kea/kea-dhcp4.conf").exists());
+        assert!(root.path().join("run/sensr/ntp/ntp.toml").exists());
+        // unbound: no file to fall back to, so not started
+        assert!(!root.path().join(UNBOUND_CONF).exists());
+        assert!(!has(&lines, "sensr-unbound.service"), "{lines:#?}");
+        assert_eq!(degraded.len(), 1, "{degraded:?}");
+        assert_eq!(degraded[0].backend, "unbound-checkconf");
+        assert_eq!(degraded[0].unit.as_deref(), Some("sensr-unbound.service"));
+        assert!(!degraded[0].kept_previous);
+        assert!(degraded[0].message.contains("environment problem"));
+        assert!(
+            degraded[0].to_string().contains("was not started"),
+            "{}",
+            degraded[0]
+        );
+
+        // an interactive commit stays all or nothing while the checker
+        // still rejects it
+        let p = e.prepare(&doc, &Runtime::default()).unwrap();
+        let err = e.commit(p).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EngineError::Rejected {
+                    backend: "unbound-checkconf",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        // once the checker accepts it, the next commit of the same document
+        // writes the held-back file and starts the resolver
+        failing.store(false, std::sync::atomic::Ordering::SeqCst);
+        let before = runner.calls().len();
+        let p = e.prepare(&doc, &Runtime::default()).unwrap();
+        e.commit(p).unwrap();
+        let lines = runner.call_lines()[before..].to_vec();
+        assert!(root.path().join(UNBOUND_CONF).exists());
+        assert!(
+            has(&lines, "'reload-or-restart' 'sensr-unbound.service'"),
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
+    fn boot_apply_restarts_a_rejected_daemon_with_its_previous_file() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut e, runner) = engine(root.path());
+        let conf = root.path().join(UNBOUND_CONF);
+        std::fs::create_dir_all(conf.parent().unwrap()).unwrap();
+        std::fs::write(&conf, "server:\n  # previous\n").unwrap();
+        reject_while(
+            &runner,
+            "unbound-checkconf",
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        );
+        let p = e.prepare(&home_router(), &Runtime::default()).unwrap();
+        let (_, degraded) = e.commit_isolated(p).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&conf).unwrap(),
+            "server:\n  # previous\n"
+        );
+        let lines = runner.call_lines();
+        assert!(
+            has(&lines, "'reload-or-restart' 'sensr-unbound.service'"),
+            "{lines:#?}"
+        );
+        assert!(
+            has(&lines, "'reload-or-restart' 'sensr-kea-dhcp4.service'"),
+            "{lines:#?}"
+        );
+        assert_eq!(degraded.len(), 1, "{degraded:?}");
+        assert!(degraded[0].kept_previous);
+        assert!(degraded[0].to_string().contains("previous configuration"));
+    }
+
+    #[test]
+    fn boot_apply_isolates_kea_and_nft_rejections() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut e, runner) = engine(root.path());
+        let on = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        reject_while(&runner, "kea-dhcp4", on.clone());
+        // `nft -c` rejects; loads (no `-c`) are never reached
+        runner.respond(|cmd, _| {
+            (cmd.display().starts_with("nft ") && cmd.display().contains("'-c'"))
+                .then(|| Output::failed(1, "Error: syntax error"))
+        });
+        let p = e.prepare(&home_router(), &Runtime::default()).unwrap();
+        let (report, degraded) = e.commit_isolated(p).unwrap();
+        assert!(!report.nft_loaded);
+        let lines = runner.call_lines();
+        assert!(!has(&lines, "sensr-kea-dhcp4.service"), "{lines:#?}");
+        assert!(!root.path().join("run/sensr/kea/kea-dhcp4.conf").exists());
+        assert!(
+            has(&lines, "'reload-or-restart' 'sensr-unbound.service'"),
+            "{lines:#?}"
+        );
+        assert!(has(&lines, "'restart' 'sensr-ntpd.service'"), "{lines:#?}");
+        // links still came up
+        assert!(
+            root.path()
+                .join("run/systemd/network/40-sensr-igc1.network")
+                .exists()
+        );
+        let backends: Vec<_> = degraded.iter().map(|d| d.backend).collect();
+        assert_eq!(backends, ["nft", "kea-dhcp4"], "{degraded:?}");
+    }
+
+    #[test]
+    fn boot_apply_starts_every_daemon_even_when_nothing_changed() {
+        // A NixOS switch stops the daemons with the agent (PartOf=); the
+        // files in /run/sensr and the engine's own view are unchanged, but
+        // the restarted agent must still start them.
+        let root = tempfile::tempdir().unwrap();
+        let (mut e, runner) = engine(root.path());
+        let doc = home_router();
+        let p = e.prepare(&doc, &Runtime::default()).unwrap();
+        e.commit(p).unwrap();
+        let before = runner.calls().len();
+        let p = e.prepare(&doc, &Runtime::default()).unwrap();
+        assert!(e.delta(&p).is_empty());
+        let (_, degraded) = e.commit_isolated(p).unwrap();
+        assert!(degraded.is_empty(), "{degraded:?}");
+        let lines = runner.call_lines()[before..].to_vec();
+        for unit in [
+            "sensr-unbound.service",
+            "sensr-kea-dhcp4.service",
+            "sensr-ntpd.service",
+            "sensr-dns-watch.service",
+        ] {
+            assert!(has(&lines, &format!("' '{unit}'")), "{unit}: {lines:#?}");
+        }
+        assert!(has(&lines, "nft '-j'"), "{lines:#?}");
     }
 
     #[test]
