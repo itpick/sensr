@@ -546,7 +546,9 @@ pub fn qdisc(doc: &Document) -> QdiscModel {
 
 /// Kernel tunables. While any host is locked and ARP interception routes
 /// same-LAN traffic through us, the internal links must not send ICMP
-/// redirects telling devices to go direct.
+/// redirects telling devices to go direct. Once nothing is locked the keys
+/// leave the model and the sysctl applier turns redirects back on
+/// ([`Sysctl::restores`](super::sysctl::Sysctl::restores)).
 fn sysctl(doc: &Document) -> SysctlModel {
     let fw = &doc.firewall;
     let locked = fw.host_mode_settings.arp_intercept && fw.host_modes.values().any(|h| h.enabled);

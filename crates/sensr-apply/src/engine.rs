@@ -552,10 +552,13 @@ impl Engine {
             }
         }
 
-        if !delta.sysctls.is_empty() {
-            Sysctl::new(&self.opts.root).apply(&p.models.sysctl)?;
+        let sysctl = Sysctl::new(&self.opts.root);
+        let own = p.models.sysctl.to_map().unwrap_or_default();
+        // a key leaving the model is no delta, but a redirect switch sensr
+        // turned off must still come back on
+        if !delta.sysctls.is_empty() || !sysctl.restores(&own).is_empty() {
+            sysctl.apply(&p.models.sysctl)?;
             // the rest (qdisc default, hostname) are written as they are
-            let own = p.models.sysctl.to_map().unwrap_or_default();
             for (k, v) in delta.sysctls.iter().filter(|(k, _)| !own.contains_key(*k)) {
                 let path = self.opts.root.join("proc/sys").join(k.replace('.', "/"));
                 std::fs::write(&path, format!("{v}\n"))

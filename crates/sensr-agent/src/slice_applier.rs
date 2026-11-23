@@ -1184,6 +1184,76 @@ mod tests {
         assert_eq!(runner.calls().len(), n);
     }
 
+    /// The live ICMP redirect switches: `all`, `default`, then each
+    /// internal device.
+    fn live_redirects(root: &tempfile::TempDir) -> Vec<String> {
+        ["all".to_owned(), "default".to_owned()]
+            .into_iter()
+            .chain(
+                crate::hosts::internal_interfaces(&home_router())
+                    .into_iter()
+                    .map(|i| i.device),
+            )
+            .map(|d| {
+                let p = root
+                    .path()
+                    .join(format!("proc/sys/net/ipv4/conf/{d}/send_redirects"));
+                std::fs::read_to_string(p)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// Interception stops three ways; each turns redirects back on at the
+    /// next apply. A document that never locked a host touches none.
+    #[test]
+    fn redirects_come_back_when_interception_stops() {
+        use sensr_schema::PathAccess;
+        let root = fake_root();
+        let (mut a, _runner, _table) = moded_applier(&root);
+        a.apply(None, &home_router()).unwrap();
+        assert!(
+            live_redirects(&root)[..2].iter().all(String::is_empty),
+            "factory: all/default never written"
+        );
+        assert!(live_redirects(&root)[2..].iter().all(|v| v == "1"));
+        const ENTRY: &str = "firewall.host_modes.6d0de000-0000-4000-8000-000000000001";
+        let locked = quarantined();
+        let stops: [(&str, Document); 3] = [
+            ("unlock", {
+                let mut d = locked.clone();
+                d.set_by_path(&format!("{ENTRY}.enabled"), serde_json::json!(false))
+                    .unwrap();
+                d
+            }),
+            ("entry removed", home_router()),
+            ("arp_intercept off", {
+                let mut d = locked.clone();
+                d.set_by_path(
+                    "firewall.host_mode_settings.arp_intercept",
+                    serde_json::json!(false),
+                )
+                .unwrap();
+                d
+            }),
+        ];
+        let mut prev = home_router();
+        for (what, next) in stops {
+            a.apply(Some(&prev), &locked).unwrap();
+            let on = live_redirects(&root);
+            assert!(
+                on.len() > 2 && on.iter().all(|v| v == "0"),
+                "locked: {on:?}"
+            );
+            a.apply(Some(&locked), &next).unwrap();
+            let off = live_redirects(&root);
+            assert!(off.iter().all(|v| v == "1"), "{what}: {off:?}");
+            prev = next;
+        }
+    }
+
     /// An Isolated host is locked (no local host reaches it) but keeps its
     /// inbound forwards: its addresses stay out of the quarantine sets.
     #[test]
