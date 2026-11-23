@@ -84,14 +84,21 @@ pub fn classify(e: &Evidence) -> Label {
     {
         found.push((rule.kind, High, format!("mDNS model: {model}")));
     }
-    found.extend(service_candidates(e.mdns_services));
+    let host_rule = e.hostname.and_then(|host| {
+        hostname_rules()
+            .iter()
+            .find(|(re, _, _)| re.is_match(host))
+            .map(|&(_, kind, conf)| (kind, conf))
+    });
+    let tv_named = host_rule.is_some_and(|(kind, _)| kind == Tv);
+    found.extend(service_candidates(e.mdns_services, tv_named));
     if let Some(vendor) = e.dhcp_vendor
         && let Some(&(_, kind, conf)) = DHCP_VENDORS.iter().find(|(m, _, _)| m.matches(vendor))
     {
         found.push((kind, conf, format!("DHCP vendor class: {vendor}")));
     }
     if let Some(host) = e.hostname
-        && let Some(&(_, kind, conf)) = hostname_rules().iter().find(|(re, _, _)| re.is_match(host))
+        && let Some((kind, conf)) = host_rule
     {
         found.push((kind, conf, format!("Host name: {host}")));
     }
@@ -216,10 +223,18 @@ const MDNS_SERVICES: &[(&str, HostKind, Confidence)] = &[
 
 const COMPANION: &str = "_companion-link._tcp";
 
-fn service_candidates(services: &[String]) -> Vec<Candidate> {
+/// `tv_named`: the host name says TV, so HomeKit does not claim the host.
+fn service_candidates(services: &[String], tv_named: bool) -> Vec<Candidate> {
     let has = |want: &str| services.iter().any(|s| s.eq_ignore_ascii_case(want));
+    // Smart TVs (Roku, LG, Samsung, Chromecast) speak HomeKit too; a TV
+    // signal beats it. Real accessories (Lutron, bulbs) have none.
+    let tv_signal =
+        tv_named || has("_googlecast._tcp") || (has("_airplay._tcp") && !has(COMPANION));
     let mut out = Vec::new();
     for svc in services {
+        if tv_signal && svc.eq_ignore_ascii_case("_hap._tcp") {
+            continue;
+        }
         if let Some(&(_, kind, conf)) = MDNS_SERVICES
             .iter()
             .find(|(n, _, _)| svc.eq_ignore_ascii_case(n))
@@ -247,8 +262,10 @@ fn service_candidates(services: &[String]) -> Vec<Candidate> {
             "mDNS service: _smb._tcp + _adisk._tcp".to_string(),
         ));
     }
+    // Every Apple device advertises it (Macs, Apple TVs, watches), so it
+    // only hints at "Apple" and any host name outranks it.
     if has(COMPANION) {
-        out.push((Phone, Medium, format!("mDNS service: {COMPANION}")));
+        out.push((Phone, Low, format!("mDNS service: {COMPANION}")));
     }
     out
 }
@@ -291,9 +308,33 @@ const HOSTNAMES: &[(&str, HostKind, Confidence)] = &[
     ("^(galaxy|sm-[a-z0-9]+|pixel|oneplus)", Phone, Medium),
     ("^(desktop|laptop)-[a-z0-9]{7}$", Computer, Medium), // Windows defaults
     ("macbook|imac|mac-?mini", Computer, Medium),
+    ("(^|[-_])watch($|[-_0-9])", Wearable, Medium),
+    (
+        "^(pop-os|ubuntu|debian|fedora|nixos|archlinux)([-_0-9]|$)",
+        Computer,
+        Low,
+    ),
     ("^hp[0-9a-f]{6}$", Printer, Medium),
     ("^(brw|epson|canon)", Printer, Medium),
-    ("^(chromecast|roku|appletv|fire-?tv)", Tv, Medium),
+    // High: smart TVs also advertise HomeKit, which must not win.
+    ("^(chromecast|roku|appletv|fire-?tv)|(^|[-_])tv$", Tv, High),
+    // Smart bulbs and plugs, before the camera rule so "wyze-bulb" lands
+    // here. A boundary (or a Wyze/Kasa/Hue prefix) before the word and a
+    // product ending after it keep "flight" and "lighthouse" out.
+    (
+        "(^|[-_0-9]|wyze|kasa|hue)(bulb|lamp|light|plug|outlet)s?($|[-_0-9]|color|v[0-9]|mini|pro|strip)",
+        SmartHome,
+        Medium,
+    ),
+    // TP-Link Kasa model numbers (HS103, KP125, EP10, KL130, KS200).
+    ("^(hs|kp|ep|kl|ks)[0-9]{3}", SmartHome, Medium),
+    ("^deco([-_0-9]|$)", Network, Medium),
+    ("^(tstat|rest2ndgen|nest)|thermostat", SmartHome, Medium),
+    ("roborock|vacuum", SmartHome, Medium),
+    ("^(rainbird|rachio)", SmartHome, Medium),
+    ("^(yoto|toniebox)", Speaker, Medium),
+    ("^(prusa|bambu|octopi)", Printer, Medium),
+    ("^amazon$", SmartHome, Low),
     ("^(xbox|playstation|ps[45]|nintendo)", Console, Medium),
     // Prefix rules below end at a separator, a digit or the end of the name,
     // so "ringo-pc" and "espresso" stay out.
@@ -304,7 +345,7 @@ const HOSTNAMES: &[(&str, HostKind, Confidence)] = &[
     ),
     // Echo only by its product names, so "echo-server" stays out.
     (
-        "^((sonos|homepod)([-_0-9]|$)|echo([-_]?(dot|show|pop|studio|plus|spot|flex|auto|input|sub|link)|[_0-9]|$))",
+        "^((sonos|homepod|libreecho)([-_0-9]|$)|echo([-_]?(dot|show|pop|studio|plus|spot|flex|auto|input|sub|link)|[_0-9]|$))",
         Speaker,
         Medium,
     ),
@@ -389,7 +430,6 @@ const DHCP_PRLS: &[(&str, &str, HostKind, Confidence)] = &[
 const MAKERS: &[(&[&str], HostKind, Confidence)] = &[
     (
         &[
-            "Wyze",
             "Ring",
             "Reolink",
             "Arlo",
@@ -402,13 +442,20 @@ const MAKERS: &[(&[&str], HostKind, Confidence)] = &[
         Camera,
         Medium,
     ),
+    // Wyze also sells bulbs and plugs: a camera guess, no more.
+    (&["Wyze"], Camera, Low),
     (&["Sonos", "Bose"], Speaker, Medium),
+    (
+        &["Resideo", "Lutron", "Beijing Roborock"],
+        SmartHome,
+        Medium,
+    ),
+    (&["Framework Computer"], Computer, Medium),
     (&["Roku"], Tv, Medium),
     (&["Nintendo", "PlayStation"], Console, Medium),
     (
         &[
             "Ubiquiti",
-            "TP-Link",
             "Netgear",
             "Cisco Systems",
             "Cisco Meraki",
@@ -418,6 +465,8 @@ const MAKERS: &[(&[&str], HostKind, Confidence)] = &[
         Network,
         Medium,
     ),
+    // TP-Link also makes Kasa plugs and bulbs.
+    (&["TP-Link"], Network, Low),
     (&["Synology", "QNAP Systems"], Server, Medium),
     (&["Brother Industries", "Seiko Epson"], Printer, Medium),
     // HP and Canon also make computers and cameras.
@@ -452,10 +501,177 @@ mod tests {
     }
 
     #[test]
-    fn wyze_is_camera_medium() {
+    fn wyze_is_camera_low() {
         let l = classify(&ev("7c:78:b2:14:b2:de"));
-        assert_eq!(short(&l), (Some("Wyze"), Camera, Confidence::Medium));
+        assert_eq!(short(&l), (Some("Wyze"), Camera, Confidence::Low));
         assert_eq!(l.reasons, vec!["MAC maker: Wyze".to_string()]);
+    }
+
+    fn svcs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Wyze bulb: maker alone says camera (Low), the name says bulb.
+    #[test]
+    fn live_wyze_bulbs_are_smart_home() {
+        for host in ["wyzebulbcolor", "wyzebulbv2"] {
+            let l = classify(&Evidence {
+                hostname: Some(host),
+                ..ev("7c:78:b2:14:b2:de")
+            });
+            assert_eq!(short(&l), (Some("Wyze"), SmartHome, Confidence::Medium));
+            assert_eq!(
+                l.reasons,
+                vec![format!("Host name: {host}"), "MAC maker: Wyze".into()]
+            );
+        }
+        // A Wyze camera by name stays a camera.
+        let l = classify(&Evidence {
+            hostname: Some("wyze-cam"),
+            ..ev("7c:78:b2:14:b2:de")
+        });
+        assert_eq!((l.kind, l.confidence), (Camera, Confidence::Medium));
+        // Ring maker alone stays camera medium.
+        let l = classify(&ev(&mac_for("Ring")));
+        assert_eq!((l.kind, l.confidence), (Camera, Confidence::Medium));
+    }
+
+    #[test]
+    fn live_kasa_plugs_are_smart_home() {
+        let mac = mac_for("TP-Link");
+        for host in ["hs103", "hs105", "hs200"] {
+            let l = classify(&Evidence {
+                hostname: Some(host),
+                ..ev(&mac)
+            });
+            assert_eq!(
+                short(&l),
+                (Some("TP-Link"), SmartHome, Confidence::Medium),
+                "{host}"
+            );
+        }
+        let l = classify(&Evidence {
+            hostname: Some("deco-m5"),
+            ..ev(&mac)
+        });
+        assert_eq!((l.kind, l.confidence), (Network, Confidence::Medium));
+        let l = classify(&ev(&mac));
+        assert_eq!((l.kind, l.confidence), (Network, Confidence::Low));
+    }
+
+    #[test]
+    fn live_macbook_beats_companion_link() {
+        let services = svcs(&["_companion-link._tcp"]);
+        let l = classify(&Evidence {
+            hostname: Some("macbookpro"),
+            mdns_services: &services,
+            ..ev("02:cf:67:c6:7b:71")
+        });
+        assert_eq!(
+            short(&l),
+            (Some("Private MAC"), Computer, Confidence::Medium)
+        );
+        // Companion alone is a weak phone guess.
+        let l = classify(&Evidence {
+            mdns_services: &services,
+            ..ev("02:cf:67:c6:7b:71")
+        });
+        assert_eq!((l.kind, l.confidence), (Phone, Confidence::Low));
+    }
+
+    #[test]
+    fn live_roku_tv_beats_homekit() {
+        let services = svcs(&["_hap._tcp", "_spotify-connect._tcp"]);
+        let l = classify(&Evidence {
+            hostname: Some("rokutv"),
+            mdns_services: &services,
+            ..ev(&mac_for("Roku"))
+        });
+        assert_eq!((l.kind, l.confidence), (Tv, Confidence::High));
+        assert_eq!(l.reasons[0], "Host name: rokutv");
+        // Same on a private MAC.
+        let l = classify(&Evidence {
+            hostname: Some("rokutv"),
+            mdns_services: &services,
+            ..ev("02:11:22:33:44:55")
+        });
+        assert_eq!((l.kind, l.confidence), (Tv, Confidence::High));
+        // AirPlay or Cast without a TV name also beats HomeKit.
+        for tv in [
+            svcs(&["_hap._tcp", "_airplay._tcp", "_raop._tcp"]),
+            svcs(&["_hap._tcp", "_googlecast._tcp"]),
+        ] {
+            let l = classify(&Evidence {
+                mdns_services: &tv,
+                ..ev("00:00:5e:00:53:01")
+            });
+            assert_eq!(l.kind, Tv, "{tv:?}");
+        }
+        // A genuine accessory keeps High smart home (Lutron).
+        let hap = svcs(&["_hap._tcp"]);
+        let l = classify(&Evidence {
+            mdns_services: &hap,
+            ..ev(&mac_for("Lutron"))
+        });
+        assert_eq!(short(&l), (Some("Lutron"), SmartHome, Confidence::High));
+        // An Apple device with companion-link and HomeKit stays smart home
+        // only by the service, not by a TV guess.
+        let apple = svcs(&["_hap._tcp", "_airplay._tcp", "_companion-link._tcp"]);
+        let l = classify(&Evidence {
+            mdns_services: &apple,
+            ..ev("02:11:22:33:44:55")
+        });
+        assert_eq!(l.kind, SmartHome);
+    }
+
+    #[test]
+    fn live_watch_is_wearable() {
+        let l = classify(&Evidence {
+            hostname: Some("watch"),
+            ..ev("02:cf:67:c6:7b:71")
+        });
+        assert_eq!(
+            short(&l),
+            (Some("Private MAC"), Wearable, Confidence::Medium)
+        );
+    }
+
+    #[test]
+    fn live_unknowns_now_labelled() {
+        for (maker, host, kind) in [
+            ("Resideo", "tstat-0a1b2c", SmartHome),
+            ("Lutron", "lutron-caseta", SmartHome),
+            ("Beijing Roborock", "roborock-vacuum-s7", SmartHome),
+            ("Framework Computer", "framework", Computer),
+        ] {
+            let mac = mac_for(maker);
+            let l = classify(&Evidence {
+                hostname: Some(host),
+                ..ev(&mac)
+            });
+            assert_eq!(
+                short(&l),
+                (Some(maker), kind, Confidence::Medium),
+                "{maker}"
+            );
+            // The maker alone is enough too.
+            let l = classify(&ev(&mac));
+            assert_eq!(
+                short(&l),
+                (Some(maker), kind, Confidence::Medium),
+                "{maker}"
+            );
+        }
+        let l = classify(&Evidence {
+            hostname: Some("libreecho"),
+            ..ev(&mac_for("Amazon"))
+        });
+        assert_eq!(short(&l), (Some("Amazon"), Speaker, Confidence::Medium));
+        let l = classify(&Evidence {
+            hostname: Some("amazon"),
+            ..ev(&mac_for("Amazon"))
+        });
+        assert_eq!(short(&l), (Some("Amazon"), SmartHome, Confidence::Low));
     }
 
     #[test]
@@ -818,15 +1034,15 @@ mod tests {
             (
                 &["_airplay._tcp", "_raop._tcp", "_companion-link._tcp"],
                 Phone,
-                Confidence::Medium,
+                Confidence::Low,
             ),
             (&["_hap._tcp"], SmartHome, Confidence::High),
             (&["_smb._tcp", "_adisk._tcp"], Server, Confidence::High),
-            (&["_companion-link._tcp"], Phone, Confidence::Medium),
+            (&["_companion-link._tcp"], Phone, Confidence::Low),
             (
                 &["_raop._tcp", "_companion-link._tcp"],
                 Phone,
-                Confidence::Medium,
+                Confidence::Low,
             ),
             (&["_smb._tcp"], Unknown, Confidence::Low),
             (&["_adisk._tcp"], Unknown, Confidence::Low),
@@ -891,11 +1107,11 @@ mod tests {
             ("BRW0080927AFBEA", Printer, Medium),
             ("EPSON123456", Printer, Medium),
             ("Canon-MF", Printer, Medium),
-            ("Chromecast-Ultra", Tv, Medium),
-            ("Roku-Ultra", Tv, Medium),
-            ("AppleTV", Tv, Medium),
-            ("fire-tv-stick", Tv, Medium),
-            ("firetv", Tv, Medium),
+            ("Chromecast-Ultra", Tv, High),
+            ("Roku-Ultra", Tv, High),
+            ("AppleTV", Tv, High),
+            ("fire-tv-stick", Tv, High),
+            ("firetv", Tv, High),
             ("XboxOne", Console, Medium),
             ("PlayStation5", Console, Medium),
             ("PS5-123", Console, Medium),
@@ -941,6 +1157,50 @@ mod tests {
             ("node3", Server, Low),
             ("picknode-01", Server, Low),
             ("lucas-thinkpad", Unknown, Low),
+            ("rokutv", Tv, High),
+            ("livingroom-tv", Tv, High),
+            ("tv", Tv, High),
+            ("tvroom", Unknown, Low),
+            ("wyzebulbcolor", SmartHome, Medium),
+            ("wyzebulbv2", SmartHome, Medium),
+            ("wyze-bulb", SmartHome, Medium),
+            ("desk-lamp", SmartHome, Medium),
+            ("kasa-plug-2", SmartHome, Medium),
+            ("flight-sim", Unknown, Low),
+            ("lighthouse", Unknown, Low),
+            ("plugin-host", Unknown, Low),
+            ("hs103", SmartHome, Medium),
+            ("HS105", SmartHome, Medium),
+            ("hs200", SmartHome, Medium),
+            ("kp125", SmartHome, Medium),
+            ("deco-m5", Network, Medium),
+            ("watch", Wearable, Medium),
+            ("apple-watch", Wearable, Medium),
+            ("Lucass-Apple-Watch", Wearable, Medium),
+            ("watchdog", Unknown, Low),
+            ("tstat-1234", SmartHome, Medium),
+            ("rest2ndgen", SmartHome, Medium),
+            ("nest-hallway", SmartHome, Medium),
+            ("living-thermostat", SmartHome, Medium),
+            ("roborock-s7", SmartHome, Medium),
+            ("vacuum", SmartHome, Medium),
+            ("rainbird", SmartHome, Medium),
+            ("rachio-3", SmartHome, Medium),
+            ("yoto", Speaker, Medium),
+            ("toniebox", Speaker, Medium),
+            ("prusa-mk4", Printer, Medium),
+            ("bambu-x1c", Printer, Medium),
+            ("octopi", Printer, Medium),
+            ("pop-os", Computer, Low),
+            ("ubuntu", Computer, Low),
+            ("debian-box", Computer, Low),
+            ("fedora", Computer, Low),
+            ("nixos", Computer, Low),
+            ("archlinux", Computer, Low),
+            ("amazon", SmartHome, Low),
+            ("amazon-4f1a", Unknown, Low),
+            ("libreecho", Speaker, Medium),
+            ("libreecho-1", Speaker, Medium),
         ] {
             let l = classify(&Evidence {
                 hostname: Some(host),
@@ -1036,7 +1296,7 @@ mod tests {
     fn maker_rows() {
         use Confidence::*;
         for (maker, kind, conf) in [
-            ("Wyze", Camera, Medium),
+            ("Wyze", Camera, Low),
             ("Ring", Camera, Medium),
             ("Reolink", Camera, Medium),
             ("Arlo", Camera, Medium),
@@ -1048,7 +1308,7 @@ mod tests {
             ("Nintendo", Console, Medium),
             ("PlayStation", Console, Medium),
             ("Ubiquiti", Network, Medium),
-            ("TP-Link", Network, Medium),
+            ("TP-Link", Network, Low),
             ("Netgear", Network, Medium),
             ("Cisco Systems", Network, Medium),
             ("Cisco Meraki", Network, Medium),
@@ -1059,6 +1319,10 @@ mod tests {
             ("Seiko Epson", Printer, Medium),
             ("CANON", Printer, Low),
             ("HP", Printer, Low),
+            ("Resideo", SmartHome, Medium),
+            ("Lutron", SmartHome, Medium),
+            ("Beijing Roborock", SmartHome, Medium),
+            ("Framework Computer", Computer, Medium),
             ("Raspberry Pi", Server, Low),
             ("Espressif", SmartHome, Low),
             ("Tuya Smart", SmartHome, Low),
