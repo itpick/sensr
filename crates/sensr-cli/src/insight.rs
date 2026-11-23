@@ -83,13 +83,7 @@ mod tests {
     use sensr_flow::store::Batch;
 
     fn key(kind: Kind, dir: Dir, addr: &str) -> Key {
-        Key {
-            kind,
-            dir,
-            addr: addr.into(),
-            proto: 0,
-            port: 0,
-        }
+        Key::addr(kind, dir, addr.parse().unwrap())
     }
 
     #[test]

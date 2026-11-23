@@ -113,15 +113,15 @@ impl Batch {
     pub fn add_counters(&mut self, deltas: &[(Key, Count)]) {
         for (k, c) in deltas {
             let key = match k.kind {
-                Kind::Host => (RowKind::Host, k.addr.clone(), String::new()),
-                Kind::Remote => (RowKind::Remote, k.addr.clone(), String::new()),
+                Kind::Host => (RowKind::Host, k.addr.to_string(), String::new()),
+                Kind::Remote => (RowKind::Remote, k.addr.to_string(), String::new()),
                 // per-(host, remote) counters feed service attribution
                 // (`attrib`), not the traffic rollups
                 Kind::Pair => continue,
                 Kind::App => (
                     RowKind::App,
                     format!("{}/{}", proto_name(k.proto), k.port),
-                    k.addr.clone(),
+                    k.addr.to_string(),
                 ),
             };
             self.rows.entry(key).or_default().add(k.dir, *c);
@@ -373,8 +373,8 @@ mod tests {
         Key {
             kind,
             dir,
-            addr: addr.into(),
-            remote: String::new(),
+            addr: addr.parse().unwrap(),
+            remote: None,
             proto: if port > 0 { 6 } else { 0 },
             port,
         }

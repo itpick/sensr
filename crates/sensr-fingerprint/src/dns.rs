@@ -103,7 +103,10 @@ fn walk(p: &[u8], qdcount: u16, ancount: u16, m: &mut DnsMessage) -> Option<()> 
         let end = start.checked_add(rdlen)?;
         let rdata = p.get(start..end)?;
         pos = end;
-        if class != CLASS_IN || m.answers.len() >= MAX_ANSWERS {
+        if m.answers.len() >= MAX_ANSWERS {
+            break;
+        }
+        if class != CLASS_IN {
             continue;
         }
         let data = match rtype {

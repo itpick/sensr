@@ -27,7 +27,7 @@ use sensr_fingerprint::dns::{self, RData};
 /// The only content type we accept.
 pub const CONTENT_TYPE: &[u8] = b"protobuf:dnstap.Dnstap";
 /// Largest data frame delivered; bigger ones are skipped.
-pub const MAX_FRAME: usize = 64 * 1024;
+pub const MAX_FRAME: usize = 128 * 1024;
 /// Largest frame we skip over. A longer length is not something a writer
 /// produces, so the stream is treated as lost (the caller closes it and the
 /// writer reconnects at a frame boundary).
@@ -174,8 +174,13 @@ impl FrameReader {
             READY => {
                 let offer: &[&[u8]] = if c.ours { &[CONTENT_TYPE] } else { &[] };
                 self.out.extend(encode_control(ACCEPT, offer));
+                // nothing we can read is offered: answer, then close
+                self.done |= !c.ours;
             }
-            START => self.started = c.ours || !c.typed,
+            // a START naming another content type: the writer did not take
+            // ours, so the stream is useless
+            START if c.typed && !c.ours => self.done = true,
+            START => self.started = true,
             STOP => {
                 self.out.extend(encode_control(FINISH, &[]));
                 self.started = false;
@@ -614,15 +619,20 @@ mod tests {
     fn frame_stream_data_needs_a_matching_start() {
         let mut r = FrameReader::default();
         assert!(r.push(&data(b"early")).is_empty(), "data before START");
-        r.push(&control(START, &[b"protobuf:other"]));
-        assert!(r.push(&data(b"wrong type")).is_empty());
         // A START with no content type (unidirectional writers) is accepted.
         r.push(&control(START, &[]));
         assert_eq!(datas(r.push(&data(b"ok"))), vec![b"ok".to_vec()]);
-        // READY without our content type gets an ACCEPT that names none.
+        // A START naming another content type ends the stream.
+        let mut r = FrameReader::default();
+        r.push(&control(START, &[b"protobuf:other"]));
+        assert!(r.finished());
+        assert!(r.push(&data(b"wrong type")).is_empty());
+        // READY without our content type gets an ACCEPT that names none,
+        // and the reader is finished (the caller writes it and closes).
         let mut r = FrameReader::default();
         r.push(&control(READY, &[b"protobuf:other"]));
         assert_eq!(r.reply(), Some(control(ACCEPT, &[])));
+        assert!(r.finished());
     }
 
     #[test]
@@ -780,6 +790,42 @@ mod tests {
         for cut in 0..=valid.len() {
             let _ = decode(&valid[..cut]);
         }
+
+        // A valid stream (handshake, frames, STOP) with bytes flipped and
+        // fed in random chunks: never a panic, the buffer stays bounded,
+        // and an undamaged copy still decodes afterwards.
+        let mut stream = control(READY, &[CONTENT_TYPE]);
+        stream.extend(control(START, &[CONTENT_TYPE]));
+        for _ in 0..8 {
+            stream.extend(data(&valid));
+        }
+        stream.extend(control(STOP, &[]));
+        for _ in 0..2_000 {
+            let mut m = stream.clone();
+            for _ in 0..=(next() % 4) {
+                let at = next() as usize % m.len();
+                m[at] = next() as u8;
+            }
+            let mut r = FrameReader::default();
+            let mut rest = &m[..];
+            while !rest.is_empty() && !r.finished() {
+                let n = 1 + next() as usize % 97;
+                let (chunk, tail) = rest.split_at(n.min(rest.len()));
+                rest = tail;
+                for f in r.push(chunk) {
+                    if let Frame::Data(d) = f {
+                        let _ = decode(&d);
+                    }
+                }
+                let _ = r.reply();
+                assert!(r.buffered() <= MAX_FRAME + 8);
+            }
+        }
+        let mut r = FrameReader::default();
+        let got = datas(r.push(&stream));
+        assert_eq!(got.len(), 8);
+        assert!(got.iter().all(|d| decode(d).is_some()));
+        assert!(r.finished());
 
         // Protobuf damage.
         let overflow = [
