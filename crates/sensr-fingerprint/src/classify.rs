@@ -46,9 +46,17 @@ pub struct Label {
 /// Label a host from its evidence.
 pub fn classify(e: &Evidence) -> Label {
     let mac = e.mac.to_ascii_lowercase();
+    // Both prefixes have the locally administered bit set, so a phone's
+    // randomised address can land on them: only a host that says nothing
+    // else about itself is taken for a container or VM.
+    let quiet = e.dhcp_vendor.is_none()
+        && e.dhcp_prl.is_none()
+        && e.mdns_services.is_empty()
+        && e.mdns_model.is_none();
     if let Some((maker, kind)) = VIRTUAL_PREFIXES
         .iter()
         .find_map(|(p, m)| mac.starts_with(p).then_some((*m, HostKind::Virtual)))
+        .filter(|_| quiet)
     {
         return Label {
             maker: Some(maker.to_string()),
@@ -133,7 +141,8 @@ type Candidate = (HostKind, Confidence, String);
 const PRIVATE_MAKER: &str = "Private MAC";
 const RANDOMISED_REASON: &str = "Randomised address (phones, tablets and laptops do this)";
 
-/// Locally administered prefixes that mean a VM or container, checked first.
+/// Locally administered prefixes that mean a VM or container, checked first
+/// when the host gives no DHCP or mDNS evidence.
 const VIRTUAL_PREFIXES: &[(&str, &str)] = &[("02:42:", "Docker"), ("52:54:00:", "QEMU/KVM")];
 
 /// One mDNS TXT model rule (case-insensitive prefix), all High.
@@ -260,10 +269,11 @@ impl VendorMatch {
 }
 
 const DHCP_VENDORS: &[(VendorMatch, HostKind, Confidence)] = &[
-    (VendorMatch::Prefix("android-dhcp-"), Phone, High),
+    // Android tablets and TVs send it too: a tablet host name outranks it.
+    (VendorMatch::Prefix("android-dhcp-"), Phone, Medium),
     (VendorMatch::Exact("MSFT 5.0"), Computer, High),
     // Huawei phones send "HUAWEI:android:<model>"; routers "HUAWEI:<model>".
-    (VendorMatch::Prefix("HUAWEI:android"), Phone, High),
+    (VendorMatch::Prefix("HUAWEI:android"), Phone, Medium),
     (VendorMatch::Prefix("HUAWEI:"), Network, Medium),
     (VendorMatch::Exact("ubnt"), Network, Medium),
     (VendorMatch::Prefix("dhcpcd-"), Computer, Low),
@@ -274,8 +284,10 @@ const DHCP_VENDORS: &[(VendorMatch, HostKind, Confidence)] = &[
 const HOSTNAMES: &[(&str, HostKind, Confidence)] = &[
     // Unanchored: Apple defaults look like "Lucass-iPhone" / "Johns-iPad".
     ("iphone", Phone, Medium),
-    ("ipad", Tablet, Medium),
-    ("^(galaxy-?tab|sm-t)", Tablet, Medium), // Samsung tablets, before phones
+    // Tablet names are High so they beat the Android vendor class (Medium),
+    // which tablets send just like phones.
+    ("ipad", Tablet, High),
+    ("^(galaxy-?tab|sm-t)", Tablet, High), // Samsung tablets, before phones
     ("^(galaxy|sm-[a-z0-9]+|pixel|oneplus)", Phone, Medium),
     ("^(desktop|laptop)-[a-z0-9]{7}$", Computer, Medium), // Windows defaults
     ("macbook|imac|mac-?mini", Computer, Medium),
@@ -505,6 +517,44 @@ mod tests {
         assert_eq!(short(&l), (Some("Docker"), Virtual, Confidence::High));
         let l = classify(&ev("52:54:00:12:34:56"));
         assert_eq!(short(&l), (Some("QEMU/KVM"), Virtual, Confidence::High));
+        // a host name alone does not change that
+        let l = classify(&Evidence {
+            hostname: Some("web-1"),
+            ..ev("02:42:ac:11:00:02")
+        });
+        assert_eq!(l.kind, Virtual);
+    }
+
+    /// A phone's randomised MAC can start 02:42 or 52:54:00 too: with DHCP
+    /// or mDNS evidence it is an ordinary private address.
+    #[test]
+    fn virtual_prefix_with_evidence_is_a_private_mac() {
+        for mac in ["02:42:ac:11:00:02", "52:54:00:12:34:56"] {
+            let l = classify(&Evidence {
+                dhcp_vendor: Some("android-dhcp-14"),
+                ..ev(mac)
+            });
+            assert_eq!(
+                short(&l),
+                (Some("Private MAC"), Phone, Confidence::Medium),
+                "{mac}"
+            );
+            let services = vec!["_ipp._tcp".to_string()];
+            let l = classify(&Evidence {
+                mdns_services: &services,
+                ..ev(mac)
+            });
+            assert_eq!(
+                short(&l),
+                (Some("Private MAC"), Printer, Confidence::High),
+                "{mac}"
+            );
+            let l = classify(&Evidence {
+                dhcp_prl: Some("1,3,6,15,31,33,43,44,46,47,119,121,249,252"),
+                ..ev(mac)
+            });
+            assert_eq!(l.kind, Computer, "{mac}");
+        }
     }
 
     #[test]
@@ -526,16 +576,40 @@ mod tests {
     }
 
     #[test]
-    fn android_vendor_class_is_phone_high() {
+    fn android_vendor_class_is_phone_medium() {
         let l = classify(&Evidence {
             dhcp_vendor: Some("android-dhcp-14"),
             ..ev("02:11:22:33:44:55")
         });
-        assert_eq!(short(&l), (Some("Private MAC"), Phone, Confidence::High));
+        assert_eq!(short(&l), (Some("Private MAC"), Phone, Confidence::Medium));
         assert_eq!(
             l.reasons,
             vec!["DHCP vendor class: android-dhcp-14".to_string()]
         );
+    }
+
+    #[test]
+    fn android_tablet_name_beats_the_vendor_class() {
+        let l = classify(&Evidence {
+            dhcp_vendor: Some("android-dhcp-14"),
+            hostname: Some("Galaxy-Tab-S9"),
+            ..ev("02:11:22:33:44:55")
+        });
+        assert_eq!((l.kind, l.confidence), (Tablet, Confidence::High));
+        assert_eq!(
+            l.reasons,
+            vec![
+                "Host name: Galaxy-Tab-S9".to_string(),
+                "DHCP vendor class: android-dhcp-14".into()
+            ]
+        );
+        // a phone name with the same vendor class stays a phone
+        let l = classify(&Evidence {
+            dhcp_vendor: Some("android-dhcp-14"),
+            hostname: Some("Pixel-8"),
+            ..ev("02:11:22:33:44:55")
+        });
+        assert_eq!((l.kind, l.confidence), (Phone, Confidence::Medium));
     }
 
     #[test]
@@ -770,7 +844,7 @@ mod tests {
     #[test]
     fn dhcp_vendor_rows() {
         for (vendor, kind, conf) in [
-            ("android-dhcp-14", Phone, Confidence::High),
+            ("android-dhcp-14", Phone, Confidence::Medium),
             ("MSFT 5.0", Computer, Confidence::High),
             (
                 "dhcpcd-9.4.1:Linux-6.1.0:aarch64:Raspberry Pi",
@@ -778,7 +852,7 @@ mod tests {
                 Confidence::Low,
             ),
             ("udhcp 1.36.1", Network, Confidence::Low),
-            ("HUAWEI:android:P30", Phone, Confidence::High),
+            ("HUAWEI:android:P30", Phone, Confidence::Medium),
             ("HUAWEI:HG8245", Network, Confidence::Medium),
             ("ubnt", Network, Confidence::Medium),
             ("something-else", Unknown, Confidence::Low),
@@ -797,12 +871,12 @@ mod tests {
         for (host, kind, conf) in [
             ("iPhone", Phone, Medium),
             ("Lucass-iPhone", Phone, Medium),
-            ("Johns-iPad", Tablet, Medium),
-            ("iPad-2", Tablet, Medium),
+            ("Johns-iPad", Tablet, High),
+            ("iPad-2", Tablet, High),
             ("Galaxy-S23", Phone, Medium),
-            ("Galaxy-Tab-S9", Tablet, Medium),
-            ("galaxytab", Tablet, Medium),
-            ("SM-T870", Tablet, Medium),
+            ("Galaxy-Tab-S9", Tablet, High),
+            ("galaxytab", Tablet, High),
+            ("SM-T870", Tablet, High),
             ("SM-G991B", Phone, Medium),
             ("Pixel-8", Phone, Medium),
             ("OnePlus-12", Phone, Medium),
