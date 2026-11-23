@@ -1852,6 +1852,13 @@ fn gsearch_renders_after_wordmark() {
         .next()
         .expect("phone magnifier");
     assert_eq!(phone.value().attr("type"), Some("button"));
+    // the live region is there before any results, so screen readers pick up changes
+    let live = gs
+        .select(&sel("[aria-live=polite]"))
+        .next()
+        .expect("live region");
+    assert!(live.value().classes().any(|c| c == "sr-only"));
+    assert_eq!(text(live).trim(), "");
     // the search box sits on the left: everything else stays in .topbar-right
     assert!(gs.select(&sel(".topbar-right")).next().is_none());
 }

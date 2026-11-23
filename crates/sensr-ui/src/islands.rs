@@ -492,18 +492,23 @@ pub fn GlobalSearch() -> impl IntoView {
             s.active.set(None);
         }
     };
-    // Focus leaving the search (Tab, a click elsewhere) closes the popup and the sheet.
+    // Focus leaving the search (Tab, a click elsewhere) closes the popup. The phone sheet
+    // closes only when focus lands on something else: on iOS, putting the keyboard away
+    // blurs the box with nowhere to go, and must not throw the results away.
     let on_leave = move |ev: leptos::ev::FocusEvent| {
         #[cfg(not(feature = "hydrate"))]
         let _ = ev;
         #[cfg(feature = "hydrate")]
         {
             use wasm_bindgen::JsCast;
-            let inside = ev
+            let to = ev
                 .related_target()
-                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-                .is_some_and(|el| el.closest(".gsearch").ok().flatten().is_some());
-            if !inside {
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+            let away = match &to {
+                Some(el) => el.closest(".gsearch").ok().flatten().is_none(),
+                None => !s.sheet.get_untracked(),
+            };
+            if away {
                 s.open.set(false);
                 s.sheet.set(false);
             }
@@ -532,10 +537,21 @@ pub fn GlobalSearch() -> impl IntoView {
             _ => String::new(),
         })
     };
+    // Read out by screen readers as results come in (the region is there from the start).
+    let announce = move || {
+        s.found.with(|f| match f {
+            Some(Ok(r)) if !r.groups.is_empty() => {
+                let n: usize = r.groups.iter().map(|g| g.hits.len()).sum();
+                format!("{n} result{}", if n == 1 { "" } else { "s" })
+            }
+            _ => status(),
+        })
+    };
     let magnifier = "M7 2.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zM10.3 10.3l3.2 3.2";
 
     view! {
         <div class="gsearch" class:sheet=move || s.sheet.get() on:keydown=on_esc on:focusout=on_leave>
+            <p class="sr-only" aria-live="polite">{announce}</p>
             <button type="button" class="icon-btn gsearch-open" aria-label="Search" node_ref=opener
                 on:click=move |_| focus()>
                 {icon(magnifier)}
@@ -572,7 +588,7 @@ pub fn GlobalSearch() -> impl IntoView {
                         })}
                     </div>
                     <p class="gsearch-status" class:error=move || s.found.with(|f| matches!(f, Some(Err(_))))
-                        role="status" hidden=move || status().is_empty()>{status}</p>
+                        hidden=move || status().is_empty()>{status}</p>
                 </div>
             </div>
         </div>
