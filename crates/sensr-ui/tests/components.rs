@@ -2460,3 +2460,11 @@ fn host_page_escapes_hostile_names() {
     let service = doc.select(&sel("input[name=service]")).next().unwrap();
     assert_eq!(service.value().attr("value"), Some(BAD));
 }
+
+#[test]
+fn wordmark_text_fits_its_box_in_any_font() {
+    // a wider fallback font (Noto, DejaVu) must not clip the final "r"
+    let html = leptos::prelude::view! { <sensr_ui::app::Wordmark/> }.to_html();
+    assert!(html.contains("textLength=\"168\""), "{html}");
+    assert!(html.contains("lengthAdjust=\"spacingAndGlyphs\""), "{html}");
+}

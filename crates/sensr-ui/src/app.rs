@@ -110,7 +110,7 @@ pub fn App() -> impl IntoView {
 pub fn Wordmark() -> impl IntoView {
     view! {
         <svg class="wordmark" viewBox="0 0 174 72" role="img" aria-label="sensr">
-            <text x="2" y="56" font-size="64" font-weight="800" letter-spacing="-2">
+            <text x="2" y="56" font-size="64" font-weight="800" letter-spacing="-2" textLength="168" lengthAdjust="spacingAndGlyphs">
                 <tspan class="wm-s">"s"</tspan><tspan class="wm-ens">"ens"</tspan><tspan class="wm-r">"r"</tspan>
             </text>
         </svg>

@@ -478,7 +478,11 @@ pkgs.testers.runNixOSTest {
             shotPython
           ];
           fonts.fontconfig.enable = true;
+          # Noto for a system-ui-like face (the wordmark fits its box) and
+          # colour emoji for the host-label type icons
           fonts.packages = with pkgs; [
+            noto-fonts
+            noto-fonts-color-emoji
             dejavu_fonts
             liberation_ttf
           ];
