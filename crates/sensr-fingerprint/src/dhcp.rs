@@ -5,6 +5,8 @@
 pub struct DhcpInfo {
     /// Client hardware address.
     pub chaddr: [u8; 6],
+    /// Relay agent address; all zero when the client sent it directly.
+    pub giaddr: [u8; 4],
     /// Option 53, DHCP message type (1 = DISCOVER, 3 = REQUEST, ...).
     pub msg_type: Option<u8>,
     /// Option 12, host name.
@@ -28,8 +30,10 @@ pub fn parse_bootp(udp_payload: &[u8]) -> Option<DhcpInfo> {
         return None;
     }
     let chaddr: [u8; 6] = p.get(28..34)?.try_into().ok()?;
+    let giaddr: [u8; 4] = p.get(24..28)?.try_into().ok()?;
     let mut info = DhcpInfo {
         chaddr,
+        giaddr,
         msg_type: None,
         hostname: None,
         vendor_class: None,

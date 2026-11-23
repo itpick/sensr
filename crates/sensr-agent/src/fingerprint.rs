@@ -146,7 +146,7 @@ fn udp(frame: &[u8]) -> Option<Udp<'_>> {
 }
 
 /// What one frame says about a host, and that host's MAC: a client's DHCP
-/// request (keyed by `chaddr`) or a multicast mDNS packet (keyed by the
+/// request (keyed by `chaddr`; unless relayed, only from that MAC) or a multicast mDNS packet (keyed by the
 /// Ethernet source).
 ///
 /// Passive evidence is only what a device claims: anyone on the LAN can
@@ -158,6 +158,11 @@ pub fn evidence(frame: &[u8]) -> Option<(String, EvidenceUpdate)> {
     let (mac, ev) = if u.dport == DHCP_SERVER_PORT {
         let d = dhcp::parse_bootp(u.payload)?;
         if !d.msg_type.is_some_and(|t| DHCP_TYPES.contains(&t)) {
+            return None;
+        }
+        // sent directly, the frame comes from the client itself: a
+        // chaddr naming another host is someone speaking for it
+        if d.giaddr == [0; 4] && d.chaddr != u.src_mac {
             return None;
         }
         let ev = EvidenceUpdate {
@@ -329,6 +334,10 @@ mod sys {
     /// `sll_pkttype` of a frame this host sent (a backstop: protocol taps
     /// see received frames only).
     const PACKET_OUTGOING: u8 = 4;
+    /// Link types whose frames start with an Ethernet header:
+    /// `ARPHRD_ETHER`, and `ARPHRD_LOOPBACK` (all-zero MACs, never a host's;
+    /// kept for the loopback test).
+    const ETHERNET_HATYPES: [u16; 2] = [1, 772];
     /// Most frames discarded right after the filter is attached.
     const DRAIN_MAX: usize = 4096;
 
@@ -411,7 +420,9 @@ mod sys {
                     Err(e) => return Err(e.into()),
                 };
                 let Some(from) = from else { continue };
-                if from.pkttype() == PACKET_OUTGOING {
+                // a frame without an Ethernet header (WireGuard, tun) would
+                // be misread from byte 0
+                if from.pkttype() == PACKET_OUTGOING || !ETHERNET_HATYPES.contains(&from.hatype()) {
                     continue;
                 }
                 return Ok(Some((n, u32::try_from(from.ifindex()).unwrap_or(0))));
@@ -613,7 +624,10 @@ mod sys {
             let chaddr = [0xaa, 0xbb, 0xcc, 0, 0, 1];
             let tx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
             tx.send_to(b"not for us", "127.0.0.1:9").unwrap();
-            let dhcp = crate::fingerprint::tests::dhcp_discover(chaddr);
+            // relayed: the loopback frame's source MAC is all zero
+            let dhcp = crate::fingerprint::tests::relayed(
+                crate::fingerprint::tests::dhcp_discover(chaddr),
+            );
             tx.send_to(&dhcp, "127.0.0.1:67").unwrap();
             let mut buf = [0u8; 2048];
             let mut got = None;
@@ -1002,6 +1016,23 @@ mod tests {
         p
     }
 
+    /// `d` as a relay agent forwards it (giaddr set).
+    pub(crate) fn relayed(mut d: Vec<u8>) -> Vec<u8> {
+        d[24..28].copy_from_slice(&[192, 168, 9, 1]);
+        d
+    }
+
+    #[test]
+    fn unrelayed_dhcp_must_come_from_its_chaddr() {
+        let other = [0x02, 0, 0, 0, 0, 0x42];
+        let d = dhcp_discover(PHONE);
+        assert!(evidence(&ipv4_udp(other, [255; 4], 68, 67, &d)).is_none());
+        let (mac, _) = evidence(&ipv4_udp(PHONE, [255; 4], 68, 67, &d)).unwrap();
+        assert_eq!(mac, mac_string(PHONE));
+        let (mac, _) = evidence(&ipv4_udp(other, [255; 4], 67, 67, &relayed(d))).unwrap();
+        assert_eq!(mac, mac_string(PHONE), "a relay speaks for the client");
+    }
+
     fn name(labels: &[&str]) -> Vec<u8> {
         let mut out = Vec::new();
         for l in labels {
@@ -1171,11 +1202,10 @@ mod tests {
     #[test]
     fn sniffer_records_dhcp_evidence() {
         let r = rig(&[PHONE]);
-        // from 0.0.0.0:68 to 255.255.255.255:67; the Ethernet source is a
-        // relay's here, the client is chaddr
+        // relayed: the Ethernet source is the relay's, the client is chaddr
         let relay = [0x02, 0, 0, 0, 0, 0x99];
         r.source.push(
-            ipv4_udp(relay, [255; 4], 68, 67, &dhcp_discover(PHONE)),
+            ipv4_udp(relay, [255; 4], 67, 67, &relayed(dhcp_discover(PHONE))),
             LAN,
         );
         r.drain();
