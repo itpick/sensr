@@ -147,6 +147,11 @@ There is a new module beside `isolation.rs`.
   any internal network, except from the router itself. This covers the
   reverse direction for both modes, including traffic routed between LAN and
   LAN2.
+- **Quarantine blocks inbound from everywhere** (added after the final review).
+  - Quarantined addresses also go in `host_quarantine_v4` / `host_quarantine_v6`. These are filled at runtime like `host_locked_*`.
+  - Traffic *to* them is dropped on every interface's `in` chain at priority 0, covering WAN, VPN and internal interfaces, with the router-sourced pass first.
+  - A forward-hook drop runs ahead of the `rdr pass` skip, so port forwards and 1:1 NAT can't reach a quarantined device.
+  - Isolated hosts keep their inbound forwards.
 - Forwarded same-interface traffic (iif == oif, produced by interception)
   hits these same rules in the forward chain.
 - **Existing connections are cut.**
@@ -207,7 +212,7 @@ Quarantine host exists.
   applier (`appliers/sysctl.rs`, which owns `net.ipv4.*`) sets
   `send_redirects=0` for `all` and for each internal interface. That way the
   kernel never tells T to go direct, and no other code fights the applier
-  over these keys. Interception being configured means `arp_intercept` is on
+  over these keys. When interception stops being configured, the applier turns `send_redirects` back to 1 for the keys it last set to 0, using the conf file it wrote under /run. Interception being configured means `arp_intercept` is on
   and at least one host is locked. IP forwarding is already on.
 - **Heal:** when a host leaves the locked set, interception is switched off,
   or the agent shuts down (Drop / SIGTERM path, like the inventory flush),
