@@ -3,8 +3,11 @@
 //!
 //! - [`Sniffer`]: the `sensr-fp` thread. It reads DHCP requests and mDNS
 //!   announcements off the internal interfaces through a read-only
-//!   [`PacketSource`] (`AF_PACKET`, `ETH_P_ALL` on Linux) and hands what
-//!   they say to the inventory, keyed by the sender's MAC.
+//!   [`PacketSource`] and hands what
+//!   they say to the inventory, keyed by the sender's MAC. On Linux these are
+//!   two receive-only `AF_PACKET` taps (`ETH_P_IP`, `ETH_P_IPV6`) with a
+//!   kernel BPF filter, and per-interface mDNS group memberships so the NIC
+//!   passes the multicast frames up.
 //! - [`evidence`]: Ethernet → IPv4/IPv6 → UDP → DHCP/mDNS, pure.
 //! - [`Querier`]: the one packet the router sends, a DNS-SD
 //!   `_services._dns-sd._udp.local` PTR query per internal interface at
@@ -14,7 +17,7 @@
 //! The caller builds the interface list only from `internal_interfaces(doc)`
 //! ([`interfaces`]); frames from any other interface index are dropped.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,8 +38,11 @@ const IDLE_WAIT: Duration = Duration::from_millis(100);
 pub const MDNS_PORT: u16 = 5353;
 /// DHCP server port: client requests go here.
 const DHCP_SERVER_PORT: u16 = 67;
-/// `ETH_P_ALL`.
-pub const ETH_P_ALL: u16 = 0x0003;
+/// Ethertypes the two packet taps listen for.
+pub const ETH_P_IP: u16 = 0x0800;
+pub const ETH_P_IPV6: u16 = 0x86dd;
+/// Wait between receive attempts while the socket keeps failing.
+const ERROR_WAIT: Duration = Duration::from_secs(1);
 /// DHCP DISCOVER and REQUEST: what a client sends when it joins. INFORM
 /// and the rest carry different option lists on some systems (Windows),
 /// which would make the evidence flip back and forth.
@@ -142,6 +148,11 @@ fn udp(frame: &[u8]) -> Option<Udp<'_>> {
 /// What one frame says about a host, and that host's MAC: a client's DHCP
 /// request (keyed by `chaddr`) or a multicast mDNS packet (keyed by the
 /// Ethernet source).
+///
+/// Passive evidence is only what a device claims: anyone on the LAN can
+/// spoof it, and a sleep proxy (an Apple TV answering for a sleeping Mac) or
+/// an mDNS reflector re-sending others' records gets them misattributed to
+/// itself. Labels built on it are hints, never access decisions.
 pub fn evidence(frame: &[u8]) -> Option<(String, EvidenceUpdate)> {
     let u = udp(frame)?;
     let (mac, ev) = if u.dport == DHCP_SERVER_PORT {
@@ -216,12 +227,16 @@ pub const FILTER: [Insn; 22] = [
     (0x06, 0, 0, 0),           // 21 reject
 ];
 
+/// Held while an interface is in the set: its mDNS group memberships.
+/// Dropping it leaves the groups.
+pub type Membership = Box<dyn Send + Sync>;
+
 /// A raw, receive-only link-layer socket.
 pub trait PacketSource: Send + Sync {
-    /// Has interface `index` deliver the mDNS multicast MACs to this
-    /// socket, as a link-layer filter entry: nothing goes on the wire.
-    fn join(&self, _index: u32) -> io::Result<()> {
-        Ok(())
+    /// Has interface `iface` pass the mDNS multicast groups up, so the
+    /// frames reach this socket; held until the guard is dropped.
+    fn join(&self, _iface: &SniffIface) -> io::Result<Membership> {
+        Ok(Box::new(()))
     }
     /// The next frame and the index of the interface it came in on (frames
     /// this host sent are skipped); `WouldBlock`/`TimedOut` after a short
@@ -234,89 +249,167 @@ pub trait QuerySender: Send + Sync {
     fn send(&self, iface: &SniffIface) -> io::Result<()>;
 }
 
+/// The mDNS groups.
+pub const MDNS_V4: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 0, 251);
+pub const MDNS_V6: std::net::Ipv6Addr = std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb);
+
 #[cfg(target_os = "linux")]
 mod sys {
-    use std::io;
+    use std::io::{self, Read};
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
     use std::os::fd::AsRawFd;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use nix::libc;
-    use nix::sys::socket::{LinkAddr, recvfrom, setsockopt};
-    use nix::{setsockopt_impl, sockopt_impl};
+    use nix::sys::socket::{LinkAddr, recvfrom};
 
-    use super::{ETH_P_ALL, FILTER, MDNS_PORT, PacketSource, QuerySender, SniffIface};
+    use super::{
+        ETH_P_IP, ETH_P_IPV6, FILTER, MDNS_PORT, MDNS_V4, MDNS_V6, Membership, PacketSource,
+        QuerySender, SniffIface,
+    };
 
-    sockopt_impl!(
-        /// `PACKET_ADD_MEMBERSHIP`: a link-layer multicast address for one
-        /// interface, held while the socket is open.
-        AddMembership,
-        SetOnly,
-        libc::SOL_PACKET,
-        libc::PACKET_ADD_MEMBERSHIP,
-        libc::packet_mreq
-    );
-
-    /// How long `recv` blocks before the loop takes a turn.
-    const RECV_WAIT: Duration = Duration::from_millis(250);
-    /// `sll_pkttype` of a frame this host sent.
+    /// How long `recv` waits on each of the two sockets before the loop
+    /// takes a turn.
+    const RECV_WAIT: Duration = Duration::from_millis(100);
+    /// `sll_pkttype` of a frame this host sent (a backstop: protocol taps
+    /// see received frames only).
     const PACKET_OUTGOING: u8 = 4;
-    /// 224.0.0.251 and ff02::fb at the link layer.
-    const MDNS_MACS: [[u8; 6]; 2] = [
-        [0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb],
-        [0x33, 0x33, 0x00, 0x00, 0x00, 0xfb],
-    ];
+    /// Most frames discarded right after the filter is attached.
+    const DRAIN_MAX: usize = 4096;
 
-    /// One `AF_PACKET`/`SOCK_RAW` socket for `ETH_P_ALL` on every interface,
-    /// with [`FILTER`] attached. Nothing is ever sent on it.
+    fn would_block(e: &io::Error) -> bool {
+        matches!(
+            e.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+        )
+    }
+
+    /// An `AF_PACKET`/`SOCK_RAW` tap for one ethertype, with [`FILTER`].
+    /// A protocol-specific tap is on the receive path only, so frames the
+    /// router transmits or forwards out are never copied to it.
+    fn tap(ethertype: u16) -> io::Result<socket2::Socket> {
+        let sock = socket2::Socket::new(
+            socket2::Domain::PACKET,
+            socket2::Type::RAW,
+            Some(socket2::Protocol::from(i32::from(ethertype.to_be()))),
+        )?;
+        let prog: Vec<socket2::SockFilter> = FILTER
+            .iter()
+            .map(|&(code, jt, jf, k)| socket2::SockFilter::new(code, jt, jf, k))
+            .collect();
+        sock.attach_filter(&prog)?;
+        drain(&sock)?;
+        sock.set_read_timeout(Some(RECV_WAIT))?;
+        Ok(sock)
+    }
+
+    /// Discards what was queued before the filter was attached.
+    fn drain(sock: &socket2::Socket) -> io::Result<()> {
+        sock.set_nonblocking(true)?;
+        // a short read drops the rest of the frame
+        let mut buf = [0u8; 64];
+        for _ in 0..DRAIN_MAX {
+            match (&*sock).read(&mut buf) {
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
+            }
+        }
+        sock.set_nonblocking(false)
+    }
+
+    /// Two receive-only taps, IPv4 and IPv6, on every interface. Nothing is
+    /// ever sent on them.
     pub struct AfPacketSource {
-        sock: socket2::Socket,
+        socks: [socket2::Socket; 2],
+        /// Which tap is read first next; they take turns.
+        turn: AtomicUsize,
     }
 
     impl AfPacketSource {
         /// Needs `CAP_NET_RAW`.
         pub fn open() -> io::Result<Self> {
-            let sock = socket2::Socket::new(
-                socket2::Domain::PACKET,
-                socket2::Type::RAW,
-                Some(socket2::Protocol::from(i32::from(ETH_P_ALL.to_be()))),
-            )?;
-            let prog: Vec<socket2::SockFilter> = FILTER
-                .iter()
-                .map(|&(code, jt, jf, k)| socket2::SockFilter::new(code, jt, jf, k))
-                .collect();
-            sock.attach_filter(&prog)?;
-            sock.set_read_timeout(Some(RECV_WAIT))?;
-            Ok(Self { sock })
+            Ok(Self {
+                socks: [tap(ETH_P_IP)?, tap(ETH_P_IPV6)?],
+                turn: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    fn recv_one(sock: &socket2::Socket, buf: &mut [u8]) -> io::Result<(usize, u32)> {
+        loop {
+            let (n, from) = recvfrom::<LinkAddr>(sock.as_raw_fd(), buf)?;
+            let Some(from) = from else { continue };
+            if from.pkttype() == PACKET_OUTGOING {
+                continue;
+            }
+            return Ok((n, u32::try_from(from.ifindex()).unwrap_or(0)));
         }
     }
 
     impl PacketSource for AfPacketSource {
-        fn join(&self, index: u32) -> io::Result<()> {
-            let ifindex = i32::try_from(index).map_err(io::Error::other)?;
-            for mac in MDNS_MACS {
-                let mut mr_address = [0u8; 8];
-                mr_address[..6].copy_from_slice(&mac);
-                let m = libc::packet_mreq {
-                    mr_ifindex: ifindex,
-                    mr_type: libc::PACKET_MR_MULTICAST as u16,
-                    mr_alen: 6,
-                    mr_address,
-                };
-                setsockopt(&self.sock, AddMembership, &m)?;
+        /// A UDP socket per family on an ephemeral port (so nothing is
+        /// delivered to it) that joins the mDNS group on the interface: the
+        /// kernel then programs the NIC to accept the group's frames.
+        fn join(&self, iface: &SniffIface) -> io::Result<Membership> {
+            let (v4, _) = addrs(&iface.device)?;
+            let mut held: Vec<socket2::Socket> = Vec::new();
+            let mut first_err = None;
+            if let Some(a) = v4 {
+                let r = (|| {
+                    let s = socket2::Socket::new(
+                        socket2::Domain::IPV4,
+                        socket2::Type::DGRAM,
+                        Some(socket2::Protocol::UDP),
+                    )?;
+                    s.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)).into())?;
+                    s.join_multicast_v4(&MDNS_V4, &a)?;
+                    Ok::<_, io::Error>(s)
+                })();
+                match r {
+                    Ok(s) => held.push(s),
+                    Err(e) => {
+                        first_err.get_or_insert(e);
+                    }
+                }
             }
-            Ok(())
+            let r = (|| {
+                let s = socket2::Socket::new(
+                    socket2::Domain::IPV6,
+                    socket2::Type::DGRAM,
+                    Some(socket2::Protocol::UDP),
+                )?;
+                s.set_only_v6(true)?;
+                s.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)).into())?;
+                s.join_multicast_v6(&MDNS_V6, iface.index)?;
+                Ok::<_, io::Error>(s)
+            })();
+            match r {
+                Ok(s) => held.push(s),
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+            match (held.is_empty(), first_err) {
+                (true, Some(e)) => Err(e),
+                _ => Ok(Box::new(held)),
+            }
         }
 
         fn recv(&self, buf: &mut [u8]) -> io::Result<(usize, u32)> {
-            loop {
-                let (n, from) = recvfrom::<LinkAddr>(self.sock.as_raw_fd(), buf)?;
-                let Some(from) = from else { continue };
-                if from.pkttype() == PACKET_OUTGOING {
-                    continue;
+            let first = self.turn.load(Ordering::Relaxed);
+            for k in 0..2 {
+                let i = (first + k) % 2;
+                match recv_one(&self.socks[i], buf) {
+                    Ok(r) => {
+                        self.turn.store((i + 1) % 2, Ordering::Relaxed);
+                        return Ok(r);
+                    }
+                    Err(e) if would_block(&e) => {}
+                    Err(e) => return Err(e),
                 }
-                return Ok((n, u32::try_from(from.ifindex()).unwrap_or(0)));
             }
+            Err(io::ErrorKind::WouldBlock.into())
         }
     }
 
@@ -339,9 +432,13 @@ mod sys {
 
     /// A UDP socket from `bind`, port 5353 where the host allows sharing it
     /// (answers to a query from 5353 go to the group), else any port.
+    /// `IPV6_V6ONLY` is set before the bind: Linux refuses it after.
     fn udp(bind: SocketAddr) -> io::Result<socket2::Socket> {
         let domain = socket2::Domain::for_address(bind);
         let s = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+        if bind.is_ipv6() {
+            s.set_only_v6(true)?;
+        }
         s.set_reuse_address(true)?;
         s.set_reuse_port(true)?;
         if s.bind(&bind.into()).is_err() {
@@ -349,6 +446,24 @@ mod sys {
             any.set_port(0);
             s.bind(&any.into())?;
         }
+        Ok(s)
+    }
+
+    /// The IPv4 query socket: from `a`, out of `a`'s interface.
+    fn v4_sender(a: Ipv4Addr) -> io::Result<socket2::Socket> {
+        let s = udp(SocketAddrV4::new(a, MDNS_PORT).into())?;
+        s.set_multicast_if_v4(&a)?;
+        s.set_multicast_ttl_v4(255)?;
+        s.set_multicast_loop_v4(false)?;
+        Ok(s)
+    }
+
+    /// The IPv6 query socket: from link-local `a` on interface `index`.
+    fn v6_sender(a: Ipv6Addr, index: u32) -> io::Result<socket2::Socket> {
+        let s = udp(SocketAddrV6::new(a, MDNS_PORT, 0, index).into())?;
+        s.set_multicast_if_v6(index)?;
+        s.set_multicast_hops_v6(255)?;
+        s.set_multicast_loop_v6(false)?;
         Ok(s)
     }
 
@@ -368,34 +483,85 @@ mod sys {
             let q = super::query_packet();
             let mut first_err = None;
             if let Some(a) = v4 {
-                let r = (|| {
-                    let s = udp(SocketAddrV4::new(a, MDNS_PORT).into())?;
-                    s.set_multicast_if_v4(&a)?;
-                    s.set_multicast_ttl_v4(255)?;
-                    s.set_multicast_loop_v4(false)?;
-                    let to = SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), MDNS_PORT);
-                    s.send_to(&q, &SocketAddr::from(to).into()).map(drop)
-                })();
-                if let Err(e) = r {
+                let to = SocketAddr::from(SocketAddrV4::new(MDNS_V4, MDNS_PORT));
+                if let Err(e) = v4_sender(a).and_then(|s| s.send_to(&q, &to.into())) {
                     first_err.get_or_insert(e);
                 }
             }
             if let Some(a) = v6 {
-                let r = (|| {
-                    let s = udp(SocketAddrV6::new(a, MDNS_PORT, 0, iface.index).into())?;
-                    s.set_only_v6(true)?;
-                    s.set_multicast_if_v6(iface.index)?;
-                    s.set_multicast_hops_v6(255)?;
-                    s.set_multicast_loop_v6(false)?;
-                    let group = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb);
-                    let to = SocketAddrV6::new(group, MDNS_PORT, 0, iface.index);
-                    s.send_to(&q, &SocketAddr::from(to).into()).map(drop)
-                })();
-                if let Err(e) = r {
+                let to = SocketAddr::from(SocketAddrV6::new(MDNS_V6, MDNS_PORT, 0, iface.index));
+                if let Err(e) = v6_sender(a, iface.index).and_then(|s| s.send_to(&q, &to.into())) {
                     first_err.get_or_insert(e);
                 }
             }
             first_err.map_or(Ok(()), Err)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Every option the senders set is accepted, in this order (Linux
+        /// refuses `IPV6_V6ONLY` after the bind).
+        #[test]
+        fn sender_sockets_build_on_loopback() {
+            v4_sender(Ipv4Addr::LOCALHOST).expect("IPv4 sender");
+            let lo = nix::net::if_::if_nametoindex("lo").expect("lo");
+            match socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, None) {
+                // no IPv6 in this environment
+                Err(_) => {}
+                Ok(_) => {
+                    v6_sender(Ipv6Addr::LOCALHOST, lo).expect("IPv6 sender");
+                }
+            }
+        }
+
+        /// The real taps end to end: filter attached, both sockets read,
+        /// the interface index reported, and other traffic kept out.
+        #[test]
+        #[ignore = "needs CAP_NET_RAW"]
+        fn af_packet_taps_see_dhcp_on_loopback() {
+            let lo = nix::net::if_::if_nametoindex("lo").expect("lo");
+            let src = AfPacketSource::open().unwrap();
+            let _m = src.join(&SniffIface {
+                id: "lo".into(),
+                device: "lo".into(),
+                index: lo,
+            });
+            let chaddr = [0xaa, 0xbb, 0xcc, 0, 0, 1];
+            let tx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            tx.send_to(b"not for us", "127.0.0.1:9").unwrap();
+            let dhcp = crate::fingerprint::tests::dhcp_discover(chaddr);
+            tx.send_to(&dhcp, "127.0.0.1:67").unwrap();
+            let mut buf = [0u8; 2048];
+            let mut got = None;
+            for _ in 0..20 {
+                match src.recv(&mut buf) {
+                    Ok(r) => {
+                        got = Some(r);
+                        break;
+                    }
+                    Err(e) if would_block(&e) => {}
+                    Err(e) => panic!("{e}"),
+                }
+            }
+            let (n, index) = got.expect("the DHCP frame");
+            assert_eq!(index, lo);
+            let (mac, ev) = crate::fingerprint::evidence(&buf[..n]).expect("parsed");
+            assert_eq!(mac, "aa:bb:cc:00:00:01");
+            assert_eq!(ev.dhcp_hostname.as_deref(), Some("Pixel-8"));
+            let again = src.recv(&mut buf).unwrap_err();
+            assert!(would_block(&again), "port 9 was filtered: {again:?}");
+        }
+
+        #[test]
+        fn udp_sets_v6only_before_bind() {
+            if socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, None).is_err() {
+                return;
+            }
+            let s = udp(SocketAddr::from((Ipv6Addr::LOCALHOST, 0))).expect("bound");
+            assert!(s.only_v6().unwrap());
         }
     }
 }
@@ -473,8 +639,9 @@ struct State {
     /// The internal interfaces; frames from any other index are dropped.
     ifaces: Vec<SniffIface>,
     socket: Option<Arc<dyn PacketSource>>,
-    /// Interface indexes the socket has the mDNS MACs for.
-    joined: BTreeSet<u32>,
+    /// mDNS group memberships by interface index, held while the
+    /// interface is in the set.
+    joined: BTreeMap<u32, Membership>,
     /// Why the socket could not be opened, logged once.
     error: Option<String>,
     querier: Querier,
@@ -491,6 +658,8 @@ pub struct Sniffer {
     clock: Arc<dyn Clock>,
     sink: Sink,
     state: Mutex<State>,
+    /// The last receive error's kind: logged at warn once, then debug.
+    recv_error: Mutex<Option<io::ErrorKind>>,
     stopped: AtomicBool,
     started: AtomicBool,
 }
@@ -509,6 +678,7 @@ impl Sniffer {
             clock,
             sink,
             state: Mutex::new(State::default()),
+            recv_error: Mutex::new(None),
             stopped: AtomicBool::new(false),
             started: AtomicBool::new(false),
         })
@@ -554,17 +724,20 @@ impl Sniffer {
                 }
             }
         }
+        // leaving the set leaves the groups
+        st.joined
+            .retain(|index, _| ifaces.iter().any(|i| i.index == *index));
         if let Some(sock) = st.socket.clone() {
             for i in &ifaces {
-                if st.joined.contains(&i.index) {
+                if st.joined.contains_key(&i.index) {
                     continue;
                 }
-                match sock.join(i.index) {
-                    Ok(()) => {
-                        st.joined.insert(i.index);
+                match sock.join(i) {
+                    Ok(m) => {
+                        st.joined.insert(i.index, m);
                     }
                     Err(e) => {
-                        tracing::debug!(device = %i.device, error = %e, "mDNS link membership");
+                        tracing::debug!(device = %i.device, error = %e, "mDNS group membership");
                     }
                 }
             }
@@ -609,7 +782,10 @@ impl Sniffer {
         match sock {
             None => self.clock.sleep(IDLE_WAIT),
             Some(s) => match s.recv(buf) {
-                Ok((n, index)) => self.on_frame(buf.get(..n).unwrap_or_default(), index),
+                Ok((n, index)) => {
+                    lock(&self.recv_error).take();
+                    self.on_frame(buf.get(..n).unwrap_or_default(), index);
+                }
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -618,8 +794,16 @@ impl Sniffer {
                             | io::ErrorKind::Interrupted
                     ) => {}
                 Err(e) => {
-                    tracing::warn!(error = %e, "host fingerprint receive");
-                    self.clock.sleep(IDLE_WAIT);
+                    {
+                        let mut last = lock(&self.recv_error);
+                        if *last == Some(e.kind()) {
+                            tracing::debug!(error = %e, "host fingerprint receive");
+                        } else {
+                            tracing::warn!(error = %e, "host fingerprint receive");
+                            *last = Some(e.kind());
+                        }
+                    }
+                    self.clock.sleep(ERROR_WAIT);
                 }
             },
         }
@@ -717,7 +901,7 @@ mod tests {
         eth(src, [0x33, 0x33, 0, 0, 0, 0xfb], 0x86dd, &ip)
     }
 
-    fn dhcp_discover(chaddr: [u8; 6]) -> Vec<u8> {
+    pub(crate) fn dhcp_discover(chaddr: [u8; 6]) -> Vec<u8> {
         let mut p = vec![0u8; 240];
         p[0] = 1;
         p[1] = 1;
@@ -763,18 +947,41 @@ mod tests {
         p
     }
 
+    /// Counts joins per interface index and releases (guard drops).
     #[derive(Default)]
-    struct MockSource(Mutex<Vec<(Vec<u8>, u32)>>);
+    struct MockSource {
+        frames: Mutex<Vec<(Vec<u8>, u32)>>,
+        joins: Mutex<Vec<u32>>,
+        released: Arc<Mutex<Vec<u32>>>,
+        /// Returned by every `recv` while set.
+        fail: Mutex<Option<io::ErrorKind>>,
+    }
+
+    struct Guard(u32, Arc<Mutex<Vec<u32>>>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            lock(&self.1).push(self.0);
+        }
+    }
 
     impl MockSource {
         fn push(&self, frame: Vec<u8>, index: u32) {
-            lock(&self.0).push((frame, index));
+            lock(&self.frames).push((frame, index));
         }
     }
 
     impl PacketSource for MockSource {
+        fn join(&self, iface: &SniffIface) -> io::Result<Membership> {
+            lock(&self.joins).push(iface.index);
+            Ok(Box::new(Guard(iface.index, Arc::clone(&self.released))))
+        }
+
         fn recv(&self, buf: &mut [u8]) -> io::Result<(usize, u32)> {
-            let mut q = lock(&self.0);
+            if let Some(k) = *lock(&self.fail) {
+                return Err(k.into());
+            }
+            let mut q = lock(&self.frames);
             if q.is_empty() {
                 return Err(io::ErrorKind::WouldBlock.into());
             }
@@ -794,7 +1001,7 @@ mod tests {
         }
     }
 
-    struct TestClock(Mutex<Instant>);
+    struct TestClock(Mutex<Instant>, Mutex<Vec<Duration>>);
 
     impl TestClock {
         fn advance(&self, d: Duration) {
@@ -806,7 +1013,9 @@ mod tests {
         fn now(&self) -> Instant {
             *lock(&self.0)
         }
-        fn sleep(&self, _: Duration) {}
+        fn sleep(&self, d: Duration) {
+            lock(&self.1).push(d);
+        }
     }
 
     struct Rig {
@@ -837,7 +1046,7 @@ mod tests {
         let hosts = HostCollector::new(HostStore::new(path), Arc::new(|| (Vec::new(), Vec::new())));
         let source = Arc::new(MockSource::default());
         let sender = Arc::new(MockSender::default());
-        let clock = Arc::new(TestClock(Mutex::new(Instant::now())));
+        let clock = Arc::new(TestClock(Mutex::new(Instant::now()), Mutex::default()));
         let (s, h) = (Arc::clone(&source), Arc::clone(&hosts));
         let sniffer = Sniffer::new(
             Arc::new(move || Ok(Arc::clone(&s) as Arc<dyn PacketSource>)),
@@ -861,7 +1070,7 @@ mod tests {
     impl Rig {
         fn drain(&self) {
             let mut buf = vec![0u8; 2048];
-            while !lock(&self.source.0).is_empty() {
+            while !lock(&self.source.frames).is_empty() {
                 self.sniffer.step(&mut buf);
             }
         }
@@ -1080,5 +1289,76 @@ mod tests {
         for f in &drop {
             assert_eq!(bpf(&FILTER, f), 0, "{f:02x?}");
         }
+    }
+
+    fn opt1() -> SniffIface {
+        SniffIface {
+            id: "opt1".into(),
+            device: "igc2".into(),
+            index: 4,
+        }
+    }
+
+    #[test]
+    fn groups_are_joined_once_per_interface_and_left_on_removal() {
+        let r = rig(&[]);
+        assert_eq!(*lock(&r.source.joins), [LAN]);
+        r.sniffer.set_interfaces(vec![lan(), opt1()]);
+        r.sniffer.set_interfaces(vec![lan(), opt1()]);
+        assert_eq!(*lock(&r.source.joins), [LAN, 4], "once each");
+        assert!(lock(&r.source.released).is_empty());
+        r.sniffer.set_interfaces(vec![lan()]);
+        assert_eq!(*lock(&r.source.released), [4], "opt1 left the set");
+        r.sniffer.set_interfaces(Vec::new());
+        assert_eq!(*lock(&r.source.released), [4, LAN], "all left when off");
+        // back on: joined again
+        r.sniffer.set_interfaces(vec![lan()]);
+        assert_eq!(*lock(&r.source.joins), [LAN, 4, LAN]);
+        r.sniffer.stop();
+        assert_eq!(*lock(&r.source.released), [4, LAN, LAN], "and on stop");
+    }
+
+    #[test]
+    fn a_failing_socket_backs_off_to_one_second() {
+        let r = rig(&[]);
+        *lock(&r.source.fail) = Some(io::ErrorKind::NetworkDown);
+        let mut buf = vec![0u8; 2048];
+        for _ in 0..3 {
+            r.sniffer.step(&mut buf);
+        }
+        assert_eq!(*lock(&r.clock.1), [ERROR_WAIT; 3]);
+        assert_eq!(
+            *lock(&r.sniffer.recv_error),
+            Some(io::ErrorKind::NetworkDown)
+        );
+        // a frame clears it; a timeout is not an error
+        *lock(&r.source.fail) = None;
+        r.source.push(vec![0; 20], LAN);
+        r.sniffer.step(&mut buf);
+        r.sniffer.step(&mut buf);
+        assert_eq!(*lock(&r.sniffer.recv_error), None);
+        assert_eq!(lock(&r.clock.1).len(), 3, "no more sleeps");
+    }
+
+    /// `ipv4_udp`'s frame with 4 bytes of IPv4 options (IHL 6).
+    fn with_ip_options(mut f: Vec<u8>) -> Vec<u8> {
+        f[14] = 0x46;
+        let total = u16::from_be_bytes([f[16], f[17]]) + 4;
+        f[16..18].copy_from_slice(&total.to_be_bytes());
+        f.splice(34..34, [1, 1, 1, 0]); // NOP NOP NOP EOL
+        f
+    }
+
+    #[test]
+    fn ipv4_options_are_skipped() {
+        let f = with_ip_options(ipv4_udp(PHONE, [255; 4], 68, 67, &dhcp_discover(PHONE)));
+        assert_ne!(bpf(&FILTER, &f), 0, "kernel filter keeps it");
+        let (mac, ev) = evidence(&f).expect("parsed past the options");
+        assert_eq!(mac, "aa:bb:cc:00:00:01");
+        assert_eq!(ev.dhcp_hostname.as_deref(), Some("Pixel-8"));
+        let m = mdns_response(&["_ipp._tcp".to_owned()]);
+        let f = with_ip_options(ipv4_udp(PHONE, [224, 0, 0, 251], 5353, 5353, &m));
+        assert_ne!(bpf(&FILTER, &f), 0);
+        assert_eq!(evidence(&f).unwrap().1.mdns_services, ["_ipp._tcp"]);
     }
 }
