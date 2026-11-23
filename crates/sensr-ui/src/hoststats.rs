@@ -150,6 +150,78 @@ fn live_ipv6(root: &Path) -> HashMap<String, String> {
     best.into_iter().map(|(d, (_, a))| (d, a)).collect()
 }
 
+/// The CPU line: x86 `model name`, else the board (device-tree model) and the
+/// Arm core name from its `CPU part`, e.g. `Raspberry Pi 5 Model B Rev 1.1 ·
+/// Cortex-A76`.
+fn cpu_model(cpuinfo: &str, board: Option<&str>) -> String {
+    let field = |key: &str| {
+        cpuinfo.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            (k.trim() == key).then(|| v.trim().to_owned())
+        })
+    };
+    if let Some(m) = field("model name").filter(|m| !m.is_empty()) {
+        return m;
+    }
+    let board = board
+        .map(|b| {
+            b.trim_matches(|c: char| c == '\0' || c.is_whitespace())
+                .to_owned()
+        })
+        .filter(|b| !b.is_empty())
+        .or_else(|| field("Model"));
+    let core = field("CPU part").and_then(|p| arm_core(&p));
+    match (board, core) {
+        (Some(b), Some(c)) => format!("{b} · {c}"),
+        (Some(b), None) => b,
+        (None, Some(c)) => c.to_owned(),
+        (None, None) => String::new(),
+    }
+}
+
+/// Arm Ltd core names by `CPU part` (implementer 0x41).
+fn arm_core(part: &str) -> Option<&'static str> {
+    let part = u32::from_str_radix(part.trim().trim_start_matches("0x"), 16).ok()?;
+    Some(match part {
+        0xd03 => "Cortex-A53",
+        0xd04 => "Cortex-A35",
+        0xd05 => "Cortex-A55",
+        0xd07 => "Cortex-A57",
+        0xd08 => "Cortex-A72",
+        0xd09 => "Cortex-A73",
+        0xd0a => "Cortex-A75",
+        0xd0b => "Cortex-A76",
+        0xd0c => "Neoverse-N1",
+        0xd0d => "Cortex-A77",
+        0xd41 => "Cortex-A78",
+        0xd44 => "Cortex-X1",
+        0xd46 => "Cortex-A510",
+        0xd47 => "Cortex-A710",
+        0xd49 => "Neoverse-N2",
+        0xd4b => "Cortex-A78C",
+        0xd4d => "Cortex-A715",
+        0xd80 => "Cortex-A520",
+        0xd81 => "Cortex-A720",
+        _ => return None,
+    })
+}
+
+/// `NixOS 26.11` from os-release (`NAME` + `VERSION_ID`).
+fn os_version(os_release: Option<&str>) -> Option<String> {
+    let s = os_release?;
+    let get = |key: &str| {
+        s.lines().find_map(|l| {
+            let v = l.strip_prefix(key)?.strip_prefix('=')?;
+            Some(v.trim().trim_matches('"').to_owned())
+        })
+    };
+    let name = get("NAME").filter(|n| !n.is_empty())?;
+    Some(match get("VERSION_ID").filter(|v| !v.is_empty()) {
+        Some(v) => format!("{name} {v}"),
+        None => name,
+    })
+}
+
 impl Sampler {
     /// A sampler reading `<root>/proc` and `<root>/sys` (tests point it at a fixture tree).
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -200,19 +272,27 @@ impl Sampler {
         let uptime_secs = read(root, "proc/uptime")
             .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
             .map_or(0, |f| f as u64);
-        let cpu_model = read(root, "proc/cpuinfo")
-            .and_then(|s| {
-                s.lines()
-                    .find(|l| l.starts_with("model name") || l.starts_with("Model"))
-                    .and_then(|l| l.split_once(':'))
-                    .map(|(_, v)| v.trim().to_owned())
+        let cpuinfo = read(root, "proc/cpuinfo").unwrap_or_default();
+        let cpu_model = cpu_model(&cpuinfo, read(root, "proc/device-tree/model").as_deref());
+        let cores = cpuinfo
+            .lines()
+            .filter(|l| l.starts_with("processor"))
+            .count();
+        let kernel =
+            read(root, "proc/sys/kernel/osrelease").map_or_else(String::new, |k| match os_version(
+                read(root, "etc/os-release").as_deref(),
+            ) {
+                Some(os) => format!("Linux {} ({os})", k.trim()),
+                None => format!("Linux {}", k.trim()),
+            });
+        // the installed release tag, which the updater records world-readably
+        let version = read(root, "run/sensr/updates/status.json")
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| {
+                let tag = get_path(&v, "current.tag")?.as_str()?.trim().to_owned();
+                (!tag.is_empty()).then(|| format!("sensr {}", tag.trim_start_matches('v')))
             })
-            .unwrap_or_default();
-        let cores = read(root, "proc/cpuinfo").map_or(0, |s| {
-            s.lines().filter(|l| l.starts_with("processor")).count()
-        });
-        let kernel = read(root, "proc/sys/kernel/osrelease")
-            .map_or_else(String::new, |k| format!("Linux {}", k.trim()));
+            .unwrap_or_else(|| version.to_owned());
 
         let text = |v: &Value, p: &str| {
             get_path(v, p)
@@ -281,7 +361,7 @@ impl Sampler {
                 text(doc, "system.hostname"),
                 text(doc, "system.domain")
             ),
-            version: version.to_owned(),
+            version,
             kernel,
             cpu_model: if cores > 0 {
                 format!("{cpu_model} ({cores} cores)")
@@ -409,6 +489,7 @@ fe800000000000000000000000000045 02 40 20 80     eth0\n\
         assert_eq!(a.hostname, "fw.example.org");
         assert_eq!(a.kernel, "Linux 6.18.4");
         assert_eq!(a.cpu_model, "Test CPU (2 cores)");
+        assert_eq!(a.version, "test", "no updater status: the agent's version");
         assert_eq!((a.mem_total, a.mem_used), (8_192_000_000, 2_048_000_000));
         assert_eq!(a.uptime_secs, 3600);
         assert_eq!(a.load, [0.5, 0.4, 0.3]);
@@ -429,5 +510,60 @@ fe800000000000000000000000000045 02 40 20 80     eth0\n\
             cpu_times("cpu  100 0 100 700 100 0 0 0\n"),
             Some((200, 1000))
         );
+    }
+
+    #[test]
+    fn cpu_model_names_arm_boards() {
+        let pi5 =
+            "processor\t: 0\nBogoMIPS\t: 108.00\nCPU implementer\t: 0x41\nCPU part\t: 0xd0b\n";
+        assert_eq!(
+            cpu_model(pi5, Some("Raspberry Pi 5 Model B Rev 1.1\0")),
+            "Raspberry Pi 5 Model B Rev 1.1 · Cortex-A76"
+        );
+        assert_eq!(cpu_model(pi5, None), "Cortex-A76");
+        assert_eq!(cpu_model("CPU part\t: 0xfff\n", Some("Board X")), "Board X");
+        assert_eq!(
+            cpu_model("model name\t: Intel(R) N100\n", Some("ignored")),
+            "Intel(R) N100"
+        );
+        assert_eq!(cpu_model("", None), "");
+    }
+
+    #[test]
+    fn os_version_from_os_release() {
+        let os =
+            "NAME=NixOS\nID=nixos\nVERSION_ID=\"26.11\"\nPRETTY_NAME=\"NixOS 26.11 (Zokor)\"\n";
+        assert_eq!(os_version(Some(os)).as_deref(), Some("NixOS 26.11"));
+        assert_eq!(os_version(Some("NAME=Debian\n")).as_deref(), Some("Debian"));
+        assert_eq!(os_version(Some("ID=x\n")), None);
+        assert_eq!(os_version(None), None);
+    }
+
+    #[test]
+    fn version_and_kernel_from_the_running_system() {
+        let dir =
+            std::env::temp_dir().join(format!("sensr-ui-hoststats-rel-{}", std::process::id()));
+        fixture(&dir, 1_000);
+        let w = |p: &str, s: &str| {
+            let f = dir.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, s).unwrap();
+        };
+        w(
+            "run/sensr/updates/status.json",
+            r#"{"phase":"up-to-date","current":{"version":"sd-card-26.11","tag":"v0.1.12","image":"pi5"}}"#,
+        );
+        w("etc/os-release", "NAME=NixOS\nVERSION_ID=\"26.11\"\n");
+        let doc = json!({"system": {"hostname": "fw", "domain": "example.org"}});
+        let a = Sampler::new(&dir).sample(&doc, "sensr 0.0.0");
+        assert_eq!(a.version, "sensr 0.1.12");
+        assert_eq!(a.kernel, "Linux 6.18.4 (NixOS 26.11)");
+        // an empty or missing tag keeps the agent's version
+        w("run/sensr/updates/status.json", r#"{"current":{"tag":""}}"#);
+        assert_eq!(
+            Sampler::new(&dir).sample(&doc, "sensr 0.0.0").version,
+            "sensr 0.0.0"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
