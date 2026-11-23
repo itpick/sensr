@@ -1281,12 +1281,14 @@ pub fn DashboardLive(initial: SystemStatus) -> impl IntoView {
 }
 
 /// A dashboard interface series as chart samples.
+/// Without a timestamp per sample, every one is 0 and the chart shows no times.
 fn series_samples(t: &TrafficSeries) -> Vec<Sample> {
+    let timed = t.ts.len() == t.rx.len();
     t.rx.iter()
         .zip(&t.tx)
         .enumerate()
         .map(|(i, (rx, tx))| Sample {
-            ts: t.ts.get(i).copied().unwrap_or(i as i64),
+            ts: if timed { t.ts[i] } else { 0 },
             rx: *rx,
             tx: *tx,
         })

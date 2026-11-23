@@ -1247,7 +1247,7 @@ fn time_ticks_fall_on_round_local_times() {
     const T: i64 = 1_794_787_200; // 00:00:00 UTC
     // Two minutes: every 30 s, none in the outer 6 %.
     assert_eq!(time_ticks(T + 2, T + 122, 0), [T + 30, T + 60, T + 90]);
-    // One minute: every 15 s; ten minutes: every 2 min; one hour: every 15 min.
+    // One minute: every 15 s; ten minutes: every 2 min; one hour: every 10 min.
     assert_eq!(time_ticks(T - 59, T, 0), [T - 45, T - 30, T - 15]);
     assert_eq!(
         time_ticks(T, T + 600, 0),
@@ -1255,12 +1255,13 @@ fn time_ticks_fall_on_round_local_times() {
     );
     assert_eq!(
         time_ticks(T - 3_540, T + 60, 0),
-        [T - 2_700, T - 1_800, T - 900]
+        [T - 3_000, T - 2_400, T - 1_800, T - 1_200, T - 600]
     );
-    // Aligned to local time: 10 minutes east of UTC moves the quarter hours with it.
+    // Aligned to local time: 5 minutes east of UTC puts six 10-minute marks in the
+    // hour, too many, so quarter hours, shifted with it.
     assert_eq!(
-        time_ticks(T - 3_540, T + 60, 600),
-        [T - 3_300, T - 2_400, T - 1_500, T - 600]
+        time_ticks(T - 3_540, T + 60, 300),
+        [T - 3_000, T - 2_100, T - 1_200, T - 300]
     );
     assert!(time_ticks(T, T, 0).is_empty());
     assert_eq!(clock(T + 3_723, 0, false), "01:02");
@@ -1350,4 +1351,105 @@ fn dashboard_traffic_cards_use_the_axis_chart() {
         doc.select(&sel(".spark")).next().is_none(),
         "old sparklines are gone"
     );
+}
+
+fn samples_at(ts: &[i64]) -> Vec<sensr_ui::chart::Sample> {
+    ts.iter()
+        .map(|t| sensr_ui::chart::Sample {
+            ts: *t,
+            rx: 1_000_000,
+            tx: 500_000,
+        })
+        .collect()
+}
+
+#[test]
+fn clock_jumps_and_bad_timestamps_are_contained() {
+    use sensr_ui::chart::{prepare, time_ticks};
+    const NOW: i64 = 1_780_000_000;
+    // A 56-year span (boot in 1970, then NTP): no time axis, and no O(span) loop.
+    assert!(time_ticks(100, NOW, 0).is_empty());
+    assert!(time_ticks(NOW, NOW, 0).is_empty());
+    assert!(time_ticks(NOW, NOW - 5, 0).is_empty());
+    assert!(time_ticks(NOW - 86_400, NOW, 0).len() <= 5);
+    let ts = |s: &[sensr_ui::chart::Sample]| s.iter().map(|p| p.ts).collect::<Vec<_>>();
+
+    // Jump forward: only the samples after the jump.
+    let (s, timed) = prepare(&samples_at(&[100, 103, 106, NOW, NOW + 3, NOW + 6]));
+    assert!(timed);
+    assert_eq!(ts(&s), [NOW, NOW + 3, NOW + 6]);
+    // Backwards: only the trailing run.
+    let (s, timed) = prepare(&samples_at(&[NOW, NOW + 3, NOW + 6, NOW - 500, NOW - 497]));
+    assert!(timed);
+    assert_eq!(ts(&s), [NOW - 500, NOW - 497]);
+    // Duplicates (two viewers in one second) are kept.
+    let (s, timed) = prepare(&samples_at(&[NOW, NOW + 3, NOW + 3, NOW + 6]));
+    assert!(timed);
+    assert_eq!(s.len(), 4);
+    // A jump right before the newest sample leaves one sample: no times.
+    let (s, timed) = prepare(&samples_at(&[100, 103, NOW]));
+    assert!(!timed);
+    assert_eq!(ts(&s), [0]);
+    // No timestamps at all: evenly spaced, no times.
+    let (s, timed) = prepare(&samples_at(&[0, 0, 0, 0]));
+    assert!(!timed);
+    assert_eq!(ts(&s), [0, 1, 2, 3]);
+    assert_eq!(prepare(&[]), (Vec::new(), false));
+}
+
+#[test]
+fn tooltip_stays_inside_the_plot() {
+    use sensr_ui::chart::tip_left;
+    // Room on the right: beside the crosshair, else on its left.
+    assert_eq!(tip_left(5.0, 220.0, 120.0), 15.0);
+    assert_eq!(tip_left(215.0, 220.0, 120.0), 85.0);
+    // Mid-way in a small plot: centred, inside both edges.
+    let l = tip_left(110.0, 220.0, 120.0);
+    assert!(l >= 0.0 && l + 120.0 <= 220.0, "{l}");
+    for px in [0.0, 30.0, 70.0, 150.0, 220.0] {
+        let l = tip_left(px, 220.0, 150.0);
+        assert!(l >= 0.0 && l + 150.0 <= 220.0, "{px}: {l}");
+    }
+    // Wider than the plot: pinned to its left edge, never over the rate axis.
+    assert_eq!(tip_left(100.0, 220.0, 300.0), 0.0);
+}
+
+#[test]
+fn chart_without_timestamps_shows_no_times() {
+    use sensr_ui::api::Backend;
+    use sensr_ui::chart::TrafficChart;
+    use sensr_ui::islands::DashboardLive;
+    let doc = render(|| {
+        view! { <TrafficChart samples=Memo::new(|_| samples_at(&[0, 0, 0])) label="t".to_owned()/> }
+            .into_any()
+    });
+    assert_eq!(doc.select(&sel(".tc-x span")).count(), 0);
+    assert_eq!(
+        doc.select(&sel(".tc-y span")).count(),
+        5,
+        "rate axis still shown"
+    );
+    let plot = doc.select(&sel(".tc-plot")).next().unwrap().value();
+    assert_eq!(
+        plot.attr("aria-valuetext"),
+        Some("In 1.0 Mbit/s, Out 500 kbit/s")
+    );
+
+    // A clock jump: times only for the samples after it.
+    let doc = render(|| {
+        view! { <TrafficChart samples=Memo::new(|_| samples_at(&[100, 103, 1_794_787_200, 1_794_787_260])) label="t".to_owned()/> }
+            .into_any()
+    });
+    let xs: Vec<String> = doc.select(&sel(".tc-x span")).map(text).collect();
+    assert!(!xs.is_empty() && xs.len() <= 5, "{xs:?}");
+    assert!(xs.iter().all(|x| x.starts_with("00:00:")), "{xs:?}");
+
+    // An interface series with partial timestamps: that chart has no time axis.
+    let m = sensr_ui::mock::MockBackend::with_clock(Box::new(|| 1_794_787_200));
+    let mut initial = block(m.status()).unwrap();
+    initial.traffic[0].ts.truncate(3);
+    let doc = render(|| view! { <DashboardLive initial/> }.into_any());
+    let charts: Vec<_> = doc.select(&sel(".traffic figure .tchart")).collect();
+    assert_eq!(charts[0].select(&sel(".tc-x span")).count(), 0);
+    assert!(charts[1].select(&sel(".tc-x span")).count() >= 3);
 }

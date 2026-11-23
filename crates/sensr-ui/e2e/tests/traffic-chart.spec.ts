@@ -76,7 +76,16 @@ test("traffic graph: hover shows the time and both rates, inside the card", asyn
   await centre(first);
   const b = (await first.boundingBox())!;
   await page.mouse.move(b.x + b.width * 0.3, b.y + b.height / 2);
-  await expect(ifaces.locator(".tc-tip")).toContainText(new RegExp(`In ${rate.source}`));
+  const small = ifaces.locator(".tc-tip");
+  await expect(small).toContainText(new RegExp(`In ${rate.source}`));
+  // Mid-way in a small chart the tooltip still stays inside the plot.
+  for (const fx of [0.45, 0.5, 0.55, 0.98]) {
+    await page.mouse.move(b.x + b.width * fx, b.y + b.height / 2);
+    await expect(small).toBeVisible();
+    const t = (await small.boundingBox())!;
+    expect(t.x).toBeGreaterThanOrEqual(b.x - 0.5);
+    expect(t.x + t.width).toBeLessThanOrEqual(b.x + b.width + 0.5);
+  }
   if (process.env.SENSR_UI_SHOTS) {
     await ifaces.screenshot({ path: `${shots}/traffic-interfaces-hover.png` });
   }
@@ -120,6 +129,10 @@ test("traffic graph: tap on a phone shows the tooltip inside the card", async ({
   const c = (await card.boundingBox())!;
   expect(t.x + t.width).toBeLessThanOrEqual(c.x + c.width);
   if (process.env.SENSR_UI_SHOTS) await card.screenshot({ path: `${shots}/traffic-chart-phone.png` });
+  // A tap elsewhere hides it.
+  const h = (await card.getByRole("heading", { name: "Traffic graph" }).boundingBox())!;
+  await page.touchscreen.tap(h.x + 10, h.y + h.height / 2);
+  await expect(tip).toHaveCount(0);
   // No sideways scroll at phone width.
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await ctx.close();

@@ -64,14 +64,59 @@ pub fn tick_label(v: u64, div: u64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
+/// The longest span a chart shows times for.
+const DAY: i64 = 86_400;
+
+/// The samples a chart draws, and whether their times are usable. Only the trailing run
+/// whose timestamps never go backwards and lie within a day of the newest is kept: a clock
+/// that jumped (a Pi without a battery-backed clock boots in 1970 until NTP sets it) ends
+/// the run. Without usable times (one sample, or all the same, as when the backend sent
+/// none) the run is spaced evenly by index and the chart shows no times.
+pub fn prepare(s: &[Sample]) -> (Vec<Sample>, bool) {
+    let Some(newest) = s.last().map(|p| p.ts) else {
+        return (Vec::new(), false);
+    };
+    let mut start = s.len() - 1;
+    while start > 0 && s[start - 1].ts <= s[start].ts && newest - s[start - 1].ts <= DAY {
+        start -= 1;
+    }
+    let run = &s[start..];
+    if run[0].ts < newest {
+        return (run.to_vec(), true);
+    }
+    let by_index = run.iter().enumerate();
+    (
+        by_index
+            .map(|(i, p)| Sample { ts: i as i64, ..*p })
+            .collect(),
+        false,
+    )
+}
+
+/// Where the tooltip's left edge goes, in px from the plot's left edge, for a crosshair at
+/// `px` in a plot `w` wide and a tooltip `tw` wide: beside the crosshair where it fits
+/// (right, else left), otherwise centred on it but kept inside the plot, never over the
+/// rate axis.
+pub fn tip_left(px: f64, w: f64, tw: f64) -> f64 {
+    const GAP: f64 = 10.0;
+    if px + GAP + tw <= w {
+        px + GAP
+    } else if px - GAP - tw >= 0.0 {
+        px - GAP - tw
+    } else {
+        (px - tw / 2.0).clamp(0.0, (w - tw).max(0.0))
+    }
+}
+
 /// Time axis ticks: multiples (in local time, `offset` seconds east of UTC) of the
-/// smallest round step that puts at most four ticks in `t0..=t1`, leaving out its first
-/// and last 6 % so a centred label never hangs off the chart.
+/// smallest round step that puts at most five ticks (four with seconds) in `t0..=t1`,
+/// leaving out its first and last 6 % so a centred label never hangs off the chart. None
+/// for a span that is empty or longer than a day.
 pub fn time_ticks(t0: i64, t1: i64, offset: i64) -> Vec<i64> {
     const STEPS: [i64; 14] = [
         5, 10, 15, 30, 60, 120, 300, 600, 900, 1_800, 3_600, 7_200, 21_600, 86_400,
     ];
-    if t1 <= t0 {
+    if t1 <= t0 || t1 - t0 > DAY {
         return Vec::new();
     }
     let margin = (t1 - t0) * 6 / 100;
@@ -85,9 +130,10 @@ pub fn time_ticks(t0: i64, t1: i64, offset: i64) -> Vec<i64> {
     };
     let step = STEPS
         .into_iter()
-        .find(|s| ticks(*s).count() <= 4)
-        .unwrap_or(86_400);
-    ticks(step).collect()
+        // HH:MM:SS labels are wider: at most four of them, five of HH:MM.
+        .find(|s| ticks(*s).take(6).count() <= if *s < 60 { 4 } else { 5 })
+        .unwrap_or(DAY);
+    ticks(step).take(5).collect()
 }
 
 /// `HH:MM`, or `HH:MM:SS` when `seconds`, at `offset` seconds east of UTC.
@@ -139,7 +185,7 @@ fn y_pct(v: u64, top: u64) -> f64 {
 /// The parts of a chart that change with the data: the unit, the rate axis labels, the
 /// SVG content (gridlines and both lines) and the time axis labels, as markup. Built as
 /// strings rather than views to keep the island bundle small; there is no user text in it.
-fn frame(s: &[Sample], off: i64) -> (&'static str, String, String, String) {
+fn frame(s: &[Sample], timed: bool, off: i64) -> (&'static str, String, String, String) {
     let ticks = rate_ticks(s.iter().map(|p| p.rx.max(p.tx)).max().unwrap_or(0));
     let top = ticks.last().copied().unwrap_or(1);
     let (div, unit) = rate_unit(top);
@@ -163,7 +209,11 @@ fn frame(s: &[Sample], off: i64) -> (&'static str, String, String, String) {
         }
         svg += r#""/>"#;
     }
-    let times = time_ticks(t0, t1, off);
+    let times = if timed {
+        time_ticks(t0, t1, off)
+    } else {
+        Vec::new()
+    };
     // Offsets are whole minutes, so this is "some tick is not on the minute".
     let seconds = times.iter().any(|t| t % 60 != 0);
     let mut x = String::new();
@@ -177,10 +227,12 @@ fn frame(s: &[Sample], off: i64) -> (&'static str, String, String, String) {
     (unit, y, svg, x)
 }
 
-/// The crosshair, the two dots and the tooltip at sample `i`, as markup.
-fn crosshair(s: &[Sample], i: usize, off: i64, labels: (&str, &str)) -> String {
+/// The crosshair, the two dots and the tooltip at sample `i`, as markup, and the
+/// crosshair's position in 0..=100. The browser then moves the tooltip beside it
+/// ([`tip_left`]).
+fn crosshair(s: &[Sample], i: usize, timed: bool, off: i64, labels: (&str, &str)) -> (String, f64) {
     let Some(p) = s.get(i) else {
-        return String::new();
+        return (String::new(), 0.0);
     };
     let top = *rate_ticks(s.iter().map(|p| p.rx.max(p.tx)).max().unwrap_or(0))
         .last()
@@ -188,35 +240,41 @@ fn crosshair(s: &[Sample], i: usize, off: i64, labels: (&str, &str)) -> String {
     let (t0, t1) = (s[0].ts, s[s.len() - 1].ts);
     let x = x_pct(p.ts, t0, t1);
     let (ry, ty) = (y_pct(p.rx, top), y_pct(p.tx, top));
-    // The tooltip sits beside the crosshair, on the side with more room, so it covers
-    // neither the dots nor the card edge.
-    let side = if x > 50.0 { " tc-tip-l" } else { "" };
-    format!(
-        r#"<div class="tc-cross" style="left:{x:.2}%"></div><span class="tc-dot tc-dot-rx" style="left:{x:.2}%;top:{ry:.2}%"></span><span class="tc-dot tc-dot-tx" style="left:{x:.2}%;top:{ty:.2}%"></span><div class="tc-tip{side}" style="left:{x:.2}%"><time>{}</time><span><span class="key key-rx"></span>{} {}</span><span><span class="key key-tx"></span>{} {}</span></div>"#,
-        clock(p.ts, off, true),
+    let time = if timed {
+        format!("<time>{}</time>", clock(p.ts, off, true))
+    } else {
+        String::new()
+    };
+    let html = format!(
+        r#"<div class="tc-cross" style="left:{x:.2}%"></div><span class="tc-dot tc-dot-rx" style="left:{x:.2}%;top:{ry:.2}%"></span><span class="tc-dot tc-dot-tx" style="left:{x:.2}%;top:{ty:.2}%"></span><div class="tc-tip" style="left:{x:.2}%">{time}<span><span class="key key-rx"></span>{} {}</span><span><span class="key key-tx"></span>{} {}</span></div>"#,
         labels.0,
         bps(p.rx),
         labels.1,
         bps(p.tx)
-    )
+    );
+    (html, x)
 }
 
 /// What the slider says to assistive technology at sample `i` (or the latest): its
 /// `aria-valuemax`, `aria-valuenow` and `aria-valuetext`.
-fn aria(s: &[Sample], i: Option<usize>, off: i64, labels: (&str, &str)) -> [String; 3] {
+fn aria(
+    s: &[Sample],
+    i: Option<usize>,
+    timed: bool,
+    off: i64,
+    labels: (&str, &str),
+) -> [String; 3] {
     let last = s.len().saturating_sub(1);
     let i = i.unwrap_or(last);
     let text = s.get(i).map_or_else(
         || "No samples yet".to_owned(),
         |p| {
-            format!(
-                "{}: {} {}, {} {}",
-                clock(p.ts, off, true),
-                labels.0,
-                bps(p.rx),
-                labels.1,
-                bps(p.tx)
-            )
+            let rates = format!("{} {}, {} {}", labels.0, bps(p.rx), labels.1, bps(p.tx));
+            if timed {
+                format!("{}: {rates}", clock(p.ts, off, true))
+            } else {
+                rates
+            }
         },
     );
     [last.to_string(), i.to_string(), text]
@@ -233,8 +291,9 @@ fn attr(s: &str) -> String {
 /// The whole chart as markup: the unit, the rate axis, the plot (a slider for keyboard
 /// and screen reader users) and the time axis.
 fn chart_html(s: &[Sample], label: &str, labels: (&str, &str)) -> String {
-    let (unit, y, svg, x) = frame(s, 0);
-    let [max, now, text] = aria(s, None, 0, labels);
+    let (s, timed) = prepare(s);
+    let (unit, y, svg, x) = frame(&s, timed, 0);
+    let [max, now, text] = aria(&s, None, timed, 0, labels);
     format!(
         r#"<span class="tc-unit" aria-hidden="true">{unit}</span><div class="tc-y" aria-hidden="true">{y}</div><div class="tc-plot" tabindex="0" role="slider" aria-label="{}" aria-valuemin="0" aria-valuemax="{max}" aria-valuenow="{now}" aria-valuetext="{text}"><svg viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true">{svg}</svg><div class="tc-hover" aria-hidden="true"></div></div><div class="tc-x" aria-hidden="true">{x}</div>"#,
         attr(label)
@@ -267,6 +326,12 @@ pub fn TrafficChart(
     let labels = (rx_label, tx_label);
     // The hovered sample, by time, so it stays put while new samples arrive.
     let hover = RwSignal::new(None::<i64>);
+    // Pointer moves within one sample change nothing: no redraw.
+    let set_hover = move |v: Option<i64>| {
+        if hover.get_untracked() != v {
+            hover.set(v);
+        }
+    };
     let root = NodeRef::<leptos::html::Div>::new();
     // The hovered sample's index, snapped to the nearest one still shown.
     let current = move |s: &[Sample]| {
@@ -278,7 +343,10 @@ pub fn TrafficChart(
             .and_then(|r| r.query_selector(sel).ok().flatten())
     };
     Effect::new(move |_| {
-        let (unit, y, svg, x) = samples.with(|s| frame(s, local_offset()));
+        let (unit, y, svg, x) = samples.with(|s| {
+            let (s, timed) = prepare(s);
+            frame(&s, timed, local_offset())
+        });
         if let Some(e) = find(".tc-unit") {
             e.set_text_content(Some(unit));
         }
@@ -290,13 +358,24 @@ pub fn TrafficChart(
     });
     Effect::new(move |_| {
         let off = local_offset();
-        let (cross, aria) = samples.with(|s| {
-            let i = current(s);
-            let cross = i.map_or_else(String::new, |i| crosshair(s, i, off, labels));
-            (cross, aria(s, i, off, labels))
+        let ((cross, x), aria) = samples.with(|s| {
+            let (s, timed) = prepare(s);
+            let i = current(&s);
+            let cross = i.map_or_else(
+                || (String::new(), 0.0),
+                |i| crosshair(&s, i, timed, off, labels),
+            );
+            (cross, aria(&s, i, timed, off, labels))
         });
         if let Some(e) = find(".tc-hover") {
             e.set_inner_html(&cross);
+        }
+        if let (Some(plot), Some(tip)) = (find(".tc-plot"), find(".tc-tip")) {
+            let w = f64::from(plot.client_width());
+            // client_width leaves out the 1 px borders.
+            let tw = f64::from(tip.client_width()) + 2.0;
+            let left = tip_left(x / 100.0 * w, w, tw);
+            let _ = tip.set_attribute("style", &format!("left:{left:.0}px"));
         }
         if let Some(e) = find(".tc-plot") {
             let _ = e.set_attribute("aria-label", &label.get());
@@ -315,32 +394,38 @@ pub fn TrafficChart(
     let hover_at = move |ev: leptos::ev::MouseEvent| {
         let el = event_target::<leptos::web_sys::Element>(&ev);
         if !el.class_list().contains("tc-plot") {
-            hover.set(None);
+            set_hover(None);
             return;
         }
         let x = f64::from(ev.offset_x()) / f64::from(el.client_width().max(1));
-        hover.set(samples.with_untracked(|s| {
+        set_hover(samples.with_untracked(|s| {
+            let (s, _) = prepare(s);
             let (t0, t1) = (s.first()?.ts, s.last()?.ts);
             let t = t0 + (x.clamp(0.0, 1.0) * (t1 - t0) as f64) as i64;
-            s.get(nearest(s, t)).map(|p| p.ts)
+            s.get(nearest(&s, t)).map(|p| p.ts)
         }));
     };
     let step = move |to: &dyn Fn(usize, usize) -> usize| {
         samples.with_untracked(|s| {
+            let (s, _) = prepare(s);
             if s.is_empty() {
                 return;
             }
-            let i = untrack(|| current(s)).unwrap_or(s.len() - 1);
-            hover.set(Some(s[to(i, s.len() - 1)].ts));
+            let i = untrack(|| current(&s)).unwrap_or(s.len() - 1);
+            set_hover(Some(s[to(i, s.len() - 1)].ts));
         });
     };
     let on_key = move |ev: leptos::ev::KeyboardEvent| {
+        // Leave modified keys (browser and screen reader shortcuts) alone.
+        if ev.alt_key() || ev.ctrl_key() || ev.meta_key() || ev.shift_key() {
+            return;
+        }
         match ev.key().as_str() {
             "ArrowLeft" => step(&|i, _| i.saturating_sub(1)),
             "ArrowRight" => step(&|i, n| (i + 1).min(n)),
             "Home" => step(&|_, _| 0),
             "End" => step(&|_, n| n),
-            "Escape" => hover.set(None),
+            "Escape" => set_hover(None),
             _ => return,
         }
         ev.prevent_default();
@@ -354,13 +439,12 @@ pub fn TrafficChart(
             inner_html=html
             on:pointermove=move |ev| hover_at(ev.into())
             on:click=hover_at
-            on:pointerleave=move |ev| {
-                if ev.pointer_type() == "mouse" {
-                    hover.set(None);
-                }
-            }
+            // A finger lifted or a scroll taking over (pointercancel is followed by
+            // pointerleave) hides it too; a tap's click then shows that sample until the
+            // next tap elsewhere moves focus away (focusout).
+            on:pointerleave=move |_| set_hover(None)
             on:keydown=on_key
-            on:focusout=move |_| hover.set(None)
+            on:focusout=move |_| set_hover(None)
         ></div>
     }
 }
