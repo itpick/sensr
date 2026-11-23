@@ -6,6 +6,7 @@
 mod coverage;
 mod fixtures;
 mod freshness;
+mod oui;
 mod parity;
 mod parity_ids;
 mod walk;
@@ -35,6 +36,8 @@ enum Task {
     Freshness(freshness::Args),
     /// Lint test fixtures: XML/JSON parse, synthetic-data conventions (T-0347).
     LintFixtures,
+    /// Regenerate the embedded IEEE OUI table (sensr-fingerprint).
+    Oui(oui::Args),
 }
 
 fn main() -> Result<()> {
@@ -48,5 +51,6 @@ fn main() -> Result<()> {
         Task::SourceCoverage(a) => coverage::run(&root, &a),
         Task::Freshness(a) => freshness::run(&root, &a),
         Task::LintFixtures => fixtures::run(&root),
+        Task::Oui(a) => oui::run(&root, &a),
     }
 }

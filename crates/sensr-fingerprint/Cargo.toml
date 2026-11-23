@@ -1,0 +1,12 @@
+[package]
+name = "sensr-fingerprint"
+description = "Smart host labels: an embedded IEEE OUI table and the pure fingerprinting rules that turn a MAC and passive evidence into a maker and device kind."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# sensr-schema (HostKind) is added with the first rule that returns a kind.
+[lints]
+workspace = true
