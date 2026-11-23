@@ -2313,15 +2313,22 @@ pub fn HostsCard(
             }
             .into_any()
         };
+        // the DNS mix colour preview (a `--mix` gradient the stylesheet paints) and its
+        // percentages in the title
+        let mix = crate::runtime::mix_style(&h.dns_mix);
+        let mix_title = crate::runtime::mix_title(&h.dns_mix);
         view! {
-            <tr class:dimmed=!h.online>
-                <td>{h.label()}</td>
+            <tr class:dimmed=!h.online style=mix title=mix_title>
+                <td><a class="host-link" href=crate::runtime::host_href(&h.key)>{h.label()}</a></td>
                 {mac_cell(h, read_only)}
                 <td class="num">{h.ipv4.clone().unwrap_or_default()}
                     {h.ipv6.first().map(|v6| view! { <br/><span class="muted">{v6.clone()}</span> })}</td>
                 <td>{h.interface_name.clone()}</td>
                 <td>{h.source()}</td>
                 <td>{h.seen(now)}</td>
+                <td class="num host-today">{h.today_minutes.map(|m| view! {
+                    <span class="muted">{crate::runtime::fmt_minutes(m)}</span>
+                })}</td>
                 <td class="host-mode">{mode_cell(h, read_only)}</td>
                 <td class="host-actions">{actions}</td>
             </tr>
@@ -2356,6 +2363,7 @@ pub fn HostsCard(
                                     <th scope="col">"Network"</th>
                                     <th scope="col">"Source"</th>
                                     <th scope="col">"Seen"</th>
+                                    <th scope="col" title="Screen time since midnight">"Today"</th>
                                     <th scope="col">"Mode"</th>
                                     <th scope="col" aria-label="Actions"></th>
                                 </tr>
@@ -2363,6 +2371,7 @@ pub fn HostsCard(
                             <tbody>{rows}</tbody>
                         </table>
                     </div>
+                    {c.list.hosts.iter().any(|h| !h.dns_mix.is_empty()).then(category_legend)}
                     {(!all && m > HostCard::SHOWN).then(|| view! {
                         <div class="banner-actions">
                             <button type="button" class="btn" on:click=move |_| show_all.set(true)>
@@ -2428,6 +2437,21 @@ pub fn HostsCard(
         })}
     }
     .into_any()
+}
+
+/// The key to the Hosts card's row shading: every category's colour.
+fn category_legend() -> impl IntoView {
+    let items = crate::runtime::CATEGORIES
+        .iter()
+        .map(|(k, name)| {
+            let dot = format!("background:var(--{})", crate::runtime::category_token(k));
+            view! { <li><i class="dot" style=dot aria-hidden="true"></i>{*name}</li> }
+        })
+        .collect_view();
+    view! {
+        <ul class="cat-legend" aria-label="Row colours">{items}</ul>
+        <p class="muted small cat-note">"Row shading shows each device's DNS lookups over the last 24 hours by category. Today is screen time since midnight, without system and ads."</p>
+    }
 }
 
 /// The Hosts card's label editor state, shared by every row's MAC cell.

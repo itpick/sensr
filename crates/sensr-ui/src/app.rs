@@ -97,6 +97,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/ui/ids/userdefined") view=IdsUserRulesPage/>
                     <Route path=path!("/ui/ids/alerts") view=IdsAlertsPage/>
                     <Route path=path!("/ui/diagnostics/networkinsight") view=Insight/>
+                    <Route path=path!("/ui/hosts/:mac") view=HostActivityPage/>
                     <Route path=path!("/*any") view=NotYet/>
                 </ParentRoute>
             </Routes>
@@ -259,6 +260,16 @@ pub fn Layout() -> impl IntoView {
             let mut crumb = menu::breadcrumb(&menu, &path);
             if path == "/" {
                 crumb = vec!["Lobby".into(), "Dashboard".into()];
+            }
+            // A host page is not in the menu: "Hosts: <its name>".
+            if let Some(key) = path.strip_prefix("/ui/hosts/") {
+                let key = crate::pages::url_decode(key);
+                let name = crate::actions::host_title(key.clone())
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(key);
+                crumb = vec!["Hosts".into(), name];
             }
             let title = if crumb.is_empty() {
                 "sensr".to_owned()

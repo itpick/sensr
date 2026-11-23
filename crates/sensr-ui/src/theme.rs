@@ -45,6 +45,19 @@ pub const LIGHT: &[(&str, &str)] = &[
     ("logo-s", "#15803d"),
     ("logo-ens", "#e0a800"),
     ("logo-r", "#b7410e"),
+    // DNS activity categories (`--cat-<key>`, see crate::runtime::category_token): legend
+    // dots, bars, and at CATEGORY_TINT the Hosts card's row shading.
+    ("cat-video", "#d13438"),
+    ("cat-social", "#c2307f"),
+    ("cat-games", "#7c4dcc"),
+    ("cat-messaging", "#2563eb"),
+    ("cat-music", "#a67c00"),
+    ("cat-education", "#2e8b3a"),
+    ("cat-shopping", "#c4610e"),
+    ("cat-system", "#6b7878"),
+    ("cat-ads-tracking", "#9a5a2e"),
+    ("cat-smart-home", "#0f8a7e"),
+    ("cat-other", "#5f6f9a"),
     (
         "shadow",
         "0 1px 2px rgb(0 0 0 / 6%), 0 1px 1px rgb(0 0 0 / 4%)",
@@ -92,8 +105,23 @@ pub const DARK: &[(&str, &str)] = &[
     ("logo-s", "#4ade80"),
     ("logo-ens", "#facc15"),
     ("logo-r", "#e2622f"),
+    ("cat-video", "#ff6b70"),
+    ("cat-social", "#f27cbb"),
+    ("cat-games", "#a98af0"),
+    ("cat-messaging", "#6aa2ff"),
+    ("cat-music", "#e8c23a"),
+    ("cat-education", "#6fcf73"),
+    ("cat-shopping", "#ff9f4a"),
+    ("cat-system", "#9eacac"),
+    ("cat-ads-tracking", "#d08a58"),
+    ("cat-smart-home", "#2dd4bf"),
+    ("cat-other", "#9aa9cc"),
     ("shadow", "0 1px 2px rgb(0 0 0 / 40%)"),
 ];
+
+/// How strongly a category colour shades a Hosts card row, in percent (alpha over the
+/// card); the contrast test checks row text on every tint.
+pub const CATEGORY_TINT_PCT: u32 = 14;
 
 fn decls(tokens: &[(&str, &str)]) -> String {
     tokens.iter().map(|(k, v)| format!("--{k}:{v};")).collect()
@@ -102,8 +130,20 @@ fn decls(tokens: &[(&str, &str)]) -> String {
 /// The `:root` custom properties for both themes.
 pub fn tokens_css() -> String {
     let (light, dark) = (decls(LIGHT), decls(DARK));
+    // the Hosts card's row shading: each category colour, faint
+    let tints: String = crate::runtime::CATEGORIES
+        .iter()
+        .map(|(k, _)| {
+            let t = crate::runtime::category_token(k);
+            format!(
+                "--{}:color-mix(in srgb,var(--{t}) {CATEGORY_TINT_PCT}%,transparent);",
+                t.replacen("cat-", "tint-", 1)
+            )
+        })
+        .collect();
     format!(
-        ":root{{{light}color-scheme:light}}\
+        ":root{{{tints}}}\
+         :root{{{light}color-scheme:light}}\
          :root[data-theme=dark]{{{dark}color-scheme:dark}}\
          @media (prefers-color-scheme:dark){{:root:not([data-theme]){{{dark}color-scheme:dark}}}}"
     )

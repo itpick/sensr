@@ -749,6 +749,233 @@ pub async fn hosts() -> Result<Option<HostCard>, ServerFnError> {
     }))
 }
 
+/// A device's page (`/ui/hosts/<key>`): its inventory row and, when it has a MAC and the
+/// caller may read the insight database, what it did over the range.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostPageData {
+    /// The host as the inventory reports it.
+    pub host: crate::runtime::HostRow,
+    /// The inventory's clock (Unix seconds), for "last seen".
+    pub now: u64,
+    /// Its DNS activity; `None` with [`HostPageData::note`] saying why.
+    pub activity: Option<crate::api::HostActivityView>,
+    /// Why there is no activity to show.
+    pub note: Option<String>,
+    /// The caller may set service overrides.
+    pub can_edit: bool,
+    /// The override editor, open for one looked-up name.
+    pub draft: Option<OverrideDraft>,
+}
+
+/// The service override editor's starting values for a looked-up name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OverrideDraft {
+    /// The name the editor was opened for.
+    pub qname: String,
+    /// The suffix to set: the existing override's, else the name's registrable domain.
+    pub suffix: String,
+    /// Service name.
+    pub service: String,
+    /// Category key.
+    pub category: String,
+    /// An override of `suffix` exists (the editor offers Remove).
+    pub existing: bool,
+}
+
+/// The data of a host page: `key` is the inventory key (a MAC, or `id:…`), `range`
+/// `today` or `7d`, `page` the domains page, `edit` a looked-up name to open the service
+/// override editor for.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn host_page(
+    key: String,
+    range: String,
+    page: u32,
+    edit: Option<String>,
+) -> Result<HostPageData, ServerFnError> {
+    use serde_json::Value;
+    let b = imp::backend()?;
+    if !b.may_access("/api/v1/hosts") {
+        return Err(ServerFnError::new("you may not view hosts"));
+    }
+    let list: crate::runtime::HostList =
+        crate::runtime::parse(b.runtime(RuntimeSection::Hosts).await.map_err(imp::err)?);
+    let key = key.trim().to_ascii_lowercase();
+    let now = list.now;
+    let Some(host) = list.hosts.into_iter().find(|h| {
+        h.key.eq_ignore_ascii_case(&key)
+            || h.mac
+                .as_deref()
+                .is_some_and(|m| m.eq_ignore_ascii_case(&key))
+    }) else {
+        return Err(ServerFnError::new(
+            "There is no such host in the inventory.",
+        ));
+    };
+    let range = if range == "7d" { "7d" } else { "today" };
+    let mut out = HostPageData {
+        now,
+        can_edit: !b.read_only() && b.may_access("/api/v1/insight/service-override"),
+        ..HostPageData::default()
+    };
+    match host.mac.clone().filter(|_| !host.key.starts_with("id:")) {
+        None => {
+            out.note = Some(
+                "This device has no MAC address, so its DNS activity cannot be told apart.".into(),
+            );
+        }
+        Some(_) if !b.may_access("/api/v1/insight/top") => {
+            out.note = Some("You may not view DNS activity.".into());
+        }
+        Some(mac) => match b.host_activity(mac, range.to_owned(), page).await {
+            Ok(v) => out.activity = Some(v),
+            Err(e) => out.note = Some(format!("Could not read the DNS activity: {e}")),
+        },
+    }
+    if let Some(qname) = edit
+        .map(|q| q.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|q| out.can_edit && !q.is_empty() && q.len() <= 253 && q.contains('.'))
+    {
+        let insight = b.get("insight").await.unwrap_or(Value::Null);
+        let existing = insight
+            .pointer("/dns/service_overrides")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|m| m.values())
+            .filter_map(|o| {
+                Some((
+                    o["suffix"].as_str()?,
+                    o["service"].as_str()?,
+                    o["category"].as_str()?,
+                ))
+            })
+            .filter(|(sfx, ..)| {
+                qname == *sfx || qname.strip_suffix(sfx).is_some_and(|h| h.ends_with('.'))
+            })
+            .max_by_key(|(sfx, ..)| sfx.len());
+        let row = out
+            .activity
+            .as_ref()
+            .and_then(|a| a.domains.iter().find(|d| d.qname == qname));
+        out.draft = Some(match existing {
+            Some((suffix, service, category)) => OverrideDraft {
+                qname,
+                suffix: suffix.to_owned(),
+                service: service.to_owned(),
+                category: category.to_owned(),
+                existing: true,
+            },
+            None => OverrideDraft {
+                suffix: sensr_flow::attrib::registrable_domain(&qname),
+                service: row.map(|d| d.service.clone()).unwrap_or_default(),
+                category: row.map_or_else(|| "other".to_owned(), |d| d.category.clone()),
+                qname,
+                existing: false,
+            },
+        });
+    }
+    out.host = host;
+    Ok(out)
+}
+
+/// What the host at `key` is called, for the page heading (`None` when unknown).
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn host_title(key: String) -> Result<Option<String>, ServerFnError> {
+    let b = imp::backend()?;
+    if !b.may_access("/api/v1/hosts") {
+        return Ok(None);
+    }
+    let list: crate::runtime::HostList =
+        crate::runtime::parse(b.runtime(RuntimeSection::Hosts).await.map_err(imp::err)?);
+    Ok(list
+        .hosts
+        .iter()
+        .find(|h| {
+            h.key.eq_ignore_ascii_case(&key)
+                || h.mac
+                    .as_deref()
+                    .is_some_and(|m| m.eq_ignore_ascii_case(&key))
+        })
+        .map(crate::runtime::HostRow::label))
+}
+
+/// The service override editor's form target (a plain form post: no scripting needed).
+/// Sets what the domain `suffix` counts as, or with `remove` drops its override, then goes
+/// back to the host page `back` (`/ui/hosts/…`), reopening the editor for `qname` with the
+/// error when it was refused.
+#[server(prefix = "/ui/fn", endpoint = "service_override")]
+pub async fn service_override(
+    suffix: String,
+    service: String,
+    category: String,
+    qname: String,
+    back: String,
+    remove: Option<String>,
+) -> Result<(), ServerFnError> {
+    use crate::api::ApiError;
+    use crate::pages::url_encode;
+    let back = if back.starts_with("/ui/hosts/") && !back.contains("//") && !back.contains('\\') {
+        back
+    } else {
+        "/".to_owned()
+    };
+    let sep = if back.contains('?') { '&' } else { '?' };
+    let fail = |m: &str| {
+        leptos_axum::redirect(&format!(
+            "{back}{sep}edit={}&error={}",
+            url_encode(&qname),
+            url_encode(m)
+        ));
+        Ok(())
+    };
+    let b = imp::backend()?;
+    if b.read_only() || !b.may_access("/api/v1/insight/service-override") {
+        return fail("You may not change service overrides.");
+    }
+    let suffix = suffix.trim().trim_end_matches('.').to_ascii_lowercase();
+    if !sensr_schema::models::insight::is_domain_suffix(&suffix) {
+        return fail("The suffix is a domain such as example.com.");
+    }
+    let r = if remove.is_some() {
+        b.set_service_override(suffix, None, None).await
+    } else {
+        let service = service.trim().to_owned();
+        if service.is_empty()
+            || service.chars().count() > 48
+            || service.chars().any(char::is_control)
+        {
+            return fail("The service name is 1 to 48 characters.");
+        }
+        if !crate::runtime::CATEGORIES
+            .iter()
+            .any(|(k, _)| *k == category)
+        {
+            return fail("Pick a category.");
+        }
+        b.set_service_override(suffix, Some(service), Some(category))
+            .await
+    };
+    match r {
+        Ok(r) => {
+            let what = match (remove.is_some(), r.as_str()) {
+                (_, "staged") => "staged",
+                (true, _) => "removed",
+                _ => "applied",
+            };
+            leptos_axum::redirect(&format!("{back}{sep}saved={what}"));
+            Ok(())
+        }
+        Err(ApiError::Validation(errors)) => fail(
+            &errors
+                .into_iter()
+                .map(|e| e.message)
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        Err(ApiError::Unauthorized) => fail("You may not change service overrides."),
+        Err(e) => fail(&e.to_string()),
+    }
+}
+
 /// Refusal of a Quarantine for the device the request comes from (the agent's wording).
 pub const SELF_QUARANTINE: &str =
     "That's the device you're using — quarantine it from another device.";

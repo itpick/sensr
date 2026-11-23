@@ -449,6 +449,101 @@ pub fn category_name(key: &str) -> &'static str {
         .map_or("Other", |c| c.1)
 }
 
+/// The theme token of category `key`: `cat-video`, `cat-ads-tracking` (see
+/// [`crate::theme`]); the faint row shade is the same name with `tint-`.
+pub fn category_token(key: &str) -> String {
+    let key = if CATEGORIES.iter().any(|c| c.0 == key) {
+        key
+    } else {
+        "other"
+    };
+    format!("cat-{}", key.replace('_', "-"))
+}
+
+/// The host page of inventory key `key` (a MAC stays readable: `/ui/hosts/aa:bb:…`).
+pub fn host_href(key: &str) -> String {
+    let mut out = String::from("/ui/hosts/");
+    for b in key.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b':' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Minutes as `1 h 12 m`, `2 h 05 m`, `48 m`.
+pub fn fmt_minutes(m: u32) -> String {
+    if m < 60 {
+        format!("{m} m")
+    } else {
+        format!("{} h {:02} m", m / 60, m % 60)
+    }
+}
+
+/// `n` tenths of a percent as `72.5%`.
+fn pct10(n: u64) -> String {
+    format!("{}.{}%", n / 10, n % 10)
+}
+
+/// The Hosts card's colour preview of a DNS mix (lookups per category key): an inline
+/// `--mix` custom property holding a left-to-right stacked gradient, each category's
+/// faint tint as wide as its share, blending into the next over a few percent. `None`
+/// with no lookups.
+pub fn mix_style(mix: &[(String, u32)]) -> Option<String> {
+    let total: u64 = mix.iter().map(|m| u64::from(m.1)).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut stops = Vec::new();
+    let mut at = 0u64;
+    let mut sum = 0u64;
+    let parts: Vec<_> = mix.iter().filter(|m| m.1 > 0).collect();
+    for (i, (key, n)) in parts.iter().enumerate() {
+        sum += u64::from(*n);
+        // in tenths of a percent; the last segment ends at exactly 100%
+        let end = sum * 1000 / total;
+        // blend half-width: 2.5%, or a third of a narrow segment
+        let w = ((end - at) / 3).min(25);
+        let (from, to) = (
+            if i == 0 { 0 } else { at + w },
+            if i + 1 == parts.len() { 1000 } else { end - w },
+        );
+        let tint = category_token(key).replacen("cat-", "tint-", 1);
+        stops.push(format!(
+            "var(--{tint}) {},var(--{tint}) {}",
+            pct10(from),
+            pct10(to)
+        ));
+        at = end;
+    }
+    Some(format!("--mix:linear-gradient(90deg,{})", stops.join(",")))
+}
+
+/// The row's `title` for its colour preview: `DNS lookups (24 h): Video 62%, Games 20%`.
+pub fn mix_title(mix: &[(String, u32)]) -> Option<String> {
+    let total: u64 = mix.iter().map(|m| u64::from(m.1)).sum();
+    if total == 0 {
+        return None;
+    }
+    let parts: Vec<String> = mix
+        .iter()
+        .filter(|m| m.1 > 0)
+        .map(|(k, n)| {
+            let p = (u64::from(*n) * 100 + total / 2) / total;
+            let p = if p == 0 {
+                "<1".to_owned()
+            } else {
+                p.to_string()
+            };
+            format!("{} {p}%", category_name(k))
+        })
+        .collect();
+    Some(format!("DNS lookups (24 h): {}", parts.join(", ")))
+}
+
 /// `(kind, display name, icon)` for every host kind, in the order the editor lists them
 /// (sensr-schema's `HostKind::ALL`, which the wasm bundle does not link).
 pub const HOST_KINDS: [(&str, &str, &str); 14] = [
@@ -1061,6 +1156,27 @@ mod tests {
             reasons: vec![],
             by: by.into(),
         }
+    }
+
+    #[test]
+    fn minutes_tokens_and_mix_title() {
+        assert_eq!(fmt_minutes(0), "0 m");
+        assert_eq!(fmt_minutes(48), "48 m");
+        assert_eq!(fmt_minutes(72), "1 h 12 m");
+        assert_eq!(fmt_minutes(125), "2 h 05 m");
+        assert_eq!(category_token("ads_tracking"), "cat-ads-tracking");
+        assert_eq!(category_token("bogus"), "cat-other");
+        let mix = vec![("video".to_owned(), 3), ("system".to_owned(), 1)];
+        assert_eq!(
+            mix_title(&mix).unwrap(),
+            "DNS lookups (24 h): Video 75%, Apple/Google/Microsoft system 25%"
+        );
+        assert_eq!(mix_title(&[]), None);
+        let single = mix_style(&[("music".to_owned(), 5)]).unwrap();
+        assert_eq!(
+            single,
+            "--mix:linear-gradient(90deg,var(--tint-music) 0.0%,var(--tint-music) 100.0%)"
+        );
     }
 
     #[test]
