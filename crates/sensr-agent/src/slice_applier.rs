@@ -3,6 +3,7 @@
 //! sysctls, qdiscs) behind the agent's [`Applier`] boundary.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -60,6 +61,9 @@ struct Fingerprint {
     make: Arc<MakeSniffer>,
     link: Arc<LinkFn>,
     running: Arc<Mutex<Option<Arc<crate::fingerprint::Sniffer>>>>,
+    /// Set (under `running`) by [`Self::stop`]: an inventory poll still in
+    /// flight when the applier is dropped must not start a new sniffer.
+    stopped: Arc<AtomicBool>,
 }
 
 impl Fingerprint {
@@ -68,6 +72,9 @@ impl Fingerprint {
     /// inventory poll cannot land an older document after a newer one.
     fn update_from(&self, applied: &Mutex<Applied>) {
         let mut running = lock(&self.running);
+        if self.stopped.load(Ordering::SeqCst) {
+            return;
+        }
         let Some(doc) = lock(applied).as_ref().map(|(d, _)| d.clone()) else {
             return;
         };
@@ -94,8 +101,11 @@ impl Fingerprint {
         s.set_interfaces(ifaces);
     }
 
+    /// Stops the sniffer for good: later updates do nothing.
     fn stop(&self) {
-        if let Some(s) = lock(&self.running).take() {
+        let mut running = lock(&self.running);
+        self.stopped.store(true, Ordering::SeqCst);
+        if let Some(s) = running.take() {
             s.stop();
         }
     }
@@ -268,6 +278,7 @@ impl SliceApplier {
                 }),
                 link: Arc::new(crate::arp_intercept::link),
                 running: Arc::default(),
+                stopped: Arc::default(),
             };
             feed_from_polls(&hosts, &ic, Some(&fp), &a.applied, &a.host_modes);
             a.intercept = Some(ic);
@@ -1489,6 +1500,7 @@ mod tests {
                 }),
                 link: Arc::new(|dev: &str| (dev == "igc1").then_some((5, [2, 0, 0, 0, 0, 1]))),
                 running: Arc::default(),
+                stopped: Arc::default(),
             });
             (a, made, opened, sent)
         }
@@ -1549,6 +1561,23 @@ mod tests {
                 "a fresh one after re-enabling"
             );
             drop(a);
+        }
+
+        /// A poll that lands after the applier is dropped (it holds its own
+        /// clone of the fingerprint task) starts nothing.
+        #[test]
+        fn a_poll_after_drop_starts_no_sniffer() {
+            let root = fake_root();
+            let (mut a, made, _, _) = applier(&root);
+            a.apply(None, &home_router()).unwrap();
+            let s = running(&a).unwrap();
+            let fp = a.fingerprint.clone().unwrap();
+            let applied = Arc::clone(&a.applied);
+            drop(a);
+            assert!(!s.listening());
+            fp.update_from(&applied);
+            assert!(lock(&fp.running).is_none());
+            assert_eq!(made.load(Ordering::SeqCst), 1);
         }
     }
 
