@@ -42,14 +42,36 @@ test.describe("host modes", () => {
   });
 
   test("quarantine shows the footer help", async ({ page }) => {
+    const help = "Same-network blocking works by redirecting";
+    // The seed locks device-02 (Isolated) and device-05 (Quarantine).
+    const seeded: [string, string][] = [
+      ["device-02", "isolated"],
+      ["device-05", "quarantine"],
+    ];
     await open(page);
-    // device-05 is seeded Quarantine, so the help is already showing; lock another host too.
-    await modeSelect(page, "bench-pi").selectOption("quarantine");
-    await expect(modeSelect(page, "bench-pi")).toHaveValue("quarantine");
-    await expect(card(page)).toContainText("Same-network blocking works by redirecting");
+    try {
+      // With no host locked the help is absent.
+      for (const [host] of seeded) {
+        await modeSelect(page, host).selectOption("normal");
+        await expect(modeSelect(page, host)).toHaveValue("normal");
+      }
+      const selects = card(page).getByRole("combobox", { name: /^Mode for / });
+      for (const s of await selects.all()) await expect(s).toHaveValue("normal");
+      await expect(card(page)).not.toContainText(help);
 
-    await modeSelect(page, "bench-pi").selectOption("normal");
-    await expect(modeSelect(page, "bench-pi")).toHaveValue("normal");
+      // Locking one host shows it.
+      await modeSelect(page, "bench-pi").selectOption("quarantine");
+      await expect(modeSelect(page, "bench-pi")).toHaveValue("quarantine");
+      await expect(card(page)).toContainText(help);
+    } finally {
+      // Back to the seed for the specs that follow.
+      await modeSelect(page, "bench-pi").selectOption("normal");
+      await expect(modeSelect(page, "bench-pi")).toHaveValue("normal");
+      for (const [host, mode] of seeded) {
+        await modeSelect(page, host).selectOption(mode);
+        await expect(modeSelect(page, host)).toHaveValue(mode);
+      }
+    }
   });
 
   test("self-quarantine is refused", async ({ page }) => {
