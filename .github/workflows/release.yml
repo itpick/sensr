@@ -32,6 +32,19 @@ jobs:
       - name: Make room for the store
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: DeterminateSystems/nix-installer-action@main
+      # Binary cache (see "CI binary cache" in README.md). No-op until the
+      # CACHIX_CACHE variable exists; pulls without a token; pushes only
+      # outside pull_request runs. Disk images are not pushed: they are
+      # large, never substituted (release.yml recompresses them anyway), and
+      # would burn the free-tier quota. Toplevels and the crane dependency
+      # closures are what make the next build fast.
+      - uses: cachix/cachix-action@v17
+        if: vars.CACHIX_CACHE != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          skipPush: ${{ github.event_name == 'pull_request' }}
+          pushFilter: '(\.img(\.zst)?|\.iso|\.qcow2?|-sd-image-.*|-nixos-disk-image|-installer.*)$'
       - name: Build the installer ISO and the qcow2 image
         run: |
           mkdir -p out
@@ -70,6 +83,19 @@ jobs:
       - name: Make room for the store
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: DeterminateSystems/nix-installer-action@main
+      # Binary cache (see "CI binary cache" in README.md). No-op until the
+      # CACHIX_CACHE variable exists; pulls without a token; pushes only
+      # outside pull_request runs. Disk images are not pushed: they are
+      # large, never substituted (release.yml recompresses them anyway), and
+      # would burn the free-tier quota. Toplevels and the crane dependency
+      # closures are what make the next build fast.
+      - uses: cachix/cachix-action@v17
+        if: vars.CACHIX_CACHE != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          skipPush: ${{ github.event_name == 'pull_request' }}
+          pushFilter: '(\.img(\.zst)?|\.iso|\.qcow2?|-sd-image-.*|-nixos-disk-image|-installer.*)$'
       - name: Build the Pi 4 and Pi 5 images
         run: |
           mkdir -p out

@@ -37,6 +37,19 @@ jobs:
         with:
           extra-conf: |
             system-features = nixos-test benchmark big-parallel kvm
+      # Binary cache (see "CI binary cache" in README.md). No-op until the
+      # CACHIX_CACHE variable exists; pulls without a token; pushes only
+      # outside pull_request runs. Disk images are not pushed: they are
+      # large, never substituted (release.yml recompresses them anyway), and
+      # would burn the free-tier quota. Toplevels and the crane dependency
+      # closures are what make the next build fast.
+      - uses: cachix/cachix-action@v17
+        if: vars.CACHIX_CACHE != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          skipPush: ${{ github.event_name == 'pull_request' }}
+          pushFilter: '(\.img(\.zst)?|\.iso|\.qcow2?|-sd-image-.*|-nixos-disk-image|-installer.*)$'
       - name: House test with example devices, then screenshots
         run: nix build -L .#screenshots.x86_64-linux.house -o result
       - name: Collect

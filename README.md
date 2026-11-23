@@ -85,3 +85,18 @@ Dual-licensed: [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your optio
 sensr is an independent project. It is not affiliated with Deciso B.V., and it contains
 no OPNsense code. OPNsense® is a trademark of Deciso B.V. and appears here only to
 describe compatibility.
+
+## CI binary cache
+
+Nix builds in CI (`ci.yml`, `release.yml`, `vm-screenshots.yml`) use a
+[Cachix](https://cachix.org) cache so a release reuses what CI already built
+for the same commit (the Pi toplevel from `nix-aarch64`, the crane dependency
+closures). It is optional and off until configured, in repo settings:
+
+- variable `CACHIX_CACHE`: the cache name. Setting it turns the step on; runs
+  without a token (fork PRs) still pull from it.
+- secret `CACHIX_AUTH_TOKEN`: a token with write access to that cache. Needed
+  only to push, which happens on pushes to main, tags and manual dispatches,
+  never on pull requests.
+
+SD card, ISO and qcow2 images are filtered out of pushes to save space.
