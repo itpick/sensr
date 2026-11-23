@@ -239,8 +239,9 @@ const DHCP_VENDORS: &[(VendorMatch, HostKind, Confidence)] = &[
 
 /// Host-name rules: case-insensitive regexes, first match wins.
 const HOSTNAMES: &[(&str, HostKind, Confidence)] = &[
-    ("^iphone", Phone, Medium),
-    ("^ipad", Tablet, Medium),
+    // Unanchored: Apple defaults look like "Lucass-iPhone" / "Johns-iPad".
+    ("iphone", Phone, Medium),
+    ("ipad", Tablet, Medium),
     ("^(galaxy|sm-[a-z0-9]+|pixel|oneplus)", Phone, Medium),
     ("^(desktop|laptop)-[a-z0-9]{7}$", Computer, Medium), // Windows defaults
     ("macbook|imac|mac-?mini", Computer, Medium),
@@ -255,9 +256,15 @@ const HOSTNAMES: &[(&str, HostKind, Confidence)] = &[
     ("^(ring|wyze|reolink|camera|cam-)", Camera, Medium),
     ("^(sonos|homepod|echo)", Speaker, Medium),
     ("^(esp|tasmota|shelly|tuya)", SmartHome, Medium),
-    ("^(sw|switch|ap|unifi|usw|uap|ism-sw)[-_]?", Network, Medium),
+    // Short prefixes need a separator so "apollo" / "swift-laptop" stay out.
     (
-        "^(pi|rpi|raspberrypi|nas|server|node|picknode)",
+        "^((sw|ap)[-_]|(switch|unifi|usw|uap|ism-sw)([-_]|$))",
+        Network,
+        Medium,
+    ),
+    // Word boundary after the prefix so "piano" stays out.
+    (
+        "^(pi|rpi|raspberrypi|nas|server|node|picknode)([-_0-9]|$)",
         Server,
         Low,
     ),
@@ -348,8 +355,6 @@ const MAKERS: &[(&[&str], HostKind, Confidence)] = &[
             "Cisco Systems",
             "Cisco Meraki",
             "Cisco-Linksys",
-            "Aruba",
-            "MikroTik",
             "Routerboard.com",
         ],
         Network,
@@ -661,7 +666,8 @@ mod tests {
         use Confidence::*;
         for (host, kind, conf) in [
             ("iPhone", Phone, Medium),
-            ("Lucass-iPad", Unknown, Low),
+            ("Lucass-iPhone", Phone, Medium),
+            ("Johns-iPad", Tablet, Medium),
             ("iPad-2", Tablet, Medium),
             ("Galaxy-S23", Phone, Medium),
             ("SM-G991B", Phone, Medium),
@@ -704,6 +710,10 @@ mod tests {
             ("USW-24", Network, Medium),
             ("UAP-AC-Lite", Network, Medium),
             ("ap-upstairs", Network, Medium),
+            ("ap_garage", Network, Medium),
+            ("apollo", Unknown, Low),
+            ("swift-laptop", Unknown, Low),
+            ("piano", Unknown, Low),
             ("ism-sw-1-f89e280774b1", Network, Medium),
             ("pi5-1", Server, Low),
             ("rpi4-8GB", Server, Low),
@@ -765,6 +775,25 @@ mod tests {
             ..ev("00:00:5e:00:53:01")
         });
         assert_eq!(l.kind, Unknown);
+    }
+
+    /// Every maker named in a rule exists in the embedded table, so a rule
+    /// keyed to a name the table does not use cannot sneak back in.
+    #[test]
+    fn maker_rule_names_exist_in_oui_table() {
+        let names: std::collections::HashSet<String> = include_str!("../data/oui.tsv")
+            .lines()
+            .filter_map(|l| l.split_once('\t'))
+            .map(|(_, n)| n.to_ascii_lowercase())
+            .collect();
+        for (makers, _, _) in MAKERS {
+            for m in *makers {
+                assert!(
+                    names.contains(&m.to_ascii_lowercase()),
+                    "{m} not in oui.tsv"
+                );
+            }
+        }
     }
 
     /// A MAC whose OUI resolves to `maker` in the embedded table.
