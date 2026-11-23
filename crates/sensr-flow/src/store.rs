@@ -115,6 +115,9 @@ impl Batch {
             let key = match k.kind {
                 Kind::Host => (RowKind::Host, k.addr.clone(), String::new()),
                 Kind::Remote => (RowKind::Remote, k.addr.clone(), String::new()),
+                // per-(host, remote) counters feed service attribution
+                // (`attrib`), not the traffic rollups
+                Kind::Pair => continue,
                 Kind::App => (
                     RowKind::App,
                     format!("{}/{}", proto_name(k.proto), k.port),
@@ -371,6 +374,7 @@ mod tests {
             kind,
             dir,
             addr: addr.into(),
+            remote: String::new(),
             proto: if port > 0 { 6 } else { 0 },
             port,
         }

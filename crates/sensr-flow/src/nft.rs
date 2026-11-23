@@ -1,7 +1,8 @@
 //! The accounting table (`inet sensr_flow`) and the parser of its listing.
 //!
 //! Sets are named `<kind><dir><family>`: kind `h` (local host), `a` (local
-//! host . protocol . service port), `r` (remote address); dir `u` (in from a
+//! host . protocol . service port), `r` (remote address), `p` (local host .
+//! remote address, for per-host service attribution); dir `u` (in from a
 //! local interface: the local host's upload) or `d` (out to one: its
 //! download); family `4` or `6`. The service port is the connection's
 //! original destination port (`ct original proto-dst`), the same for both
@@ -31,6 +32,8 @@ pub enum Kind {
     App,
     /// A remote address.
     Remote,
+    /// A local host and a remote address it talks to.
+    Pair,
 }
 
 /// Direction from the local host's point of view.
@@ -42,7 +45,12 @@ pub enum Dir {
     Down,
 }
 
-const KINDS: [(Kind, char); 3] = [(Kind::Host, 'h'), (Kind::App, 'a'), (Kind::Remote, 'r')];
+const KINDS: [(Kind, char); 4] = [
+    (Kind::Host, 'h'),
+    (Kind::App, 'a'),
+    (Kind::Remote, 'r'),
+    (Kind::Pair, 'p'),
+];
 const DIRS: [(Dir, char); 2] = [(Dir::Up, 'u'), (Dir::Down, 'd')];
 const FAMILIES: [(&str, char, &str); 2] = [("ip", '4', "ipv4_addr"), ("ip6", '6', "ipv6_addr")];
 
@@ -71,10 +79,10 @@ pub fn ruleset(cfg: &FlowConfig) -> String {
     for (proto, f, addr) in FAMILIES {
         for (_, k) in KINDS {
             for (_, d) in DIRS {
-                let ty: Value = if k == 'a' {
-                    json!([addr, "inet_proto", "inet_service"])
-                } else {
-                    json!(addr)
+                let ty: Value = match k {
+                    'a' => json!([addr, "inet_proto", "inet_service"]),
+                    'p' => json!([addr, addr]),
+                    _ => json!(addr),
                 };
                 cmds.push(json!({ "add": { "set": {
                     "family": "inet", "table": TABLE, "name": set_name(k, d, f),
@@ -104,6 +112,10 @@ pub fn ruleset(cfg: &FlowConfig) -> String {
                 on_local.clone(),
                 update(set_name('h', d, f), field(own)),
                 update(set_name('r', d, f), field(other)),
+                update(
+                    set_name('p', d, f),
+                    json!({ "concat": [field(own), field(other)] }),
+                ),
             ]));
             cmds.push(rule(vec![
                 on_local,
@@ -136,8 +148,10 @@ pub struct Key {
     pub kind: Kind,
     /// Which way.
     pub dir: Dir,
-    /// The address (local host for `Host`/`App`, remote for `Remote`).
+    /// The address (local host for `Host`/`App`/`Pair`, remote for `Remote`).
     pub addr: String,
+    /// For `Pair`: the remote address (else empty).
+    pub remote: String,
     /// For `App`: IP protocol number.
     pub proto: u8,
     /// For `App`: service port.
@@ -231,14 +245,36 @@ pub fn parse(listing: &[u8]) -> HashMap<Key, Count> {
                         kind,
                         dir,
                         addr: addr.to_owned(),
+                        remote: String::new(),
                         proto,
                         port,
+                    }
+                }
+                (Kind::Pair, v) => {
+                    let Some(parts) = v.get("concat").and_then(Value::as_array) else {
+                        continue;
+                    };
+                    let (Some(local), Some(remote), None) = (
+                        parts.first().and_then(Value::as_str),
+                        parts.get(1).and_then(Value::as_str),
+                        parts.get(2),
+                    ) else {
+                        continue;
+                    };
+                    Key {
+                        kind,
+                        dir,
+                        addr: local.to_owned(),
+                        remote: remote.to_owned(),
+                        proto: 0,
+                        port: 0,
                     }
                 }
                 (_, Value::String(addr)) => Key {
                     kind,
                     dir,
                     addr: addr.clone(),
+                    remote: String::new(),
                     proto: 0,
                     port: 0,
                 },
@@ -308,16 +344,90 @@ mod tests {
     }
 
     #[test]
-    fn ruleset_has_twelve_sets_and_eight_rules() {
+    fn ruleset_has_sixteen_sets_and_eight_rules() {
         let v: Value = serde_json::from_str(&ruleset(&cfg())).unwrap();
         let cmds = v["nftables"].as_array().unwrap();
         let count = |what: &str| cmds.iter().filter(|c| c["add"].get(what).is_some()).count();
-        assert_eq!(count("set"), 12);
+        assert_eq!(count("set"), 16);
         assert_eq!(count("rule"), 8);
         let text = v.to_string();
         assert!(text.contains(r#""right":{"set":["igc1"]}"#), "{text}");
         assert!(!text.contains("igc0"), "the WAN is not local");
         assert!(text.contains(r#""dir":"original""#));
+    }
+
+    #[test]
+    fn pair_sets_rendered() {
+        let v: Value = serde_json::from_str(&ruleset(&cfg())).unwrap();
+        let cmds = v["nftables"].as_array().unwrap();
+        for (f, addr) in [('4', "ipv4_addr"), ('6', "ipv6_addr")] {
+            for d in ['u', 'd'] {
+                let name = format!("p{d}{f}");
+                let set = cmds
+                    .iter()
+                    .find_map(|c| c["add"].get("set").filter(|s| s["name"] == name.as_str()))
+                    .unwrap_or_else(|| panic!("set {name}"));
+                assert_eq!(set["type"], json!([addr, addr]), "{name}");
+                assert_eq!(set["size"], 65536);
+                assert_eq!(set["timeout"], ELEMENT_TIMEOUT);
+                assert_eq!(set["flags"], json!(["dynamic", "timeout"]));
+                assert_eq!(set["stmt"], json!([{ "counter": null }]));
+            }
+        }
+        // the host rule updates the pair set with (local . remote)
+        let proto = |p: &str, f: &str| json!({ "payload": { "protocol": p, "field": f } });
+        for (p, f) in [("ip", '4'), ("ip6", '6')] {
+            for (d, own, other) in [('u', "saddr", "daddr"), ('d', "daddr", "saddr")] {
+                let want = json!({ "set": { "op": "update",
+                    "elem": { "concat": [proto(p, own), proto(p, other)] },
+                    "set": format!("@p{d}{f}") } });
+                assert!(
+                    cmds.iter().any(|c| c["add"]["rule"]["expr"]
+                        .as_array()
+                        .is_some_and(|e| e.contains(&want))),
+                    "no pair update for p{d}{f}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pair_listing_parsed() {
+        let listing = json!({"nftables": [
+            {"metainfo": {"version": "1.1.7"}},
+            {"set": {"family": "inet", "name": "pd4", "table": TABLE,
+                "type": ["ipv4_addr", "ipv4_addr"],
+                "elem": [
+                    {"elem": {"val": {"concat": ["192.168.1.100", "142.250.1.1"]},
+                        "expires": 3599, "counter": {"packets": 7, "bytes": 7000}}},
+                    // malformed: one part only
+                    {"elem": {"val": {"concat": ["192.168.1.100"]},
+                        "counter": {"packets": 1, "bytes": 1}}},
+                    // malformed: not a concatenation
+                    {"elem": {"val": "192.168.1.100", "counter": {"packets": 1, "bytes": 1}}}
+                ]}},
+            {"set": {"family": "inet", "name": "pu6", "table": TABLE,
+                "type": ["ipv6_addr", "ipv6_addr"],
+                "elem": [{"elem": {"val": {"concat": ["fd00::10", "2001:db8::1"]},
+                    "counter": {"packets": 2, "bytes": 150}}}]}}
+        ]})
+        .to_string();
+        let m = parse(listing.as_bytes());
+        assert_eq!(m.len(), 2, "{m:?}");
+        let down = Key {
+            kind: Kind::Pair,
+            dir: Dir::Down,
+            addr: "192.168.1.100".into(),
+            remote: "142.250.1.1".into(),
+            proto: 0,
+            port: 0,
+        };
+        assert_eq!(m[&down].bytes, 7000);
+        let up = m.keys().find(|k| k.dir == Dir::Up).unwrap();
+        assert_eq!(
+            (up.kind, up.addr.as_str(), up.remote.as_str()),
+            (Kind::Pair, "fd00::10", "2001:db8::1")
+        );
     }
 
     #[test]
