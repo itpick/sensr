@@ -1079,6 +1079,12 @@ async fn label_set_rejects_a_bad_mac_and_a_long_maker() {
             .is_err()
     );
     assert_eq!(fx.applied().len(), before);
+    // control characters inside the maker (a trailing newline is trimmed)
+    for bad in ["Wy\nze", "Wy\tze", "Wyze\u{1b}[0m"] {
+        let e = agent_err(label_set(&mut c, None, Some(bad)).await);
+        assert_eq!(e.kind, ErrorKind::BadRequest, "{bad:?}");
+    }
+    assert_eq!(fx.applied().len(), before);
 }
 
 #[tokio::test]

@@ -1079,6 +1079,15 @@ impl<A: Applier> Agent<A> {
         // the schema checks the length of the trimmed maker but stores it
         // as given: store it trimmed, and a blank one is no maker
         let maker = maker.map(|m| m.trim().to_owned()).filter(|m| !m.is_empty());
+        if maker
+            .as_deref()
+            .is_some_and(|m| m.chars().any(char::is_control))
+        {
+            return Err(err(
+                ErrorKind::BadRequest,
+                "the maker must not contain control characters",
+            ));
+        }
         let base = inner
             .candidate
             .clone()

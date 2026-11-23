@@ -99,7 +99,8 @@ pub struct HostLabel {
     /// Replaces the guessed kind when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<HostKind>,
-    /// Replaces the guessed maker when set (1-64 characters).
+    /// Replaces the guessed maker when set (1-64 characters, no control
+    /// characters).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maker: Option<String>,
     /// Free text.
@@ -170,6 +171,13 @@ impl Validate for Hosts {
                         "The maker must be 1 to 64 characters.",
                     );
                 }
+                if m.chars().any(char::is_control) {
+                    out.add(
+                        &labels.join(id).join("maker"),
+                        ValidatorKind::Callback,
+                        "The maker must not contain control characters (tabs, line breaks).",
+                    );
+                }
             }
         }
     }
@@ -235,6 +243,19 @@ mod tests {
         let blank = doc_with(json!({U1:{"mac":"aa:bb:cc:dd:ee:01","maker":"   "}}));
         assert!(format!("{}", blank.validate()).contains("1 to 64"));
         let ok = doc_with(json!({U1:{"mac":"aa:bb:cc:dd:ee:01","maker":"a".repeat(64)}}));
+        assert!(ok.validate().is_empty());
+    }
+
+    #[test]
+    fn host_label_maker_control_characters_rejected() {
+        for bad in ["Wy\nze", "Wy\tze", "Wyze\u{7}", "\u{1b}[31mWyze"] {
+            let d = doc_with(json!({U1:{"mac":"aa:bb:cc:dd:ee:01","maker":bad}}));
+            assert!(
+                format!("{}", d.validate()).contains("control characters"),
+                "{bad:?}"
+            );
+        }
+        let ok = doc_with(json!({U1:{"mac":"aa:bb:cc:dd:ee:01","maker":"Pi Foundation & Co"}}));
         assert!(ok.validate().is_empty());
     }
 
