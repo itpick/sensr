@@ -9,6 +9,7 @@
 pub mod actions;
 pub mod api;
 pub mod app;
+pub mod chart;
 pub mod form;
 pub mod grid;
 pub mod islands;

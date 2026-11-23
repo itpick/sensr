@@ -985,6 +985,7 @@ fn simulated_status(doc: &Value, t: u64) -> SystemStatus {
                 name: iface.name.clone(),
                 rx: samples(60, phase, 1.0),
                 tx: samples(45, phase + 9, 0.3),
+                ts: (0..60).map(|s| t as i64 - 59 + s).collect(),
             }
         })
         .collect();

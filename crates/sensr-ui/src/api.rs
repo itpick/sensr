@@ -232,6 +232,9 @@ pub struct TrafficSeries {
     pub rx: Vec<u64>,
     /// Transmit rates, oldest first, bits/s.
     pub tx: Vec<u64>,
+    /// When each sample was taken, seconds since the Unix epoch.
+    #[serde(default)]
+    pub ts: Vec<i64>,
 }
 
 /// Everything the dashboard shows.

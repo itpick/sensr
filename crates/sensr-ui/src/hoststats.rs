@@ -13,7 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Samples kept per device (one per dashboard refresh, ~3 s apart).
 const KEEP: usize = 40;
@@ -22,7 +22,7 @@ const KEEP: usize = 40;
 struct State {
     cpu: Option<(u64, u64)>,
     net: HashMap<String, (Instant, u64, u64)>,
-    traffic: HashMap<String, VecDeque<(u64, u64)>>,
+    traffic: HashMap<String, VecDeque<(i64, u64, u64)>>,
 }
 
 /// Reads host statistics, remembering counters between calls.
@@ -238,6 +238,9 @@ impl Sampler {
         let root = self.root.as_path();
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
+        let unix_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
 
         let cpu_pct =
             read(root, "proc/stat")
@@ -331,14 +334,15 @@ impl Sampler {
                 None => (0, 0),
             };
             let hist = st.traffic.entry(dev.clone()).or_default();
-            hist.push_back((rx_bps, tx_bps));
+            hist.push_back((unix_now, rx_bps, tx_bps));
             while hist.len() > KEEP {
                 hist.pop_front();
             }
             traffic.push(TrafficSeries {
                 name: name.clone(),
-                rx: hist.iter().map(|(r, _)| *r).collect(),
-                tx: hist.iter().map(|(_, t)| *t).collect(),
+                rx: hist.iter().map(|(_, r, _)| *r).collect(),
+                tx: hist.iter().map(|(_, _, t)| *t).collect(),
+                ts: hist.iter().map(|(t, _, _)| *t).collect(),
             });
             let addr = |p: &str| Some(text(iface, p)).filter(|a| !a.is_empty());
             let ipv4 = live4.get(&dev).cloned().or_else(|| addr("ipv4.address"));
@@ -501,6 +505,7 @@ fe800000000000000000000000000045 02 40 20 80     eth0\n\
         let b = s.sample(&doc, "test");
         assert!(b.interfaces[0].rx_bps > 0);
         assert_eq!(b.traffic[0].rx.len(), 2);
+        assert_eq!(b.traffic[0].ts.len(), 2, "a timestamp per sample");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
