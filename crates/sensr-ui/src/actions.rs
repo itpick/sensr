@@ -712,6 +712,22 @@ pub async fn hosts() -> Result<Option<HostCard>, ServerFnError> {
     if let Ok(doc) = imp::doc().await {
         list.mark_staged(&doc);
     }
+    // Today's screen time and the DNS colour preview come from the insight database, for
+    // callers who may read it (cached: the card polls).
+    if b.may_access("/api/v1/insight/top") {
+        let dir = b.insight_dir();
+        let now = imp::now();
+        let scan = move || crate::insight::host_mix(&dir, now);
+        // Off the async threads when there is a runtime (there is not in the component tests).
+        let mix = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::spawn_blocking(scan).await.ok()
+        } else {
+            Some(scan())
+        };
+        if let Some(mix) = mix {
+            crate::insight::apply_mix(&mut list.hosts, &mix);
+        }
+    }
     let networks: std::collections::BTreeMap<String, String> = list
         .hosts
         .iter()

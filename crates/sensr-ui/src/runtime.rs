@@ -415,6 +415,38 @@ pub struct HostRow {
     pub owner_maker: Option<String>,
     /// The staged owner label differs from the one in force (set by the UI).
     pub staged_label: bool,
+    /// Screen-time minutes since local midnight (from the insight database, set by the UI
+    /// when the caller may read it); `None` when there is no such data.
+    pub today_minutes: Option<u32>,
+    /// Lookups over the last 24 hours by category key ([`CATEGORIES`] order), for the
+    /// Hosts card's colour preview; empty when there is no DNS data.
+    #[serde(deserialize_with = "null_default")]
+    pub dns_mix: Vec<(String, u32)>,
+}
+
+/// `(key, display name)` of every DNS activity category, in display order (sensr-schema's
+/// `Category::ALL` and `display()`, which the wasm bundle does not link; a test in
+/// sensr-api keeps them equal).
+pub const CATEGORIES: [(&str, &str); 11] = [
+    ("video", "Video"),
+    ("social", "Social"),
+    ("games", "Games"),
+    ("messaging", "Messaging"),
+    ("music", "Music"),
+    ("education", "Education"),
+    ("shopping", "Shopping"),
+    ("system", "Apple/Google/Microsoft system"),
+    ("ads_tracking", "Ads & tracking"),
+    ("smart_home", "Smart home"),
+    ("other", "Other"),
+];
+
+/// The display name of category `key` (an unknown key reads as Other).
+pub fn category_name(key: &str) -> &'static str {
+    CATEGORIES
+        .iter()
+        .find(|c| c.0 == key)
+        .map_or("Other", |c| c.1)
 }
 
 /// `(kind, display name, icon)` for every host kind, in the order the editor lists them
@@ -837,6 +869,24 @@ mod tests {
         assert!(v.gateways.is_empty());
         let a: Vec<AliasFeed> = parse(json!({"not": "a list"}));
         assert!(a.is_empty());
+    }
+
+    #[test]
+    fn host_activity_fields_are_lenient() {
+        let l: HostList = parse(json!({"now": 1, "hosts": [
+            {"key": "a", "today_minutes": 95, "dns_mix": [["video", 7], ["other", 2]]},
+            {"key": "b", "dns_mix": null},
+            {"key": "c"}
+        ]}));
+        assert_eq!(l.hosts[0].today_minutes, Some(95));
+        assert_eq!(
+            l.hosts[0].dns_mix,
+            [("video".to_owned(), 7), ("other".to_owned(), 2)]
+        );
+        assert!(l.hosts[1].dns_mix.is_empty() && l.hosts[1].today_minutes.is_none());
+        assert!(l.hosts[2].dns_mix.is_empty());
+        assert_eq!(category_name("smart_home"), "Smart home");
+        assert_eq!(category_name("nope"), "Other");
     }
 
     #[test]

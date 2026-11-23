@@ -309,6 +309,42 @@ impl Backend for UiBackend {
         .boxed()
     }
 
+    fn host_activity(
+        &self,
+        mac: String,
+        range: String,
+        page: u32,
+    ) -> BoxFuture<'_, ApiResult<sensr_ui::api::HostActivityView>> {
+        async move {
+            use sensr_ui::insight::{ActivityError, host_activity, local_offset};
+            if !self.may_access("/api/v1/insight/top") || !self.may_access("/api/v1/hosts") {
+                return Err(ApiError::Unauthorized);
+            }
+            if !matches!(range.as_str(), "today" | "7d") {
+                return Err(ApiError::Validation(vec![FieldError::new(
+                    "range",
+                    "Range is today or 7d.",
+                )]));
+            }
+            let hosts = self.runtime(RuntimeSection::Hosts).await?;
+            let dir = self.insight_dir();
+            let r = tokio::task::spawn_blocking(move || {
+                let now = crate::insight::now();
+                host_activity(&dir, hosts, &mac, &range, page, now, local_offset(now))
+            })
+            .await
+            .map_err(|e| ApiError::Backend(e.to_string()))?;
+            r.map_err(|e| match e {
+                ActivityError::BadRange => {
+                    ApiError::Validation(vec![FieldError::new("range", "Range is today or 7d.")])
+                }
+                ActivityError::UnknownHost => ApiError::NotFound("no such host".into()),
+                ActivityError::Failed(m) => ApiError::Backend(m),
+            })
+        }
+        .boxed()
+    }
+
     fn forget_host(&self, key: String) -> BoxFuture<'_, ApiResult<()>> {
         async move {
             match self.call(Op::HostForget { key }).await? {

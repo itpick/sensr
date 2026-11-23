@@ -102,6 +102,8 @@ pub struct MockBackend {
     insight_dir: Option<std::path::PathBuf>,
     /// The caller's privileges, checked against the built-in registry; `None` is root.
     privileges: Option<Vec<String>>,
+    /// The dnstap feed reads as stale (lookups only, no minutes).
+    stale_feed: bool,
 }
 
 impl Default for MockBackend {
@@ -158,7 +160,16 @@ impl MockBackend {
             users: vec![("root".into(), "sensr".into())],
             insight_dir: None,
             privileges: None,
+            stale_feed: false,
         }
+    }
+
+    /// The DNS activity feed reads as stale: hosts keep their lookups, but there are no
+    /// minutes and the page shows the banner.
+    #[must_use]
+    pub fn with_stale_feed(mut self) -> Self {
+        self.stale_feed = true;
+        self
     }
 
     /// Reads the traffic and alert databases from `dir` instead of the daemon's directory.
@@ -379,6 +390,9 @@ impl Backend for MockBackend {
                         .collect();
                     // the applied document's owner labels and modes, as the agent reports them
                     apply_host_labels(&mut hosts, &s.head().doc);
+                    for h in &mut hosts {
+                        apply_mock_mix(h, self.stale_feed);
+                    }
                     let modes = host_modes(&s.head().doc);
                     let mut interfaces = std::collections::BTreeSet::new();
                     for h in &mut hosts {
@@ -396,6 +410,33 @@ impl Backend for MockBackend {
                     json!({ "now": t, "hosts": hosts, "intercept": intercept })
                 }
             })
+        }))
+    }
+
+    fn host_activity(
+        &self,
+        mac: String,
+        range: String,
+        page: u32,
+    ) -> BoxFuture<'_, ApiResult<HostActivityView>> {
+        ready(self.with(|s| {
+            if !matches!(range.as_str(), "today" | "7d") {
+                return Err(ApiError::Validation(vec![FieldError::new(
+                    "range",
+                    "Range is today or 7d.",
+                )]));
+            }
+            let t = (s.clock)();
+            let host = simulated_hosts(t)
+                .into_iter()
+                .find(|h| {
+                    h["mac"]
+                        .as_str()
+                        .is_some_and(|m| m.eq_ignore_ascii_case(&mac))
+                })
+                .filter(|h| !s.forgotten.contains(h["key"].as_str().unwrap_or_default()))
+                .ok_or_else(|| ApiError::NotFound("no such host".into()))?;
+            Ok(simulated_activity(&host, &range, page, t, self.stale_feed))
         }))
     }
 
@@ -683,7 +724,21 @@ pub fn simulated_hosts(now: u64) -> Vec<Value> {
                "ipv4": "192.168.1.30", "sources": ["reserved"],
                "first_seen": now - 86_400 * 4, "online": false}),
     ];
-    for i in 1..=20u64 {
+    // Devices with DNS activity (see [`MOCK_ACTIVITY`]).
+    hosts.push(
+        json!({"key": KID_TABLET, "mac": KID_TABLET, "name": "kid-tablet",
+           "lease_hostname": "kid-tablet", "interface": "lan", "interface_name": "LAN",
+           "ipv4": "192.168.1.61", "sources": ["lease", "neighbour"],
+           "lease": {"state": "active", "expires": now + 3_600},
+           "first_seen": now.saturating_sub(86_400 * 60), "last_seen": now - 4, "online": true}),
+    );
+    hosts.push(json!({"key": LAPTOP, "mac": LAPTOP, "name": "laptop",
+           "lease_hostname": "laptop", "interface": "lan", "interface_name": "LAN",
+           "ipv4": "192.168.1.62", "sources": ["lease", "neighbour"],
+           "lease": {"state": "active", "expires": now + 3_600},
+           "first_seen": now.saturating_sub(86_400 * 200), "last_seen": now - 9, "online": true}));
+    // (Eighteen of these: with the two above the inventory stays at 25 devices.)
+    for i in 1..=18u64 {
         let (iface, name, net) = if i % 3 == 0 {
             ("opt1", "LAN2", "192.168.72")
         } else {
@@ -717,6 +772,18 @@ pub fn simulated_hosts(now: u64) -> Vec<Value> {
                 &["MAC maker: Raspberry Pi"],
             ),
             "7c:78:b2:10:9e:41" => (Some("Wyze"), "camera", "medium", &["MAC maker: Wyze"]),
+            KID_TABLET => (
+                Some("Samsung"),
+                "tablet",
+                "medium",
+                &["MAC maker: Samsung", "Host name: kid-tablet"],
+            ),
+            LAPTOP => (
+                Some("Apple"),
+                "computer",
+                "medium",
+                &["MAC maker: Apple", "Host name: laptop"],
+            ),
             "00:14:78:38:a5:fc" => (
                 Some("TP-Link"),
                 "network",
@@ -746,6 +813,360 @@ pub fn simulated_hosts(now: u64) -> Vec<Value> {
         )
     });
     hosts
+}
+
+const KID_TABLET: &str = "e2:5b:7a:31:90:c4";
+const LAPTOP: &str = "3c:22:fb:81:4d:0a";
+/// The Wyze camera of [`simulated_hosts`]: only lookups, no screen time.
+const CAMERA: &str = "7c:78:b2:10:9e:41";
+
+/// `(service, category key, minutes today)`.
+type MockService = (&'static str, &'static str, u32);
+/// `(name, lookups, service, category key, new, blocked)`.
+type MockDomain = (&'static str, u64, &'static str, &'static str, bool, bool);
+
+/// What a mock device did: today's minutes per service, how the other six days compare
+/// (tenths of today), the hours of the day it is active (hour, share in percent), the
+/// names it looked up and its 24 h lookups per category.
+struct MockActivity {
+    mac: &'static str,
+    today: &'static [MockService],
+    prior_days: [u32; 6],
+    hours: &'static [(u8, u32)],
+    domains: &'static [MockDomain],
+    mix: &'static [(&'static str, u32)],
+}
+
+/// The seeded activity, matching the owner-approved mockup.
+const MOCK_ACTIVITY: &[MockActivity] = &[
+    MockActivity {
+        mac: KID_TABLET,
+        today: &[
+            ("YouTube", "video", 82),
+            ("Roblox", "games", 48),
+            ("YouTube Kids", "video", 13),
+            ("TikTok", "social", 14),
+            ("Discord", "messaging", 6),
+            ("Minecraft", "games", 4),
+        ],
+        prior_days: [8, 11, 6, 9, 13, 12],
+        hours: &[(15, 20), (16, 25), (17, 20), (19, 20), (20, 15)],
+        domains: &[
+            (
+                "rr3---sn-4g5e6nsz.googlevideo.com",
+                412,
+                "YouTube",
+                "video",
+                false,
+                false,
+            ),
+            ("www.youtube.com", 188, "YouTube", "video", false, false),
+            ("apis.roblox.com", 164, "Roblox", "games", false, false),
+            ("gamejoin.roblox.com", 61, "Roblox", "games", false, false),
+            ("v16m.tiktokcdn.com", 133, "TikTok", "social", false, false),
+            ("www.tiktok.com", 57, "TikTok", "social", false, false),
+            ("ads.tiktok.com", 49, "TikTok", "ads_tracking", false, true),
+            (
+                "kids.youtube.com",
+                41,
+                "YouTube Kids",
+                "video",
+                false,
+                false,
+            ),
+            (
+                "gateway.discord.gg",
+                38,
+                "Discord",
+                "messaging",
+                false,
+                false,
+            ),
+            (
+                "sessionserver.mojang.com",
+                12,
+                "Minecraft",
+                "games",
+                false,
+                false,
+            ),
+            ("time.android.com", 9, "Google", "system", false, false),
+            (
+                "some-new-game-cdn.net",
+                6,
+                "some-new-game-cdn.net",
+                "other",
+                true,
+                false,
+            ),
+        ],
+        mix: &[
+            ("video", 640),
+            ("social", 190),
+            ("games", 225),
+            ("messaging", 38),
+            ("system", 44),
+            ("ads_tracking", 49),
+            ("other", 6),
+        ],
+    },
+    MockActivity {
+        mac: CAMERA,
+        today: &[],
+        prior_days: [10; 6],
+        hours: &[],
+        domains: &[
+            ("api.wyzecam.com", 312, "Wyze", "smart_home", false, false),
+            (
+                "p2p-relay-eu-3.wyze.com",
+                140,
+                "Wyze",
+                "smart_home",
+                false,
+                false,
+            ),
+            ("time.android.com", 96, "Google", "system", false, false),
+            (
+                "telemetry.iot-analytics.net",
+                14,
+                "iot-analytics.net",
+                "ads_tracking",
+                false,
+                true,
+            ),
+            (
+                "firmware-cdn-07.iotvendor.net",
+                3,
+                "iotvendor.net",
+                "other",
+                true,
+                false,
+            ),
+        ],
+        mix: &[
+            ("smart_home", 452),
+            ("system", 96),
+            ("ads_tracking", 14),
+            ("other", 3),
+        ],
+    },
+    MockActivity {
+        mac: LAPTOP,
+        today: &[
+            ("Netflix", "video", 41),
+            ("Slack", "messaging", 118),
+            ("GitHub", "other", 64),
+            ("Spotify", "music", 90),
+            ("Khan Academy", "education", 25),
+        ],
+        prior_days: [9, 10, 4, 3, 11, 10],
+        hours: &[(9, 25), (10, 25), (13, 20), (14, 15), (21, 15)],
+        domains: &[
+            ("api.github.com", 540, "GitHub", "other", false, false),
+            ("slack-edge.com", 310, "Slack", "messaging", false, false),
+            ("gateway.icloud.com", 260, "Apple", "system", false, false),
+            (
+                "audio-ak-spotify-com.akamaized.net",
+                150,
+                "Spotify",
+                "music",
+                false,
+                false,
+            ),
+            ("www.amazon.com", 30, "Amazon", "shopping", false, false),
+            (
+                "pixel.adsafeprotected.com",
+                95,
+                "adsafeprotected.com",
+                "ads_tracking",
+                false,
+                true,
+            ),
+            (
+                "www.khanacademy.org",
+                25,
+                "Khan Academy",
+                "education",
+                false,
+                false,
+            ),
+            (
+                "occ-0-1.nflxvideo.net",
+                120,
+                "Netflix",
+                "video",
+                false,
+                false,
+            ),
+        ],
+        mix: &[
+            ("video", 120),
+            ("social", 80),
+            ("messaging", 310),
+            ("music", 150),
+            ("education", 25),
+            ("shopping", 30),
+            ("system", 260),
+            ("ads_tracking", 95),
+            ("other", 540),
+        ],
+    },
+];
+
+/// Screen-time categories of the mock (everything but system and ads).
+fn mock_screen_time(category: &str) -> bool {
+    !matches!(category, "system" | "ads_tracking")
+}
+
+/// Today's screen-time minutes of a mock device (`None`: no services).
+fn mock_today_minutes(a: &MockActivity) -> Option<u32> {
+    let m: u32 = a
+        .today
+        .iter()
+        .filter(|s| mock_screen_time(s.1))
+        .map(|s| s.2)
+        .sum();
+    (m > 0).then_some(m)
+}
+
+/// Sets a host row's `today_minutes` and `dns_mix` when the mock has activity for it; a
+/// stale feed has no minutes.
+fn apply_mock_mix(h: &mut Value, stale: bool) {
+    let Some(a) = MOCK_ACTIVITY
+        .iter()
+        .find(|a| h["mac"].as_str() == Some(a.mac))
+    else {
+        return;
+    };
+    h["dns_mix"] = json!(a.mix);
+    if !stale && let Some(m) = mock_today_minutes(a) {
+        h["today_minutes"] = json!(m);
+    }
+}
+
+/// The activity page of a mock device (an empty one for hosts without seeded activity).
+/// `host` is its row in [`simulated_hosts`].
+pub fn simulated_activity(
+    host: &Value,
+    range: &str,
+    page: u32,
+    now: u64,
+    stale: bool,
+) -> HostActivityView {
+    const DAY: i64 = 86_400;
+    let now = i64::try_from(now).unwrap_or(0);
+    let today_start = now - now.rem_euclid(DAY);
+    let week = range == "7d";
+    let mut v = HostActivityView {
+        mac: host["mac"].as_str().unwrap_or_default().to_owned(),
+        name: host["name"].as_str().map(str::to_owned),
+        label: serde_json::from_value(host["label"].clone()).ok(),
+        ipv4: host["ipv4"].as_str().map(str::to_owned),
+        ipv6: host["ipv6"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str().map(str::to_owned))
+            .collect(),
+        mode: host["mode"].as_str().map(str::to_owned),
+        last_seen: host["last_seen"].as_u64(),
+        online: host["online"].as_bool().unwrap_or(false),
+        range: range.to_owned(),
+        from: if week {
+            today_start - 6 * DAY
+        } else {
+            today_start
+        },
+        to: today_start + DAY,
+        utc_offset: 0,
+        available: true,
+        feed_stale: stale,
+        last_frame: stale.then_some(now - 3_600),
+        page,
+        per_page: 100,
+        ..HostActivityView::default()
+    };
+    let Some(a) = MOCK_ACTIVITY.iter().find(|a| a.mac == v.mac) else {
+        return v;
+    };
+    // `scale` tenths of today: 10 is today itself.
+    let day_factors: Vec<(i64, u32)> = if week {
+        std::iter::once((0, 10))
+            .chain(
+                a.prior_days
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (-(i as i64) - 1, *f)),
+            )
+            .collect()
+    } else {
+        vec![(0, 10)]
+    };
+    let total_factor: u32 = day_factors.iter().map(|f| f.1).sum();
+    if !stale {
+        let mut services: Vec<ActivityService> = a
+            .today
+            .iter()
+            .map(|(service, category, m)| ActivityService {
+                service: (*service).to_owned(),
+                category: (*category).to_owned(),
+                minutes: (m * total_factor).div_ceil(10).max(1),
+            })
+            .collect();
+        services.sort_by(|x, y| y.minutes.cmp(&x.minutes).then(x.service.cmp(&y.service)));
+        let mut cats: std::collections::BTreeMap<&str, u32> = Default::default();
+        for s in &services {
+            *cats.entry(s.category.as_str()).or_default() += s.minutes;
+        }
+        let mut categories: Vec<ActivityCategory> = cats
+            .iter()
+            .map(|(c, m)| ActivityCategory {
+                category: (*c).to_owned(),
+                minutes: *m,
+            })
+            .collect();
+        categories.sort_by(|x, y| y.minutes.cmp(&x.minutes).then(x.category.cmp(&y.category)));
+        v.screen_time = services
+            .iter()
+            .filter(|s| mock_screen_time(&s.category))
+            .map(|s| s.minutes)
+            .sum();
+        let today_total = mock_today_minutes(a).unwrap_or(0);
+        for (offset, factor) in day_factors {
+            let day = (today_start / DAY) + offset;
+            let total = (today_total * factor).div_ceil(10);
+            for (hour, share) in a.hours {
+                v.timeline.push(ActivityCell {
+                    day,
+                    hour: *hour,
+                    minutes: (total * share / 100).clamp(0, 60),
+                });
+            }
+        }
+        v.timeline.sort_by_key(|c| (c.day, c.hour));
+        v.services = services;
+        v.categories = categories;
+    }
+    v.domains_total = u32::try_from(a.domains.len()).unwrap_or(u32::MAX);
+    if page == 0 {
+        v.domains = a
+            .domains
+            .iter()
+            .map(
+                |(qname, count, service, category, new, blocked)| ActivityDomain {
+                    qname: (*qname).to_owned(),
+                    count: if week { count * 6 } else { *count },
+                    first_seen: if *new { now - 3_600 } else { now - 86_400 * 20 },
+                    last_seen: now - 60,
+                    service: (*service).to_owned(),
+                    category: (*category).to_owned(),
+                    new: *new,
+                    blocked: *blocked,
+                },
+            )
+            .collect();
+    }
+    v
 }
 
 /// Leases for the seeded DHCP server on 192.168.1.0/24: a client of each kind the page
@@ -1716,6 +2137,115 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn activity(mock: &MockBackend, mac: &str, range: &str) -> ApiResult<HostActivityView> {
+        block(mock.host_activity(mac.into(), range.into(), 0))
+    }
+
+    #[test]
+    fn mock_kid_tablet_matches_the_mockup() {
+        let m = MockBackend::new();
+        let v = activity(&m, KID_TABLET, "today").unwrap();
+        let mins = |svc: &str| {
+            v.services
+                .iter()
+                .find(|s| s.service == svc)
+                .unwrap()
+                .minutes
+        };
+        assert_eq!(
+            [
+                "YouTube",
+                "Roblox",
+                "YouTube Kids",
+                "TikTok",
+                "Discord",
+                "Minecraft"
+            ]
+            .map(mins),
+            [82, 48, 13, 14, 6, 4]
+        );
+        assert_eq!(v.screen_time, 167);
+        assert_eq!(v.categories[0].category, "video");
+        let d = |n: &str| v.domains.iter().find(|d| d.qname == n).unwrap();
+        assert!(d("ads.tiktok.com").blocked);
+        assert!(d("some-new-game-cdn.net").new);
+        assert!(!v.feed_stale && v.available);
+        let week = activity(&m, KID_TABLET, "7d").unwrap();
+        assert!(week.screen_time > 4 * v.screen_time);
+        let days: std::collections::BTreeSet<_> = week.timeline.iter().map(|c| c.day).collect();
+        assert_eq!(days.len(), 7);
+        assert!(week.timeline.iter().any(|c| c.hour == 16));
+        assert_eq!(activity(&m, KID_TABLET, "7d").unwrap().page, 0);
+        assert!(
+            block(m.host_activity(KID_TABLET.into(), "7d".into(), 1))
+                .unwrap()
+                .domains
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn mock_camera_has_only_domains() {
+        let m = MockBackend::new();
+        let v = activity(&m, CAMERA, "today").unwrap();
+        assert!(v.services.is_empty() && v.timeline.is_empty() && v.screen_time == 0);
+        assert!(v.domains.iter().any(|d| d.blocked));
+        assert!(v.domains.iter().any(|d| d.new));
+        assert!(v.domains.iter().any(|d| d.category == "smart_home"));
+    }
+
+    #[test]
+    fn mock_stale_feed_keeps_lookups_but_no_minutes() {
+        let m = MockBackend::new().with_stale_feed();
+        let v = activity(&m, KID_TABLET, "today").unwrap();
+        assert!(v.feed_stale && v.last_frame.is_some());
+        assert!(v.services.is_empty() && v.timeline.is_empty());
+        assert!(!v.domains.is_empty());
+        let hosts: crate::runtime::HostList =
+            crate::runtime::parse(block(m.runtime(RuntimeSection::Hosts)).unwrap());
+        let kid = hosts
+            .hosts
+            .iter()
+            .find(|h| h.mac.as_deref() == Some(KID_TABLET))
+            .unwrap();
+        assert_eq!(kid.today_minutes, None);
+        assert!(!kid.dns_mix.is_empty());
+    }
+
+    #[test]
+    fn mock_activity_errors_and_hosts_rows() {
+        let m = MockBackend::new();
+        assert!(matches!(
+            activity(&m, KID_TABLET, "1y"),
+            Err(ApiError::Validation(_))
+        ));
+        assert!(matches!(
+            activity(&m, "00:00:00:00:00:00", "today"),
+            Err(ApiError::NotFound(_))
+        ));
+        let hosts: crate::runtime::HostList =
+            crate::runtime::parse(block(m.runtime(RuntimeSection::Hosts)).unwrap());
+        let row = |mac: &str| {
+            hosts
+                .hosts
+                .iter()
+                .find(|h| h.mac.as_deref() == Some(mac))
+                .unwrap()
+        };
+        assert_eq!(row(KID_TABLET).today_minutes, Some(167));
+        assert_eq!(row(KID_TABLET).dns_mix[0], ("video".to_owned(), 640));
+        assert_eq!(row(CAMERA).today_minutes, None);
+        assert!(row(CAMERA).dns_mix.iter().any(|c| c.0 == "smart_home"));
+        assert!(row(LAPTOP).dns_mix.len() >= 8, "a mixed day");
+        assert!(row("02:00:00:00:00:01").dns_mix.is_empty());
+        // every mix key is a known category
+        for h in &hosts.hosts {
+            for (k, _) in &h.dns_mix {
+                assert!(crate::runtime::CATEGORIES.iter().any(|c| c.0 == k), "{k}");
+            }
+        }
+    }
 
     fn block<T>(f: BoxFuture<'_, T>) -> T {
         futures::executor::block_on(f)

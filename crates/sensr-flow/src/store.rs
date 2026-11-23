@@ -1202,6 +1202,23 @@ mod tests {
         assert_eq!(count("SELECT COUNT(*) FROM domains_seen"), 4, "90 days");
     }
 
+    /// Callers (the API) treat a database from before per-host DNS activity as empty by this
+    /// error text.
+    #[test]
+    fn missing_activity_tables_say_no_such_table() {
+        let s = FlowStore {
+            db: Connection::open_in_memory().unwrap(),
+        };
+        let r = ActivityRange::today(D0, 0);
+        for e in [
+            s.host_activity(KID, &r, 0, cat()).unwrap_err().to_string(),
+            s.today_minutes(0, cat()).unwrap_err().to_string(),
+            s.dns_mix_24h(D0, cat()).unwrap_err().to_string(),
+        ] {
+            assert!(e.contains("no such table"), "{e}");
+        }
+    }
+
     #[test]
     fn today_minutes_excludes_system_and_ads() {
         let mut s = FlowStore::memory().unwrap();
