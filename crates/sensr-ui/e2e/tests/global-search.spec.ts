@@ -75,15 +75,13 @@ test("finds an alias and opens its dialog", async ({ page }) => {
   await expect(dlg.locator("#grid-aliases-dlg--name")).toHaveValue("web_ports");
 });
 
-test("show all opens the filtered grid", async ({ page }) => {
+test("no Show all when the matches span several grid tabs", async ({ page }) => {
   await at(page, "/ui/core/dashboard");
+  // 6 rules match "an", on the LAN, WireGuard and floating tabs: no one tab lists them all
   await search(page, "an");
-  const more = group(page, "Rules").getByRole("option", { name: /^Show all \(\d+\)$/ });
-  await expect(more).toHaveAttribute("data-url", "/ui/firewall/filter?q=an");
-  await more.click();
-  await page.waitForURL("**/ui/firewall/filter?q=an");
-  await hydrated(page);
-  await expect(page.locator(".grid-toolbar input[type=search]")).toHaveValue("an");
+  const rules = group(page, "Rules");
+  await expect(rules.getByRole("option")).toHaveCount(5);
+  await expect(rules.getByRole("option", { name: /^Show all/ })).toHaveCount(0);
 });
 
 test("finds a host", async ({ page }) => {
@@ -280,9 +278,29 @@ test("phone sheet", async ({ page }) => {
   await open.click();
   await page.getByRole("button", { name: "Close search" }).click();
   await expect(box(page)).toBeHidden();
+  // putting the keyboard away (a blur with nowhere to go) keeps the sheet and its results
   await open.click();
+  await page.keyboard.type("fire");
+  await expect(page.locator("#gsearch-opt-0")).toBeVisible();
   await page.evaluate(() => (document.activeElement as HTMLElement).blur());
+  await page.waitForTimeout(200);
+  await expect(box(page)).toBeVisible();
+  await expect(page.locator("#gsearch-opt-0")).toBeVisible();
+  // back in the box, focus moving to the page behind closes it
+  await box(page).focus();
+  await page.locator("#content").focus();
   await expect(box(page)).toBeHidden();
+});
+
+test("results are announced", async ({ page }) => {
+  await at(page, "/ui/core/dashboard");
+  const live = page.locator(".gsearch [aria-live=polite]");
+  await expect(live).toBeAttached();
+  await expect(live).toHaveText("");
+  await search(page, "hostname");
+  await expect(live).toHaveText("3 results");
+  await box(page).fill("zzzz");
+  await expect(live).toHaveText("No matches for “zzzz”");
 });
 
 test.describe("read-only user", () => {
@@ -290,16 +308,66 @@ test.describe("read-only user", () => {
   const port = Number(process.env.SENSR_UI_PORT ?? 3300) + 1;
   test.use({ baseURL: `http://127.0.0.1:${port}` });
 
-  test("read-only user sees no hidden pages", async ({ page }) => {
+  // page-all + read-only: a read-only user searches everything it can read
+  test("read-only user finds what it can read", async ({ page }) => {
     await at(page, "/ui/core/dashboard");
     await search(page, "192.168");
+    await expect(group(page, "Hosts")).toBeVisible();
+    await expect(group(page, "Aliases")).toBeVisible();
     const urls = await page.locator("#gsearch-list [role=option]").evaluateAll((os) => os.map((o) => o.getAttribute("data-url")!));
-    expect(urls.length).toBeGreaterThan(0);
-    // every hit is a page this user may open
     for (const u of urls) {
       const res = await page.request.get(u);
       expect(res.status(), u).toBe(200);
-      expect(await res.text(), u).not.toMatch(/not allowed|forbidden|Login \| sensr/i);
     }
+  });
+});
+
+test.describe("alias-only user", () => {
+  test.skip(!!process.env.SENSR_UI_BASE_URL, "needs the alias-only dev server");
+  const port = Number(process.env.SENSR_UI_PORT ?? 3300) + 2;
+  test.use({ baseURL: `http://127.0.0.1:${port}` });
+  test.describe.configure({ mode: "serial" });
+
+  test("sees no hidden pages", async ({ page }) => {
+    // (the dashboard's hosts card stays empty for this user, so wait on the alias page)
+    await at(page, "/ui/firewall/alias");
+    // root on the main server gets Rules and Hosts for these; this user may only open aliases
+    for (const q of ["192.168", "lan", "an", "b8:27:eb"]) {
+      await box(page).fill(q);
+      await expect(page.locator(".gsearch [aria-live=polite]")).not.toHaveText("");
+      const groups = await page.locator("#gsearch-list [role=group]").evaluateAll((gs) => gs.map((g) => g.getAttribute("aria-label")));
+      for (const hidden of ["Rules", "Users", "Hosts", "Settings", "Assignments", "Port Forward"]) {
+        expect(groups, `${q}: ${hidden}`).not.toContain(hidden);
+      }
+      const urls = await page.locator("#gsearch-list [role=option]").evaluateAll((os) => os.map((o) => o.getAttribute("data-url")!));
+      for (const u of urls) expect(u, q).toMatch(/^\/ui\/firewall\/alias(\?|$)/);
+      await box(page).fill("");
+    }
+    await box(page).fill("192.168");
+    await expect(group(page, "Aliases").getByRole("option")).toHaveCount(3);
+  });
+
+  test("show all opens the grid listing every match", async ({ page }) => {
+    await at(page, "/ui/firewall/alias");
+    // six new aliases: one more than a group shows (this server's own mock state)
+    for (let i = 1; i <= 6; i++) {
+      await page.getByRole("button", { name: "Add" }).click();
+      const dialog = page.getByRole("dialog", { name: "Add alias" });
+      await dialog.getByLabel("Name").fill(`qsall_${i}`);
+      await dialog.getByLabel("Content").fill(`10.9.9.${i}`);
+      await dialog.getByRole("button", { name: "Save" }).click();
+      await expect(dialog).toBeHidden();
+    }
+    await search(page, "qsall");
+    const aliases = group(page, "Aliases");
+    const more = aliases.getByRole("option", { name: /^Show all \(\d+\)$/ });
+    await expect(more).toHaveText("Show all (6)");
+    await expect(more).toHaveAttribute("data-url", "/ui/firewall/alias?q=qsall");
+    await more.click();
+    await page.waitForURL("**/ui/firewall/alias?q=qsall");
+    await hydrated(page);
+    await expect(page.locator(".grid-toolbar input[type=search]")).toHaveValue("qsall");
+    // the grid lists as many as Show all promised
+    await expect(page.locator(".grid tbody tr")).toHaveCount(6);
   });
 });

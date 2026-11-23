@@ -7,6 +7,8 @@ const external = process.env.SENSR_UI_BASE_URL;
 const root = (process.env.SENSR_UI_ROOT ?? require("node:path").resolve(__dirname, "../../..")) + "/";
 const port = Number(process.env.SENSR_UI_PORT ?? 3300);
 const readOnlyPort = port + 1;
+// Only the alias page: global search must not show anything else.
+const aliasOnlyPort = port + 2;
 
 function server(p: number, bin?: string, privileges?: string) {
   return {
@@ -41,5 +43,7 @@ export default defineConfig({
     server(port, process.env.SENSR_UI_BIN),
     // A second instance whose only user is a read-only administrator.
     server(readOnlyPort, process.env.SENSR_UI_BIN, "page-all,user-config-readonly"),
+    // A third whose only privilege is the alias page.
+    server(aliasOnlyPort, process.env.SENSR_UI_BIN, "page-firewall-alias-edit"),
   ],
 });
