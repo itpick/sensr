@@ -1678,6 +1678,7 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
                     card.set(c);
                     if let (Some(el), Some(v)) = (select.get_untracked(), shown) {
                         el.set_value(&v);
+                        el.set_class_name(mode_select_class(&v));
                     }
                 }
                 Err(e) => error.set(Some(format!("Could not read the hosts: {e}"))),
@@ -1704,6 +1705,7 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
             return view! { {badge} {staged_note} }.into_any();
         }
         let shown = mode_shown(h);
+        let class = mode_select_class(shown);
         let select = NodeRef::<leptos::html::Select>::new();
         let label = format!("Mode for {}", h.label());
         let options = [
@@ -1714,10 +1716,16 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
         .map(|(v, t)| view! { <option value=v selected=v == shown>{t}</option> });
         let m = mac.clone();
         view! {
-            {badge}
-            <select aria-label=label node_ref=select
+            <select aria-label=label node_ref=select class=class
                 disabled=move || busy.get().as_deref() == Some(m.as_str())
-                on:change=move |ev| set_mode(mac.clone(), event_target_value(&ev), select)>
+                on:change=move |ev| {
+                    let v = event_target_value(&ev);
+                    // tint at once; the refresh in set_mode settles it
+                    if let Some(el) = select.get_untracked() {
+                        el.set_class_name(mode_select_class(&v));
+                    }
+                    set_mode(mac.clone(), v, select)
+                }>
                 {options}
             </select>
             {staged_note}
@@ -1744,7 +1752,10 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
                     <span class="muted" title="A reservation is staged; apply it to make this host static">"staged"</span>
                 })}
                 {if h.reserved() {
-                    view! { <span class="muted">"remove the reservation on the DHCP page to forget this host"</span> }.into_any()
+                    view! {
+                        <span class="muted host-reserved"
+                            title="Remove the reservation on the DHCP page to forget this host">"Reserved"</span>
+                    }.into_any()
                 } else {
                     view! {
                         <button type="button" class="btn btn-sm"
@@ -1870,6 +1881,15 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
         })}
     }
     .into_any()
+}
+
+/// The mode select's classes: compact, tinted for a locked mode.
+fn mode_select_class(mode: &str) -> &'static str {
+    match mode {
+        "isolated" => "mode-select mode-isolated",
+        "quarantine" => "mode-select mode-quarantine",
+        _ => "mode-select",
+    }
 }
 
 /// The mode a host's Mode select shows: the staged one, else the one in force.

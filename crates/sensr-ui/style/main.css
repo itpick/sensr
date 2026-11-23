@@ -160,6 +160,19 @@ input[type="text"], input[type="password"], input[type="search"], select, textar
   border: 1px solid var(--input-line); border-radius: 4px;
   background: var(--input); color: var(--input-fg); font: inherit;
 }
+/* Native arrow replaced: a token-coloured chevron with room to breathe. */
+select {
+  appearance: none; -webkit-appearance: none;
+  padding-right: 32px; cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 17px) 55%, calc(100% - 12px) 55%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+select:disabled { opacity: .55; cursor: not-allowed; }
+select[multiple] { padding-right: 8px; background-image: none; }
 textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
 input[type="checkbox"], input[type="radio"] { width: 16px; height: 16px; accent-color: var(--accent); }
 .field-check .control { padding-top: 7px; }
@@ -228,6 +241,14 @@ ul.plain { list-style: none; padding: 0; margin: 8px 0; }
 .host-actions .btn + * { margin-left: 6px; }
 .host-mode { white-space: nowrap; }
 .host-mode .pill + select { margin-left: 6px; }
+.mode-select {
+  width: auto; min-width: 122px; min-height: 28px; padding: 3px 30px 3px 10px;
+  font-size: 13px; font-weight: 500; border-radius: 14px;
+}
+.mode-select.mode-isolated { background-color: var(--warn-bg); border-color: var(--warn); color: var(--warn); }
+.mode-select.mode-quarantine { background-color: var(--bad-bg); border-color: var(--bad); color: var(--bad); }
+.mode-select option { background: var(--input); color: var(--input-fg); }
+.host-reserved { cursor: help; border-bottom: 1px dotted var(--muted); }
 .host-mode-staged { display: block; font-size: 12px; }
 .hosts-footer p { margin: 8px 0 0; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
@@ -350,6 +371,7 @@ span.btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
     max-width: none; font-size: 16px; min-height: 44px;
   }
   input[type="checkbox"], input[type="radio"] { width: 20px; height: 20px; }
+  .mode-select { min-height: 44px; font-size: 16px; }
   .multi-opt { padding: 4px 0; }
   .row-actions { flex-direction: row; flex-wrap: wrap; }
   .row-actions .btn { flex: 1 1 auto; }

@@ -701,7 +701,7 @@ fn hosts_card_read_only_has_no_actions() {
     assert!(all.contains("Hosts (25)"));
     assert!(!all.contains("Forget"), "{all}");
     assert!(!all.contains("Make static"));
-    assert!(!all.contains("remove the reservation on the DHCP page"));
+    assert!(!all.contains("Reserved"), "{all}");
 }
 
 #[test]
@@ -709,7 +709,15 @@ fn hosts_card_reserved_row_has_no_forget() {
     let doc = render_hosts(hosts_from(hosts_mock()));
     let nas = host_row(&doc, "nas");
     assert!(nas.select(&sel("button")).next().is_none(), "{}", text(nas));
-    assert!(text(nas).contains("remove the reservation on the DHCP page to forget this host"));
+    let reserved = nas
+        .select(&sel(".host-reserved"))
+        .next()
+        .expect("reserved note");
+    assert_eq!(text(reserved), "Reserved");
+    assert_eq!(
+        reserved.value().attr("title"),
+        Some("Remove the reservation on the DHCP page to forget this host")
+    );
     // A leased host can be made static and forgotten.
     let pi: Vec<String> = host_row(&doc, "bench-pi")
         .select(&sel("button"))
@@ -943,19 +951,22 @@ fn host_mode_badges() {
     assert_eq!(mode("device-05").as_deref(), Some("quarantine"));
     assert_eq!(mode("bench-pi"), None);
     let doc = render_hosts(Some(card));
-    let badge = |name: &str| {
-        mode_cell(host_row(&doc, name))
-            .select(&sel(".pill"))
+    // editable rows tint the select itself instead of adding a badge
+    let class = |name: &str| {
+        let cell = mode_cell(host_row(&doc, name));
+        assert!(
+            cell.select(&sel(".pill")).next().is_none(),
+            "{name} has a badge"
+        );
+        cell.select(&sel("select"))
             .next()
-            .map(|b| (b.value().attr("class").unwrap_or("").to_owned(), text(b)))
+            .and_then(|s| s.value().attr("class"))
+            .unwrap_or("")
+            .to_owned()
     };
-    let (class, label) = badge("device-02").expect("isolated badge");
-    assert!(class.split(' ').any(|c| c == "pill-warn"), "{class}");
-    assert_eq!(label, "Isolated");
-    let (class, label) = badge("device-05").expect("quarantine badge");
-    assert!(class.split(' ').any(|c| c == "pill-off"), "{class}");
-    assert_eq!(label, "Quarantine");
-    assert!(badge("bench-pi").is_none(), "Normal has no badge");
+    assert_eq!(class("device-02"), "mode-select mode-isolated");
+    assert_eq!(class("device-05"), "mode-select mode-quarantine");
+    assert_eq!(class("bench-pi"), "mode-select");
     let selected: Vec<String> = mode_cell(host_row(&doc, "device-05"))
         .select(&sel("option[selected]"))
         .map(text)
