@@ -18,6 +18,7 @@ pub mod dns;
 pub mod dnsbl;
 pub mod firewall;
 pub mod gateways;
+pub mod hosts;
 pub mod ids;
 pub mod insight;
 pub mod interfaces;
