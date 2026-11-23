@@ -422,31 +422,42 @@ pub fn refresh_once(feeds: &Feeds, engine: &Mutex<Engine>, doc: &Document, now: 
 }
 
 /// `sets`' MACs with the addresses `table` holds for them: the locked
-/// hosts' current IPv4 and IPv6 addresses.
+/// hosts' current IPv4 and IPv6 addresses, and the quarantined hosts' own.
 fn with_locked(sets: &HostModeSets, table: &[(String, std::net::IpAddr)]) -> HostModeSets {
     use std::collections::BTreeSet;
     use std::net::IpAddr;
-    let locked: BTreeSet<MacAddr> = sets
-        .isolated
-        .iter()
-        .chain(&sets.quarantine)
-        .copied()
-        .collect();
     let (mut v4, mut v6) = (BTreeSet::new(), BTreeSet::new());
+    let (mut q4, mut q6) = (BTreeSet::new(), BTreeSet::new());
     for (mac, ip) in table {
-        if !mac.parse().is_ok_and(|m: MacAddr| locked.contains(&m)) {
+        let Ok(m) = mac.parse::<MacAddr>() else {
+            continue;
+        };
+        let quarantined = sets.quarantine.contains(&m);
+        if !quarantined && !sets.isolated.contains(&m) {
             continue;
         }
         match ip {
-            IpAddr::V4(a) => v4.insert(*a),
-            IpAddr::V6(a) => v6.insert(*a),
-        };
+            IpAddr::V4(a) => {
+                v4.insert(*a);
+                if quarantined {
+                    q4.insert(*a);
+                }
+            }
+            IpAddr::V6(a) => {
+                v6.insert(*a);
+                if quarantined {
+                    q6.insert(*a);
+                }
+            }
+        }
     }
     HostModeSets {
         isolated: sets.isolated.clone(),
         quarantine: sets.quarantine.clone(),
         locked_v4: v4.into_iter().collect(),
         locked_v6: v6.into_iter().collect(),
+        quarantine_v4: q4.into_iter().collect(),
+        quarantine_v6: q6.into_iter().collect(),
     }
 }
 
@@ -530,7 +541,13 @@ pub fn refresh_host_modes(
     let engine = lock(engine);
     match engine.update_host_mode_sets(&next) {
         Ok(()) => {
-            tracing::info!(v4 = ?next.locked_v4, v6 = ?next.locked_v6, "locked host addresses updated");
+            tracing::info!(
+                v4 = ?next.locked_v4,
+                v6 = ?next.locked_v6,
+                quarantine_v4 = ?next.quarantine_v4,
+                quarantine_v6 = ?next.quarantine_v6,
+                "locked host addresses updated"
+            );
             // a locked host's new address may already hold an open flow
             cut(&engine, &newly_locked(&pushed, &next, &table));
             *pushed = next;
@@ -1037,6 +1054,27 @@ mod tests {
             .collect()
     }
 
+    /// The elements a set-update transaction gives each set it flushes.
+    fn pushed_sets(load: &str) -> BTreeMap<String, Vec<String>> {
+        let v: Value = serde_json::from_str(load).unwrap();
+        let mut out = BTreeMap::new();
+        for c in v["nftables"].as_array().into_iter().flatten() {
+            if let Some(n) = c["flush"]["set"]["name"].as_str() {
+                out.insert(n.to_owned(), Vec::new());
+            }
+            if let Some(n) = c["add"]["element"]["name"].as_str() {
+                let e = c["add"]["element"]["elem"].as_array().unwrap();
+                out.insert(
+                    n.to_owned(),
+                    e.iter()
+                        .map(|x| x.as_str().map_or_else(|| x.to_string(), str::to_owned))
+                        .collect(),
+                );
+            }
+        }
+        out
+    }
+
     const LOCKED: &str = "02:00:5e:10:00:99";
 
     fn quarantined() -> Document {
@@ -1058,7 +1096,9 @@ mod tests {
         a.apply(None, &home_router()).unwrap();
         let loads = nft_loads(&runner);
         assert!(
-            loads.iter().all(|l| !l.contains("host_locked")),
+            loads
+                .iter()
+                .all(|l| !l.contains("host_locked") && !l.contains("host_quarantine")),
             "no host-mode sets are declared, so none may be pushed"
         );
         let n = runner.calls().len();
@@ -1088,6 +1128,18 @@ mod tests {
             !last.contains("192.168.1.10"),
             "a Normal host is not locked"
         );
+        // the quarantined host's addresses also fill the inbound-block sets,
+        // in the same transaction
+        let sets = pushed_sets(last);
+        let v = |n: &str| {
+            sets.get(n)
+                .cloned()
+                .unwrap_or_else(|| panic!("{n}: {sets:?}"))
+        };
+        assert_eq!(v("host_locked_v4"), ["192.168.1.20"]);
+        assert_eq!(v("host_quarantine_v4"), ["192.168.1.20"]);
+        assert_eq!(v("host_locked_v6"), ["fd00::20"]);
+        assert_eq!(v("host_quarantine_v6"), ["fd00::20"]);
         // a re-apply of the same document reloads nothing but still pushes
         a.apply(Some(&doc), &doc).unwrap();
         let again = nft_loads(&runner);
@@ -1111,12 +1163,15 @@ mod tests {
             last.contains("192.168.1.21") && !last.contains("192.168.1.20"),
             "{last}"
         );
+        assert_eq!(pushed_sets(last)["host_quarantine_v4"], ["192.168.1.21"]);
         // released: the set empties
         lock(&table).clear();
         tick(&a);
         let loads = nft_loads(&runner);
         assert_eq!(loads.len(), n + 2);
         assert!(!loads.last().unwrap().contains("192.168.1.21"));
+        let sets = pushed_sets(loads.last().unwrap());
+        assert!(sets["host_quarantine_v4"].is_empty() && sets["host_quarantine_v6"].is_empty());
 
         // back to no modes: the next tick pushes nothing
         a.apply(Some(&doc), &home_router()).unwrap();
@@ -1124,6 +1179,28 @@ mod tests {
         let n = runner.calls().len();
         tick(&a);
         assert_eq!(runner.calls().len(), n);
+    }
+
+    /// An Isolated host is locked (no local host reaches it) but keeps its
+    /// inbound forwards: its addresses stay out of the quarantine sets.
+    #[test]
+    fn an_isolated_host_fills_only_the_locked_sets() {
+        use sensr_schema::PathAccess;
+        let root = fake_root();
+        let (mut a, runner, table) = moded_applier(&root);
+        lock(&table).push((LOCKED.into(), "192.168.1.20".parse().unwrap()));
+        let mut doc = quarantined();
+        doc.set_by_path(
+            "firewall.host_modes.6d0de000-0000-4000-8000-000000000001.mode",
+            serde_json::json!("isolated"),
+        )
+        .unwrap();
+        a.apply(None, &doc).unwrap();
+        let sets = pushed_sets(nft_loads(&runner).last().unwrap());
+        assert_eq!(sets["host_locked_v4"], ["192.168.1.20"]);
+        assert!(sets["host_quarantine_v4"].is_empty(), "{sets:?}");
+        assert!(sets["host_quarantine_v6"].is_empty(), "{sets:?}");
+        assert_eq!(sets["host_isolated"], [LOCKED]);
     }
 
     #[test]
@@ -1147,18 +1224,19 @@ mod tests {
             conntrack(&runner),
             [
                 "conntrack '-D' '-s' '192.168.1.20'",
-                "conntrack '-D' '-d' '192.168.1.20'"
+                "conntrack '-D' '-d' '192.168.1.20'",
+                "conntrack '-D' '-r' '192.168.1.20'"
             ]
         );
         a.apply(Some(&doc), &doc).unwrap();
-        assert_eq!(conntrack(&runner).len(), 2, "re-applying cuts nothing");
+        assert_eq!(conntrack(&runner).len(), 3, "re-applying cuts nothing");
 
         // the tick finds a new lease: that address is cut too
         lock(&table)[0].1 = "192.168.1.21".parse().unwrap();
         refresh_host_modes(a.neighbours.as_deref().unwrap(), &a.engine, &a.host_modes);
         let c = conntrack(&runner);
-        assert_eq!(c.len(), 4, "{c:?}");
-        assert!(c[2].contains("192.168.1.21"));
+        assert_eq!(c.len(), 6, "{c:?}");
+        assert!(c[3].contains("192.168.1.21"));
 
         // Quarantine -> Isolated and leaving a mode cut nothing
         let mut iso = doc.clone();
@@ -1169,13 +1247,13 @@ mod tests {
         .unwrap();
         a.apply(Some(&doc), &iso).unwrap();
         a.apply(Some(&iso), &home_router()).unwrap();
-        assert_eq!(conntrack(&runner).len(), 4);
+        assert_eq!(conntrack(&runner).len(), 6);
 
         // Isolated -> Quarantine cuts
         a.apply(Some(&home_router()), &iso).unwrap();
         let n = conntrack(&runner).len();
         a.apply(Some(&iso), &doc).unwrap();
-        assert_eq!(conntrack(&runner).len(), n + 2);
+        assert_eq!(conntrack(&runner).len(), n + 3);
     }
 
     mod intercept {

@@ -880,8 +880,9 @@ impl Engine {
 }
 
 impl Engine {
-    /// Replaces the contents of the four host-mode sets in one transaction
-    /// (the MACs and the locked hosts' current addresses): no re-render.
+    /// Replaces the contents of the six host-mode sets in one transaction
+    /// (the MACs, the locked and the quarantined hosts' current addresses):
+    /// no re-render.
     /// Does nothing when no host is in a mode, since the ruleset then
     /// declares none of the sets.
     pub fn update_host_mode_sets(&self, sets: &HostModeSets) -> Result<(), EngineError> {
@@ -904,8 +905,10 @@ impl Engine {
 
     /// Cuts the established flows of `addrs` (a host entering Isolated or
     /// Quarantine): without this they keep matching the conntrack entry and
-    /// skip the new rules. Runs `conntrack -D -s <ip>` and `-D -d <ip>` per
-    /// address. Deleting a conntrack entry also drops its flowtable offload
+    /// skip the new rules. Runs `conntrack -D -s <ip>`, `-D -d <ip>` and
+    /// `-D -r <ip>` per address: the reply source catches a flow that was
+    /// destination-NATed to the host (a port forward, 1:1 NAT), whose
+    /// original destination is the router's address. Deleting a conntrack entry also drops its flowtable offload
     /// (the offloaded flow is torn down with the entry), so no separate
     /// flowtable delete is needed. `conntrack` exits non-zero when nothing
     /// matched ("0 flow entries"); that is not an error. A box without the
@@ -920,7 +923,7 @@ impl Engine {
         }
         for addr in addrs {
             let ip = addr.to_string();
-            for flag in ["-s", "-d"] {
+            for flag in ["-s", "-d", "-r"] {
                 let cmd = Cmd::new("conntrack").args(["-D", flag, ip.as_str()]);
                 let out = self.runner.run(&cmd, None)?;
                 if out.code != Some(0) {
@@ -1273,11 +1276,12 @@ mod tests {
             runner.call_lines(),
             [
                 "conntrack '-D' '-s' '192.168.68.50'",
-                "conntrack '-D' '-d' '192.168.68.50'"
+                "conntrack '-D' '-d' '192.168.68.50'",
+                "conntrack '-D' '-r' '192.168.68.50'"
             ]
         );
         e.cut_host(&[]).unwrap();
-        assert_eq!(runner.calls().len(), 2, "no addresses, no commands");
+        assert_eq!(runner.calls().len(), 3, "no addresses, no commands");
     }
 
     #[test]
@@ -1302,6 +1306,7 @@ mod tests {
             quarantine: vec!["02:00:00:00:00:01".parse().unwrap()],
             locked_v4: vec!["192.168.1.20".parse().unwrap()],
             locked_v6: vec!["fd00::20".parse().unwrap()],
+            quarantine_v4: vec!["192.168.1.20".parse().unwrap()],
             ..HostModeSets::default()
         };
         e.update_host_mode_sets(&sets).unwrap();
@@ -1314,6 +1319,8 @@ mod tests {
             "host_quarantine",
             "host_locked_v4",
             "host_locked_v6",
+            "host_quarantine_v4",
+            "host_quarantine_v6",
             "02:00:00:00:00:01",
             "192.168.1.20",
             "fd00::20",

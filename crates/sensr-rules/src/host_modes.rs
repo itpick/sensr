@@ -8,6 +8,10 @@
 //! - **Reverse**: no local host reaches a locked host's addresses
 //!   (`host_locked_v4/v6`, filled at run time from the neighbour table and
 //!   leases).
+//! - **Inbound**: nothing arriving on any interface (WAN, VPN or internal)
+//!   reaches a quarantined host's addresses (`host_quarantine_v4/v6`, filled
+//!   the same way): no port forward, 1:1 NAT, IPv6 pass or VPN client gets
+//!   through. Isolated hosts keep their inbound forwards.
 //!
 //! The rules match `ether saddr @host_<kind>`, so they live only in the `in`
 //! chains, which the input and forward hooks reach (both have a link-layer
@@ -35,8 +39,17 @@ pub const QUARANTINE_SET: &str = "host_quarantine";
 pub const MAC_SETS: [&str; 2] = [ISOLATED_SET, QUARANTINE_SET];
 /// Base name of the locked hosts' address sets (`host_locked_v4`, `_v6`).
 pub const LOCKED_SET: &str = "host_locked";
+/// Base name of the quarantined hosts' address sets (`host_quarantine_v4`,
+/// `_v6`); the MAC set of the same name has no suffix.
+pub const QUARANTINE_ADDR_SET: &str = "host_quarantine";
+/// Both run-time address sets (base names).
+pub const ADDR_SETS: [&str; 2] = [LOCKED_SET, QUARANTINE_ADDR_SET];
 
 const REF: &str = "ui/core/dashboard";
+/// The inbound quarantine block runs first of all: even the system passes
+/// at priority 1 (a WAN DHCP client's `sport 67 dport 68`) must not let a
+/// forwarded packet reach a quarantined host.
+const INBOUND_PRIO: u32 = 0;
 /// Quarantine runs ahead of the system rules at priority 5 (anti-lockout).
 const QUARANTINE_PRIO: u32 = 4;
 const REVERSE_PRIO: u32 = 5;
@@ -53,7 +66,7 @@ pub struct HostModeEntry<'a> {
     pub description: &'a str,
 }
 
-/// Contents of the four host-mode sets.
+/// Contents of the six host-mode sets.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HostModeSets {
     /// MACs of Isolated hosts (from the configuration)
@@ -64,6 +77,10 @@ pub struct HostModeSets {
     pub locked_v4: Vec<Ipv4Addr>,
     /// current IPv6 addresses of every locked host (run time)
     pub locked_v6: Vec<Ipv6Addr>,
+    /// current IPv4 addresses of the quarantined hosts (run time)
+    pub quarantine_v4: Vec<Ipv4Addr>,
+    /// current IPv6 addresses of the quarantined hosts (run time)
+    pub quarantine_v6: Vec<Ipv6Addr>,
 }
 
 impl HostModeSets {
@@ -102,36 +119,33 @@ impl HostModeSets {
 
     /// Contents of one family of an address set by base name.
     pub fn ips(&self, set: &str, fam: IpFamily) -> Vec<IpNet> {
-        if set != LOCKED_SET {
-            return Vec::new();
-        }
+        let (v4, v6) = match set {
+            LOCKED_SET => (&self.locked_v4, &self.locked_v6),
+            QUARANTINE_ADDR_SET => (&self.quarantine_v4, &self.quarantine_v6),
+            _ => return Vec::new(),
+        };
+        let net = |a: std::net::IpAddr| IpNet::from(a);
         match fam {
-            IpFamily::V4 => self
-                .locked_v4
-                .iter()
-                .map(|&a| IpNet::from(std::net::IpAddr::from(a)))
-                .collect(),
-            IpFamily::V6 => self
-                .locked_v6
-                .iter()
-                .map(|&a| IpNet::from(std::net::IpAddr::from(a)))
-                .collect(),
+            IpFamily::V4 => v4.iter().map(|&a| net(a.into())).collect(),
+            IpFamily::V6 => v6.iter().map(|&a| net(a.into())).collect(),
         }
     }
 }
 
-/// The four host-mode sets with their contents, for
+/// The six host-mode sets with their contents, for
 /// [`render_set_updates`](crate::render::nft::render_set_updates).
 pub fn host_mode_set_updates(sets: &HostModeSets) -> Vec<(String, SetContents)> {
     let mut v: Vec<(String, SetContents)> = MAC_SETS
         .iter()
         .map(|&n| (n.to_owned(), SetContents::Macs(sets.macs(n).to_vec())))
         .collect();
-    for fam in IpFamily::BOTH {
-        v.push((
-            crate::compile::ip_set(LOCKED_SET, fam),
-            SetContents::Nets(sets.ips(LOCKED_SET, fam)),
-        ));
+    for set in ADDR_SETS {
+        for fam in IpFamily::BOTH {
+            v.push((
+                crate::compile::ip_set(set, fam),
+                SetContents::Nets(sets.ips(set, fam)),
+            ));
+        }
     }
     v
 }
@@ -140,6 +154,8 @@ pub fn host_mode_set_updates(sets: &HostModeSets) -> Vec<(String, SetContents)> 
 /// virtual nor a gateway). Rules match the kind's MAC set, so each kind's
 /// rules are registered once however many hosts it holds; the reverse
 /// block is registered once per interface whenever any host is locked.
+/// With a quarantined host, the inbound block is registered once, floating
+/// (every interface's `in` chain).
 pub fn register(rs: &mut Ruleset, entries: &[HostModeEntry<'_>], ctx: &Context<'_>) {
     if entries.is_empty() {
         return;
@@ -155,6 +171,29 @@ pub fn register(rs: &mut Ruleset, entries: &[HostModeEntry<'_>], ctx: &Context<'
     let any = |kind| entries.iter().any(|e| e.kind == kind);
     let quarantine = any(HostModeKind::Quarantine).then_some("host mode quarantine");
     let isolated = any(HostModeKind::Isolated).then_some("host mode isolated");
+    if let Some(l) = quarantine {
+        // inbound: floating, so WAN and VPN ingress (port forwards, 1:1
+        // NAT, IPv6 passes, tunnel clients) are blocked as well as local
+        // sources; ahead of every system and user pass
+        let rule = |action: &str, descr: String| {
+            conf! {
+                "direction" => "in",
+                "quick" => true,
+                "type" => action,
+                "#ref" => REF,
+                "descr" => descr,
+            }
+        };
+        let mut c = rule(
+            "pass",
+            format!("{l}: allow the router to quarantined hosts"),
+        );
+        // Defensive, as for the reverse pass below.
+        c.set("from", "(self)");
+        register_to(rs, INBOUND_PRIO, &c, ctx, QUARANTINE_ADDR_SET);
+        let c = rule("block", format!("{l}: block traffic to quarantined hosts"));
+        register_to(rs, INBOUND_PRIO, &c, ctx, QUARANTINE_ADDR_SET);
+    }
     for iface in &internal {
         let rule = |action: &str, descr: String| {
             conf! {
@@ -186,8 +225,10 @@ pub fn register(rs: &mut Ruleset, entries: &[HostModeEntry<'_>], ctx: &Context<'
             register_from(rs, QUARANTINE_PRIO, &c, ctx, src);
         }
 
-        // reverse: nothing arriving on an internal interface (local,
-        // routed or tunnelled sources alike) reaches a locked host
+        // reverse: no source on this internal interface (a local host, or
+        // one routed in from another internal network) reaches a locked
+        // host; WAN and VPN ingress to a quarantined host is the floating
+        // inbound block above
         let mut c = rule(
             "pass",
             "host modes: allow the router to locked hosts".into(),
@@ -196,9 +237,9 @@ pub fn register(rs: &mut Ruleset, entries: &[HostModeEntry<'_>], ctx: &Context<'
         // an `in` chain; this keeps a router-sourced packet seen here (a
         // hairpin, a future chain layout) from being caught by the block.
         c.set("from", "(self)");
-        register_to_locked(rs, &c, ctx);
+        register_to(rs, REVERSE_PRIO, &c, ctx, LOCKED_SET);
         let c = rule("block", "host modes: block traffic to locked hosts".into());
-        register_to_locked(rs, &c, ctx);
+        register_to(rs, REVERSE_PRIO, &c, ctx, LOCKED_SET);
 
         if let Some(l) = isolated {
             let src = ISOLATED_SET;
@@ -228,15 +269,15 @@ fn register_from(rs: &mut Ruleset, prio: u32, c: &conf::Conf, ctx: &Context<'_>,
     }
 }
 
-/// Registers `c` with its destination replaced by the locked hosts' sets
+/// Registers `c` with its destination replaced by the address sets `set`
 /// (as a table token in the array, for a distinct label hash).
-fn register_to_locked(rs: &mut Ruleset, c: &conf::Conf, ctx: &Context<'_>) {
+fn register_to(rs: &mut Ruleset, prio: u32, c: &conf::Conf, ctx: &Context<'_>, set: &str) {
     let mut c = c.clone();
-    c.set("to", format!("<{LOCKED_SET}>"));
+    c.set("to", format!("<{set}>"));
     let start = rs.rules.len();
-    rs.register_filter(REVERSE_PRIO, &c, None, ctx);
+    rs.register_filter(prio, &c, None, ctx);
     for r in &mut rs.rules[start..] {
-        r.dst.addr = Addr::IpSet(LOCKED_SET.into());
+        r.dst.addr = Addr::IpSet(set.into());
     }
 }
 

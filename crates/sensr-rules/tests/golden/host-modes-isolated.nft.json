@@ -54,6 +54,8 @@
 {"add":{"set":{"family":"inet","table":"sensr","name":"host_quarantine","type":"ether_addr"}}},
 {"add":{"set":{"family":"inet","table":"sensr","name":"host_locked_v4","type":"ipv4_addr"}}},
 {"add":{"set":{"family":"inet","table":"sensr","name":"host_locked_v6","type":"ipv6_addr"}}},
+{"add":{"set":{"family":"inet","table":"sensr","name":"host_quarantine_v4","type":"ipv4_addr"}}},
+{"add":{"set":{"family":"inet","table":"sensr","name":"host_quarantine_v6","type":"ipv6_addr"}}},
 {"add":{"set":{"family":"inet","table":"sensr","name":"a_BLOCKLIST_p","type":"inet_service","flags":["interval"],"auto-merge":true}}},
 {"add":{"set":{"family":"inet","table":"sensr","name":"a_DROP_FEED_p","type":"inet_service","flags":["interval"],"auto-merge":true}}},
 {"add":{"set":{"family":"inet","table":"sensr","name":"a_GEO_BLOCK_p","type":"inet_service","flags":["interval"],"auto-merge":true}}},

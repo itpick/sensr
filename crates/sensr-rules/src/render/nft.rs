@@ -82,7 +82,7 @@ pub struct Policy<'a> {
     pub nat: Option<&'a NatRules>,
     /// policy-routing targets; `None` (or empty) renders no route marking
     pub routing: Option<&'a PolicyRouting>,
-    /// host-mode sets; `Some` declares all four host-mode sets with these
+    /// host-mode sets; `Some` declares all six host-mode sets with these
     /// contents (`None`: only sets a rule references, empty)
     pub host_modes: Option<&'a HostModeSets>,
 }
@@ -261,7 +261,13 @@ pub fn render<W: io::Write>(
     }
 
     let rdr_pass = nat.as_ref().is_some_and(|n| n.rdr_pass);
-    base_chains(&mut w, opts, !devices.is_empty(), rdr_pass)?;
+    base_chains(
+        &mut w,
+        opts,
+        !devices.is_empty(),
+        rdr_pass,
+        policy.host_modes.is_some_and(|h| !h.quarantine.is_empty()),
+    )?;
     if let Some(n) = nat {
         for (chain, rules) in [("nat_pre", n.pre), ("nat_post", n.post)] {
             for (expr, comment) in rules {
@@ -346,6 +352,7 @@ fn base_chains<W: io::Write>(
     opts: &Options,
     has_devices: bool,
     rdr_pass: bool,
+    quarantine: bool,
 ) -> io::Result<()> {
     let lo = |key: &'static str| Stmt::Match {
         op: "==",
@@ -376,22 +383,40 @@ fn base_chains<W: io::Write>(
     }
     add_rule(w, "forward", vec![ct_state_fast_path()])?;
     if rdr_pass {
+        let rdr_marked = || Stmt::Match {
+            op: "==",
+            left: Expr::And(
+                Box::new(Expr::Ct("mark")),
+                Box::new(Expr::Num(RDR_PASS_MARK)),
+            ),
+            right: Expr::Num(RDR_PASS_MARK),
+        };
+        if quarantine {
+            // a quarantined host takes no port forward, `rdr pass` or not:
+            // drop before the skip below, which bypasses `in_<iface>`
+            for fam in IpFamily::BOTH {
+                let set = compile::ip_set(host_modes::QUARANTINE_ADDR_SET, fam);
+                let daddr = match fam {
+                    IpFamily::V4 => Expr::Payload("ip", "daddr"),
+                    IpFamily::V6 => Expr::Payload("ip6", "daddr"),
+                };
+                add_rule(
+                    w,
+                    "forward",
+                    vec![
+                        rdr_marked(),
+                        Stmt::Match {
+                            op: "==",
+                            left: daddr,
+                            right: Expr::set_ref(&set),
+                        },
+                        Stmt::Verdict(Verdict::Drop),
+                    ],
+                )?;
+            }
+        }
         // `rdr pass`: the redirect marked the connection; skip the filter
-        add_rule(
-            w,
-            "forward",
-            vec![
-                Stmt::Match {
-                    op: "==",
-                    left: Expr::And(
-                        Box::new(Expr::Ct("mark")),
-                        Box::new(Expr::Num(RDR_PASS_MARK)),
-                    ),
-                    right: Expr::Num(RDR_PASS_MARK),
-                },
-                accept(),
-            ],
-        )?;
+        add_rule(w, "forward", vec![rdr_marked(), accept()])?;
     }
     add_rule(w, "forward", vec![jump("in_dispatch")])?;
     add_rule(w, "forward", vec![jump("out_dispatch")])?;
@@ -488,7 +513,7 @@ fn emit_sets<W: io::Write>(
     let mut ip_sets = refs.ip_sets.clone();
     if policy.host_modes.is_some() {
         mac_sets.extend(host_modes::MAC_SETS.map(str::to_owned));
-        ip_sets.insert(host_modes::LOCKED_SET.to_owned());
+        ip_sets.extend(host_modes::ADDR_SETS.map(str::to_owned));
     }
     for name in &mac_sets {
         let macs = policy.host_modes.map_or(&[][..], |h| h.macs(name));

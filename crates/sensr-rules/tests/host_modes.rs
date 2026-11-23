@@ -240,6 +240,8 @@ fn reverse_block_targets_only_locked_addresses() {
             Ipv4Addr::new(192, 168, 68, 51),
         ],
         locked_v6: Vec::new(),
+        quarantine_v4: vec![Ipv4Addr::new(192, 168, 68, 51)],
+        quarantine_v6: vec!["fd00::51".parse().unwrap()],
     };
     let updates = host_modes::host_mode_set_updates(&sets);
     let get = |n: &str| {
@@ -265,7 +267,15 @@ fn reverse_block_targets_only_locked_addresses() {
         get("host_quarantine"),
         SetContents::Macs(sets.quarantine.clone())
     );
-    assert_eq!(updates.len(), 4, "{updates:?}");
+    assert_eq!(
+        get("host_quarantine_v4"),
+        SetContents::Nets(vec!["192.168.68.51/32".parse().unwrap()])
+    );
+    assert_eq!(
+        get("host_quarantine_v6"),
+        SetContents::Nets(vec!["fd00::51/128".parse().unwrap()])
+    );
+    assert_eq!(updates.len(), 6, "{updates:?}");
 
     // the compiled reverse rules: a pass from (self), then a block from any
     // source to the locked addresses, per internal interface
@@ -388,4 +398,112 @@ fn host_mode_labels_are_distinct() {
             .collect();
         assert!(seen.keys().all(|l| !other_labels.contains(&l.as_str())));
     }
+}
+
+/// The expressions of `chain`'s rules, as JSON text.
+fn chain_text(cmds: &[serde_json::Value], chain: &str) -> Vec<String> {
+    rules_in(cmds, chain)
+        .into_iter()
+        .map(|r| r["expr"].to_string())
+        .collect()
+}
+
+/// Quarantine means no internet in either direction: a packet arriving on
+/// the WAN for a quarantined address (a port forward, 1:1 NAT, an IPv6
+/// pass) is dropped in `in_wan`, after a pass for router-sourced traffic,
+/// and so is VPN ingress (`in_opt3` is WireGuard) and anything unassigned.
+#[test]
+fn quarantine_drops_wan_ingress_to_quarantined_addresses() {
+    let c = with_host(HostModeKind::Quarantine);
+    let inbound: Vec<&FilterRule> = c
+        .filter
+        .iter()
+        .filter(|r| r.dst.addr == Addr::IpSet("host_quarantine".into()))
+        .collect();
+    assert_eq!(inbound.len(), 2, "{inbound:#?}");
+    assert_eq!(
+        (inbound[0].action, &inbound[0].src.addr),
+        (Action::Pass, &Addr::SelfAddr)
+    );
+    assert_eq!(
+        (inbound[1].action, &inbound[1].src.addr),
+        (Action::Block, &Addr::Any)
+    );
+    for r in &inbound {
+        assert!(r.quick && r.enabled && r.direction == Direction::In);
+        assert_eq!(r.interface, None, "floating: every interface");
+        assert_eq!(r.priority, 0, "ahead of every system and user pass");
+    }
+
+    let cmds = commands(&rendered(HostModeKind::Quarantine));
+    for chain in ["in_wan", "in_opt3", "in_lan", "in__any"] {
+        let rules = chain_text(&cmds, chain);
+        for (set, fam) in [
+            ("@host_quarantine_v4", "ip"),
+            ("@host_quarantine_v6", "ip6"),
+        ] {
+            let to = format!(
+                r#"{{"match":{{"op":"==","left":{{"payload":{{"protocol":"{fam}","field":"daddr"}}}},"right":"{set}"}}}}"#
+            );
+            let pass = rules
+                .iter()
+                .position(|e| e.contains(&to) && e.contains(r#""fib""#) && e.contains("return"));
+            let drop = rules
+                .iter()
+                .position(|e| e.contains(&to) && e.contains(r#"{"drop":null}"#));
+            let (Some(pass), Some(drop)) = (pass, drop) else {
+                panic!("{chain}: no pass/drop to {set}: {rules:#?}");
+            };
+            assert!(pass < drop, "{chain}: the router pass comes first");
+            // no other pass runs before the drop (only the router's own)
+            let early: Vec<&String> = rules[..drop]
+                .iter()
+                .filter(|e| e.contains("return") && !e.contains("@host_quarantine_v"))
+                .collect();
+            assert!(
+                early.is_empty(),
+                "{chain}: passes before the drop: {early:#?}"
+            );
+        }
+    }
+
+    // `rdr pass` skips the filter chains: the forward hook drops a redirect
+    // to a quarantined address before that skip
+    let fwd = chain_text(&cmds, "forward");
+    let skip = fwd
+        .iter()
+        .position(|e| e.contains(r#""ct":{"key":"mark"}"#) && e.contains("accept"))
+        .expect("rdr pass skip");
+    for set in ["@host_quarantine_v4", "@host_quarantine_v6"] {
+        let drop = fwd
+            .iter()
+            .position(|e| {
+                e.contains(r#""ct":{"key":"mark"}"#) && e.contains(set) && e.contains("drop")
+            })
+            .unwrap_or_else(|| panic!("no rdr-pass drop to {set}: {fwd:#?}"));
+        assert!(drop < skip, "{set}: drop after the skip");
+    }
+}
+
+/// Isolated hosts keep their inbound forwards: no rule targets the
+/// quarantined addresses (the sets are declared, empty).
+#[test]
+fn isolated_gets_no_inbound_block() {
+    let c = with_host(HostModeKind::Isolated);
+    assert!(
+        c.filter
+            .iter()
+            .all(|r| r.dst.addr != Addr::IpSet("host_quarantine".into()))
+    );
+    let text = String::from_utf8(rendered(HostModeKind::Isolated)).unwrap();
+    let cmds = commands(text.as_bytes());
+    for chain in ["in_wan", "in_opt3", "forward"] {
+        assert!(
+            chain_text(&cmds, chain)
+                .iter()
+                .all(|e| !e.contains("@host_quarantine")),
+            "{chain}"
+        );
+    }
+    assert!(text.contains(r#""name":"host_quarantine_v4""#), "declared");
 }
