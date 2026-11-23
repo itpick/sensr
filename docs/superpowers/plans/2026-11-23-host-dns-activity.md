@@ -240,7 +240,7 @@
   2. **Range toggle:** Today / 7 days, links with `?range=`; this can be SSR-only.
   3. **Services card:** rows `icon? · service · category · bar · 1 h 12 m`.
   4. **Categories card:** a stacked bar plus a legend. The headline "Screen time" total excludes the two system categories.
-  5. **Timeline:** a 7 × 24 CSS grid heat strip with intensity by minutes. Each cell has a title `Tue 15:00 — 42 min` and an accessible table alternative (a visually hidden table or `aria-label`s).
+  5. **Timeline:** a CSS grid heat strip (7 × 24 for 7 days, one row for Today) with intensity by minutes. Each cell has a title `Tue 15:00 — 42 min` and an accessible table alternative (a visually hidden table or `aria-label`s).
   6. **Domains card:** a table with search, `new` and `blocked` pills, and paging.
   7. **Stale banner:** shown when the API says the feed is stale, with the exact copy from Global Constraints.
 - **Hosts card:** the name links to `/ui/hosts/<mac>` (every row), and rows with `today_minutes` show `1 h 12 m` in muted text.

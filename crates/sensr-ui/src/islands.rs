@@ -2317,9 +2317,11 @@ pub fn HostsCard(
         // percentages in the title
         let mix = crate::runtime::mix_style(&h.dns_mix);
         let mix_title = crate::runtime::mix_title(&h.dns_mix);
+        let mix_text = mix_title.clone();
         view! {
             <tr class:dimmed=!h.online style=mix title=mix_title>
-                <td><a class="host-link" href=crate::runtime::host_href(&h.key)>{h.label()}</a></td>
+                <td><a class="host-link" href=crate::runtime::host_href(&h.key)>{h.label()}</a>
+                    {mix_text.map(|t| view! { <span class="sr-only">{format!(". {t}")}</span> })}</td>
                 {mac_cell(h, read_only)}
                 <td class="num">{h.ipv4.clone().unwrap_or_default()}
                     {h.ipv6.first().map(|v6| view! { <br/><span class="muted">{v6.clone()}</span> })}</td>

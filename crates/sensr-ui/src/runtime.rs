@@ -523,16 +523,26 @@ pub fn mix_style(mix: &[(String, u32)]) -> Option<String> {
 }
 
 /// The row's `title` for its colour preview: `DNS lookups (24 h): Video 62%, Games 20%`.
+/// The percentages add up to exactly 100 (largest remainder); a share that rounds to 0
+/// reads `<1%`.
 pub fn mix_title(mix: &[(String, u32)]) -> Option<String> {
-    let total: u64 = mix.iter().map(|m| u64::from(m.1)).sum();
+    let parts: Vec<_> = mix.iter().filter(|m| m.1 > 0).collect();
+    let total: u64 = parts.iter().map(|m| u64::from(m.1)).sum();
     if total == 0 {
         return None;
     }
-    let parts: Vec<String> = mix
+    // floor of each share, then the leftover points to the largest remainders
+    let mut pct: Vec<u64> = parts.iter().map(|m| u64::from(m.1) * 100 / total).collect();
+    let mut order: Vec<usize> = (0..parts.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse((u64::from(parts[i].1) * 100) % total));
+    let left = 100 - pct.iter().sum::<u64>();
+    for &i in order.iter().take(usize::try_from(left).unwrap_or(0)) {
+        pct[i] += 1;
+    }
+    let text: Vec<String> = parts
         .iter()
-        .filter(|m| m.1 > 0)
-        .map(|(k, n)| {
-            let p = (u64::from(*n) * 100 + total / 2) / total;
+        .zip(pct)
+        .map(|((k, _), p)| {
             let p = if p == 0 {
                 "<1".to_owned()
             } else {
@@ -541,7 +551,7 @@ pub fn mix_title(mix: &[(String, u32)]) -> Option<String> {
             format!("{} {p}%", category_name(k))
         })
         .collect();
-    Some(format!("DNS lookups (24 h): {}", parts.join(", ")))
+    Some(format!("DNS lookups (24 h): {}", text.join(", ")))
 }
 
 /// `(kind, display name, icon)` for every host kind, in the order the editor lists them
@@ -1172,6 +1182,27 @@ mod tests {
             "DNS lookups (24 h): Video 75%, Apple/Google/Microsoft system 25%"
         );
         assert_eq!(mix_title(&[]), None);
+        // thirds: 34 + 33 + 33, not 33 + 33 + 33
+        let thirds: Vec<(String, u32)> = ["video", "games", "music"]
+            .iter()
+            .map(|k| ((*k).to_owned(), 1))
+            .collect();
+        assert_eq!(
+            mix_title(&thirds).unwrap(),
+            "DNS lookups (24 h): Video 34%, Games 33%, Music 33%"
+        );
+        // 1/7 each: 15 + 15 + 14 * 5 = 100
+        let sevenths: Vec<(String, u32)> = CATEGORIES[..7]
+            .iter()
+            .map(|(k, _)| ((*k).to_owned(), 1))
+            .collect();
+        let t = mix_title(&sevenths).unwrap();
+        let sum: u32 = t
+            .split(['%', ' '])
+            .filter_map(|w| w.parse::<u32>().ok())
+            .filter(|n| *n != 24)
+            .sum();
+        assert_eq!(sum, 100, "{t}");
         let single = mix_style(&[("music".to_owned(), 5)]).unwrap();
         assert_eq!(
             single,

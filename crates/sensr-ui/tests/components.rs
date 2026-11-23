@@ -586,13 +586,22 @@ fn render_hosts(initial: Option<sensr_ui::actions::HostCard>) -> Html {
     render(|| view! { <HostsCard initial/> }.into_any())
 }
 
+/// A Hosts row's name: its link's text (the cell also holds the DNS mix for screen readers).
+fn name_text(td: scraper::ElementRef<'_>) -> String {
+    td.select(&sel("a.host-link"))
+        .next()
+        .map_or_else(|| text(td), text)
+        .trim()
+        .to_owned()
+}
+
 /// The card's row for the host named `name`.
 fn host_row<'a>(doc: &'a Html, name: &str) -> scraper::ElementRef<'a> {
     doc.select(&sel("tbody tr"))
         .find(|r| {
             r.select(&sel("td"))
                 .next()
-                .is_some_and(|td| text(td).trim() == name)
+                .is_some_and(|td| name_text(td) == name)
         })
         .unwrap_or_else(|| panic!("no row for {name}"))
 }
@@ -660,7 +669,7 @@ fn hosts_card_source_and_seen_labels() {
     let nas = cells("nas");
     assert_eq!((nas[4].as_str(), nas[5].as_str()), ("static", "now"));
     // A seen-only host has no name: its MAC stands in.
-    let seen = doc
+    let seen_row = doc
         .select(&sel("tbody tr"))
         .find(|r| {
             r.select(&sel("td"))
@@ -668,11 +677,12 @@ fn hosts_card_source_and_seen_labels() {
                 .is_some_and(|c| text(c).trim() == "seen")
         })
         .expect("seen-only row");
-    let seen: Vec<String> = seen
+    let seen: Vec<String> = seen_row
         .select(&sel("td"))
         .map(|c| text(c).trim().to_owned())
         .collect();
-    assert!(seen[1].starts_with(&seen[0]), "name falls back to the MAC");
+    let name = name_text(seen_row.select(&sel("td")).next().unwrap());
+    assert!(seen[1].starts_with(&name), "name falls back to the MAC");
     assert_eq!(seen[4], "seen");
     // IPv6 sits on its own muted line under the IPv4.
     let ip = host_row(&doc, "nas").select(&sel("td")).nth(2).unwrap();
@@ -2260,4 +2270,193 @@ fn hosts_card_row_tinted_by_dns_mix() {
     assert!(s.find("--tint-video").unwrap() < s.find("--tint-games").unwrap());
     assert_eq!(mix_style(&[]), None);
     assert_eq!(mix_style(&[("video".into(), 0)]), None);
+}
+
+/// Runs a form-post server function as a browser's form post would (with the request
+/// parts and response options leptos_axum gives it) and returns its Location header.
+fn form_post_location<F, Fut>(m: sensr_ui::mock::MockBackend, f: F) -> String
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), ServerFnError>>,
+{
+    let handle: sensr_ui::api::BackendHandle = std::sync::Arc::new(m);
+    let (parts, _) = axum::http::Request::builder()
+        .header("accept", "text/html")
+        .body(())
+        .unwrap()
+        .into_parts();
+    let res = leptos_axum::ResponseOptions::default();
+    let owner = Owner::new();
+    owner.with(|| {
+        provide_context(handle);
+        provide_context(parts);
+        provide_context(res.clone());
+        futures::executor::block_on(f()).unwrap();
+    });
+    let parts = res.0.read().unwrap();
+    parts
+        .headers
+        .get("location")
+        .expect("a redirect")
+        .to_str()
+        .expect("visible ASCII")
+        .to_owned()
+}
+
+const HOSTILE: [&str; 4] = [
+    "\r\nSet-Cookie: x=1",
+    "é",
+    "../../ui/core/password",
+    "\"><script>&",
+];
+
+#[test]
+fn service_override_redirect_is_rebuilt_and_safe() {
+    // a refused save (bad category) and a successful one, with hostile key / q / qname
+    for bad in HOSTILE {
+        for category in ["toaster", "games"] {
+            let loc = form_post_location(hosts_mock(), || {
+                sensr_ui::actions::service_override(
+                    "example.com".into(),
+                    "Example".into(),
+                    category.into(),
+                    bad.into(),
+                    bad.into(),
+                    Some(bad.into()),
+                    Some(3),
+                    Some(bad.into()),
+                    None,
+                )
+            });
+            // not an inventory key: back to the dashboard
+            let want = if category == "games" {
+                "/?saved=applied"
+            } else {
+                ""
+            };
+            if category == "games" {
+                assert_eq!(loc, want, "{bad:?}");
+            } else {
+                assert!(
+                    loc.starts_with("/?edit=") && loc.ends_with("&error=category"),
+                    "{bad:?}: {loc}"
+                );
+            }
+            assert!(
+                loc.starts_with('/') && !loc.starts_with("//"),
+                "{bad:?}: {loc}"
+            );
+            assert!(!loc.contains(['\r', '\n', '"', '<', ' ']), "{bad:?}: {loc}");
+            // the path is the dashboard; `..` may only appear encoded inside a query value
+            assert_eq!(loc.split('?').next(), Some("/"), "{bad:?}: {loc}");
+        }
+    }
+    // a real key keeps the page, range, page number and the encoded search
+    let loc = form_post_location(hosts_mock(), || {
+        sensr_ui::actions::service_override(
+            "example.com".into(),
+            "Example".into(),
+            "toaster".into(),
+            "www.example.com".into(),
+            KID_TABLET.into(),
+            Some("7d".into()),
+            Some(2),
+            Some("é <x>\r\n".into()),
+            None,
+        )
+    });
+    assert_eq!(
+        loc,
+        format!(
+            "/ui/hosts/{KID_TABLET}?range=7d&page=2&q=%C3%A9%20%3Cx%3E%0D%0A&edit=www.example.com&error=category"
+        )
+    );
+    let loc = form_post_location(hosts_mock(), || {
+        sensr_ui::actions::service_override(
+            "example.com".into(),
+            "Example".into(),
+            "games".into(),
+            "www.example.com".into(),
+            KID_TABLET.into(),
+            None,
+            None,
+            None,
+            None,
+        )
+    });
+    assert_eq!(
+        loc,
+        format!("/ui/hosts/{KID_TABLET}?range=today&saved=applied")
+    );
+}
+
+#[test]
+fn ids_suppress_redirect_is_rebuilt_and_safe() {
+    for bad in HOSTILE {
+        let loc = form_post_location(sensr_ui::mock::MockBackend::new(), || {
+            sensr_ui::actions::ids_suppress(
+                2001219,
+                1,
+                "ET SCAN".into(),
+                Some("not an address".into()),
+                Some(bad.into()),
+                Some(bad.into()),
+                Some(1),
+            )
+        });
+        assert!(loc.starts_with("/ui/ids/alerts?"), "{bad:?}: {loc}");
+        assert!(loc.ends_with("&error=address"), "{bad:?}: {loc}");
+        assert!(!loc.contains(['\r', '\n', '"', '<', ' ']), "{bad:?}: {loc}");
+        // the hostile text only ever appears percent-encoded, as a query value
+        assert!(!loc.contains("/../"), "{bad:?}: {loc}");
+    }
+}
+
+#[test]
+fn host_page_escapes_hostile_names() {
+    use sensr_ui::actions::{HostPageData, OverrideDraft};
+    use sensr_ui::api::{ActivityDomain, HostActivityView};
+    const BAD: &str = "\"><script>alert(1)</script>&";
+    let mut p = host_page_from(hosts_mock(), KID_TABLET, "today", None);
+    let a: &mut HostActivityView = p.activity.as_mut().unwrap();
+    a.domains.push(ActivityDomain {
+        qname: BAD.into(),
+        service: BAD.into(),
+        category: "other".into(),
+        count: 1,
+        ..ActivityDomain::default()
+    });
+    p.draft = Some(OverrideDraft {
+        qname: BAD.into(),
+        suffix: BAD.into(),
+        service: BAD.into(),
+        category: "other".into(),
+        existing: true,
+    });
+    let p: HostPageData = p;
+    let html = {
+        let owner = Owner::new();
+        owner.with(|| sensr_ui::pages::host_page_body(p, host_query("today")).to_html())
+    };
+    assert!(!html.contains(BAD), "raw text reached the page");
+    assert!(!html.contains("<script>alert"), "script injected");
+    // text nodes escape <, > and & (a bare quote is harmless there); attributes also the quote
+    let escaped = "&gt;&lt;script&gt;alert(1)&lt;/script&gt;&amp;";
+    let ctx: Vec<&str> = html
+        .match_indices("alert(1)")
+        .map(|(i, _)| &html[i.saturating_sub(70)..i + 30])
+        .collect();
+    // the domain and service cells, the Set service label, the dialog's text, and the
+    // qname, suffix and service fields
+    assert_eq!(html.matches(escaped).count(), 7, "{ctx:#?}");
+    assert_eq!(
+        html.matches(&format!("&quot;{escaped}\"")).count(),
+        4,
+        "attribute values: {ctx:#?}"
+    );
+    let doc = Html::parse_fragment(&html);
+    let suffix = doc.select(&sel("input[name=suffix]")).next().unwrap();
+    assert_eq!(suffix.value().attr("value"), Some(BAD));
+    let service = doc.select(&sel("input[name=service]")).next().unwrap();
+    assert_eq!(service.value().attr("value"), Some(BAD));
 }

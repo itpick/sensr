@@ -390,6 +390,8 @@ span.btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
 /* Hosts card: a row's DNS mix as a faint left-to-right stacked stripe (--mix is set
  * inline from the row's lookups), the Today figure, the category key. */
 .hosts-card tbody tr[style] { background: var(--mix); }
+/* hover still shows on a shaded row: the hover colour over the stripe */
+.hosts-card tbody tr[style]:hover { background: linear-gradient(color-mix(in srgb, var(--accent-soft) 45%, transparent) 0 0), var(--mix); }
 .host-link { font-weight: 600; text-decoration: none; }
 .host-link:hover { text-decoration: underline; }
 .host-today { white-space: nowrap; }
@@ -539,7 +541,8 @@ dialog.modal[open]:not(:modal) { position: fixed; inset: 0; margin: auto; height
   .svc .chip { justify-self: end; }
   .big { font-size: 2rem; }
   .heat { grid-template-columns: 2.4em repeat(24, minmax(0, 1fr)); gap: 1px; }
-  /* the domains table keeps the name, service, last seen and the action */
+  /* the domains table keeps the name, the service and the action (Queries, First seen
+   * and Last seen are hidden) */
   .dom .col-opt { display: none; }
   .dom .pill { margin-left: 0; margin-right: 6px; }
   .dom-name code { display: block; word-break: break-all; }

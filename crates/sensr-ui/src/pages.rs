@@ -1175,7 +1175,6 @@ pub fn History() -> impl IntoView {
     view! { <Suspense fallback=|| ()>{load}</Suspense> }
 }
 
-/// Percent-encodes a query parameter value.
 /// Undoes `%XX` escapes (a malformed escape stays as it is).
 pub fn url_decode(s: &str) -> String {
     let b = s.as_bytes();
@@ -1197,6 +1196,7 @@ pub fn url_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Percent-encodes a query parameter value.
 pub fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -1295,7 +1295,8 @@ fn endpoint(ip: &str, port: Option<u16>) -> String {
     }
 }
 
-fn alerts_url(text: &str, host: &str, page: u32) -> String {
+/// The alerts tab with a filter and page (each value percent-encoded).
+pub fn alerts_url(text: &str, host: &str, page: u32) -> String {
     let mut q = Vec::new();
     if !text.is_empty() {
         q.push(format!("text={}", url_encode(text)));
@@ -1314,7 +1315,7 @@ fn alerts_url(text: &str, host: &str, page: u32) -> String {
 }
 
 fn alerts_table(p: AlertPage, text: &str, host: &str) -> AnyView {
-    let back = alerts_url(text, host, p.page);
+    let (text_v, host_v, page_v) = (text.to_owned(), host.to_owned(), p.page.to_string());
     if p.rows.is_empty() {
         return view! { <p class="muted">"No alerts match."</p> }.into_any();
     }
@@ -1332,7 +1333,9 @@ fn alerts_table(p: AlertPage, text: &str, host: &str) -> AnyView {
                         <input type="hidden" name="sid" value=sid.clone()/>
                         <input type="hidden" name="gid" value=a.gid.to_string()/>
                         <input type="hidden" name="signature" value=a.signature.clone()/>
-                        <input type="hidden" name="back" value=back.clone()/>
+                        <input type="hidden" name="text" value=text_v.clone()/>
+                        <input type="hidden" name="host" value=host_v.clone()/>
+                        <input type="hidden" name="page" value=page_v.clone()/>
                         <button type="submit" class="btn btn-sm" aria-label=format!("Suppress sid {sid}")>"Suppress"</button>
                         <button type="submit" class="btn btn-sm" name="src" value=src.clone()
                             aria-label=format!("Source only: suppress sid {sid} from {src}")>"Source only"</button>
@@ -1396,11 +1399,16 @@ pub fn IdsAlertsPage() -> impl IntoView {
     let text = q.get("text").unwrap_or_default().trim().to_owned();
     let host = q.get("host").unwrap_or_default().trim().to_owned();
     let page: u32 = q.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
-    let staged = q.get("staged");
-    let error = q.get("error");
+    let staged = q.get("staged").filter(|s| s.parse::<u32>().is_ok());
+    let error = match q.get("error").as_deref() {
+        Some("address") => Some("Not an address."),
+        Some("duplicate") => Some("This signature is already suppressed for these addresses."),
+        Some(_) => Some("The suppression could not be staged."),
+        None => None,
+    };
     let load = move || {
         let (text, host) = (text.clone(), host.clone());
-        let (staged, error) = (staged.clone(), error.clone());
+        let (staged, error) = (staged.clone(), error);
         Suspend::new(async move {
             let p = match ids_alerts(text.clone(), host.clone(), page).await {
                 Ok(p) => p,
@@ -1743,6 +1751,48 @@ pub struct HostQuery {
     pub error: Option<String>,
 }
 
+impl HostQuery {
+    /// The query of a host page URL.
+    pub fn from_query(qm: &leptos_router::params::ParamsMap) -> Self {
+        Self {
+            range: if qm.get("range").as_deref() == Some("7d") {
+                "7d".into()
+            } else {
+                "today".into()
+            },
+            page: qm
+                .get("page")
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0)
+                .min(100_000),
+            q: qm.get("q").unwrap_or_default(),
+            edit: qm.get("edit").filter(|e| !e.is_empty()),
+            saved: qm.get("saved"),
+            error: qm.get("error"),
+        }
+    }
+}
+
+/// A host page's data, loaded once per request: the layout's heading and the page body
+/// both await it (provided as context by the layout).
+#[derive(Clone)]
+pub struct HostPageLoad(
+    pub  futures::future::Shared<
+        futures::future::BoxFuture<'static, Result<crate::actions::HostPageData, ServerFnError>>,
+    >,
+);
+
+/// Starts loading the page of host `key` for query `q`.
+#[cfg(feature = "ssr")]
+pub fn host_page_load(key: String, q: &HostQuery) -> HostPageLoad {
+    use futures::FutureExt;
+    HostPageLoad(
+        crate::actions::host_page(key, q.range.clone(), q.page, q.edit.clone())
+            .boxed()
+            .shared(),
+    )
+}
+
 /// The copy of the banner shown while the dnstap feed is stale.
 pub const STALE_FEED: &str = "DNS answers aren't arriving; showing lookups only.";
 
@@ -1779,6 +1829,33 @@ fn host_url(key: &str, range: &str, page: u32, extra: &str) -> String {
         u += &format!("&page={page}");
     }
     u + extra
+}
+
+/// `&q=<search>` for a non-blank search, else nothing.
+fn search_param(q: &str) -> String {
+    if q.trim().is_empty() {
+        String::new()
+    } else {
+        format!("&q={}", url_encode(q))
+    }
+}
+
+/// Where the service override form goes back to: the host page of `key` with its range,
+/// domains page and search, every value percent-encoded (plain ASCII, safe for a Location
+/// header). A key that is not an inventory key (a MAC or `id:` plus letters, digits, `:`,
+/// `-`, `_`) goes back to the dashboard instead.
+pub fn host_back_url(key: &str, range: &str, page: u32, q: &str) -> String {
+    let key = key.trim();
+    let ok = !key.is_empty()
+        && key.len() <= 128
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'-' | b'_'));
+    if !ok {
+        return "/".to_owned();
+    }
+    let range = if range == "7d" { "7d" } else { "today" };
+    host_url(key, range, page.min(100_000), &search_param(q))
 }
 
 fn host_header(p: &crate::actions::HostPageData, range: &str) -> AnyView {
@@ -1943,20 +2020,12 @@ fn timeline_card(a: &crate::api::HostActivityView) -> AnyView {
     const DAY: i64 = 86_400;
     let first = (a.from + a.utc_offset).div_euclid(DAY);
     let days = if a.range == "7d" { 7 } else { 1 };
-    let minutes = |day: i64, hour: u8| {
-        a.timeline
-            .iter()
-            .filter(|c| c.day == day && c.hour == hour)
-            .map(|c| c.minutes)
-            .sum::<u32>()
-    };
-    let max = a
-        .timeline
-        .iter()
-        .map(|c| c.minutes)
-        .max()
-        .unwrap_or(0)
-        .max(1);
+    // cells can repeat a (day, hour): sum them, and scale by the summed cell, as drawn
+    let mut sums: std::collections::BTreeMap<(i64, u8), u32> = Default::default();
+    for c in &a.timeline {
+        *sums.entry((c.day, c.hour)).or_default() += c.minutes;
+    }
+    let max = sums.values().copied().max().unwrap_or(0).max(1);
     let wd = |day: i64| WEEKDAYS[usize::try_from((day + 4).rem_euclid(7)).unwrap_or(0)];
     let mut grid = Vec::new();
     let mut table = Vec::new();
@@ -1965,7 +2034,7 @@ fn timeline_card(a: &crate::api::HostActivityView) -> AnyView {
         grid.push(view! { <span class="dl">{name}</span> }.into_any());
         let mut busy = Vec::new();
         for hour in 0..24u8 {
-            let m = minutes(day, hour);
+            let m = sums.get(&(day, hour)).copied().unwrap_or(0);
             let title = format!("{name} {hour:02}:00 — {m} min");
             if m > 0 {
                 busy.push(format!("{hour:02}:00 {m} min"));
@@ -2070,10 +2139,10 @@ fn domains_card(
     let pages = a.domains_total.div_ceil(a.per_page.max(1));
     let pager = (pages > 1).then(|| {
         let prev = (a.page > 0).then(|| {
-            view! { <a class="btn btn-sm" href=host_url(&key, &range, a.page - 1, "") rel="prev">"Previous"</a> }
+            view! { <a class="btn btn-sm" href=host_url(&key, &range, a.page - 1, &search_extra) rel="prev">"Previous"</a> }
         });
         let next = (a.page + 1 < pages).then(|| {
-            view! { <a class="btn btn-sm" href=host_url(&key, &range, a.page + 1, "") rel="next">"Next"</a> }
+            view! { <a class="btn btn-sm" href=host_url(&key, &range, a.page + 1, &search_extra) rel="next">"Next"</a> }
         });
         view! {
             <nav class="pager" aria-label="Domain pages">
@@ -2126,14 +2195,15 @@ fn override_dialog(
     d: &crate::actions::OverrideDraft,
     q: &HostQuery,
 ) -> AnyView {
-    let range = q.range.clone();
-    let search = if q.q.trim().is_empty() {
-        String::new()
-    } else {
-        format!("&q={}", url_encode(&q.q))
-    };
-    let back = host_url(&p.host.key, &range, q.page, &search);
-    let (cancel, cancel_x, cancel_btn) = (back.clone(), back.clone(), back.clone());
+    let back = host_url(&p.host.key, &q.range, q.page, &search_param(&q.q));
+    let (cancel, cancel_x, cancel_btn) = (back.clone(), back.clone(), back);
+    let error = q.error.as_deref().map(|code| match code {
+        "forbidden" => "You may not change service overrides.",
+        "suffix" => "The suffix is a domain such as example.com.",
+        "service" => "The service name is 1 to 48 characters.",
+        "category" => "Pick a category.",
+        _ => "The router refused the override. Check the suffix and the service name.",
+    });
     let options = crate::runtime::CATEGORIES
         .iter()
         .map(|(k, name)| view! { <option value=*k selected=*k == d.category>{*name}</option> })
@@ -2149,9 +2219,12 @@ fn override_dialog(
                 <div class="modal-body">
                     <p class="muted">"Choose what " <code>{d.qname.clone()}</code>
                         " and the other names under the suffix count as, on every device's page."</p>
-                    {q.error.clone().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
+                    {error.map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
                     <input type="hidden" name="qname" value=d.qname.clone()/>
-                    <input type="hidden" name="back" value=back/>
+                    <input type="hidden" name="key" value=p.host.key.clone()/>
+                    <input type="hidden" name="range" value=q.range.clone()/>
+                    <input type="hidden" name="page" value=q.page.to_string()/>
+                    <input type="hidden" name="q" value=q.q.clone()/>
                     <div class="field-stack">
                         <label for="ss-suffix">"Domain suffix"</label>
                         <input id="ss-suffix" name="suffix" type="text" required maxlength="253"
@@ -2241,27 +2314,19 @@ pub fn host_page_body(p: crate::actions::HostPageData, q: HostQuery) -> AnyView 
 #[component]
 pub fn HostActivityPage() -> impl IntoView {
     let key = param("mac").unwrap_or_default();
-    let qm = use_query_map().get_untracked();
-    let q = HostQuery {
-        range: if qm.get("range").as_deref() == Some("7d") {
-            "7d".into()
-        } else {
-            "today".into()
-        },
-        page: qm
-            .get("page")
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(0)
-            .min(100_000),
-        q: qm.get("q").unwrap_or_default(),
-        edit: qm.get("edit").filter(|e| !e.is_empty()),
-        saved: qm.get("saved"),
-        error: qm.get("error"),
-    };
+    let q = HostQuery::from_query(&use_query_map().get_untracked());
+    // the layout started the load (and its heading uses it too)
+    let shared = use_context::<HostPageLoad>();
     let load = move || {
-        let (key, q) = (key.clone(), q.clone());
+        let (key, q, shared) = (key.clone(), q.clone(), shared.clone());
         Suspend::new(async move {
-            match crate::actions::host_page(key, q.range.clone(), q.page, q.edit.clone()).await {
+            let data = match shared {
+                Some(l) => l.0.await,
+                None => {
+                    crate::actions::host_page(key, q.range.clone(), q.page, q.edit.clone()).await
+                }
+            };
+            match data {
                 Ok(p) => host_page_body(p, q),
                 Err(e) => load_error(e),
             }
@@ -2336,7 +2401,8 @@ mod tests {
         assert!(html.contains("[2001:db8::7]:40000"));
         assert_eq!(html.matches("action=\"/ui/fn/ids_suppress\"").count(), 1);
         assert!(html.contains("aria-label=\"Source only: suppress sid 2001219 from 2001:db8::7\""));
-        assert!(html.contains("value=\"/ui/ids/alerts?text=ssh%20scan&amp;page=1\""));
+        assert!(html.contains("name=\"text\" value=\"ssh scan\""), "{html}");
+        assert!(html.contains("name=\"page\" value=\"1\""), "{html}");
         assert!(
             html.contains("href=\"/ui/ids/alerts?text=ssh%20scan\""),
             "previous page"
