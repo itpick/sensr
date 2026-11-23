@@ -9,6 +9,7 @@
 
 pub mod agent;
 pub mod applier;
+pub mod arp_intercept;
 pub mod auth;
 pub mod diff;
 pub mod gateways;

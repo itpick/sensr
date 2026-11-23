@@ -373,11 +373,26 @@ impl Backend for MockBackend {
                 RuntimeSection::Aliases => simulated_feeds(&s.staged, t),
                 RuntimeSection::Ipv6 => simulated_pd(&s.staged, t),
                 RuntimeSection::Hosts => {
-                    let hosts: Vec<Value> = simulated_hosts(t)
+                    let mut hosts: Vec<Value> = simulated_hosts(t)
                         .into_iter()
                         .filter(|h| !s.forgotten.contains(h["key"].as_str().unwrap_or_default()))
                         .collect();
-                    json!({ "now": t, "hosts": hosts })
+                    // the applied document's modes, as the agent reports them
+                    let modes = host_modes(&s.head().doc);
+                    let mut interfaces = std::collections::BTreeSet::new();
+                    for h in &mut hosts {
+                        if let Some(mode) = h["mac"].as_str().and_then(|m| modes.get(m)) {
+                            h["mode"] = json!(mode);
+                            interfaces
+                                .insert(h["interface"].as_str().unwrap_or_default().to_owned());
+                        }
+                    }
+                    let intercept = json!({
+                        "active": !interfaces.is_empty(),
+                        "interfaces": interfaces,
+                        "error": null,
+                    });
+                    json!({ "now": t, "hosts": hosts, "intercept": intercept })
                 }
             })
         }))
@@ -397,6 +412,73 @@ impl Backend for MockBackend {
             } else {
                 Err(ApiError::Conflict("host is reserved or unknown".into()))
             }
+        }))
+    }
+
+    fn set_host_mode(
+        &self,
+        mac: String,
+        mode: Option<String>,
+        remote: Option<std::net::IpAddr>,
+    ) -> BoxFuture<'_, ApiResult<String>> {
+        let _ = remote;
+        if self.read_only() {
+            return ready(Err(ApiError::Unauthorized));
+        }
+        let mac = mac.to_ascii_lowercase();
+        let mode = match mode.as_deref() {
+            None | Some("normal") => None,
+            Some(m @ ("isolated" | "quarantine")) => Some(m.to_owned()),
+            Some(other) => {
+                return ready(Err(ApiError::Backend(format!(
+                    "unknown host mode {other:?}"
+                ))));
+            }
+        };
+        if mode.as_deref() == Some("quarantine") && mac == MOCK_CLIENT_MAC {
+            return ready(Err(ApiError::Conflict(
+                crate::actions::SELF_QUARANTINE.to_owned(),
+            )));
+        }
+        let message = format!(
+            "set host mode {mac} → {}",
+            mode.as_deref().unwrap_or("normal")
+        );
+        // Like the agent: commit at once unless other changes are staged or a commit
+        // awaits confirmation, then stage beside them.
+        ready(self.with(|s| {
+            let dirty = !s.changed().is_empty() || s.confirm.is_some();
+            let mut doc = s.staged.clone();
+            let entries = doc
+                .pointer_mut("/firewall")
+                .and_then(Value::as_object_mut)
+                .map(|f| f.entry("host_modes").or_insert_with(|| json!({})))
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| ApiError::Backend("no firewall section".into()))?;
+            let id = entries
+                .iter()
+                .find(|(_, h)| h["mac"].as_str() == Some(mac.as_str()))
+                .map(|(id, _)| id.clone());
+            match (mode, id) {
+                (None, Some(id)) => {
+                    entries.remove(&id);
+                }
+                (None, None) => {}
+                (Some(m), id) => {
+                    let id = id.unwrap_or_else(|| {
+                        format!("6d0de000-0000-4000-8000-{}", mac.replace(':', ""))
+                    });
+                    entries.insert(id, json!({"enabled": true, "mac": mac, "mode": m}));
+                }
+            }
+            if dirty {
+                s.staged = doc;
+                return Ok("staged".to_owned());
+            }
+            if doc != s.head().doc {
+                s.push("root", &message, doc);
+            }
+            Ok("applied".to_owned())
         }))
     }
 
@@ -427,6 +509,26 @@ impl Backend for MockBackend {
         })
     }
 }
+
+/// Enabled host modes of `doc`: MAC → `isolated` / `quarantine`.
+pub fn host_modes(doc: &Value) -> std::collections::BTreeMap<String, String> {
+    doc.pointer("/firewall/host_modes")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|m| m.values())
+        .filter(|h| h["enabled"].as_bool().unwrap_or(true))
+        .filter_map(|h| {
+            Some((
+                h["mac"].as_str()?.to_ascii_lowercase(),
+                h["mode"].as_str()?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// The MAC of the device the mock pretends every request comes from (`device-01`):
+/// quarantining it is refused, as the agent refuses the caller's own device.
+pub const MOCK_CLIENT_MAC: &str = "02:00:00:00:00:01";
 
 /// The host inventory as the agent would report it at `now`, sorted the agent's way
 /// (online first, then most recently seen): 25 hosts on LAN and LAN2 with one of each
@@ -1213,6 +1315,13 @@ pub fn seed() -> Value {
                      "ipv4": {"mode": "static", "address": "10.10.0.1/24"}, "ipv6": {"mode": "none"}}
         },
         "firewall": {
+            "host_modes": {
+                "6d0de000-0000-4000-8000-020000000002": {"enabled": true,
+                    "mac": "02:00:00:00:00:02", "mode": "isolated"},
+                "6d0de000-0000-4000-8000-020000000005": {"enabled": true,
+                    "mac": "02:00:00:00:00:05", "mode": "quarantine",
+                    "description": "Unknown device"}
+            },
             "aliases": {
                 "6d1f3a0e-0b54-4c43-9a51-2f1f0d4c8a01": {"enabled": true, "name": "rfc1918",
                     "content": {"type": "network", "entries": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]},

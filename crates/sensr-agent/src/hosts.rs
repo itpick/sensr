@@ -642,6 +642,23 @@ impl HostStore {
     }
 }
 
+/// Enabled host modes of `doc`: lowercase MAC → `isolated` / `quarantine`.
+fn host_modes(doc: &Document) -> BTreeMap<String, &'static str> {
+    use sensr_schema::models::firewall::HostModeKind;
+    doc.firewall
+        .host_modes
+        .values()
+        .filter(|h| h.enabled)
+        .map(|h| {
+            let mode = match h.mode {
+                HostModeKind::Isolated => "isolated",
+                HostModeKind::Quarantine => "quarantine",
+            };
+            (h.mac.to_string(), mode)
+        })
+        .collect()
+}
+
 /// How often the collector polls its sources.
 const POLL: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -657,6 +674,9 @@ struct Collected {
     /// No document applied yet: polling would read every loaded
     /// reservation as removed.
     ready: bool,
+    /// Hosts in a mode (enabled `firewall.host_modes` entries of the
+    /// applied document): MAC → `isolated` / `quarantine`.
+    modes: BTreeMap<String, &'static str>,
 }
 
 /// The host inventory service: polls [`Sources`] every 30 s, merges them into
@@ -664,7 +684,13 @@ struct Collected {
 pub struct HostCollector {
     sources: Sources,
     state: Mutex<Collected>,
+    /// Called after each poll with what it read (the ARP interceptor's
+    /// inputs follow the inventory's).
+    on_poll: Mutex<Option<PollHook>>,
 }
+
+/// Sees each poll's neighbour table and leases.
+pub type PollHook = Arc<dyn Fn(&[NeighEntry], &[KeaLease]) + Send + Sync>;
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -693,15 +719,24 @@ impl HostCollector {
                     subnet_iface: BTreeMap::new(),
                 },
                 ready: false,
+                modes: BTreeMap::new(),
             }),
+            on_poll: Mutex::new(None),
         })
     }
 
-    /// After an apply: the document's internal interfaces, Kea subnets and
-    /// reservations.
+    /// Runs `hook` after every poll, outside the inventory lock.
+    pub fn on_poll(&self, hook: PollHook) {
+        *lock(&self.on_poll) = Some(hook);
+    }
+
+    /// After an apply: the document's internal interfaces, Kea subnets,
+    /// reservations and host modes.
     pub fn set_document(&self, doc: &Document) {
         let internal = internal_interfaces(doc);
+        let modes = host_modes(doc);
         let mut st = lock(&self.state);
+        st.modes = modes;
         st.snap.subnet_iface = subnet_ifaces(doc, &internal);
         st.snap.reservations = reservations(doc);
         st.snap.internal = internal;
@@ -716,19 +751,28 @@ impl HostCollector {
         }
         // outside the lock: this runs `ip` and reads Kea's files
         let (neigh, leases) = (self.sources)();
-        let mut st = lock(&self.state);
-        let st = &mut *st;
-        st.snap.neigh = neigh;
-        st.snap.leases = leases;
-        let change = st.inv.observe(&st.snap, now);
-        st.snap.neigh.clear();
-        st.snap.leases.clear();
-        st.store.note(change);
-        if st.inv.prune(now) {
-            st.store.note(Change::Structural);
-        }
-        if let Err(e) = st.store.maybe_flush(&st.inv, now) {
-            tracing::warn!(error = %e, "saving the host inventory");
+        let (neigh, leases) = {
+            let mut st = lock(&self.state);
+            let st = &mut *st;
+            st.snap.neigh = neigh;
+            st.snap.leases = leases;
+            let change = st.inv.observe(&st.snap, now);
+            let read = (
+                std::mem::take(&mut st.snap.neigh),
+                std::mem::take(&mut st.snap.leases),
+            );
+            st.store.note(change);
+            if st.inv.prune(now) {
+                st.store.note(Change::Structural);
+            }
+            if let Err(e) = st.store.maybe_flush(&st.inv, now) {
+                tracing::warn!(error = %e, "saving the host inventory");
+            }
+            read
+        };
+        let hook = lock(&self.on_poll).clone();
+        if let Some(hook) = hook {
+            hook(&neigh, &leases);
         }
     }
 
@@ -748,10 +792,48 @@ impl HostCollector {
         }
     }
 
-    /// The wire format ([`Inventory::view`]).
+    /// The wire format ([`Inventory::view`]), each host in a mode with its
+    /// `mode` (`isolated` / `quarantine`; omitted when Normal).
     pub fn view(&self, now: u64) -> serde_json::Value {
         let st = lock(&self.state);
-        st.inv.view(now, &st.snap.internal)
+        let mut v = st.inv.view(now, &st.snap.internal);
+        if let Some(hosts) = v["hosts"].as_array_mut() {
+            for h in hosts {
+                if let Some(mode) = h["mac"].as_str().and_then(|m| st.modes.get(m)) {
+                    h["mode"] = (*mode).into();
+                }
+            }
+        }
+        v
+    }
+
+    /// Hosts seen within [`ONLINE_SECS`] of `now` with a MAC, an IPv4
+    /// address and an interface: `(mac, ipv4, interface id)`.
+    pub fn online_v4(&self, now: u64) -> Vec<(String, Ipv4Addr, String)> {
+        let st = lock(&self.state);
+        st.inv
+            .hosts()
+            .filter(|h| {
+                h.last_seen
+                    .is_some_and(|t| now.saturating_sub(t) <= ONLINE_SECS)
+            })
+            .filter_map(|h| Some((h.mac.clone()?, h.ipv4?, h.interface.clone()?)))
+            .collect()
+    }
+
+    /// The MAC of the inventory host holding `ip`; when a stale row still
+    /// lists the address too, the most recently seen one.
+    pub fn mac_for_ip(&self, ip: IpAddr) -> Option<String> {
+        let st = lock(&self.state);
+        st.inv
+            .hosts()
+            .filter(|h| match ip {
+                IpAddr::V4(a) => h.ipv4 == Some(a),
+                IpAddr::V6(a) => h.ipv6.contains(&a),
+            })
+            .filter_map(|h| Some((h.last_seen, h.mac.clone()?)))
+            .max()
+            .map(|(_, mac)| mac)
     }
 
     /// Forgets an unreserved host and saves at once; `false` if `key` is
@@ -1676,6 +1758,22 @@ mod collector {
     }
 
     #[test]
+    fn poll_hook_sees_the_read_and_online_v4_lists_recent_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, _) = collector(&dir);
+        let seen: Arc<Mutex<Vec<NeighEntry>>> = Arc::default();
+        let s = Arc::clone(&seen);
+        c.on_poll(Arc::new(move |neigh, _| lock(&s).extend_from_slice(neigh)));
+        c.poll(1000);
+        assert_eq!(lock(&seen).len(), 1);
+        assert_eq!(lock(&seen)[0].mac, MAC);
+        let online = c.online_v4(1000);
+        assert_eq!(online.len(), 1);
+        assert_eq!((online[0].0.as_str(), online[0].2.as_str()), (MAC, "lan"));
+        assert!(c.online_v4(1000 + ONLINE_SECS + 1).is_empty());
+    }
+
+    #[test]
     fn poll_survives_an_unwritable_store() {
         let dir = tempfile::tempdir().unwrap();
         // the store's parent is a file, so every write fails
@@ -1688,5 +1786,62 @@ mod collector {
         c.poll(1000);
         c.shutdown();
         assert!(!c.view(1000)["hosts"].as_array().unwrap().is_empty());
+    }
+
+    fn with_mode(mut doc: Document, mac: &str, mode: &str) -> Document {
+        use sensr_schema::PathAccess;
+        doc.set_by_path(
+            "firewall.host_modes.6d0de000-0000-4000-8000-000000000001",
+            serde_json::json!({"mac": mac, "mode": mode}),
+        )
+        .unwrap();
+        doc
+    }
+
+    #[test]
+    fn view_includes_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, doc) = collector(&dir);
+        c.poll(1000);
+        let row = |c: &HostCollector, key: &str| {
+            c.view(1000)["hosts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|h| h["key"] == key)
+                .cloned()
+                .expect("row")
+        };
+        // Normal hosts carry no `mode`
+        assert!(row(&c, MAC).get("mode").is_none());
+        c.set_document(&with_mode(doc.clone(), MAC, "isolated"));
+        assert_eq!(row(&c, MAC)["mode"], "isolated");
+        // the reserved host stays Normal
+        assert!(row(&c, "02:00:5e:10:00:0a").get("mode").is_none());
+        c.set_document(&with_mode(doc.clone(), MAC, "quarantine"));
+        assert_eq!(row(&c, MAC)["mode"], "quarantine");
+        // a disabled entry is not in force
+        let mut off = with_mode(doc.clone(), MAC, "quarantine");
+        for h in off.firewall.host_modes.iter_mut() {
+            h.1.enabled = false;
+        }
+        c.set_document(&off);
+        assert!(row(&c, MAC).get("mode").is_none());
+        c.set_document(&doc);
+        assert!(row(&c, MAC).get("mode").is_none());
+    }
+
+    #[test]
+    fn mac_for_ip_finds_the_inventory_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, doc) = collector(&dir);
+        c.poll(1000);
+        let lan = internal_interfaces(&doc)
+            .into_iter()
+            .find(|i| i.id == "lan")
+            .unwrap();
+        let ip = IpAddr::V4(lan.subnets[0].hosts().nth(41).unwrap());
+        assert_eq!(c.mac_for_ip(ip).as_deref(), Some(MAC));
+        assert_eq!(c.mac_for_ip("198.51.100.7".parse().unwrap()), None);
     }
 }

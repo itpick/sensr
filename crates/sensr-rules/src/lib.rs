@@ -13,6 +13,7 @@ pub mod alias;
 pub mod compile;
 pub mod conf;
 pub mod document;
+pub mod host_modes;
 pub mod icmp;
 pub mod ir;
 pub mod isolation;

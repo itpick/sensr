@@ -114,6 +114,12 @@ pub enum Addr {
     IfaceAddr(String),
     /// a literal device reference written by automated rules (`(em0)`)
     Device(String),
+    /// a named set of source MAC addresses (`ether saddr @name`; the name
+    /// without `@`), written by host-mode rules; source-only and nft-only
+    MacSet(String),
+    /// a named pair of address sets filled at run time (`@name_v4`,
+    /// `@name_v6`; the base name), written by host-mode rules; nft-only
+    IpSet(String),
     /// an address that failed to parse; the rule is disabled
     Invalid(String),
 }
@@ -401,6 +407,12 @@ pub struct Interface {
 }
 
 impl Interface {
+    /// A local network the router serves: neither virtual nor a gateway
+    /// (what isolation and host modes treat as internal).
+    pub fn is_internal(&self) -> bool {
+        !self.r#virtual && !self.gateway_v4 && !self.gateway_v6
+    }
+
     /// Addresses of one family.
     pub fn addrs_of(&self, fam: IpFamily) -> impl Iterator<Item = &IfAddr> {
         self.addrs

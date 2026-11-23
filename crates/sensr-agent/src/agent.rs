@@ -26,10 +26,13 @@ use std::time::{Duration, Instant};
 use sensr_config::{CommitMeta, CommitOutcome as StoreOutcome, ConfirmState, Store, StoreError};
 use sensr_ipc::server::{Handler, PeerCred, Reply};
 use sensr_ipc::{
-    AuthMethod, CommitOutcome, ErrorKind, Event, IpcError, Op, PendingConfirm, Principal, Request,
-    Response, RevisionId, RevisionInfo, Source, Status, StreamItem, ValidationIssue,
+    AuthMethod, CommitOutcome, ErrorKind, Event, HostModeMode, IpcError, Op, PendingConfirm,
+    Principal, Request, Response, RevisionId, RevisionInfo, Source, Status, StreamItem,
+    ValidationIssue,
 };
 use sensr_schema::Document;
+use sensr_schema::fields::MacAddr;
+use sensr_schema::models::firewall::{HostMode, HostModeKind};
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
 
@@ -964,7 +967,108 @@ impl<A: Applier> Agent<A> {
                 Ok(false) => Err(err(ErrorKind::Conflict, "host is reserved or unknown")),
                 Err(e) => Err(apply_error(e)),
             },
+            Op::HostModeSet {
+                mac,
+                mode,
+                remote_addr,
+            } => {
+                self.set_host_mode(inner, principal, &mac, mode, remote_addr)
+                    .await
+            }
         }
+    }
+
+    /// [`Op::HostModeSet`]: edits the host's `firewall.host_modes` entry and,
+    /// when nothing else is staged and no commit awaits confirmation,
+    /// commits it in the same critical section (no other edit can slip in);
+    /// otherwise stages it beside the other changes.
+    async fn set_host_mode(
+        &self,
+        inner: &mut Inner<A>,
+        principal: &Principal,
+        mac: &str,
+        mode: Option<HostModeMode>,
+        remote_addr: Option<std::net::IpAddr>,
+    ) -> Result<Response, IpcError> {
+        let mac: MacAddr = mac.to_ascii_lowercase().parse().map_err(|_| {
+            err(
+                ErrorKind::BadRequest,
+                format!("{mac:?} is not a MAC address"),
+            )
+        })?;
+        if mode == Some(HostModeMode::Quarantine)
+            // a dual-stack listener reports IPv4 clients as `::ffff:a.b.c.d`
+            && remote_addr
+                .and_then(|ip| inner.applier.client_mac(ip.to_canonical()))
+                .and_then(|m| m.parse::<MacAddr>().ok())
+                == Some(mac)
+        {
+            return Err(err(
+                ErrorKind::Conflict,
+                "That's the device you're using — quarantine it from another device.",
+            ));
+        }
+        let base = inner
+            .candidate
+            .clone()
+            .unwrap_or_else(|| inner.head.1.clone());
+        let mut doc = base.clone();
+        let modes = &mut doc.firewall.host_modes;
+        let existing = modes.find(|h| h.mac == mac).map(|(id, _)| *id);
+        match (mode, existing) {
+            (None, _) => modes.retain(|_, h| h.mac != mac),
+            (Some(m), id) => {
+                let kind = match m {
+                    HostModeMode::Isolated => HostModeKind::Isolated,
+                    HostModeMode::Quarantine => HostModeKind::Quarantine,
+                };
+                // keep the entry's id and description: a mode change is an
+                // edit of the host's row, not a new one
+                match id.and_then(|id| modes.get_mut(&id)) {
+                    Some(h) => {
+                        h.mode = kind;
+                        h.enabled = true;
+                    }
+                    None => {
+                        modes.push(HostMode {
+                            enabled: true,
+                            mac,
+                            mode: kind,
+                            description: None,
+                        });
+                    }
+                }
+            }
+        }
+        let result = |r: &str| Ok(Response::Value(Some(serde_json::json!({ "result": r }))));
+        let other_changes = Self::dirty(inner);
+        let pending = inner.store.pending_confirm().map_err(internal)?.is_some();
+        if other_changes || pending {
+            self.stage(inner, &base, doc)?;
+            return result("staged");
+        }
+        if doc == inner.head.1 {
+            // already in that mode: nothing to commit
+            return result("applied");
+        }
+        let head = inner.head.clone();
+        let previous = inner.candidate.clone();
+        self.stage(inner, &head.1, doc)?;
+        let to = match mode {
+            None => "normal",
+            Some(HostModeMode::Isolated) => "isolated",
+            Some(HostModeMode::Quarantine) => "quarantine",
+        };
+        let message = format!("set host mode {mac} → {to}");
+        if let Err(e) = self.commit(inner, principal, Some(message), None).await {
+            // refused before anything was stored: leave the candidate as it
+            // was rather than holding a half-made mode change
+            if inner.head.0 == head.0 {
+                inner.set_candidate(previous);
+            }
+            return Err(e);
+        }
+        result("applied")
     }
 
     async fn commit(
@@ -1143,6 +1247,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::InterfacesAssign { .. } => "interfaces.assign",
         Op::Runtime { .. } => "runtime",
         Op::HostForget { .. } => "host.forget",
+        Op::HostModeSet { .. } => "host.mode_set",
     }
 }
 

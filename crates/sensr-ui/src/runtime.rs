@@ -399,6 +399,24 @@ pub struct HostRow {
     /// A reservation for it is staged but not applied yet (set by the UI from the
     /// staged document, never sent by the agent).
     pub staged: bool,
+    /// Its host mode: `isolated` or `quarantine`; `None` (omitted) is Normal.
+    pub mode: Option<String>,
+    /// The mode staged for it (`normal`, `isolated`, `quarantine`) when that differs from
+    /// `mode` and waits for Apply (set by the UI from the staged document, never sent by
+    /// the agent).
+    pub staged_mode: Option<String>,
+}
+
+/// The ARP interceptor that enforces host modes between hosts of one network.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Intercept {
+    /// Redirecting now: it runs and a locked host has an address.
+    pub active: bool,
+    /// Interface ids with a locked host, while active.
+    pub interfaces: Vec<String>,
+    /// Why it could not start.
+    pub error: Option<String>,
 }
 
 /// `null` as the type's default, for fields an agent may send as `null`.
@@ -408,6 +426,16 @@ where
     T: Default + Deserialize<'de>,
 {
     Option::<T>::deserialize(d).map(Option::unwrap_or_default)
+}
+
+/// The value if it parses, else `None`: an odd block does not empty the whole list.
+fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v: Option<Value> = Option::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// The rows that parse; one odd row is dropped instead of failing the whole list.
@@ -445,6 +473,15 @@ impl HostRow {
             .filter(|n| !n.is_empty())
             .or_else(|| self.mac.clone())
             .unwrap_or_else(|| self.key.clone())
+    }
+
+    /// `isolated` or `quarantine`; `None` for Normal (and for a mode this UI does not know).
+    pub fn locked_mode(&self) -> Option<&'static str> {
+        match self.mode.as_deref() {
+            Some("isolated") => Some("isolated"),
+            Some("quarantine") => Some("quarantine"),
+            _ => None,
+        }
     }
 
     /// `static`, `dynamic` or `seen`.
@@ -497,12 +534,29 @@ pub struct HostList {
     /// Hosts, online first, then most recently seen.
     #[serde(deserialize_with = "lenient_rows")]
     pub hosts: Vec<HostRow>,
+    /// The ARP interceptor's state; `None` when the agent runs none.
+    #[serde(deserialize_with = "lenient")]
+    pub intercept: Option<Intercept>,
 }
 
 impl HostList {
     /// Marks the unreserved hosts a reservation in `doc` (the staged document) covers,
-    /// by MAC or address, so the card stops offering Make static before Apply.
+    /// by MAC or address, so the card stops offering Make static before Apply, and the
+    /// hosts whose staged mode differs from the one in force.
     pub fn mark_staged(&mut self, doc: &Value) {
+        let modes: std::collections::BTreeMap<String, &str> = doc
+            .pointer("/firewall/host_modes")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|m| m.values())
+            .filter(|h| h.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+            .filter_map(|h| {
+                Some((
+                    h.get("mac")?.as_str()?.to_ascii_lowercase(),
+                    h.get("mode")?.as_str()?,
+                ))
+            })
+            .collect();
         let reservations: Vec<&Value> = doc
             .pointer("/dhcpv4/reservations")
             .and_then(Value::as_object)
@@ -514,10 +568,16 @@ impl HostList {
                 .map(str::to_ascii_lowercase)
         };
         for h in &mut self.hosts {
+            // the staged keys are lowercased; so is the row's MAC
+            let mac = h.mac.as_deref().map(str::to_ascii_lowercase);
+            h.staged_mode = mac.as_deref().and_then(|mac| {
+                let staged = modes.get(mac).copied().unwrap_or("normal");
+                (staged != h.locked_mode().unwrap_or("normal")).then(|| staged.to_owned())
+            });
             // a reserved row's reservation is already applied
             h.staged = !h.reserved()
                 && reservations.iter().any(|r| {
-                    (h.mac.is_some() && get(r, "/client/hw_address").as_deref() == h.mac.as_deref())
+                    (mac.is_some() && get(r, "/client/hw_address") == mac)
                         || (h.ipv4.is_some() && get(r, "/ip_address") == h.ipv4)
                 });
         }
@@ -741,6 +801,54 @@ mod tests {
         let orphan = row("orphan").expect("orphan");
         assert_eq!(orphan.interface, "");
         assert_eq!(orphan.seen(l.now), "never");
+    }
+
+    #[test]
+    fn parses_host_modes_and_the_intercept_block() {
+        let l: HostList = parse(json!({"now": 1, "hosts": [
+            {"key": "aa:bb:cc:dd:ee:01", "mac": "aa:bb:cc:dd:ee:01", "mode": "isolated"},
+            {"key": "aa:bb:cc:dd:ee:02", "mac": "aa:bb:cc:dd:ee:02", "mode": "quarantine"},
+            {"key": "aa:bb:cc:dd:ee:03", "mac": "aa:bb:cc:dd:ee:03"},
+            {"key": "aa:bb:cc:dd:ee:04", "mac": "aa:bb:cc:dd:ee:04", "mode": "later"}
+        ], "intercept": {"active": true, "interfaces": ["lan"], "error": null}}));
+        let modes: Vec<_> = l.hosts.iter().map(HostRow::locked_mode).collect();
+        assert_eq!(modes, [Some("isolated"), Some("quarantine"), None, None]);
+        assert_eq!(
+            l.intercept,
+            Some(Intercept {
+                active: true,
+                interfaces: vec!["lan".into()],
+                error: None
+            })
+        );
+        // an odd intercept block keeps the hosts
+        let odd: HostList = parse(json!({"now": 1, "hosts": [{"key": "k"}], "intercept": 5}));
+        assert_eq!((odd.hosts.len(), odd.intercept), (1, None));
+    }
+
+    /// The agent's MAC may be uppercase; the staged document's is matched
+    /// case-insensitively.
+    #[test]
+    fn mark_staged_matches_an_uppercase_mac() {
+        let mut l: HostList = parse(json!({"now": 1, "hosts": [
+            {"key": "k1", "mac": "AA:BB:CC:DD:EE:01", "mode": "isolated"},
+            {"key": "k2", "mac": "AA:BB:CC:DD:EE:02"}
+        ]}));
+        l.mark_staged(&json!({
+            "firewall": {"host_modes": {
+                "a": {"mac": "aa:bb:cc:dd:ee:01", "mode": "isolated"},
+                "b": {"mac": "aa:bb:cc:dd:ee:02", "mode": "quarantine"}
+            }},
+            "dhcpv4": {"reservations": {
+                "r": {"client": {"hw_address": "aa:bb:cc:dd:ee:02"}, "ip_address": "192.168.1.9"}
+            }}
+        }));
+        assert_eq!(
+            l.hosts[0].staged_mode, None,
+            "already isolated: nothing staged"
+        );
+        assert_eq!(l.hosts[1].staged_mode.as_deref(), Some("quarantine"));
+        assert!(l.hosts[1].staged, "its reservation is staged");
     }
 
     #[test]

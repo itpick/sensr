@@ -32,7 +32,7 @@ pub fn register(rs: &mut Ruleset, policies: &[Policy<'_>], ctx: &Context<'_>) {
     let internal: Vec<&String> = ctx
         .interfaces
         .iter()
-        .filter(|(_, i)| !i.r#virtual && !i.gateway_v4 && !i.gateway_v6)
+        .filter(|(_, i)| i.is_internal())
         .map(|(name, _)| name)
         .collect();
     for p in policies {

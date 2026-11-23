@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sensr_rules::document::{self, Runtime};
+use sensr_rules::host_modes::{self, HostModeSets};
 use sensr_rules::ir::IfAddr;
 use sensr_rules::render::nft as rules_nft;
 use sensr_schema::Document;
@@ -130,6 +131,9 @@ pub struct Prepared {
     pub alias_failed: Vec<String>,
     /// alias contents the ruleset was rendered with
     pub aliases: BTreeMap<String, rules_nft::ResolvedAlias>,
+    /// host-mode MAC sets the ruleset was rendered with (the locked
+    /// addresses are empty: [`Engine::update_host_mode_sets`] fills them)
+    pub host_modes: HostModeSets,
     secrets: Vec<(PathBuf, String)>,
 }
 
@@ -216,6 +220,7 @@ impl Engine {
                 .collect(),
             alias_failed: compiled.aliases.failed.iter().cloned().collect(),
             aliases: compiled.aliases.aliases.clone(),
+            host_modes: compiled.host_modes.clone(),
             secrets,
         })
     }
@@ -547,10 +552,13 @@ impl Engine {
             }
         }
 
-        if !delta.sysctls.is_empty() {
-            Sysctl::new(&self.opts.root).apply(&p.models.sysctl)?;
+        let sysctl = Sysctl::new(&self.opts.root);
+        let own = p.models.sysctl.to_map().unwrap_or_default();
+        // a key leaving the model is no delta, but a redirect switch sensr
+        // turned off must still come back on
+        if !delta.sysctls.is_empty() || !sysctl.restores(&own).is_empty() {
+            sysctl.apply(&p.models.sysctl)?;
             // the rest (qdisc default, hostname) are written as they are
-            let own = p.models.sysctl.to_map().unwrap_or_default();
             for (k, v) in delta.sysctls.iter().filter(|(k, _)| !own.contains_key(*k)) {
                 let path = self.opts.root.join("proc/sys").join(k.replace('.', "/"));
                 std::fs::write(&path, format!("{v}\n"))
@@ -870,6 +878,73 @@ impl Engine {
                 source,
             })?;
         nft::load(self.runner.as_ref(), &buf)?;
+        Ok(())
+    }
+}
+
+impl Engine {
+    /// Replaces the contents of the six host-mode sets in one transaction
+    /// (the MACs, the locked and the quarantined hosts' current addresses):
+    /// no re-render.
+    /// Does nothing when no host is in a mode, since the ruleset then
+    /// declares none of the sets.
+    pub fn update_host_mode_sets(&self, sets: &HostModeSets) -> Result<(), EngineError> {
+        if sets.is_empty() {
+            return Ok(());
+        }
+        let mut buf = Vec::new();
+        rules_nft::render_set_updates(
+            &rules_nft::Options::default().table,
+            &host_modes::host_mode_set_updates(sets),
+            &mut buf,
+        )
+        .map_err(|source| EngineError::Io {
+            path: PathBuf::from("<nft host-mode update>"),
+            source,
+        })?;
+        nft::load(self.runner.as_ref(), &buf)?;
+        Ok(())
+    }
+
+    /// Cuts the established flows of `addrs` (a host entering Isolated or
+    /// Quarantine): without this they keep matching the conntrack entry and
+    /// skip the new rules. Runs `conntrack -D -s <ip>`, `-D -d <ip>` and
+    /// `-D -r <ip>` per address: the reply source catches a flow that was
+    /// destination-NATed to the host (a port forward, 1:1 NAT), whose
+    /// original destination is the router's address. Deleting a conntrack
+    /// entry also drops its flowtable offload (the offloaded flow is torn
+    /// down with the entry), so no separate flowtable delete is needed.
+    /// `conntrack` exits non-zero when nothing matched ("0 flow entries");
+    /// that is not an error. A box without the binary (a dev machine) is
+    /// skipped with a warning. A command that fails to run is logged and the
+    /// rest still run: one address must not keep the others' flows alive.
+    pub fn cut_host(&self, addrs: &[IpAddr]) -> Result<(), EngineError> {
+        if addrs.is_empty() {
+            return Ok(());
+        }
+        if !self.runner.has_program("conntrack") {
+            tracing::warn!("conntrack not found; established flows of locked hosts are not cut");
+            return Ok(());
+        }
+        for addr in addrs {
+            let ip = addr.to_string();
+            for flag in ["-s", "-d", "-r"] {
+                let cmd = Cmd::new("conntrack").args(["-D", flag, ip.as_str()]);
+                let out = match self.runner.run(&cmd, None) {
+                    Ok(out) => out,
+                    Err(e) => {
+                        tracing::warn!(cmd = %cmd.display(), error = %e, "conntrack delete did not run");
+                        continue;
+                    }
+                };
+                if out.code != Some(0) {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    if !err.contains("0 flow entries") {
+                        tracing::warn!(cmd = %cmd.display(), stderr = %err.trim(), "conntrack delete failed");
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -1194,6 +1269,123 @@ mod tests {
             "{err}"
         );
         assert!(!root.path().join("run/systemd/network").exists());
+    }
+
+    #[test]
+    fn cut_host_deletes_conntrack() {
+        let root = tempfile::tempdir().unwrap();
+        let (e, runner) = engine(root.path());
+        runner.push(
+            "conntrack",
+            Output::failed(
+                1,
+                "conntrack v1.4.8 (conntrack-tools): 0 flow entries have been deleted.",
+            ),
+        );
+        e.cut_host(&["192.168.68.50".parse().unwrap()]).unwrap();
+        assert_eq!(
+            runner.call_lines(),
+            [
+                "conntrack '-D' '-s' '192.168.68.50'",
+                "conntrack '-D' '-d' '192.168.68.50'",
+                "conntrack '-D' '-r' '192.168.68.50'"
+            ]
+        );
+        e.cut_host(&[]).unwrap();
+        assert_eq!(runner.calls().len(), 3, "no addresses, no commands");
+    }
+
+    /// One command that fails to run does not abort the others.
+    #[test]
+    fn cut_host_continues_past_a_spawn_error() {
+        use crate::cmd::{CmdError, Runner, StdinWriter};
+        struct FailFirst(FakeRunner, std::sync::Mutex<bool>);
+        impl Runner for FailFirst {
+            fn run(&self, cmd: &Cmd, stdin: Option<StdinWriter<'_>>) -> Result<Output, CmdError> {
+                let out = self.0.run(cmd, stdin);
+                if std::mem::replace(&mut *self.1.lock().unwrap(), false) {
+                    return Err(CmdError::Spawn {
+                        cmd: cmd.display(),
+                        source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                    });
+                }
+                out
+            }
+            fn has_program(&self, p: &str) -> bool {
+                self.0.has_program(p)
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let runner = Arc::new(FailFirst(FakeRunner::new(), std::sync::Mutex::new(true)));
+        let e = Engine::new(
+            EngineOptions {
+                root: root.path().to_owned(),
+                ..EngineOptions::default()
+            },
+            runner.clone(),
+        )
+        .unwrap();
+        e.cut_host(&[
+            "192.168.68.50".parse().unwrap(),
+            "fd00::51".parse().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(
+            runner.0.call_lines(),
+            [
+                "conntrack '-D' '-s' '192.168.68.50'",
+                "conntrack '-D' '-d' '192.168.68.50'",
+                "conntrack '-D' '-r' '192.168.68.50'",
+                "conntrack '-D' '-s' 'fd00::51'",
+                "conntrack '-D' '-d' 'fd00::51'",
+                "conntrack '-D' '-r' 'fd00::51'"
+            ]
+        );
+    }
+
+    #[test]
+    fn cut_host_skips_a_missing_conntrack() {
+        let root = tempfile::tempdir().unwrap();
+        let (e, runner) = engine(root.path());
+        runner.without_program("conntrack");
+        e.cut_host(&["fd00::20".parse().unwrap()]).unwrap();
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn host_mode_sets_are_pushed_only_when_a_host_is_in_a_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let (e, runner) = engine(root.path());
+        e.update_host_mode_sets(&HostModeSets::default()).unwrap();
+        assert!(
+            runner.calls().is_empty(),
+            "no sets declared, nothing pushed"
+        );
+        let sets = HostModeSets {
+            quarantine: vec!["02:00:00:00:00:01".parse().unwrap()],
+            locked_v4: vec!["192.168.1.20".parse().unwrap()],
+            locked_v6: vec!["fd00::20".parse().unwrap()],
+            quarantine_v4: vec!["192.168.1.20".parse().unwrap()],
+            ..HostModeSets::default()
+        };
+        e.update_host_mode_sets(&sets).unwrap();
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].cmd.display(), "nft '-j' '-f' '-'");
+        let text = String::from_utf8(calls[0].stdin.clone().unwrap()).unwrap();
+        for set in [
+            "host_isolated",
+            "host_quarantine",
+            "host_locked_v4",
+            "host_locked_v6",
+            "host_quarantine_v4",
+            "host_quarantine_v6",
+            "02:00:00:00:00:01",
+            "192.168.1.20",
+            "fd00::20",
+        ] {
+            assert!(text.contains(set), "{set} missing from {text}");
+        }
     }
 
     #[test]

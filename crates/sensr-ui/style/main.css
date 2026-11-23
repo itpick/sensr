@@ -226,6 +226,10 @@ ul.plain { list-style: none; padding: 0; margin: 8px 0; }
 .card-wide { grid-column: span 2; }
 .hosts-card { margin-top: 18px; }
 .host-actions .btn + * { margin-left: 6px; }
+.host-mode { white-space: nowrap; }
+.host-mode .pill + select { margin-left: 6px; }
+.host-mode-staged { display: block; font-size: 12px; }
+.hosts-footer p { margin: 8px 0 0; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; }

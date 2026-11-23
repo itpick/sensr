@@ -22,9 +22,12 @@ use std::io;
 
 use ipnet::IpNet;
 
+use sensr_schema::fields::MacAddr;
+
 use crate::compile::{
     self, ChainOptions, Field, Item, Low, SetRefs, Val, Verdict as LowVerdict, Warning,
 };
+use crate::host_modes::{self, HostModeSets};
 use crate::ir::{Addr, Endpoint, FilterRule, InterfaceMap, IpFamily, PortMatch};
 use crate::nat::{NatRules, RdrRule, SnatTarget, StaticKind, StaticPart, StaticRule};
 use crate::render::json::{Expr, Hook, Nat, Object, SetType, Stmt, Verdict, Writer};
@@ -79,6 +82,9 @@ pub struct Policy<'a> {
     pub nat: Option<&'a NatRules>,
     /// policy-routing targets; `None` (or empty) renders no route marking
     pub routing: Option<&'a PolicyRouting>,
+    /// host-mode sets; `Some` declares all six host-mode sets with these
+    /// contents (`None`: only sets a rule references, empty)
+    pub host_modes: Option<&'a HostModeSets>,
 }
 
 /// Counts that make the compilation visible (and benchmarkable).
@@ -255,7 +261,13 @@ pub fn render<W: io::Write>(
     }
 
     let rdr_pass = nat.as_ref().is_some_and(|n| n.rdr_pass);
-    base_chains(&mut w, opts, !devices.is_empty(), rdr_pass)?;
+    base_chains(
+        &mut w,
+        opts,
+        !devices.is_empty(),
+        rdr_pass,
+        policy.host_modes.is_some_and(|h| !h.quarantine.is_empty()),
+    )?;
     if let Some(n) = nat {
         for (chain, rules) in [("nat_pre", n.pre), ("nat_post", n.post)] {
             for (expr, comment) in rules {
@@ -340,6 +352,7 @@ fn base_chains<W: io::Write>(
     opts: &Options,
     has_devices: bool,
     rdr_pass: bool,
+    quarantine: bool,
 ) -> io::Result<()> {
     let lo = |key: &'static str| Stmt::Match {
         op: "==",
@@ -370,22 +383,40 @@ fn base_chains<W: io::Write>(
     }
     add_rule(w, "forward", vec![ct_state_fast_path()])?;
     if rdr_pass {
+        let rdr_marked = || Stmt::Match {
+            op: "==",
+            left: Expr::And(
+                Box::new(Expr::Ct("mark")),
+                Box::new(Expr::Num(RDR_PASS_MARK)),
+            ),
+            right: Expr::Num(RDR_PASS_MARK),
+        };
+        if quarantine {
+            // a quarantined host takes no port forward, `rdr pass` or not:
+            // drop before the skip below, which bypasses `in_<iface>`
+            for fam in IpFamily::BOTH {
+                let set = compile::ip_set(host_modes::QUARANTINE_ADDR_SET, fam);
+                let daddr = match fam {
+                    IpFamily::V4 => Expr::Payload("ip", "daddr"),
+                    IpFamily::V6 => Expr::Payload("ip6", "daddr"),
+                };
+                add_rule(
+                    w,
+                    "forward",
+                    vec![
+                        rdr_marked(),
+                        Stmt::Match {
+                            op: "==",
+                            left: daddr,
+                            right: Expr::set_ref(&set),
+                        },
+                        Stmt::Verdict(Verdict::Drop),
+                    ],
+                )?;
+            }
+        }
         // `rdr pass`: the redirect marked the connection; skip the filter
-        add_rule(
-            w,
-            "forward",
-            vec![
-                Stmt::Match {
-                    op: "==",
-                    left: Expr::And(
-                        Box::new(Expr::Ct("mark")),
-                        Box::new(Expr::Num(RDR_PASS_MARK)),
-                    ),
-                    right: Expr::Num(RDR_PASS_MARK),
-                },
-                accept(),
-            ],
-        )?;
+        add_rule(w, "forward", vec![rdr_marked(), accept()])?;
     }
     add_rule(w, "forward", vec![jump("in_dispatch")])?;
     add_rule(w, "forward", vec![jump("out_dispatch")])?;
@@ -478,6 +509,32 @@ fn emit_sets<W: io::Write>(
             })?;
         }
     }
+    let mut mac_sets = refs.mac_sets.clone();
+    let mut ip_sets = refs.ip_sets.clone();
+    if policy.host_modes.is_some() {
+        mac_sets.extend(host_modes::MAC_SETS.map(str::to_owned));
+        ip_sets.extend(host_modes::ADDR_SETS.map(str::to_owned));
+    }
+    for name in &mac_sets {
+        let macs = policy.host_modes.map_or(&[][..], |h| h.macs(name));
+        w.add(Object::Set {
+            name: name.as_str().into(),
+            ty: SetType(vec!["ether_addr"]),
+            interval: false,
+            elem: macs.iter().map(mac_elem).collect(),
+        })?;
+    }
+    for name in &ip_sets {
+        for fam in IpFamily::BOTH {
+            let addrs = policy.host_modes.map_or(Vec::new(), |h| h.ips(name, fam));
+            w.add(Object::Set {
+                name: compile::ip_set(name, fam).into(),
+                ty: SetType(vec![addr_type(fam)]),
+                interval: false,
+                elem: addrs.iter().map(net_elem).collect(),
+            })?;
+        }
+    }
     for (name, a) in policy.aliases {
         w.add(Object::Set {
             name: compile::port_alias_set(name).into(),
@@ -509,6 +566,10 @@ fn addr_type(fam: IpFamily) -> &'static str {
     }
 }
 
+fn mac_elem(m: &MacAddr) -> Expr<'static> {
+    Expr::Str(m.to_string().into())
+}
+
 fn net_elem(n: &IpNet) -> Expr<'static> {
     if n.prefix_len() == n.max_prefix_len() {
         Expr::Ip(n.addr())
@@ -522,6 +583,7 @@ fn field_expr(f: Field) -> Expr<'static> {
     match f {
         Field::Nfproto => Expr::Meta("nfproto"),
         Field::L4proto => Expr::Meta("l4proto"),
+        Field::EtherSaddr => Expr::Payload("ether", "saddr"),
         Field::Saddr(IpFamily::V4) => Expr::Payload("ip", "saddr"),
         Field::Saddr(IpFamily::V6) => Expr::Payload("ip6", "saddr"),
         Field::Daddr(IpFamily::V4) => Expr::Payload("ip", "daddr"),
@@ -1238,6 +1300,8 @@ pub enum SetContents {
     Nets(Vec<IpNet>),
     /// inclusive port ranges
     Ports(Vec<(u16, u16)>),
+    /// Ethernet addresses (an `ether_addr` set)
+    Macs(Vec<MacAddr>),
 }
 
 /// Replaces the contents of named sets in one transaction (`flush set` +
@@ -1268,6 +1332,7 @@ pub fn render_set_updates<W: io::Write>(
                     }
                 })
                 .collect(),
+            SetContents::Macs(macs) => macs.iter().map(mac_elem).collect(),
         };
         if !elem.is_empty() {
             w.add(Object::Element {
@@ -1525,4 +1590,61 @@ fn emit_route<W: io::Write>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ether_saddr_renders() {
+        assert_eq!(
+            field_expr(Field::EtherSaddr),
+            Expr::Payload("ether", "saddr")
+        );
+        let m = compile::Match {
+            field: Field::EtherSaddr,
+            neg: false,
+            val: Val::SetRef(compile::host_mode_set("host_isolated")),
+        };
+        assert_eq!(
+            serde_json::to_string(&match_stmt(&m)).unwrap(),
+            r#"{"match":{"op":"==","left":{"payload":{"protocol":"ether","field":"saddr"}},"right":"@host_isolated"}}"#
+        );
+    }
+
+    #[test]
+    fn referenced_mac_set_is_declared_as_ether_addr() {
+        let rule = FilterRule {
+            action: crate::ir::Action::Block,
+            quick: true,
+            enabled: true,
+            src: Endpoint {
+                addr: Addr::MacSet("host_isolated".into()),
+                ..Endpoint::default()
+            },
+            ..FilterRule::default()
+        };
+        let render_one = |rules: &[FilterRule]| {
+            let mut buf = Vec::new();
+            let policy = Policy {
+                rules,
+                interfaces: &InterfaceMap::new(),
+                aliases: &BTreeMap::new(),
+                nat: None,
+                routing: None,
+                host_modes: None,
+            };
+            let report = render(&policy, &Options::default(), &mut buf).unwrap();
+            assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+            String::from_utf8(buf).unwrap()
+        };
+        let out = render_one(std::slice::from_ref(&rule));
+        assert!(
+            out.contains(r#"{"add":{"set":{"family":"inet","table":"sensr","name":"host_isolated","type":"ether_addr"}}}"#),
+            "{out}"
+        );
+        assert!(out.contains(r#""right":"@host_isolated""#), "{out}");
+        assert!(!render_one(&[]).contains("ether_addr"));
+    }
 }

@@ -45,6 +45,8 @@ pub enum Field {
     Nfproto,
     /// `meta l4proto`
     L4proto,
+    /// `ether saddr` (family-independent)
+    EtherSaddr,
     /// `ip/ip6 saddr`
     Saddr(IpFamily),
     /// `th sport`
@@ -184,6 +186,10 @@ pub struct Low<'a> {
 pub struct SetRefs {
     /// automation tables (`<bogons>`) referenced
     pub tables: BTreeSet<String>,
+    /// source-MAC sets (`ether_addr`) referenced
+    pub mac_sets: BTreeSet<String>,
+    /// run-time address sets ([`ip_set`] base names) referenced
+    pub ip_sets: BTreeSet<String>,
 }
 
 /// Set name of a logical interface's networks.
@@ -199,6 +205,17 @@ pub fn iface_addr_set(iface: &str, fam: IpFamily) -> String {
 /// Set name of an address alias.
 pub fn alias_set(name: &str, fam: IpFamily) -> String {
     format!("a_{name}_{}", fam_digit(fam))
+}
+
+/// Set name of a host-mode source-MAC set: host-mode sets are pre-named
+/// (`host_isolated`), so this is the name verbatim.
+pub fn host_mode_set(name: &str) -> String {
+    name.to_owned()
+}
+
+/// Set name of one family of a run-time address set (`host_locked_v4`).
+pub fn ip_set(name: &str, fam: IpFamily) -> String {
+    format!("{name}_v{}", fam_digit(fam))
 }
 
 /// Set name of a port alias.
@@ -444,6 +461,7 @@ fn needs_family(a: &Addr) -> bool {
             | Addr::IfaceNet { .. }
             | Addr::IfaceAddr(_)
             | Addr::Device(_)
+            | Addr::IpSet(_)
     )
 }
 
@@ -576,6 +594,17 @@ fn addr_alternatives(
                 iface_addr_set(name, f)
             };
             vec![vec![m(field(f), Val::SetRef(set))]]
+        }
+        Addr::IpSet(s) => {
+            let f = need("address set")?;
+            refs.ip_sets.insert(s.clone());
+            vec![vec![m(field(f), Val::SetRef(ip_set(s, f)))]]
+        }
+        Addr::MacSet(_) if dst => return Err("a MAC set can only match the source".into()),
+        Addr::MacSet(s) => {
+            let name = host_mode_set(s);
+            refs.mac_sets.insert(name.clone());
+            vec![vec![m(Field::EtherSaddr, Val::SetRef(name))]]
         }
         Addr::Invalid(s) => return Err(format!("invalid address {s:?}")),
     })
@@ -975,6 +1004,80 @@ mod tests {
                 prop_assert_eq!(linear(&lows, p), compiled(&items, p), "{:?}", p);
             }
         }
+    }
+
+    fn mac_rule(dst: Addr) -> FilterRule {
+        FilterRule {
+            action: Action::Block,
+            src: Endpoint {
+                addr: Addr::MacSet("host_isolated".into()),
+                ..Endpoint::default()
+            },
+            dst: Endpoint {
+                addr: dst,
+                ..Endpoint::default()
+            },
+            ..FilterRule::default()
+        }
+    }
+
+    #[test]
+    fn mac_set_source_lowers_to_ether_saddr() {
+        let rule = mac_rule(Addr::IfaceNet {
+            iface: "lan".into(),
+            link_local: false,
+        });
+        let mut refs = SetRefs::default();
+        let alts = lower_matches(
+            &MatchSpec::of_filter(&rule),
+            &InterfaceMap::new(),
+            &mut refs,
+        )
+        .unwrap();
+        assert_eq!(alts.len(), 2, "{alts:?}");
+        let ether = eq(Field::EtherSaddr, Val::SetRef("host_isolated".into()));
+        for (fam, matches) in &alts {
+            assert!(matches.contains(&ether), "{matches:?}");
+            let f = fam.expect("interface network is per family");
+            assert!(matches.contains(&eq(Field::Daddr(f), Val::SetRef(iface_net_set("lan", f)))));
+            // the MAC test is cheap, so it comes first
+            assert_eq!(matches[0], ether);
+        }
+        assert_eq!(
+            refs.mac_sets.iter().collect::<Vec<_>>(),
+            [&"host_isolated".to_owned()]
+        );
+    }
+
+    #[test]
+    fn mac_only_rule_needs_no_family() {
+        let rule = mac_rule(Addr::Any);
+        let alts = lower_matches(
+            &MatchSpec::of_filter(&rule),
+            &InterfaceMap::new(),
+            &mut SetRefs::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            alts,
+            vec![(
+                None,
+                vec![eq(Field::EtherSaddr, Val::SetRef("host_isolated".into()))]
+            )]
+        );
+    }
+
+    #[test]
+    fn mac_set_is_source_only() {
+        let mut rule = mac_rule(Addr::Any);
+        std::mem::swap(&mut rule.src, &mut rule.dst);
+        let err = lower_matches(
+            &MatchSpec::of_filter(&rule),
+            &InterfaceMap::new(),
+            &mut SetRefs::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("source"), "{err}");
     }
 
     #[test]

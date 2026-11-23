@@ -46,6 +46,12 @@ pub trait Applier: Send + 'static {
     fn forget_host(&mut self, _key: &str) -> Result<bool, ApplyError> {
         Ok(false)
     }
+
+    /// The MAC of the inventory host holding `ip` (lowercase), if any: who a
+    /// request comes from, for the self-quarantine guard.
+    fn client_mac(&self, _ip: std::net::IpAddr) -> Option<String> {
+        None
+    }
 }
 
 /// Sections and the unit that serves them, for the preview plan.
@@ -168,6 +174,8 @@ pub struct FakeState {
     pub runtime: Vec<(sensr_ipc::RuntimeSection, Value)>,
     /// Host keys [`Applier::forget_host`] accepts (each once).
     pub forgettable: Vec<String>,
+    /// Answers for [`Applier::client_mac`].
+    pub client_macs: Vec<(std::net::IpAddr, String)>,
 }
 
 /// Test double: records applies, can be told to fail.
@@ -224,6 +232,14 @@ impl Applier for FakeApplier {
         let before = st.forgettable.len();
         st.forgettable.retain(|k| k != key);
         Ok(st.forgettable.len() != before)
+    }
+
+    fn client_mac(&self, ip: std::net::IpAddr) -> Option<String> {
+        self.lock()
+            .client_macs
+            .iter()
+            .find(|(a, _)| *a == ip)
+            .map(|(_, m)| m.clone())
     }
 }
 

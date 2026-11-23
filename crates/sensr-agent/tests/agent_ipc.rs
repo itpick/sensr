@@ -748,3 +748,213 @@ async fn host_forget_is_refused_for_readonly() {
         vec!["aa:bb:cc:dd:ee:01".to_owned()]
     );
 }
+
+const MODE_MAC: &str = "aa:bb:cc:dd:ee:01";
+
+async fn mode_set(
+    c: &mut Client,
+    mode: Option<sensr_ipc::HostModeMode>,
+    remote_addr: Option<std::net::IpAddr>,
+) -> Result<Response, ClientError> {
+    c.call(Op::HostModeSet {
+        mac: MODE_MAC.to_uppercase(),
+        mode,
+        remote_addr,
+    })
+    .await
+}
+
+fn modes_of(doc: &Document) -> Vec<(String, sensr_schema::models::firewall::HostModeKind, bool)> {
+    doc.firewall
+        .host_modes
+        .values()
+        .map(|h| (h.mac.to_string(), h.mode, h.enabled))
+        .collect()
+}
+
+#[tokio::test]
+async fn mode_set_applies_on_clean_head() {
+    use sensr_schema::models::firewall::HostModeKind;
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    let before = fx.applied().len();
+    let r = mode_set(&mut c, Some(sensr_ipc::HostModeMode::Isolated), None)
+        .await
+        .unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"result": "applied"}))));
+    let applied = fx.applied();
+    assert_eq!(applied.len(), before + 1);
+    assert_eq!(
+        modes_of(applied.last().unwrap()),
+        [(MODE_MAC.to_owned(), HostModeKind::Isolated, true)]
+    );
+    let h = history(&mut c).await;
+    assert_eq!(
+        h[0].description,
+        format!("set host mode {MODE_MAC} → isolated")
+    );
+
+    // a new mode replaces the entry; Normal removes it
+    mode_set(&mut c, Some(sensr_ipc::HostModeMode::Quarantine), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        modes_of(fx.applied().last().unwrap()),
+        [(MODE_MAC.to_owned(), HostModeKind::Quarantine, true)]
+    );
+    assert_eq!(
+        history(&mut c).await[0].description,
+        format!("set host mode {MODE_MAC} → quarantine")
+    );
+    let r = mode_set(&mut c, None, None).await.unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"result": "applied"}))));
+    assert!(modes_of(fx.applied().last().unwrap()).is_empty());
+    assert_eq!(
+        history(&mut c).await[0].description,
+        format!("set host mode {MODE_MAC} → normal")
+    );
+    let st = match c.call(Op::Status).await.unwrap() {
+        Response::Status(s) => s,
+        other => panic!("{other:?}"),
+    };
+    assert!(!st.candidate_dirty);
+
+    // already Normal: nothing to change, nothing applied, no error
+    let n = fx.applied().len();
+    let r = mode_set(&mut c, None, None).await.unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"result": "applied"}))));
+    assert_eq!(fx.applied().len(), n);
+}
+
+#[tokio::test]
+async fn mode_set_stages_when_candidate_is_dirty() {
+    use sensr_schema::models::firewall::HostModeKind;
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    set(&mut c, "system.hostname", json!("half-done")).await;
+    let before = fx.applied().len();
+    let r = mode_set(&mut c, Some(sensr_ipc::HostModeMode::Quarantine), None)
+        .await
+        .unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"result": "staged"}))));
+    assert_eq!(fx.applied().len(), before, "nothing applied");
+    // both edits wait in the candidate
+    assert_eq!(host(&mut c, Source::Candidate).await, json!("half-done"));
+    let modes = get(&mut c, "firewall.host_modes", Source::Candidate)
+        .await
+        .unwrap();
+    let entry = modes.as_object().unwrap().values().next().unwrap().clone();
+    assert_eq!(entry["mac"], MODE_MAC);
+    assert_eq!(entry["mode"], "quarantine");
+    commit(&mut c, None).await.unwrap();
+    assert_eq!(
+        modes_of(fx.applied().last().unwrap()),
+        [(MODE_MAC.to_owned(), HostModeKind::Quarantine, true)]
+    );
+}
+
+#[tokio::test]
+async fn mode_set_stages_when_confirm_pending() {
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    set(&mut c, "system.hostname", json!("a")).await;
+    commit(&mut c, None).await.unwrap();
+    set(&mut c, "system.hostname", json!("b")).await;
+    commit(&mut c, Some(60)).await.unwrap();
+    let before = fx.applied().len();
+    let r = mode_set(&mut c, Some(sensr_ipc::HostModeMode::Isolated), None)
+        .await
+        .unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"result": "staged"}))));
+    assert_eq!(fx.applied().len(), before, "nothing applied");
+    let st = match c.call(Op::Status).await.unwrap() {
+        Response::Status(s) => s,
+        other => panic!("{other:?}"),
+    };
+    assert!(st.candidate_dirty);
+    assert!(
+        st.pending_confirm.is_some(),
+        "the provisional commit stands"
+    );
+}
+
+#[tokio::test]
+async fn mode_set_self_quarantine_refused() {
+    let fx = Fx::start(true).await;
+    let me: std::net::IpAddr = "192.168.1.50".parse().unwrap();
+    fx.applier
+        .state
+        .lock()
+        .unwrap()
+        .client_macs
+        .push((me, MODE_MAC.into()));
+    let mut c = fx.client().await;
+    let before = fx.applied().len();
+    let e = agent_err(mode_set(&mut c, Some(sensr_ipc::HostModeMode::Quarantine), Some(me)).await);
+    assert_eq!(e.kind, ErrorKind::Conflict);
+    assert_eq!(
+        e.message,
+        "That's the device you're using — quarantine it from another device."
+    );
+    // the same client through a dual-stack listener
+    let mapped: std::net::IpAddr = "::ffff:192.168.1.50".parse().unwrap();
+    let e = agent_err(
+        mode_set(
+            &mut c,
+            Some(sensr_ipc::HostModeMode::Quarantine),
+            Some(mapped),
+        )
+        .await,
+    );
+    assert_eq!(e.kind, ErrorKind::Conflict);
+    assert_eq!(fx.applied().len(), before);
+    let st = match c.call(Op::Status).await.unwrap() {
+        Response::Status(s) => s,
+        other => panic!("{other:?}"),
+    };
+    assert!(!st.candidate_dirty, "nothing staged");
+    // Isolating yourself is allowed (the GUI stays reachable), and so is
+    // quarantining another device
+    let r = mode_set(&mut c, Some(sensr_ipc::HostModeMode::Isolated), Some(me))
+        .await
+        .unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"result": "applied"}))));
+    let other: std::net::IpAddr = "192.168.1.51".parse().unwrap();
+    let r = mode_set(
+        &mut c,
+        Some(sensr_ipc::HostModeMode::Quarantine),
+        Some(other),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"result": "applied"}))));
+}
+
+#[tokio::test]
+async fn mode_set_rejects_a_bad_mac() {
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    let e = agent_err(
+        c.call(Op::HostModeSet {
+            mac: "id:01aabb".into(),
+            mode: Some(sensr_ipc::HostModeMode::Isolated),
+            remote_addr: None,
+        })
+        .await,
+    );
+    assert_eq!(e.kind, ErrorKind::BadRequest);
+}
+
+#[tokio::test]
+async fn mode_set_readonly_forbidden() {
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    c.set_principal(Principal {
+        readonly: true,
+        ..c.principal().clone()
+    });
+    let before = fx.applied().len();
+    let e = agent_err(mode_set(&mut c, Some(sensr_ipc::HostModeMode::Isolated), None).await);
+    assert_eq!(e.kind, ErrorKind::Forbidden);
+    assert_eq!(fx.applied().len(), before);
+}

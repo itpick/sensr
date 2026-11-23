@@ -336,6 +336,53 @@ pub async fn forget_host(
     }
 }
 
+/// A mode in the body of `POST /api/v1/hosts/mode`.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum ModeBody {
+    /// No containment (the entry is removed); same as `null`.
+    Normal,
+    /// Router and internet only.
+    Isolated,
+    /// The router's DHCP, DNS and NTP only.
+    Quarantine,
+}
+
+/// Body of `POST /api/v1/hosts/mode`.
+#[derive(Deserialize)]
+pub struct HostModeBody {
+    mac: String,
+    #[serde(default)]
+    mode: Option<ModeBody>,
+}
+
+/// `POST /api/v1/hosts/mode`: put a host in a mode or back to Normal. The
+/// agent commits at once when nothing else is staged (`{"result":
+/// "applied"}`), else stages (`"staged"`); quarantining the device the
+/// request comes from is a Conflict (409), read-only principals get 403.
+pub async fn set_host_mode(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    connect: Option<Extension<ConnectInfo<SocketAddr>>>,
+    Json(b): Json<HostModeBody>,
+) -> ApiResult {
+    use sensr_ipc::HostModeMode;
+    let mode = match b.mode {
+        None | Some(ModeBody::Normal) => None,
+        Some(ModeBody::Isolated) => Some(HostModeMode::Isolated),
+        Some(ModeBody::Quarantine) => Some(HostModeMode::Quarantine),
+    };
+    let op = Op::HostModeSet {
+        mac: b.mac,
+        mode,
+        remote_addr: connect.map(|Extension(ConnectInfo(a))| a.ip()),
+    };
+    match call(&state, &caller, op).await? {
+        Response::Value(Some(v)) => Ok(Json(v)),
+        other => Err(unexpected(other)),
+    }
+}
+
 /// Body of `POST /api/v1/session`.
 #[derive(Deserialize)]
 pub struct LoginBody {

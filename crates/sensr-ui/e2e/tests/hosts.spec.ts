@@ -33,7 +33,7 @@ test("search filters by MAC", async ({ page }) => {
 
 test("network filter shows only LAN2", async ({ page }) => {
   await open(page);
-  await card(page).getByRole("combobox").selectOption({ label: "LAN2" });
+  await card(page).getByRole("combobox", { name: "Network", exact: true }).selectOption({ label: "LAN2" });
   const lan = rows(page).locator("td:nth-child(4)").filter({ hasNotText: /^LAN2$/ });
   await expect(lan).toHaveCount(0);
   await expect(rows(page).first()).toBeVisible();

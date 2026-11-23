@@ -703,6 +703,8 @@ pub struct HostCard {
     pub read_only: bool,
     /// `(interface id, display name)` of each network with hosts, by id.
     pub networks: Vec<(String, String)>,
+    /// Why same-network blocking (the ARP interceptor) is off, when it failed.
+    pub arp_error: Option<String>,
 }
 
 impl HostCard {
@@ -766,8 +768,60 @@ pub async fn hosts() -> Result<Option<HostCard>, ServerFnError> {
     Ok(Some(HostCard {
         read_only: b.read_only(),
         networks: networks.into_iter().collect(),
+        arp_error: list.intercept.as_ref().and_then(|i| i.error.clone()),
         list,
     }))
+}
+
+/// Refusal of a Quarantine for the device the request comes from (the agent's wording).
+pub const SELF_QUARANTINE: &str =
+    "That's the device you're using — quarantine it from another device.";
+
+/// What a server function's error says, without the transport's prefix.
+pub fn server_message(e: &ServerFnError) -> String {
+    match e {
+        ServerFnError::ServerError(m) => m.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Puts a host in a mode (`isolated`, `quarantine`; `None` or `normal` for Normal) and
+/// returns `applied` or `staged` (it waits for Apply beside other changes). The agent
+/// refuses to quarantine the device the request comes from; the card checks the host list
+/// first so the refusal needs no round trip when the address is known.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn set_host_mode(mac: String, mode: Option<String>) -> Result<String, ServerFnError> {
+    use crate::api::ApiError;
+    let b = imp::backend()?;
+    if !b.may_access("/api/v1/hosts/mode") || b.read_only() {
+        return Err(ServerFnError::new("you may not change host modes"));
+    }
+    let remote = imp::remote().map(|ip| ip.to_canonical());
+    if mode.as_deref() == Some("quarantine")
+        && let Some(ip) = remote
+        && let Ok(v) = b.runtime(RuntimeSection::Hosts).await
+    {
+        let list: crate::runtime::HostList = crate::runtime::parse(v);
+        let at = |a: &str| a.parse::<std::net::IpAddr>().ok() == Some(ip);
+        let own = list
+            .hosts
+            .iter()
+            // an offline row may still hold an address someone else has now
+            .filter(|h| h.online)
+            .find(|h| h.ipv4.as_deref().is_some_and(at) || h.ipv6.iter().any(|a| at(a)));
+        if own
+            .and_then(|h| h.mac.as_deref())
+            .is_some_and(|m| m.eq_ignore_ascii_case(&mac))
+        {
+            return Err(ServerFnError::new(SELF_QUARANTINE));
+        }
+    }
+    match b.set_host_mode(mac, mode, remote).await {
+        Ok(r) => Ok(r),
+        // the agent's own wording (e.g. the self-quarantine refusal), shown as is
+        Err(ApiError::Conflict(m)) => Err(ServerFnError::new(m)),
+        Err(e) => Err(imp::err(e)),
+    }
 }
 
 /// Drops an unreserved host from the inventory (it comes back if still on the network).

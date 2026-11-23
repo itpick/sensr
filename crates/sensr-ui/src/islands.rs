@@ -1569,8 +1569,9 @@ pub fn DhcpLeases(initial: LeaseTable) -> impl IntoView {
 }
 
 /// Dashboard › Hosts: every client the router knows of, searchable and filterable by
-/// network, with Make static for leased hosts and Forget for unreserved ones. Refreshed
-/// with the other dashboard widgets; renders nothing when the caller may not see hosts.
+/// network, with Make static for leased hosts, Forget for unreserved ones and a Mode
+/// (Normal / Isolated / Quarantine) for hosts with a MAC. Refreshed with the other
+/// dashboard widgets; renders nothing when the caller may not see hosts.
 #[island]
 pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
     if initial.is_none() {
@@ -1583,6 +1584,8 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
     let show_all = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(None::<String>);
+    // The last Mode change's refusal; kept across refreshes (which clear `error`).
+    let mode_error = RwSignal::new(None::<String>);
 
     let refresh = move || {
         spawn_local(async move {
@@ -1648,6 +1651,80 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
         });
     };
 
+    let set_mode = move |mac: String, mode: String, select: NodeRef<leptos::html::Select>| {
+        let mode = (mode != "normal").then_some(mode);
+        busy.set(Some(mac.clone()));
+        spawn_local(async move {
+            match set_host_mode(mac.clone(), mode).await {
+                // a staged mode shows on its row (from the staged document)
+                Ok(_) => {
+                    mode_error.set(None);
+                    bump();
+                }
+                Err(e) => mode_error.set(Some(server_message(&e))),
+            }
+            // also on a refusal: the select goes back to the host's actual mode. The row
+            // is patched in place and its `selected` attributes may not change, so the
+            // value the user picked is reset by hand.
+            match hosts().await {
+                Ok(c) => {
+                    let shown = c.as_ref().and_then(|c| {
+                        c.list
+                            .hosts
+                            .iter()
+                            .find(|h| h.mac.as_deref() == Some(mac.as_str()))
+                            .map(|h| mode_shown(h).to_owned())
+                    });
+                    card.set(c);
+                    if let (Some(el), Some(v)) = (select.get_untracked(), shown) {
+                        el.set_value(&v);
+                    }
+                }
+                Err(e) => error.set(Some(format!("Could not read the hosts: {e}"))),
+            }
+            busy.set(None);
+        });
+    };
+
+    let mode_cell = move |h: &crate::runtime::HostRow, read_only: bool| {
+        // `id:` rows have no MAC to match on
+        let Some(mac) = h.mac.clone().filter(|_| !h.key.starts_with("id:")) else {
+            return view! { <span class="muted">"—"</span> }.into_any();
+        };
+        let current = h.locked_mode().unwrap_or("normal");
+        let badge = match current {
+            "isolated" => Some(view! { <span class="pill pill-warn">"Isolated"</span> }),
+            "quarantine" => Some(view! { <span class="pill pill-off">"Quarantine"</span> }),
+            _ => None,
+        };
+        let staged_note = h.staged_mode.is_some().then(|| {
+            view! { <span class="muted host-mode-staged">"Staged — Apply to take effect"</span> }
+        });
+        if read_only {
+            return view! { {badge} {staged_note} }.into_any();
+        }
+        let shown = mode_shown(h);
+        let select = NodeRef::<leptos::html::Select>::new();
+        let label = format!("Mode for {}", h.label());
+        let options = [
+            ("normal", "Normal"),
+            ("isolated", "Isolated"),
+            ("quarantine", "Quarantine"),
+        ]
+        .map(|(v, t)| view! { <option value=v selected=v == shown>{t}</option> });
+        let m = mac.clone();
+        view! {
+            {badge}
+            <select aria-label=label node_ref=select
+                disabled=move || busy.get().as_deref() == Some(m.as_str())
+                on:change=move |ev| set_mode(mac.clone(), event_target_value(&ev), select)>
+                {options}
+            </select>
+            {staged_note}
+        }
+        .into_any()
+    };
+
     let row = move |h: &crate::runtime::HostRow, now: u64, read_only: bool| {
         let key = h.key.clone();
         let actions = if read_only {
@@ -1687,6 +1764,7 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
                 <td>{h.interface_name.clone()}</td>
                 <td>{h.source()}</td>
                 <td>{h.seen(now)}</td>
+                <td class="host-mode">{mode_cell(h, read_only)}</td>
                 <td class="host-actions">{actions}</td>
             </tr>
         }
@@ -1720,6 +1798,7 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
                                     <th scope="col">"Network"</th>
                                     <th scope="col">"Source"</th>
                                     <th scope="col">"Seen"</th>
+                                    <th scope="col">"Mode"</th>
                                     <th scope="col" aria-label="Actions"></th>
                                 </tr>
                             </thead>
@@ -1761,17 +1840,43 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
             </div>
         })
     };
+    let footer = move || {
+        card.with(|c| {
+            let c = c.as_ref()?;
+            let locked = c.list.hosts.iter().any(|h| h.locked_mode().is_some());
+            let error = c.arp_error.clone();
+            (locked || error.is_some()).then(|| view! {
+                <div class="hosts-footer">
+                    {locked.then(|| view! {
+                        <p class="muted">"Same-network blocking works by redirecting the device's local traffic through the router (IPv4). It stops ordinary devices, not ones configured to bypass it."</p>
+                    })}
+                    {error.map(|e| view! {
+                        <p class="field-error">{format!("Same-network blocking is off: {e}")}</p>
+                    })}
+                </div>
+            })
+        })
+    };
     view! {
         {move || visible.get().then(|| view! {
             <section class="card card-wide hosts-card" aria-labelledby="w-hosts">
                 <h2 id="w-hosts">{move || card.with(|c| format!("Hosts ({})", c.as_ref().map_or(0, |c| c.list.hosts.len())))}</h2>
                 {toolbar}
                 {body}
+                {footer}
+                {move || mode_error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
                 {move || error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
             </section>
         })}
     }
     .into_any()
+}
+
+/// The mode a host's Mode select shows: the staged one, else the one in force.
+fn mode_shown(h: &crate::runtime::HostRow) -> &str {
+    h.staged_mode
+        .as_deref()
+        .unwrap_or_else(|| h.locked_mode().unwrap_or("normal"))
 }
 
 /// Keeps `DiffKind` in the bundle's public surface for the history page CSS classes.
