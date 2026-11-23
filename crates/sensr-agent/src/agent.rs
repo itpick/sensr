@@ -400,16 +400,28 @@ impl<A: Applier> Agent<A> {
         self.reconcile(&mut inner).await
     }
 
+    /// The boot apply of head. Unlike a commit it is fault-isolated: a
+    /// daemon whose checker rejects its config is held back (and reported
+    /// in `last_apply_error`) while the rest of the network comes up.
     async fn reconcile(&self, inner: &mut Inner<A>) -> Result<(), IpcError> {
         let (id, head) = inner.head.clone();
-        // `running: None` forces every backend to be rendered and checked.
-        inner.applier.plan(None, &head).map_err(apply_error)?;
-        match inner.applier.apply(None, &head) {
-            Ok(()) => {
+        match inner.applier.apply_boot(&head) {
+            Ok(held) => {
                 // A pending confirm (SIGHUP during the window) keeps its deadline.
                 let pending = inner.store.pending_confirm().map_err(internal)?;
                 self.mark_applied(inner, id, head, pending)?;
-                inner.last_apply_error = None;
+                inner.last_apply_error = if held.is_empty() {
+                    None
+                } else {
+                    for problem in &held {
+                        tracing::error!(revision = %id, %problem, "boot apply degraded");
+                    }
+                    Some(format!(
+                        "revision {id} applied at startup without part of its configuration \
+                         (fix the cause, then commit a change or reload sensr-agent): {}",
+                        held.join("; ")
+                    ))
+                };
                 let _ = self.events.send(Event::Applied(id));
                 Ok(())
             }

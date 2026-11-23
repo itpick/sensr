@@ -114,6 +114,7 @@ impl UiBackend {
                 changed.push("configuration".into());
             }
         }
+        let alert = alert_text(&status);
         Ok(Pending {
             changed,
             confirm: status.pending_confirm.map(|p| ConfirmWindow {
@@ -121,9 +122,29 @@ impl UiBackend {
                 deadline: u64::try_from(p.deadline_ms / 1000).unwrap_or(0),
             }),
             now: now_secs(),
-            alert: status.seed_error.clone(),
+            alert,
         })
     }
+}
+
+/// The every-page banner: a first-boot seed that did not import, and the
+/// last apply problem (a boot apply that held a daemon back, a commit that
+/// was stored but not applied), one `Label: message` per line.
+fn alert_text(status: &sensr_ipc::Status) -> Option<String> {
+    let lines: Vec<String> = [
+        status
+            .seed_error
+            .as_ref()
+            .map(|e| format!("First-boot seed: {e}")),
+        status
+            .last_apply_error
+            .as_ref()
+            .map(|e| format!("Apply problem: {e}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 impl Backend for UiBackend {
@@ -624,4 +645,38 @@ pub fn options(site_root: PathBuf) -> leptos::config::LeptosOptions {
 /// The UI router for `state`.
 pub fn router(state: Arc<AppState>, site_root: PathBuf) -> axum::Router {
     sensr_ui::server::router(options(site_root), Arc::new(UiSessions::new(state)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_banner_shows_seed_and_apply_problems() {
+        let mut st = sensr_ipc::Status {
+            agent_version: String::new(),
+            protocol: 1,
+            uptime_secs: 0,
+            head: None,
+            applied: Some(1),
+            candidate_dirty: false,
+            pending_confirm: None,
+            last_apply_error: None,
+            seed_error: None,
+        };
+        assert_eq!(alert_text(&st), None);
+        st.last_apply_error = Some("revision 1 applied at startup without part".into());
+        assert_eq!(
+            alert_text(&st).as_deref(),
+            Some("Apply problem: revision 1 applied at startup without part")
+        );
+        st.seed_error = Some("config.xml did not validate".into());
+        assert_eq!(
+            alert_text(&st).unwrap().lines().collect::<Vec<_>>(),
+            [
+                "First-boot seed: config.xml did not validate",
+                "Apply problem: revision 1 applied at startup without part"
+            ]
+        );
+    }
 }

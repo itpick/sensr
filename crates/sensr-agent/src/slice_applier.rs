@@ -830,6 +830,27 @@ impl Applier for SliceApplier {
     }
 
     fn apply(&mut self, _running: Option<&Document>, next: &Document) -> Result<(), ApplyError> {
+        self.apply_with(next, false).map(|_| ())
+    }
+
+    fn apply_boot(&mut self, next: &Document) -> Result<Vec<String>, ApplyError> {
+        Ok(self
+            .apply_with(next, true)?
+            .iter()
+            .map(ToString::to_string)
+            .collect())
+    }
+}
+
+impl SliceApplier {
+    /// Applies `next`: all or nothing, or (`isolated`, the boot apply)
+    /// from scratch with checker rejections held back per backend
+    /// ([`Engine::commit_isolated`]).
+    fn apply_with(
+        &mut self,
+        next: &Document,
+        isolated: bool,
+    ) -> Result<Vec<sensr_apply::engine::Degraded>, ApplyError> {
         let doc = document(next)?.clone();
         // before the engine, as in the refresher: no tick pushes stale sets
         // between the reload and the push below
@@ -844,7 +865,14 @@ impl Applier for SliceApplier {
         if !p.alias_failed.is_empty() {
             tracing::warn!(aliases = ?p.alias_failed, "aliases kept their previous contents");
         }
-        let report = engine.commit(p).map_err(rejected)?;
+        let (report, degraded) = if isolated {
+            engine.commit_isolated(p).map_err(rejected)?
+        } else {
+            (engine.commit(p).map_err(rejected)?, Vec::new())
+        };
+        for d in &degraded {
+            tracing::error!(problem = %d, "boot apply: backend held back");
+        }
         tracing::info!(
             commands = report.commands.len(),
             files = report.files.len(),
@@ -892,7 +920,7 @@ impl Applier for SliceApplier {
         }
         self.start_watcher();
         self.start_refresher();
-        Ok(())
+        Ok(degraded)
     }
 }
 
@@ -1082,6 +1110,47 @@ mod tests {
         // nothing due: nothing pushed
         refresh_once(&feeds, &a.engine, &typed, 1_005);
         assert_eq!(loads(&runner), before + 1);
+    }
+
+    #[test]
+    fn boot_apply_holds_back_a_rejected_daemon_and_commits_stay_all_or_nothing() {
+        let root = fake_root();
+        let runner = Arc::new(FakeRunner::new());
+        runner.respond(|cmd, _| {
+            cmd.display()
+                .starts_with("unbound-checkconf ")
+                .then(|| sensr_apply::cmd::Output::failed(1, "cannot open file"))
+        });
+        let mut a = SliceApplier::new(
+            EngineOptions {
+                root: root.path().to_owned(),
+                ..EngineOptions::default()
+            },
+            runner.clone(),
+        )
+        .unwrap();
+        let doc = home_router();
+        // a commit: the plan is rejected as a whole
+        assert!(matches!(a.plan(None, &doc), Err(ApplyError::Invalid(_))));
+        // the boot apply: everything but the resolver
+        let held = a.apply_boot(&doc).unwrap();
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert!(
+            held[0].contains("unbound-checkconf")
+                && held[0].contains("sensr-unbound.service was not started")
+                && held[0].contains("cannot open file"),
+            "{held:?}"
+        );
+        let lines = runner.call_lines();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("'reload-or-restart' 'sensr-kea-dhcp4.service'")),
+            "{lines:#?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("sensr-unbound.service")));
+        // and a later commit of a document is still refused whole
+        assert!(matches!(a.apply(None, &doc), Err(ApplyError::Invalid(_))));
     }
 
     #[test]
