@@ -21,6 +21,7 @@ required-features = ["store"]
 anyhow = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
+sensr-fingerprint.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

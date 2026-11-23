@@ -22,6 +22,7 @@
 //! (the accounting table).
 
 pub mod config;
+pub mod dnstap;
 #[cfg(feature = "store")]
 pub mod eve;
 pub mod nft;
