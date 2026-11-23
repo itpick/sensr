@@ -771,8 +771,9 @@ impl Applier for SliceApplier {
         // fill them now, not on the next tick.
         let table = self.neighbours.as_ref().map(|n| n()).unwrap_or_default();
         let sets = with_locked(&host_modes, &table);
-        // cut whether or not the push worked: the ruleset holds the MACs
-        cut(&engine, &newly_locked(&pushed, &sets, &table));
+        let to_cut = newly_locked(&pushed, &sets, &table);
+        // the sets first, then the cut: a connection opened in between
+        // would otherwise survive as established
         match engine.update_host_mode_sets(&sets) {
             Ok(()) => *pushed = sets,
             Err(e) => {
@@ -781,6 +782,8 @@ impl Applier for SliceApplier {
                 *pushed = with_locked(&host_modes, &[]);
             }
         }
+        // cut whether or not the push worked: the ruleset holds the MACs
+        cut(&engine, &to_cut);
         drop(engine);
         drop(pushed);
         if let Some(f) = &self.feeds {
@@ -1201,6 +1204,39 @@ mod tests {
         assert!(sets["host_quarantine_v4"].is_empty(), "{sets:?}");
         assert!(sets["host_quarantine_v6"].is_empty(), "{sets:?}");
         assert_eq!(sets["host_isolated"], [LOCKED]);
+    }
+
+    /// The cut runs after the set push, on apply and on the tick: a
+    /// connection opened between them would otherwise survive.
+    #[test]
+    fn locked_sets_are_pushed_before_the_cut() {
+        let root = fake_root();
+        let (mut a, runner, table) = moded_applier(&root);
+        lock(&table).push((LOCKED.into(), "192.168.1.20".parse().unwrap()));
+        a.apply(None, &home_router()).unwrap();
+        let order = |r: &FakeRunner, from: usize| -> Vec<&'static str> {
+            r.calls()[from..]
+                .iter()
+                .filter_map(|c| {
+                    let stdin = String::from_utf8_lossy(c.stdin.as_deref().unwrap_or_default());
+                    // a set update flushes host_locked_v4; a full load adds chains
+                    let push = stdin.contains("host_locked_v4") && !stdin.contains(r#""chain""#);
+                    if c.cmd.display().starts_with("conntrack") {
+                        Some("cut")
+                    } else {
+                        push.then_some("push")
+                    }
+                })
+                .collect()
+        };
+        let n = runner.calls().len();
+        a.apply(Some(&home_router()), &quarantined()).unwrap();
+        assert_eq!(order(&runner, n), ["push", "cut", "cut", "cut"]);
+        // the tick: a new lease
+        let n = runner.calls().len();
+        lock(&table)[0].1 = "192.168.1.21".parse().unwrap();
+        refresh_host_modes(a.neighbours.as_deref().unwrap(), &a.engine, &a.host_modes);
+        assert_eq!(order(&runner, n), ["push", "cut", "cut", "cut"]);
     }
 
     #[test]
