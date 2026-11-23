@@ -107,6 +107,15 @@
         endpoint = (lib.nixosSystem { system = "x86_64-linux"; modules = [ ./nix/bench/endpoint.nix ]; }).config.system.build.image;
       };
 
+      # Dashboard screenshots from the house test, with example devices on
+      # the LAN (.github/workflows/vm-screenshots.yml; $out/screenshots).
+      # Not a check, so `nix flake check` does not run it.
+      screenshots.x86_64-linux.house = import ./nix/tests/house.nix {
+        pkgs = pkgsFor "x86_64-linux";
+        sensrModules = testModules;
+        screenshots = true;
+      };
+
       packages = forAll (pkgs: {
         default = pkgs.sensr;
         sensr = pkgs.sensr;

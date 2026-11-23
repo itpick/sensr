@@ -35,6 +35,11 @@
   pkgs,
   sensrModules,
   strict ? false,
+  # Also: example devices on the LAN (DHCP + mDNS from network namespaces),
+  # some traffic, two host modes, and screenshots of the dashboard from a
+  # LAN client into $out/screenshots. The scorecard is printed, not
+  # enforced; the test fails only without a dashboard screenshot.
+  screenshots ? false,
 }:
 let
   inherit (pkgs) lib;
@@ -158,9 +163,149 @@ let
         linkConfig.RequiredForOnline = "no";
       };
     } extra;
+
+  # Headless Chromium for the screenshots (Playwright, the browsers from
+  # the same nixpkgs as its driver).
+  shotPython = pkgs.python3.withPackages (ps: [ ps.playwright ]);
+  shotBrowsers = pkgs.playwright-driver.browsers-chromium;
+  # Download loop for one example device: random rates around $2 KB/s.
+  trafficLoop = pkgs.writeShellScript "house-traffic" ''
+    export PATH=/run/current-system/sw/bin
+    while :; do
+      r=$(( $2 + RANDOM % $2 ))
+      curl -s -o /dev/null --max-time $(( 4 + RANDOM % 8 )) --limit-rate "''${r}k" "$1"
+      sleep $(( RANDOM % 4 ))
+    done
+  '';
+
+  # The screenshots part of the test script (screenshots = true): after the
+  # scorecard, so the checks see the house as usual.
+  screenshotScript = ''
+    # ------------------------------------------------------- screenshots
+    # Example devices: namespace, MAC (a real maker's OUI), DHCP host name,
+    # DHCP vendor class ("" sends none), mDNS (instance, TXT, services).
+    DEVICES = [
+        ("cam", "7c:78:b2:3a:11:01", "wyze-cam-v3", "", None),
+        ("door", "9c:76:13:5d:22:02", "Ring-Doorbell", "", None),
+        ("prn", "ec:9a:74:6c:33:03", "HP6C3303", "", ("HP OfficeJet Pro 9015", "ty=HP OfficeJet Pro 9015", ["_ipp._tcp", "_printer._tcp"])),
+        ("pi", "dc:a6:32:02:8e:35", "rpi4-homeassistant", "", None),
+        ("sonos", "5c:aa:fd:44:55:05", "Sonos-Kitchen", "", ("Kitchen", "", ["_sonos._tcp", "_spotify-connect._tcp"])),
+        ("iphone", "2a:7e:9c:11:22:06", "Sams-iPhone", "", ("Sam's iPhone", "model=iPhone15,2", ["_companion-link._tcp"])),
+        ("tv", "d8:eb:46:77:88:07", "Chromecast", "", ("Living Room TV", "md=Chromecast|fn=Living Room TV", ["_googlecast._tcp"])),
+        ("plug", "04:83:08:c8:c9:08", "shellyplug-s-c8c908", "", None),
+        ("galaxy", "8c:79:f5:12:34:09", "Galaxy-S24", "android-dhcp-14", None),
+        ("pc", "f8:bc:12:ab:cd:10", "DESKTOP-AB12CD3", "MSFT 5.0", None),
+        ("mac", "ac:bc:32:9e:01:11", "Annas-MacBook-Air", "", ("Anna's MacBook Air", "model=Mac14,2", ["_companion-link._tcp"])),
+        ("switch", "98:b6:e9:4c:22:12", "Nintendo-Switch", "", None),
+    ]
+    # KB/s around which each device downloads from the "internet"
+    TRAFFIC = {"tv": 300, "mac": 120, "pc": 200, "galaxy": 50, "sonos": 30, "switch": 80}
+    MODES = {"cam": "isolated", "plug": "quarantine"}
+    # bcrypt of "opnsense" (as in agent-api.nix): the seed's hash is synthetic
+    ROOT_HASH = "$2y$10$YRVoF4SgskIsrXOvOQjGieB9XqHPRra9R7d80B3BZdbY/j21TwBfS"
+    API = f"https://{LAN_IP}"
+    UDHCPC = "${pkgs.busybox}/bin/udhcpc"
+    IP = "${pkgs.iproute2}/bin/ip"
+    dev_ip: dict[str, str] = {}
+
+
+    def dev_dhcp(ns, name, vendor):
+        desk.succeed(
+            f"{IP} netns exec {ns} timeout 60 {UDHCPC} -i eth0 -f -q -n -t 10 -T 3"
+            f" -x hostname:{q(name)} -V {q(vendor)} -s /etc/house-udhcpc.sh >&2"
+        )
+        out = json.loads(desk.succeed(f"{IP} -n {ns} -j -4 addr show dev eth0"))
+        dev_ip[ns] = [a["local"] for i in out for a in i.get("addr_info", [])][0]
+
+
+    def dev_mdns(ns, host, m):
+        inst, txt, svcs = m
+        desk.succeed(
+            f"{IP} netns exec {ns} python3 ${./house/mdns.py} {dev_ip[ns]} {q(host)} {q(inst)} {q(txt)} "
+            + " ".join(q(s) for s in svcs)
+        )
+
+
+    def hosts_now():
+        return {h.get("mac"): h for h in json.loads(router.succeed("sensr runtime hosts"))["hosts"]}
+
+
+    def label_of(h):
+        return (h or {}).get("label") or {}
+
+
+    users = json.loads(router.succeed("sensr config get system.users --json"))
+    root_id = next(k for k, u in users.items() if u.get("name") == "root")
+    router.succeed(
+        f"sensr config set system.users.{root_id}.password_hash {q(ROOT_HASH)}"
+        " && sensr config commit -m 'house: a known root password for the screenshots'"
+    )
+
+    desk.wait_for_unit("multi-user.target")
+    print("desk:", client_dhcp(desk, None, hostname="admin-desk"))
+    for ns, mac, name, vendor, m in DEVICES:
+        desk.succeed(
+            f"{IP} netns add {ns} && {IP} link add mv-{ns} link eth1 address {mac} type macvlan mode bridge"
+            f" && {IP} link set mv-{ns} netns {ns} && {IP} -n {ns} link set lo up"
+            f" && {IP} -n {ns} link set mv-{ns} name eth0 && {IP} -n {ns} link set eth0 up"
+        )
+        dev_dhcp(ns, name, vendor)
+    print("example devices:", dev_ip)
+
+    # Labelled once the inventory (30 s poll) has the leases and the sniffer
+    # the DHCP and mDNS evidence; renew and re-announce until then.
+    deadline = time.monotonic() + 420
+    while True:
+        for ns, mac, name, vendor, m in DEVICES:
+            if m:
+                dev_mdns(ns, name, m)
+        time.sleep(20)
+        hs = hosts_now()
+        unlabelled = [d for d in DEVICES if label_of(hs.get(d[1])).get("kind") in (None, "unknown")]
+        no_mdns = [d[0] for d in DEVICES if d[4] and not any(r.startswith("mDNS") for r in label_of(hs.get(d[1])).get("reasons", []))]
+        no_dhcp = [d for d in DEVICES if d[3] and not any(r.startswith("DHCP") for r in label_of(hs.get(d[1])).get("reasons", []))]
+        print(f"labels: {len(DEVICES) - len(unlabelled)}/{len(DEVICES)}; without mDNS {no_mdns}; without DHCP {[d[0] for d in no_dhcp]}")
+        if not unlabelled and not no_mdns and not no_dhcp:
+            break
+        if time.monotonic() > deadline:
+            print("WARNING: not every example device is labelled; screenshots anyway")
+            print(router.execute("journalctl -b -u sensr-agent --no-pager | grep -i -E 'fingerprint|sniff|sensr-fp' | tail -n 20")[1])
+            break
+        for ns, mac, name, vendor, m in unlabelled + no_dhcp:
+            desk.execute(f"{IP} netns exec {ns} timeout 30 {UDHCPC} -i eth0 -f -q -n -t 5 -T 2 -x hostname:{q(name)} -V {q(vendor)} -s /etc/house-udhcpc.sh >&2")
+    for mac, h in sorted(hosts_now().items(), key=lambda kv: str(kv[1].get("ipv4"))):
+        lab = label_of(h)
+        print(f"HOST {str(h.get('name')):24} {mac} {str(h.get('ipv4')):15} {lab.get('maker')} / {lab.get('kind')} ({lab.get('confidence')}) {h.get('sources')} {lab.get('reasons')}")
+
+    until(desk, f"curl -skf -u root:opnsense {API}/api/v1/status >/dev/null", timeout=60)
+    for ns, mode in MODES.items():
+        mac = next(d[1] for d in DEVICES if d[0] == ns)
+        rc, out = desk.execute(
+            f"curl -sk -u root:opnsense -X POST -H 'Content-Type: application/json'"
+            f" -d {q(json.dumps({'mac': mac, 'mode': mode}))} {API}/api/v1/hosts/mode"
+        )
+        print(f"mode {ns} {mode}: rc {rc} {out}")
+
+    # Some traffic for the graphs: downloads at changing rates.
+    internet.succeed("dd if=/dev/urandom of=/run/house-www/big bs=1M count=64 status=none")
+    for ns, kbs in TRAFFIC.items():
+        desk.succeed(f"systemd-run --unit=traffic-{ns} {IP} netns exec {ns} ${trafficLoop} http://{INET}/big {kbs}")
+    time.sleep(150)
+
+    rc, out = desk.execute(
+        "PLAYWRIGHT_BROWSERS_PATH=${shotBrowsers} FONTCONFIG_FILE=/etc/fonts/fonts.conf"
+        f" timeout 900 python3 ${./house/shots.py} {API} /tmp/screenshots root opnsense Chromecast 2>&1",
+        timeout=960,
+    )
+    print(out)
+    print(desk.succeed("ls -la /tmp/screenshots"))
+    desk.copy_from_machine("/tmp/screenshots")
+    desk.succeed("test -s /tmp/screenshots/dashboard-1440-light.png")
+    print(f"screenshots: {rc} failed")
+  '';
 in
 pkgs.testers.runNixOSTest {
-  name = "sensr-house";
+  name = if screenshots then "sensr-house-screenshots" else "sensr-house";
 
   nodes = {
     upstream = {
@@ -319,6 +464,27 @@ pkgs.testers.runNixOSTest {
     wifi = client {
       virtualisation.interfaces.eth1.vlan = vlan.lan2;
     };
+  }
+  // lib.optionalAttrs screenshots {
+    # The example devices (one network namespace each, a macvlan on eth1
+    # with a real maker's MAC) and the browser.
+    desk = client {
+      virtualisation.interfaces.eth1.vlan = vlan.lan;
+      virtualisation.memorySize = 2048;
+      virtualisation.cores = 2;
+      imports = [
+        {
+          environment.systemPackages = [
+            shotPython
+          ];
+          fonts.fontconfig.enable = true;
+          fonts.packages = with pkgs; [
+            dejavu_fonts
+            liberation_ttf
+          ];
+        }
+      ];
+    };
   };
 
   testScript = ''
@@ -331,6 +497,7 @@ pkgs.testers.runNixOSTest {
     P = json.load(open(os.environ.get("SENSR_HOUSE_PARAMS", "${./house/example.json}")))
     EXPECT = set(json.loads(${builtins.toJSON (builtins.toJSON expect.pass)}))
     STRICT = ${if strict then "True" else "False"} or os.environ.get("SENSR_HOUSE_STRICT") == "1"
+    SCREENSHOTS = ${if screenshots then "True" else "False"}
     REAL_INTERNET = os.environ.get("SENSR_HOUSE_REAL_INTERNET") == "1"
     R = P["router"]
     U = P["upstream"]
@@ -790,6 +957,7 @@ pkgs.testers.runNixOSTest {
 
     check("commit_confirm.rollback", commit_confirm)
 
+    ${lib.optionalString screenshots screenshotScript}
     # ---------------------------------------------------------------- report
     print("=== sensr import report ===")
     print(report)
@@ -807,6 +975,9 @@ pkgs.testers.runNixOSTest {
         print(f"could not write {dest}: {e}")
     bad = [c for c, (s, _) in results.items() if s == "FAIL" and (STRICT or c in EXPECT)]
     missing = [c for c in EXPECT if c not in results]
-    assert not bad and not missing, f"failed: {bad}; expected but not run: {missing}"
+    if SCREENSHOTS:
+        print(f"scorecard not enforced with screenshots: failed {bad}; expected but not run {missing}")
+    else:
+        assert not bad and not missing, f"failed: {bad}; expected but not run: {missing}"
   '';
 }
