@@ -130,6 +130,19 @@ jobs:
         with:
           extra-conf: |
             system-features = nixos-test benchmark big-parallel kvm
+      # Binary cache (see "CI binary cache" in README.md). No-op until the
+      # CACHIX_CACHE variable exists; pulls without a token; pushes only
+      # outside pull_request runs. Disk images are not pushed: they are
+      # large, never substituted (release.yml recompresses them anyway), and
+      # would burn the free-tier quota. Toplevels and the crane dependency
+      # closures are what make the next build fast.
+      - uses: cachix/cachix-action@v17
+        if: vars.CACHIX_CACHE != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          skipPush: ${{ github.event_name == 'pull_request' }}
+          pushFilter: '(\.img(\.zst)?|\.iso|\.qcow2?|-sd-image-.*|-nixos-disk-image|-installer.*)$'
       - run: nix flake check --all-systems --no-build
       - name: Build sensr, the qcow image, and run the VM checks
         run: nix flake check -L --keep-going
@@ -145,6 +158,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: DeterminateSystems/nix-installer-action@main
+      # Binary cache (see "CI binary cache" in README.md). No-op until the
+      # CACHIX_CACHE variable exists; pulls without a token; pushes only
+      # outside pull_request runs. Disk images are not pushed: they are
+      # large, never substituted (release.yml recompresses them anyway), and
+      # would burn the free-tier quota. Toplevels and the crane dependency
+      # closures are what make the next build fast.
+      - uses: cachix/cachix-action@v17
+        if: vars.CACHIX_CACHE != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          skipPush: ${{ github.event_name == 'pull_request' }}
+          pushFilter: '(\.img(\.zst)?|\.iso|\.qcow2?|-sd-image-.*|-nixos-disk-image|-installer.*)$'
       - run: nix build -L .#checks.aarch64-linux.sensr
       - name: Build the Pi 4 and Pi 5 images
         run: |
