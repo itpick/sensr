@@ -759,8 +759,11 @@ in
         # netlink/nft/wg (NET_ADMIN), raw sockets for probes (NET_RAW),
         # binding helpers (NET_BIND_SERVICE), remounting the seed partition
         # (SYS_ADMIN), handing rendered files to daemon users (CHOWN, FOWNER),
-        # signalling them (KILL).
+        # signalling them (KILL), and reading Kea's lease files, which the
+        # DynamicUser daemon writes 0640 as nobody:nogroup (DAC_READ_SEARCH;
+        # without it the host inventory never sees a lease).
         CapabilityBoundingSet = [
+          "CAP_DAC_READ_SEARCH"
           "CAP_NET_ADMIN"
           "CAP_NET_RAW"
           "CAP_NET_BIND_SERVICE"

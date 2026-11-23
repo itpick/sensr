@@ -393,6 +393,16 @@ pkgs.testers.runNixOSTest {
             assert ${toString net.lan.poolFirst} <= last <= ${toString net.lan.poolLast}, ip
             lan.succeed("ip -4 route show default | grep -q 'via ${net.lan.router}'")
 
+        if not REFERENCE:
+            with subtest("Hosts inventory sees the LAN client's DHCP lease"):
+                # Kea writes its lease file 0640 as its DynamicUser; the agent
+                # needs CAP_DAC_READ_SEARCH to read it (else no host ever has
+                # the "lease" source and the Hosts card offers no Make static).
+                router.wait_until_succeeds(
+                    "sensr runtime hosts | jq -e '[.hosts[] | select(.sources | index(\"lease\"))] | length > 0'",
+                    timeout=60,
+                )
+
         with subtest("LAN: static reservation for the NAS"):
             nas.wait_until_succeeds(f"ip -4 addr show dev eth1 | grep -q 'inet {NAS}/'", timeout=90)
 
