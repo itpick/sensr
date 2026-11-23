@@ -3635,7 +3635,7 @@ impl GridId {
         }
     }
 
-    /// Plural name for the grid's rows, after its menu entry ("Aliases", "Peers").
+    /// Plural name for the grid's rows, after its menu entry ("Aliases", "WireGuard peers").
     pub fn group_name(self) -> &'static str {
         match self {
             Self::Assignments => "Assignments",
@@ -3649,8 +3649,8 @@ impl GridId {
             Self::AccessLists => "Access Lists",
             Self::Forwarders => "Query Forwarding",
             Self::Blocklists => "Blocklists",
-            Self::WgInstances => "Instances",
-            Self::WgPeers => "Peers",
+            Self::WgInstances => "WireGuard instances",
+            Self::WgPeers => "WireGuard peers",
             Self::IdsSuppressions => "Suppressions",
             Self::IdsUserRules => "User defined rules",
             Self::Gateways => "Gateways",

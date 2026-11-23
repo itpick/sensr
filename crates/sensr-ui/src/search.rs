@@ -169,20 +169,20 @@ const CRUMB_SEP: &str = " › ";
 pub fn page_candidates(menu: &[crate::menu::MenuItem]) -> Vec<Candidate> {
     fn walk(items: &[crate::menu::MenuItem], trail: &mut Vec<String>, out: &mut Vec<Candidate>) {
         for item in items {
-            trail.push(item.label.clone());
+            // the menu brackets interface names ("[LAN]"); plain text reads better here
+            let l = item.label.as_str();
+            let title = l
+                .strip_prefix('[')
+                .and_then(|l| l.strip_suffix(']'))
+                .unwrap_or(l)
+                .to_owned();
+            trail.push(title.clone());
             if let Some(url) = item
                 .url
                 .as_ref()
                 .filter(|u| u.starts_with('/') && u.as_str() != LOGOUT)
             {
                 let crumb = trail.join(CRUMB_SEP);
-                // the menu brackets interface names ("[LAN]"); the crumb gives that context
-                let l = item.label.as_str();
-                let title = l
-                    .strip_prefix('[')
-                    .and_then(|l| l.strip_suffix(']'))
-                    .unwrap_or(l)
-                    .to_owned();
                 out.push(Candidate::new(
                     PAGES.to_owned(),
                     ORDER_PAGES,
@@ -368,9 +368,17 @@ pub fn host_candidates(hosts: &crate::runtime::HostList) -> Vec<Candidate> {
                 ORDER_HOSTS,
                 title,
                 detail,
+                // what the Hosts card search matches: the MAC, else the IPv4, else the name
+                // (an `id:…` key filters the card to nothing)
                 format!(
                     "/ui/core/dashboard?host={}#w-hosts",
-                    encode_component(&h.key)
+                    encode_component(
+                        [&h.mac, &h.ipv4, &h.name]
+                            .into_iter()
+                            .flatten()
+                            .find(|t| !t.trim().is_empty())
+                            .unwrap_or(&h.key)
+                    )
                 ),
                 haystack,
             )
@@ -460,9 +468,15 @@ pub fn search_in(
             .then_with(|| a.2.title.to_lowercase().cmp(&b.2.title.to_lowercase()))
             .then_with(|| a.2.title.cmp(&b.2.title))
     });
-    let mut totals: HashMap<&str, usize> = HashMap::new();
+    // Per group: its matches, and the one page (grid scope) holding them all, if one does.
+    let mut totals: HashMap<&str, (usize, Option<&str>)> = HashMap::new();
     for (_, _, c) in &matched {
-        *totals.entry(c.group.as_str()).or_default() += 1;
+        let page = page_of(&c.url);
+        let t = totals.entry(c.group.as_str()).or_insert((0, Some(page)));
+        t.0 += 1;
+        if t.1 != Some(page) {
+            t.1 = None;
+        }
     }
     let mut groups: Vec<(u32, SearchGroup)> = Vec::new();
     let mut shown = 0;
@@ -473,16 +487,20 @@ pub fn search_in(
         let idx = match groups.iter().position(|(_, g)| g.name == c.group) {
             Some(i) => i,
             None => {
+                let (total, page) = totals.get(c.group.as_str()).copied().unwrap_or_default();
+                // "Show all" opens one grid tab, so only when that tab holds every match
                 let more_url = GridId::ALL
                     .iter()
-                    .find(|g| g.group_name() == c.group)
-                    .map(|g| format!("{}?q={}", g.page_url(), encode_component(&query)))
+                    .any(|g| g.group_name() == c.group)
+                    .then_some(page)
+                    .flatten()
+                    .map(|p| format!("{p}?q={}", encode_component(&query)))
                     .filter(|u| ok(u));
                 groups.push((
                     c.group_order,
                     SearchGroup {
                         name: c.group.clone(),
-                        total: totals.get(c.group.as_str()).copied().unwrap_or(0),
+                        total,
                         more_url,
                         hits: Vec::new(),
                     },
@@ -769,7 +787,7 @@ mod tests {
         });
         let r = search(&row_candidates(&doc), "zeta", all());
         let names: Vec<_> = r.groups.iter().map(|g| g.name.as_str()).collect();
-        assert_eq!(names, ["Gateways", "Aliases", "Rules", "Peers"]);
+        assert_eq!(names, ["Gateways", "Aliases", "Rules", "WireGuard peers"]);
     }
 
     #[test]
@@ -934,6 +952,77 @@ mod tests {
             );
             assert_eq!(hit.title, "doorbell");
         }
+    }
+
+    #[test]
+    fn host_without_mac_links_ipv4_then_name() {
+        let row = |key: &str, ipv4: Option<&str>, name: Option<&str>| HostRow {
+            key: key.into(),
+            ipv4: ipv4.map(Into::into),
+            name: name.map(Into::into),
+            ..HostRow::default()
+        };
+        let hosts = HostList {
+            hosts: vec![
+                row("id:01ab", Some("192.168.1.77"), Some("tv")),
+                row("id:02cd", None, Some("printer2")),
+            ],
+            ..HostList::default()
+        };
+        let cands = host_candidates(&hosts);
+        let url = |q: &str| search(&cands, q, all()).groups[0].hits[0].url.clone();
+        assert_eq!(url("tv"), "/ui/core/dashboard?host=192.168.1.77#w-hosts");
+        assert_eq!(url("printer2"), "/ui/core/dashboard?host=printer2#w-hosts");
+    }
+
+    #[test]
+    fn show_all_only_when_one_scope_holds_every_match() {
+        let rules = |ifs: &[&str]| {
+            let map: serde_json::Map<String, Value> = ifs
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    (
+                        format!("r{i}"),
+                        json!({"description": format!("zeta {i}"), "interfaces": [f]}),
+                    )
+                })
+                .collect();
+            json!({
+                "firewall": {"rules": map},
+                "interfaces": {"lan": {"description": "LAN"}, "opt1": {"description": "LAN2"}}
+            })
+        };
+        let one = search(&row_candidates(&rules(&["opt1"; 7])), "zeta", all());
+        let g = group(&one, "Rules").expect("rules");
+        assert_eq!(g.total, 7);
+        assert_eq!(
+            g.more_url.as_deref(),
+            Some("/ui/firewall/filter/opt1?q=zeta")
+        );
+        let mixed = rules(&["lan", "lan", "lan", "opt1", "opt1", "opt1"]);
+        let two = search(&row_candidates(&mixed), "zeta", all());
+        let g = group(&two, "Rules").expect("rules");
+        assert_eq!(g.total, 6);
+        assert_eq!(g.more_url, None, "the LAN tab would not list them all");
+    }
+
+    #[test]
+    fn page_crumbs_drop_the_menu_brackets() {
+        let menu = crate::menu::build(&[crate::menu::MenuInterface {
+            id: "lan".to_owned(),
+            description: "LAN".to_owned(),
+            dhcp_capable: true,
+        }]);
+        for c in page_candidates(&menu) {
+            assert!(!c.detail.contains('['), "{}", c.detail);
+        }
+    }
+
+    #[test]
+    fn wireguard_groups_say_wireguard() {
+        assert_eq!(GridId::WgInstances.group_name(), "WireGuard instances");
+        assert_eq!(GridId::WgPeers.group_name(), "WireGuard peers");
     }
 
     #[test]
