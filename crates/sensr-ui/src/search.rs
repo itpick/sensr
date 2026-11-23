@@ -176,13 +176,20 @@ pub fn page_candidates(menu: &[crate::menu::MenuItem]) -> Vec<Candidate> {
                 .filter(|u| u.starts_with('/') && u.as_str() != LOGOUT)
             {
                 let crumb = trail.join(CRUMB_SEP);
+                // the menu brackets interface names ("[LAN]"); the crumb gives that context
+                let l = item.label.as_str();
+                let title = l
+                    .strip_prefix('[')
+                    .and_then(|l| l.strip_suffix(']'))
+                    .unwrap_or(l)
+                    .to_owned();
                 out.push(Candidate::new(
                     PAGES.to_owned(),
                     ORDER_PAGES,
-                    item.label.clone(),
+                    title.clone(),
                     crumb.clone(),
                     url.clone(),
-                    vec![item.label.clone(), crumb],
+                    vec![title, crumb],
                 ));
             }
             walk(&item.children, trail, out);
@@ -937,6 +944,28 @@ mod tests {
                 "{g:?} has nothing to search"
             );
         }
+    }
+
+    #[test]
+    fn interface_pages_drop_the_menu_brackets() {
+        let menu = crate::menu::build(&[crate::menu::MenuInterface {
+            id: "lan".to_owned(),
+            description: "LAN".to_owned(),
+            dhcp_capable: true,
+        }]);
+        let r = search(&page_candidates(&menu), "lan", all());
+        let pages = group(&r, PAGES).expect("LAN pages");
+        assert!(!pages.hits.is_empty());
+        for h in &pages.hits {
+            assert!(!h.title.contains('['), "{h:?}");
+        }
+        let dhcp = pages
+            .hits
+            .iter()
+            .find(|h| h.url == "/ui/dhcpv4/lan")
+            .expect("DHCPv4 LAN page");
+        assert_eq!(dhcp.title, "LAN");
+        assert!(dhcp.detail.contains("DHCPv4"), "crumb keeps the context");
     }
 
     #[test]

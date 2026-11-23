@@ -77,11 +77,12 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .gsearch-group + .gsearch-group { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 4px; }
 .gsearch-head { padding: 4px 12px 2px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .gsearch-opt { display: flex; flex-direction: column; gap: 1px; padding: 6px 12px; cursor: pointer; }
-.gsearch-opt:hover, .gsearch-opt[aria-selected="true"] { background: var(--accent-soft); color: var(--fg); }
-.gsearch-opt[aria-selected="true"] { box-shadow: inset 3px 0 0 var(--accent); }
+/* Hover is lighter than the active option, so only one row ever looks selected. */
+.gsearch-opt:hover { background: var(--bg); }
+.gsearch-opt[aria-selected="true"] { background: var(--accent-soft); color: var(--fg); box-shadow: inset 3px 0 0 var(--accent); }
 .gsearch-title { overflow-wrap: anywhere; }
 .gsearch-detail { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
-.gsearch-opt[aria-selected="true"] .gsearch-detail, .gsearch-opt:hover .gsearch-detail { color: var(--fg); }
+.gsearch-opt[aria-selected="true"] .gsearch-detail { color: var(--fg); }
 .gsearch-more .gsearch-title { color: var(--link); font-size: 13px; }
 .gsearch-opt[aria-selected="true"].gsearch-more .gsearch-title { color: var(--fg); }
 .gsearch-status { margin: 0; padding: 8px 12px; color: var(--muted); }
@@ -457,6 +458,8 @@ span.btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
     background: var(--topbar); color: var(--topbar-fg); border-bottom: 1px solid var(--line);
   }
   .gsearch.sheet .icon-btn.gsearch-close { display: inline-flex; flex: none; }
+  /* the close button is the sheet's only × */
+  .gsearch.sheet input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
   .gsearch-box > .gsearch-icon { left: max(21px, calc(env(safe-area-inset-left, 0px) + 9px)); }
   .gsearch-pop { position: fixed; top: 56px; left: 0; right: 0; max-height: calc(100dvh - 56px); border-radius: 0; border-width: 0 0 1px; }
   .gsearch-opt { min-height: 44px; justify-content: center; }

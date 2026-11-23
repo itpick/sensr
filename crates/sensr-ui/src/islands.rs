@@ -402,24 +402,23 @@ pub fn GlobalSearch() -> impl IntoView {
                         || matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
                 });
             let slash = k == "/" && !typing && !ev.ctrl_key() && !ev.meta_key() && !ev.alt_key();
-            let cmd_k = (ev.ctrl_key() || ev.meta_key()) && k.eq_ignore_ascii_case("k");
-            if slash || cmd_k {
+            let cmd_k = (ev.ctrl_key() || ev.meta_key())
+                && !ev.shift_key()
+                && !ev.alt_key()
+                && k.eq_ignore_ascii_case("k");
+            // someone else took the key, or a modal dialog owns the keyboard
+            let busy = ev.default_prevented()
+                || document()
+                    .query_selector("dialog[open]")
+                    .ok()
+                    .flatten()
+                    .is_some();
+            if (slash || cmd_k) && !busy {
                 ev.prevent_default();
                 focus();
             }
         });
         on_cleanup(move || drop(keys));
-        let click = window_event_listener(leptos::ev::click, move |ev| {
-            let inside = ev
-                .target()
-                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-                .is_some_and(|el| el.closest(".gsearch").ok().flatten().is_some());
-            if !inside {
-                s.open.set(false);
-                s.sheet.set(false);
-            }
-        });
-        on_cleanup(move || drop(click));
     }
 
     let on_input = move |ev: leptos::ev::Event| {
@@ -460,25 +459,54 @@ pub fn GlobalSearch() -> impl IntoView {
             }
             "Enter" if n > 0 && s.open.get_untracked() => {
                 ev.prevent_default();
+                // the list is for an older query until the response for this one is in
+                let q = s.query.get_untracked();
+                if !s
+                    .found
+                    .with_untracked(|f| matches!(f, Some(Ok(r)) if r.query == q.trim()))
+                {
+                    return;
+                }
                 let i = s.active.get_untracked().unwrap_or(0).min(n - 1);
                 if let Some(url) = urls.with_untracked(|u| u.get(i).cloned()) {
                     gsearch_go(s, &url);
                 }
             }
-            "Escape" => {
-                ev.prevent_default();
-                if s.sheet.get_untracked() {
-                    close_sheet();
-                } else if s.open.get_untracked() && s.found.with_untracked(Option::is_some) {
-                    s.open.set(false);
-                    s.active.set(None);
-                } else {
-                    s.query.set(String::new());
-                    s.found.set(None);
-                    s.active.set(None);
-                }
-            }
             _ => {}
+        }
+    };
+    // On the root, so Esc works from the box, the popup and the close button alike.
+    let on_esc = move |ev: leptos::ev::KeyboardEvent| {
+        if ev.key() != "Escape" {
+            return;
+        }
+        ev.prevent_default();
+        if s.sheet.get_untracked() {
+            close_sheet();
+        } else if s.open.get_untracked() && s.found.with_untracked(Option::is_some) {
+            s.open.set(false);
+            s.active.set(None);
+        } else {
+            s.query.set(String::new());
+            s.found.set(None);
+            s.active.set(None);
+        }
+    };
+    // Focus leaving the search (Tab, a click elsewhere) closes the popup and the sheet.
+    let on_leave = move |ev: leptos::ev::FocusEvent| {
+        #[cfg(not(feature = "hydrate"))]
+        let _ = ev;
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::JsCast;
+            let inside = ev
+                .related_target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .is_some_and(|el| el.closest(".gsearch").ok().flatten().is_some());
+            if !inside {
+                s.open.set(false);
+                s.sheet.set(false);
+            }
         }
     };
     let on_pick = move |ev: leptos::ev::MouseEvent| {
@@ -507,7 +535,7 @@ pub fn GlobalSearch() -> impl IntoView {
     let magnifier = "M7 2.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zM10.3 10.3l3.2 3.2";
 
     view! {
-        <div class="gsearch" class:sheet=move || s.sheet.get()>
+        <div class="gsearch" class:sheet=move || s.sheet.get() on:keydown=on_esc on:focusout=on_leave>
             <button type="button" class="icon-btn gsearch-open" aria-label="Search" node_ref=opener
                 on:click=move |_| focus()>
                 {icon(magnifier)}

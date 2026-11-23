@@ -1858,11 +1858,11 @@ fn gsearch_renders_after_wordmark() {
 
 #[test]
 fn gsearch_absent_on_login() {
-    use leptos_router::components::Router;
-    use sensr_ui::app::Login;
+    use sensr_ui::app::App;
+    // the real routes at /login, so a search box added to any shared chrome would show
     let doc = render(|| {
         provide_context(leptos_router::location::RequestUrl::new("/login"));
-        view! { <Router><Login/></Router> }.into_any()
+        view! { <App/> }.into_any()
     });
     assert!(
         doc.select(&sel(".login-card")).next().is_some(),
