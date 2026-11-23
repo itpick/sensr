@@ -128,6 +128,12 @@ pub struct Host {
     pub evidence: HostEvidence,
 }
 
+/// Most MACs whose evidence waits for their inventory row.
+pub const MAX_PENDING_EVIDENCE: usize = 256;
+/// How long evidence waits for its row (a DHCP DISCOVER arrives before the
+/// lease and the neighbour entry the next poll turns into a row).
+pub const PENDING_EVIDENCE_SECS: u64 = 600;
+
 /// Most mDNS service types kept per host.
 pub const MAX_MDNS_SERVICES: usize = 16;
 
@@ -421,6 +427,10 @@ pub struct Inventory {
     /// Set after the first poll; until then lease expiries are only recorded,
     /// so leases existing at start-up are not mistaken for activity.
     primed: bool,
+    /// Evidence for MACs without a row yet, with when it last arrived:
+    /// merged once a poll creates the row, dropped after
+    /// [`PENDING_EVIDENCE_SECS`], at most [`MAX_PENDING_EVIDENCE`] MACs.
+    pending: BTreeMap<String, (u64, HostEvidence)>,
 }
 
 impl Inventory {
@@ -430,6 +440,7 @@ impl Inventory {
             hosts: hosts.into_iter().map(|h| (h.key.clone(), h)).collect(),
             expires: BTreeMap::new(),
             primed: false,
+            pending: BTreeMap::new(),
         }
     }
 
@@ -559,6 +570,7 @@ impl Inventory {
             h.name = h.reserved_name.clone().or_else(|| h.lease_hostname.clone());
         }
         self.primed = true;
+        let adopted = self.adopt_pending(now);
 
         if self.hosts.len() != before.len()
             || self
@@ -573,6 +585,7 @@ impl Inventory {
             .values()
             .zip(before.values())
             .any(|(h, b)| h.last_seen != b.last_seen || h.lease != b.lease)
+            || adopted
         {
             Change::Seen
         } else {
@@ -586,13 +599,43 @@ impl Inventory {
             .or_insert_with(|| Host::new(key.to_owned(), now))
     }
 
+    /// Drops expired pending evidence and merges the rest into rows that
+    /// now exist. Whether any row's evidence changed.
+    fn adopt_pending(&mut self, now: u64) -> bool {
+        self.pending
+            .retain(|_, (at, _)| now.saturating_sub(*at) <= PENDING_EVIDENCE_SECS);
+        let mut changed = false;
+        let ready: Vec<String> = self
+            .pending
+            .keys()
+            .filter(|k| self.hosts.get(*k).is_some_and(|h| h.mac.is_some()))
+            .cloned()
+            .collect();
+        for key in ready {
+            let (Some((_, ev)), Some(h)) = (self.pending.remove(&key), self.hosts.get_mut(&key))
+            else {
+                continue;
+            };
+            let before = h.evidence.clone();
+            // the row's own (later) evidence wins
+            h.evidence.absorb(ev);
+            changed |= h.evidence != before;
+        }
+        changed
+    }
+
     /// Merges evidence into the row keyed `mac` (lowercase colon form).
     /// Never creates a row: the inventory follows leases and neighbours.
+    /// Evidence for a MAC without a row waits (bounded, see
+    /// [`Inventory::pending`]) for the poll that creates it.
     /// [`Change::Seen`] when the merged evidence differs, so a host
     /// re-announcing the same thing writes nothing and a new detail is
     /// saved within the `last_seen` throttle.
-    pub fn record_evidence(&mut self, mac: &str, u: &EvidenceUpdate) -> Change {
+    pub fn record_evidence(&mut self, mac: &str, u: &EvidenceUpdate, now: u64) -> Change {
         let Some(h) = self.hosts.get_mut(mac).filter(|h| h.mac.is_some()) else {
+            if !self.hosts.contains_key(mac) {
+                self.hold(mac, u, now);
+            }
             return Change::None;
         };
         let before = h.evidence.clone();
@@ -602,6 +645,29 @@ impl Inventory {
         } else {
             Change::Seen
         }
+    }
+
+    /// Keeps evidence for a MAC that has no row yet.
+    fn hold(&mut self, mac: &str, u: &EvidenceUpdate, now: u64) {
+        self.pending
+            .retain(|_, (at, _)| now.saturating_sub(*at) <= PENDING_EVIDENCE_SECS);
+        if !self.pending.contains_key(mac) && self.pending.len() >= MAX_PENDING_EVIDENCE {
+            // make room: the stalest goes
+            if let Some(oldest) = self
+                .pending
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone())
+            {
+                self.pending.remove(&oldest);
+            }
+        }
+        let (at, ev) = self
+            .pending
+            .entry(mac.to_owned())
+            .or_insert_with(|| (now, HostEvidence::default()));
+        *at = now;
+        ev.merge(u);
     }
 
     /// Removes an unreserved host; `false` if `key` is unknown or reserved.
@@ -1070,7 +1136,7 @@ impl HostCollector {
     /// ([`Inventory::record_evidence`]); saved with the next poll's flush.
     pub fn record_evidence(&self, mac: &str, u: &EvidenceUpdate) -> Change {
         let mut st = lock(&self.state);
-        let c = st.inv.record_evidence(mac, u);
+        let c = st.inv.record_evidence(mac, u, unix_now());
         st.store.note(c);
         c
     }
@@ -1768,23 +1834,23 @@ mod tests {
     #[test]
     fn same_evidence_is_not_a_change() {
         let mut inv = Inventory::from_hosts(vec![host(MAC, 1, Some(2))]);
-        assert_eq!(inv.record_evidence(MAC, &dhcp_update()), Change::Seen);
-        assert_eq!(inv.record_evidence(MAC, &dhcp_update()), Change::None);
+        assert_eq!(inv.record_evidence(MAC, &dhcp_update(), 3), Change::Seen);
+        assert_eq!(inv.record_evidence(MAC, &dhcp_update(), 3), Change::None);
         let mdns = EvidenceUpdate {
             mdns_services: vec!["_googlecast._tcp".into()],
             mdns_name: Some("Living Room".into()),
             ..EvidenceUpdate::default()
         };
-        assert_eq!(inv.record_evidence(MAC, &mdns), Change::Seen);
+        assert_eq!(inv.record_evidence(MAC, &mdns, 3), Change::Seen);
         for _ in 0..5 {
-            assert_eq!(inv.record_evidence(MAC, &mdns), Change::None);
+            assert_eq!(inv.record_evidence(MAC, &mdns, 3), Change::None);
         }
         // another instance of the same device does not flip the name back and forth
         let other = EvidenceUpdate {
             mdns_name: Some("Living Room speaker group".into()),
             ..mdns.clone()
         };
-        assert_eq!(inv.record_evidence(MAC, &other), Change::None);
+        assert_eq!(inv.record_evidence(MAC, &other, 3), Change::None);
         assert_eq!(
             only(&inv).evidence.mdns_name.as_deref(),
             Some("Living Room")
@@ -1814,18 +1880,59 @@ mod tests {
     fn evidence_for_unknown_mac_creates_no_row() {
         let mut inv = Inventory::from_hosts(vec![host(MAC, 1, Some(2))]);
         assert_eq!(
-            inv.record_evidence("aa:bb:cc:dd:ee:77", &dhcp_update()),
+            inv.record_evidence("aa:bb:cc:dd:ee:77", &dhcp_update(), 3),
             Change::None
         );
         let mut cid = host("id:01:aa", 1, None);
         cid.mac = None;
         let mut inv2 = Inventory::from_hosts(vec![cid]);
         assert_eq!(
-            inv2.record_evidence("id:01:aa", &dhcp_update()),
+            inv2.record_evidence("id:01:aa", &dhcp_update(), 3),
             Change::None
         );
         assert_eq!(inv.hosts().count(), 1);
         assert!(only(&inv).evidence.is_empty());
+    }
+
+    /// A DISCOVER arrives before the lease and the neighbour entry: its
+    /// evidence waits for the poll that creates the row.
+    #[test]
+    fn evidence_before_the_row_lands_once_the_poll_creates_it() {
+        let mut inv = Inventory::default();
+        assert_eq!(inv.record_evidence(MAC, &dhcp_update(), 100), Change::None);
+        assert_eq!(inv.hosts().count(), 0, "no row from evidence alone");
+        inv.observe(&with_neigh("REACHABLE"), 200);
+        let h = only(&inv);
+        assert_eq!(h.evidence.dhcp_hostname.as_deref(), Some("Pixel-8"));
+        assert_eq!(h.evidence.dhcp_vendor.as_deref(), Some("android-dhcp-14"));
+        assert!(inv.pending.is_empty(), "merged once");
+    }
+
+    #[test]
+    fn pending_evidence_expires() {
+        let mut inv = Inventory::default();
+        inv.record_evidence(MAC, &dhcp_update(), 100);
+        inv.observe(&with_neigh("REACHABLE"), 100 + PENDING_EVIDENCE_SECS + 1);
+        assert!(only(&inv).evidence.is_empty());
+        assert!(inv.pending.is_empty());
+    }
+
+    #[test]
+    fn pending_evidence_is_bounded() {
+        let mut inv = Inventory::default();
+        for i in 0..MAX_PENDING_EVIDENCE + 10 {
+            let mac = format!("aa:bb:cc:00:{:02x}:{:02x}", i / 256, i % 256);
+            inv.record_evidence(&mac, &dhcp_update(), 100 + i as u64);
+        }
+        assert_eq!(inv.pending.len(), MAX_PENDING_EVIDENCE);
+        // the oldest went, the newest stayed
+        assert!(!inv.pending.contains_key("aa:bb:cc:00:00:00"));
+        let last = MAX_PENDING_EVIDENCE + 9;
+        assert!(inv.pending.contains_key(&format!(
+            "aa:bb:cc:00:{:02x}:{:02x}",
+            last / 256,
+            last % 256
+        )));
     }
 
     #[test]
