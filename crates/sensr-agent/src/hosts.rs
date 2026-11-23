@@ -2002,7 +2002,7 @@ mod tests {
         assert_eq!(c["label"]["kind"], "camera");
         assert_eq!(c["label"]["by"], "auto");
         assert_eq!(c["label"]["maker"], "Wyze");
-        assert_eq!(c["label"]["confidence"], "medium");
+        assert_eq!(c["label"]["confidence"], "low");
         assert_eq!(
             c["label"]["reasons"],
             serde_json::json!(["MAC maker: Wyze"])
