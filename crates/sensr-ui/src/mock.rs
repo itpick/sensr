@@ -1282,27 +1282,48 @@ pub fn simulated_activity(
         v.services = services;
         v.categories = categories;
     }
-    v.domains_total = u32::try_from(a.domains.len()).unwrap_or(u32::MAX);
-    if page == 0 {
-        v.domains = a
-            .domains
-            .iter()
-            .map(
-                |(qname, count, service, category, new, blocked)| ActivityDomain {
-                    qname: (*qname).to_owned(),
-                    count: if week { count * 6 } else { *count },
-                    first_seen: if *new { now - 3_600 } else { now - 86_400 * 20 },
-                    last_seen: now - 60,
-                    service: (*service).to_owned(),
-                    category: (*category).to_owned(),
-                    new: *new,
-                    blocked: *blocked,
-                },
-            )
-            .collect();
+    let mut domains: Vec<ActivityDomain> = a
+        .domains
+        .iter()
+        .map(
+            |(qname, count, service, category, new, blocked)| ActivityDomain {
+                qname: (*qname).to_owned(),
+                count: if week { count * 6 } else { *count },
+                first_seen: if *new { now - 3_600 } else { now - 86_400 * 20 },
+                last_seen: now - 60,
+                service: (*service).to_owned(),
+                category: (*category).to_owned(),
+                new: *new,
+                blocked: *blocked,
+            },
+        )
+        .collect();
+    // Over a week the tablet looks up a long tail of one-off names, enough for a second
+    // page of domains.
+    if week && a.mac == KID_TABLET {
+        domains.extend((0..MOCK_TAIL).map(|i| ActivityDomain {
+            qname: format!("edge-{i:03}.tail-cdn.net"),
+            count: 1,
+            first_seen: now - 86_400 * 3,
+            last_seen: now - 86_400 * 3,
+            service: "tail-cdn.net".to_owned(),
+            category: "other".to_owned(),
+            new: false,
+            blocked: false,
+        }));
     }
+    v.domains_total = u32::try_from(domains.len()).unwrap_or(u32::MAX);
+    let per_page = v.per_page.max(1) as usize;
+    v.domains = domains
+        .into_iter()
+        .skip((page as usize).saturating_mul(per_page))
+        .take(per_page)
+        .collect();
     v
 }
+
+/// One-off names in the tablet's 7-day domains after the seeded ones.
+const MOCK_TAIL: usize = 120;
 
 /// Leases for the seeded DHCP server on 192.168.1.0/24: a client of each kind the page
 /// has to render. The first is the seeded `nas` reservation (192.168.1.20,
@@ -2342,13 +2363,24 @@ mod tests {
         let days: std::collections::BTreeSet<_> = week.timeline.iter().map(|c| c.day).collect();
         assert_eq!(days.len(), 7);
         assert!(week.timeline.iter().any(|c| c.hour == 16));
-        assert_eq!(activity(&m, KID_TABLET, "7d").unwrap().page, 0);
+        assert_eq!(week.page, 0);
+        assert_eq!(week.domains.len(), 100);
+        assert_eq!(week.domains_total, 132);
+        let second = block(m.host_activity(KID_TABLET.into(), "7d".into(), 1)).unwrap();
+        assert_eq!((second.page, second.domains.len()), (1, 32));
         assert!(
-            block(m.host_activity(KID_TABLET.into(), "7d".into(), 1))
+            second
+                .domains
+                .iter()
+                .all(|d| d.qname.ends_with(".tail-cdn.net"))
+        );
+        assert!(
+            block(m.host_activity(KID_TABLET.into(), "7d".into(), 2))
                 .unwrap()
                 .domains
                 .is_empty()
         );
+        assert_eq!(v.domains_total, 12);
     }
 
     #[test]
