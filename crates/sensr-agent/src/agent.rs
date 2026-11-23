@@ -418,7 +418,7 @@ impl<A: Applier> Agent<A> {
                     }
                     Some(format!(
                         "revision {id} applied at startup without part of its configuration \
-                         (fix the cause, then commit a change or reload sensr-agent): {}",
+                         (fix the cause, then commit a change or restart sensr-agent): {}",
                         held.join("; ")
                     ))
                 };

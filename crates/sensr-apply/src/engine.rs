@@ -26,7 +26,9 @@ use sensr_schema::Document;
 use crate::appliers::convert::{self, ConvertError, SecretsDir};
 use crate::appliers::interfaces::InterfacesModel;
 use crate::appliers::sysctl::{Sysctl, SysctlApplyError};
-use crate::appliers::{SliceError, SliceModels, insight, kea, nft, ntp, suricata, unbound};
+use crate::appliers::{
+    SliceError, SliceModels, emergency, insight, kea, nft, ntp, suricata, unbound,
+};
 use crate::cmd::{Cmd, CmdError, Runner};
 use crate::hooks::{HookLevel, Hooks};
 use crate::plan::{FileSpec, Plan, UnitAction, UnitSpec};
@@ -134,6 +136,9 @@ pub struct Prepared {
     /// host-mode MAC sets the ruleset was rendered with (the locked
     /// addresses are empty: [`Engine::update_host_mode_sets`] fills them)
     pub host_modes: HostModeSets,
+    /// devices of the enabled non-WAN interfaces (the emergency firewall
+    /// serves them)
+    pub inside: Vec<String>,
     secrets: Vec<(PathBuf, String)>,
 }
 
@@ -148,37 +153,77 @@ pub struct CommitReport {
     pub nft_loaded: bool,
 }
 
-/// A backend the boot apply left without its new configuration because
-/// the backend's own checker rejected it ([`Engine::commit_isolated`]).
+/// Something the boot apply could not bring up as planned
+/// ([`Engine::commit_isolated`]); the rest of the system applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Degraded {
-    /// The checker: `nft`, `kea-dhcp4`, `unbound-checkconf`, `ntp-ctl`.
+    /// Who refused: the checker (`nft`, `kea-dhcp4`, `unbound-checkconf`,
+    /// `ntp-ctl`), or `systemctl` / `nft` for a start or load that failed.
     pub backend: &'static str,
-    /// The unit that did not get the new configuration (`None` for the
-    /// ruleset, which has no unit).
+    /// The unit (or table) concerned; `None` for the main ruleset.
     pub unit: Option<String>,
-    /// The checker's message.
+    /// The checker's or command's message.
     pub message: String,
-    /// The unit was (re)started with the configuration already on disk
-    /// (an agent restart within a boot); `false` means it was left stopped
-    /// (fresh boot, nothing to fall back to). For `nft`: the kernel keeps
-    /// whatever ruleset it holds.
-    pub kept_previous: bool,
+    /// What runs instead.
+    pub outcome: Outcome,
+}
+
+/// What runs in place of a held-back part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The unit was (re)started with the file already on disk (an agent
+    /// restart within a boot).
+    KeptPrevious,
+    /// The unit was left stopped (fresh boot, nothing to fall back to).
+    NotStarted,
+    /// The ruleset was rejected; the kernel keeps the sensr ruleset it
+    /// already had (an agent restart within a boot).
+    PreviousFirewall,
+    /// The ruleset was rejected and the kernel had none: the emergency
+    /// firewall ([`emergency`]) is loaded.
+    EmergencyFirewall,
+    /// The unit's start/restart failed.
+    StartFailed,
+    /// A ruleset load failed (IDS queue, accounting, the emergency table).
+    LoadFailed,
+}
+
+/// Longest message shown per problem (the UI banner keeps one line each).
+const MAX_MESSAGE: usize = 300;
+
+/// `s` on one line, cut at [`MAX_MESSAGE`] characters with an ellipsis.
+fn one_line(s: &str) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= MAX_MESSAGE {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(MAX_MESSAGE - 1).collect();
+    cut.push('…');
+    cut
 }
 
 impl std::fmt::Display for Degraded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let what = match (&self.unit, self.kept_previous) {
-            (None, _) => "the firewall keeps the ruleset already loaded".to_owned(),
-            (Some(u), true) => format!("{u} runs its previous configuration"),
-            (Some(u), false) => format!("{u} was not started"),
-        };
-        write!(
-            f,
-            "{} rejected the configuration ({what}): {}",
-            self.backend,
-            self.message.trim()
-        )
+        let msg = one_line(&self.message);
+        let unit = self.unit.as_deref().unwrap_or("the ruleset");
+        let b = self.backend;
+        match self.outcome {
+            Outcome::KeptPrevious => write!(
+                f,
+                "{b} rejected the configuration; {unit} runs its previous configuration: {msg}"
+            ),
+            Outcome::NotStarted => write!(
+                f,
+                "{b} rejected the configuration; {unit} was not started: {msg}"
+            ),
+            Outcome::PreviousFirewall => write!(
+                f,
+                "{b} rejected the ruleset; the firewall keeps the ruleset loaded before: {msg}"
+            ),
+            Outcome::EmergencyFirewall => write!(f, "emergency firewall active: {msg}"),
+            Outcome::StartFailed => write!(f, "{unit} failed to start: {msg}"),
+            Outcome::LoadFailed => write!(f, "{unit} could not be loaded: {msg}"),
+        }
     }
 }
 
@@ -190,8 +235,8 @@ struct Isolation {
     withheld_files: std::collections::BTreeSet<PathBuf>,
     /// units not started (rejected, and no previous file to run with)
     withheld_units: std::collections::BTreeSet<String>,
-    /// the ruleset was rejected: not loaded
-    skip_nft: bool,
+    /// the ruleset was rejected (with this message): not loaded
+    nft_rejected: Option<String>,
 }
 
 impl Isolation {
@@ -211,11 +256,45 @@ impl Isolation {
                 backend,
                 unit: Some(unit.clone()),
                 message: message.clone(),
-                kept_previous: kept,
+                outcome: if kept {
+                    Outcome::KeptPrevious
+                } else {
+                    Outcome::NotStarted
+                },
             });
         }
     }
 }
+
+/// In a fault-isolated commit, records a failed step and carries on;
+/// otherwise fails.
+fn isolate(
+    iso: Option<&mut Isolation>,
+    result: Result<(), EngineError>,
+    backend: &'static str,
+    unit: &str,
+    outcome: Outcome,
+) -> Result<(), EngineError> {
+    match (result, iso) {
+        (Ok(()), _) => Ok(()),
+        (Err(e), Some(iso)) => {
+            iso.degraded.push(Degraded {
+                backend,
+                unit: Some(unit.to_owned()),
+                message: match e {
+                    EngineError::Failed { message, .. } => message,
+                    other => other.to_string(),
+                },
+                outcome,
+            });
+            Ok(())
+        }
+        (Err(e), None) => Err(e),
+    }
+}
+
+/// Units started first by a commit: name service and leases matter most.
+const FIRST_UNITS: &[&str] = &["sensr-unbound.service", "sensr-kea-dhcp4.service"];
 
 /// The checker for a rendered file, by file name.
 fn checker_for(name: &str) -> Option<(&'static str, Checker)> {
@@ -300,6 +379,14 @@ impl Engine {
             alias_failed: compiled.aliases.failed.iter().cloned().collect(),
             aliases: compiled.aliases.aliases.clone(),
             host_modes: compiled.host_modes.clone(),
+            inside: doc
+                .interfaces
+                .iter()
+                .filter(|(_, i)| {
+                    i.enabled && i.role != sensr_schema::models::interfaces::InterfaceRole::Wan
+                })
+                .map(|(_, i)| i.device.as_str().to_owned())
+                .collect(),
             secrets,
         })
     }
@@ -519,18 +606,11 @@ impl Engine {
     fn check_isolated(&self, p: &Prepared, iso: &mut Isolation) -> Result<(), EngineError> {
         let r = self.runner.as_ref();
         if r.has_program("nft") {
+            // a checker that cannot run counts as a rejection too
             match nft::check(r, &p.ruleset) {
                 Ok(()) => {}
-                Err(nft::NftError::Rejected { message, .. }) => {
-                    iso.skip_nft = true;
-                    iso.degraded.push(Degraded {
-                        backend: "nft",
-                        unit: None,
-                        message,
-                        kept_previous: true,
-                    });
-                }
-                Err(other) => return Err(other.into()),
+                Err(nft::NftError::Rejected { message, .. }) => iso.nft_rejected = Some(message),
+                Err(other) => iso.nft_rejected = Some(other.to_string()),
             }
         }
         for (path, spec) in &p.plan.files {
@@ -540,11 +620,35 @@ impl Engine {
             if !early {
                 continue;
             }
-            if let Some((backend, message)) = self.check_file(path, spec)? {
+            if let Some((backend, message)) = self.check_file_isolated(path, spec) {
                 iso.withhold(&p.plan, path, backend, message);
             }
         }
         Ok(())
+    }
+
+    /// [`check_file`](Self::check_file) where a checker that cannot run
+    /// (spawn failure, scratch copy not writable) rejects the file.
+    fn check_file_isolated(&self, path: &Path, spec: &FileSpec) -> Option<(&'static str, String)> {
+        match self.check_file(path, spec) {
+            Ok(r) => r,
+            Err(e) => {
+                let name = path.file_name()?.to_string_lossy().into_owned();
+                let (backend, _) = checker_for(&name)?;
+                Some((backend, format!("the check could not run: {e}")))
+            }
+        }
+    }
+
+    /// Whether the kernel holds the sensr ruleset's table.
+    fn sensr_table_loaded(&self) -> bool {
+        let table = rules_nft::Options::default().table;
+        self.runner
+            .run(
+                &Cmd::new("nft").args(["list", "table", "inet", table.as_str()]),
+                None,
+            )
+            .is_ok_and(|o| o.success())
     }
 
     /// unbound-checkconf follows `directory:` and `include:`, which only
@@ -646,10 +750,15 @@ impl Engine {
     /// (a NixOS switch stops them with the agent) are started even when
     /// their files did not change. A daemon whose file its checker rejects
     /// does not get the new file: it is restarted with the file already on
-    /// disk if there is one, else left stopped. A rejected ruleset is not
-    /// loaded (the kernel keeps what it has) but everything else still
-    /// applies. What was held back is returned, and left out of the applied
-    /// state so the next commit writes (and checks) it again.
+    /// disk if there is one, else left stopped. A checker that cannot run
+    /// counts as that backend's rejection. A rejected ruleset is not loaded:
+    /// the kernel keeps the sensr ruleset it has (agent restart) or, when it
+    /// has none (fresh boot), gets the [`emergency`] firewall, so the box is
+    /// never left unfiltered; everything else still applies. A unit that
+    /// fails to start or a side table that fails to load is recorded and the
+    /// rest carries on. What was held back is returned, and left out of the
+    /// applied state so the next commit writes (and checks) it again; that
+    /// commit's ruleset load also drops the emergency table.
     pub fn commit_isolated(
         &mut self,
         mut p: Prepared,
@@ -666,7 +775,7 @@ impl Engine {
         for u in &iso.withheld_units {
             p.plan.units.remove(u);
         }
-        if iso.skip_nft {
+        if iso.nft_rejected.is_some() {
             p.plan.nft = None;
         }
         self.applied = Some(Applied {
@@ -680,14 +789,14 @@ impl Engine {
     fn commit_inner(
         &self,
         p: &Prepared,
-        iso: Option<&mut Isolation>,
+        mut iso: Option<&mut Isolation>,
     ) -> Result<CommitReport, EngineError> {
         let mut report = CommitReport::default();
         let mut delta = self.delta(p);
         if let Some(iso) = iso.as_deref() {
             delta.files.retain(|f, _| !iso.withheld_files.contains(f));
             delta.units.retain(|u, _| !iso.withheld_units.contains(u));
-            if iso.skip_nft {
+            if iso.nft_rejected.is_some() {
                 delta.nft = None;
             }
         }
@@ -777,7 +886,7 @@ impl Engine {
         if self.opts.check && delta.files.keys().any(|f| f.ends_with("kea-dhcp4.conf")) {
             // networkd creates VLANs asynchronously after the reload
             self.wait_for_links(&p.interfaces);
-            match iso {
+            match iso.as_deref_mut() {
                 None => self.check_files(p, &["kea-dhcp4.conf"])?,
                 Some(iso) => {
                     let kea: Vec<_> = delta
@@ -787,7 +896,7 @@ impl Engine {
                         .map(|(f, spec)| (f.clone(), spec.clone()))
                         .collect();
                     for (path, spec) in kea {
-                        if let Some((backend, message)) = self.check_file(&path, &spec)? {
+                        if let Some((backend, message)) = self.check_file_isolated(&path, &spec) {
                             iso.withhold(&p.plan, &path, backend, message);
                             delta.files.remove(&path);
                         }
@@ -807,6 +916,47 @@ impl Engine {
             nft::load(r, &p.ruleset)?;
             report.commands.push("nft -j -f -".into());
             report.nft_loaded = true;
+            if applied.plan.nft.is_none() {
+                // first ruleset of this engine, or after a boot that had
+                // to run the emergency firewall: drop it if it is there
+                nft::load(r, emergency::removal().as_bytes())?;
+                report
+                    .commands
+                    .push("nft -j -f - (emergency firewall removed)".into());
+            }
+        } else if let Some(iso) = iso.as_deref_mut()
+            && let Some(message) = iso.nft_rejected.clone()
+        {
+            // a rejected ruleset never leaves the box unfiltered
+            if self.sensr_table_loaded() {
+                iso.degraded.push(Degraded {
+                    backend: "nft",
+                    unit: None,
+                    message,
+                    outcome: Outcome::PreviousFirewall,
+                });
+            } else {
+                let loaded = nft::load(r, emergency::ruleset(&p.inside).as_bytes());
+                match loaded {
+                    Ok(_) => {
+                        report
+                            .commands
+                            .push("nft -j -f - (emergency firewall)".into());
+                        iso.degraded.push(Degraded {
+                            backend: "nft",
+                            unit: None,
+                            message,
+                            outcome: Outcome::EmergencyFirewall,
+                        });
+                    }
+                    Err(e) => iso.degraded.push(Degraded {
+                        backend: "nft",
+                        unit: Some(format!("inet {}", emergency::TABLE)),
+                        message: format!("{e} (after the ruleset was rejected: {message})"),
+                        outcome: Outcome::LoadFailed,
+                    }),
+                }
+            }
         }
 
         for (path, spec) in delta.files.iter().filter(|(p, _)| !is_iface_file(p)) {
@@ -830,14 +980,28 @@ impl Engine {
             self.run(&Cmd::new("systemctl").arg("daemon-reload"), &mut report)?;
         }
 
-        for (unit, spec) in &delta.units {
+        let mut units: Vec<_> = delta.units.iter().collect();
+        units.sort_by_key(|(u, _)| {
+            FIRST_UNITS
+                .iter()
+                .position(|f| f == u)
+                .unwrap_or(FIRST_UNITS.len())
+        });
+        for (unit, spec) in units {
             let verb = match spec.action {
                 UnitAction::Reload => "reload-or-restart",
                 UnitAction::Restart => "restart",
             };
-            self.run(
+            let started = self.run(
                 &Cmd::new("systemctl").args([verb, unit.as_str()]),
                 &mut report,
+            );
+            isolate(
+                iso.as_deref_mut(),
+                started,
+                "systemctl",
+                unit,
+                Outcome::StartFailed,
             )?;
         }
 
@@ -851,8 +1015,17 @@ impl Engine {
         // fail-open a queue nobody reads drops everything
         let ips = self.staging.live_dir(suricata::DIR).join(suricata::IPS_NFT);
         if let Some(f) = delta.files.get(&ips) {
-            nft::load(r, f.contents.as_slice())?;
-            report.commands.push("nft -j -f - (ids queue)".into());
+            let loaded = nft::load(r, f.contents.as_slice()).map(|_| ());
+            if loaded.is_ok() {
+                report.commands.push("nft -j -f - (ids queue)".into());
+            }
+            isolate(
+                iso.as_deref_mut(),
+                loaded.map_err(EngineError::from),
+                "nft",
+                "the IDS queue",
+                Outcome::LoadFailed,
+            )?;
         } else if delta.remove_files.contains(&ips) {
             nft::load(r, suricata::ips_removal().as_str())?;
             report
@@ -862,8 +1035,17 @@ impl Engine {
 
         let flow = self.staging.live_dir(insight::DIR).join(insight::NFT);
         if let Some(f) = delta.files.get(&flow) {
-            nft::load(r, f.contents.as_slice())?;
-            report.commands.push("nft -j -f - (accounting)".into());
+            let loaded = nft::load(r, f.contents.as_slice()).map(|_| ());
+            if loaded.is_ok() {
+                report.commands.push("nft -j -f - (accounting)".into());
+            }
+            isolate(
+                iso,
+                loaded.map_err(EngineError::from),
+                "nft",
+                "the accounting table",
+                Outcome::LoadFailed,
+            )?;
         } else if delta.remove_files.contains(&flow) {
             nft::load(r, sensr_flow::nft::removal().as_str())?;
             report
@@ -1519,7 +1701,7 @@ mod tests {
         assert_eq!(degraded.len(), 1, "{degraded:?}");
         assert_eq!(degraded[0].backend, "unbound-checkconf");
         assert_eq!(degraded[0].unit.as_deref(), Some("sensr-unbound.service"));
-        assert!(!degraded[0].kept_previous);
+        assert_eq!(degraded[0].outcome, Outcome::NotStarted);
         assert!(degraded[0].message.contains("environment problem"));
         assert!(
             degraded[0].to_string().contains("was not started"),
@@ -1583,24 +1765,55 @@ mod tests {
             "{lines:#?}"
         );
         assert_eq!(degraded.len(), 1, "{degraded:?}");
-        assert!(degraded[0].kept_previous);
+        assert_eq!(degraded[0].outcome, Outcome::KeptPrevious);
         assert!(degraded[0].to_string().contains("previous configuration"));
+    }
+
+    /// `nft -c` rejects every ruleset; `fresh`: the kernel holds no
+    /// `inet sensr` table (`nft list table` fails).
+    fn reject_nft(runner: &FakeRunner, fresh: bool) {
+        runner.respond(move |cmd, _| {
+            let line = cmd.display();
+            if !line.starts_with("nft ") {
+                return None;
+            }
+            if line.contains("'-c'") {
+                return Some(Output::failed(1, "Error: syntax error\n  in line 3"));
+            }
+            (fresh && line.contains("'list'"))
+                .then(|| Output::failed(1, "Error: No such file or directory"))
+        });
+    }
+
+    /// The rulesets fed to `nft -j -f -` (not `-c`), in order.
+    fn nft_loads(runner: &FakeRunner) -> Vec<String> {
+        runner
+            .calls()
+            .into_iter()
+            .filter(|c| c.cmd.display() == "nft '-j' '-f' '-'")
+            .map(|c| String::from_utf8(c.stdin.unwrap_or_default()).unwrap())
+            .collect()
     }
 
     #[test]
     fn boot_apply_isolates_kea_and_nft_rejections() {
         let root = tempfile::tempdir().unwrap();
         let (mut e, runner) = engine(root.path());
-        let on = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        reject_while(&runner, "kea-dhcp4", on.clone());
-        // `nft -c` rejects; loads (no `-c`) are never reached
-        runner.respond(|cmd, _| {
-            (cmd.display().starts_with("nft ") && cmd.display().contains("'-c'"))
-                .then(|| Output::failed(1, "Error: syntax error"))
-        });
+        reject_while(
+            &runner,
+            "kea-dhcp4",
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        );
+        reject_nft(&runner, true);
         let p = e.prepare(&home_router(), &Runtime::default()).unwrap();
+        let inside = p.inside.clone();
+        assert!(inside.contains(&"igc1".to_owned()) && !inside.contains(&"igc0".to_owned()));
         let (report, degraded) = e.commit_isolated(p).unwrap();
+        // the real ruleset is not loaded; the emergency firewall is
         assert!(!report.nft_loaded);
+        let loads = nft_loads(&runner);
+        assert_eq!(loads.len(), 1, "{loads:#?}");
+        assert_eq!(loads[0], emergency::ruleset(&inside));
         let lines = runner.call_lines();
         assert!(!has(&lines, "sensr-kea-dhcp4.service"), "{lines:#?}");
         assert!(!root.path().join("run/sensr/kea/kea-dhcp4.conf").exists());
@@ -1615,8 +1828,199 @@ mod tests {
                 .join("run/systemd/network/40-sensr-igc1.network")
                 .exists()
         );
-        let backends: Vec<_> = degraded.iter().map(|d| d.backend).collect();
-        assert_eq!(backends, ["nft", "kea-dhcp4"], "{degraded:?}");
+        let got: Vec<_> = degraded.iter().map(|d| (d.backend, d.outcome)).collect();
+        assert_eq!(
+            got,
+            [
+                ("kea-dhcp4", Outcome::NotStarted),
+                ("nft", Outcome::EmergencyFirewall)
+            ],
+            "{degraded:?}"
+        );
+        assert_eq!(
+            degraded[1].to_string(),
+            "emergency firewall active: Error: syntax error in line 3"
+        );
+    }
+
+    #[test]
+    fn boot_apply_after_an_agent_restart_keeps_the_loaded_ruleset() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut e, runner) = engine(root.path());
+        reject_nft(&runner, false);
+        let p = e.prepare(&home_router(), &Runtime::default()).unwrap();
+        let (_, degraded) = e.commit_isolated(p).unwrap();
+        assert!(nft_loads(&runner).is_empty(), "{:#?}", nft_loads(&runner));
+        assert_eq!(degraded.len(), 1, "{degraded:?}");
+        assert_eq!(degraded[0].outcome, Outcome::PreviousFirewall);
+    }
+
+    #[test]
+    fn the_next_good_commit_replaces_the_emergency_firewall() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut e, runner) = engine(root.path());
+        let rejecting = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let on = rejecting.clone();
+        runner.respond(move |cmd, _| {
+            let line = cmd.display();
+            (line.starts_with("nft ") && on.load(std::sync::atomic::Ordering::SeqCst))
+                .then(|| Output::failed(1, "Error: syntax error"))
+                .filter(|_| line.contains("'-c'") || line.contains("'list'"))
+        });
+        let doc = home_router();
+        let p = e.prepare(&doc, &Runtime::default()).unwrap();
+        e.commit_isolated(p).unwrap();
+        assert_eq!(nft_loads(&runner).len(), 1);
+        rejecting.store(false, std::sync::atomic::Ordering::SeqCst);
+        let p = e.prepare(&doc, &Runtime::default()).unwrap();
+        let report = e.commit(p).unwrap();
+        assert!(report.nft_loaded);
+        let loads = nft_loads(&runner);
+        assert_eq!(loads.len(), 3, "{loads:#?}");
+        assert!(loads[1].contains("\"name\":\"sensr\""));
+        assert_eq!(loads[2], emergency::removal());
+    }
+
+    #[test]
+    fn boot_apply_carries_on_past_a_unit_that_fails_to_start() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut e, runner) = engine(root.path());
+        runner.respond(|cmd, _| {
+            let line = cmd.display();
+            (line.starts_with("systemctl ")
+                && (line.contains("sensr-kea-dhcp4") || line.contains("'sensr-suricata.service'")))
+            .then(|| Output::failed(1, "Job failed.\nSee journalctl -xeu for details."))
+        });
+        let mut doc = home_router();
+        doc.ids.enabled = true;
+        let p = e.prepare(&doc, &Runtime::default()).unwrap();
+        let (report, degraded) = e.commit_isolated(p).unwrap();
+        let lines = runner.call_lines();
+        let pos = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} not run: {lines:#?}"))
+        };
+        // resolver and DHCP first, then the rest, failures or not
+        assert!(pos("'sensr-unbound.service'") < pos("'sensr-kea-dhcp4.service'"));
+        assert!(pos("'sensr-kea-dhcp4.service'") < pos("'sensr-ntpd.service'"));
+        assert!(has(&lines, "'restart' 'sensr-ntpd.service'"), "{lines:#?}");
+        assert!(has(&lines, "'sensr-dns-watch.service'"), "{lines:#?}");
+        // the IDS queue still loaded after the failed Suricata start
+        assert!(
+            report.commands.iter().any(|c| c.ends_with("(ids queue)")),
+            "{:#?}",
+            report.commands
+        );
+        let failed: Vec<_> = degraded
+            .iter()
+            .map(|d| (d.unit.as_deref().unwrap(), d.outcome))
+            .collect();
+        assert_eq!(
+            failed,
+            [
+                ("sensr-kea-dhcp4.service", Outcome::StartFailed),
+                ("sensr-suricata.service", Outcome::StartFailed)
+            ],
+            "{degraded:?}"
+        );
+        assert_eq!(
+            degraded[0].to_string(),
+            "sensr-kea-dhcp4.service failed to start: Job failed. See journalctl -xeu for details."
+        );
+
+        // a commit still stops at the first failure
+        let root = tempfile::tempdir().unwrap();
+        let (mut e, runner) = engine(root.path());
+        runner.respond(|cmd, _| {
+            cmd.display()
+                .contains("sensr-kea-dhcp4")
+                .then(|| Output::failed(1, "Job failed."))
+        });
+        let p = e.prepare(&home_router(), &Runtime::default()).unwrap();
+        assert!(matches!(e.commit(p), Err(EngineError::Failed { .. })));
+    }
+
+    #[test]
+    fn boot_apply_treats_a_checker_that_cannot_run_as_its_rejection() {
+        use crate::cmd::{CmdError, StdinWriter};
+        /// unbound-checkconf cannot be spawned
+        struct NoUnbound(FakeRunner);
+        impl Runner for NoUnbound {
+            fn run(&self, cmd: &Cmd, stdin: Option<StdinWriter<'_>>) -> Result<Output, CmdError> {
+                if cmd.display().starts_with("unbound-checkconf ") {
+                    return Err(CmdError::Spawn {
+                        cmd: cmd.display(),
+                        source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                    });
+                }
+                self.0.run(cmd, stdin)
+            }
+            fn has_program(&self, p: &str) -> bool {
+                self.0.has_program(p)
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let (base, _) = engine(root.path());
+        drop(base); // only for the fake /proc/sys
+        let runner = Arc::new(NoUnbound(FakeRunner::new()));
+        let mut e = Engine::new(
+            EngineOptions {
+                root: root.path().to_owned(),
+                secrets: SecretsDir::default(),
+                check: true,
+            },
+            runner.clone(),
+        )
+        .unwrap();
+        // ntp's scratch copy cannot be written: a directory sits there
+        std::fs::create_dir_all(root.path().join("run/sensr/.check/ntp.toml/x")).unwrap();
+        let p = e.prepare(&home_router(), &Runtime::default()).unwrap();
+        let (_, degraded) = e.commit_isolated(p).unwrap();
+        let got: Vec<_> = degraded
+            .iter()
+            .map(|d| (d.backend, d.unit.as_deref().unwrap(), d.outcome))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("ntp-ctl", "sensr-ntpd.service", Outcome::NotStarted),
+                (
+                    "unbound-checkconf",
+                    "sensr-unbound.service",
+                    Outcome::NotStarted
+                )
+            ],
+            "{degraded:?}"
+        );
+        assert!(degraded.iter().all(|d| d.message.contains("could not run")));
+        let lines = runner.0.call_lines();
+        assert!(
+            has(&lines, "'reload-or-restart' 'sensr-kea-dhcp4.service'"),
+            "{lines:#?}"
+        );
+        assert!(has(&lines, "nft '-j'"), "{lines:#?}");
+
+        // a commit: the same failure refuses everything
+        let p = e.prepare(&home_router(), &Runtime::default()).unwrap();
+        assert!(e.commit(p).is_err());
+    }
+
+    #[test]
+    fn degraded_messages_are_one_short_line() {
+        let d = Degraded {
+            backend: "unbound-checkconf",
+            unit: Some("sensr-unbound.service".into()),
+            message: format!("line 1\n\tline 2 {}", "x".repeat(400)),
+            outcome: Outcome::NotStarted,
+        };
+        let text = d.to_string();
+        assert!(!text.contains('\n') && !text.contains('\t'), "{text}");
+        assert!(text.contains(": line 1 line 2 xxx"), "{text}");
+        assert!(text.ends_with('…'), "{text}");
+        let msg = text.split_once(": ").unwrap().1;
+        assert_eq!(msg.chars().count(), MAX_MESSAGE);
     }
 
     #[test]

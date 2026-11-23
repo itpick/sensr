@@ -25,6 +25,8 @@ jobs:
       - run: sudo apt-get update -q && sudo apt-get install -y -q nftables
       - run: nft --version
       - run: NFT_WRAP=sudo scripts/nft-check-goldens.sh
+      # the boot apply's emergency firewall
+      - run: NFT_WRAP=sudo scripts/nft-check-goldens.sh crates/sensr-apply/tests/golden
 
   xtask:
     runs-on: ubuntu-24.04
