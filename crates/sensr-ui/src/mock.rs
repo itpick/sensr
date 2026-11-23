@@ -606,7 +606,8 @@ pub fn host_modes(doc: &Value) -> std::collections::BTreeMap<String, String> {
 }
 
 /// Lays the enabled owner labels of `doc` over the guessed `label` of each host, as
-/// the agent does: a set field wins, with confidence `high` and the reason `Set by you`.
+/// the agent does: a set field wins, with confidence `high` and the reason `Set by you`
+/// ahead of the guessed ones.
 pub fn apply_host_labels(hosts: &mut [Value], doc: &Value) {
     let Some(labels) = doc.pointer("/hosts/labels").and_then(Value::as_object) else {
         return;
@@ -633,7 +634,11 @@ pub fn apply_host_labels(hosts: &mut [Value], doc: &Value) {
         if owner {
             label["confidence"] = json!("high");
             label["by"] = json!("owner");
-            label["reasons"] = json!(["Set by you"]);
+            let mut reasons = vec![json!("Set by you")];
+            if let Some(guessed) = label["reasons"].as_array() {
+                reasons.extend(guessed.iter().filter(|r| *r != "Set by you").cloned());
+            }
+            label["reasons"] = Value::Array(reasons);
         }
     }
 }
@@ -662,12 +667,12 @@ pub fn simulated_hosts(now: u64) -> Vec<Value> {
                "lease": {"state": "active", "expires": now + 1_800},
                "first_seen": now - 86_400 * 2, "last_seen": now - 12, "online": true}),
         // Only seen in the neighbour table: no name.
-        json!({"key": "3c:22:fb:10:9e:41", "mac": "3c:22:fb:10:9e:41",
+        json!({"key": "7c:78:b2:10:9e:41", "mac": "7c:78:b2:10:9e:41",
                "interface": "opt1", "interface_name": "LAN2", "ipv4": "192.168.72.40",
-               "ipv6": ["fe80::3e22:fbff:fe10:9e41"], "sources": ["neighbour"],
+               "ipv6": ["fe80::7e78:b2ff:fe10:9e41"], "sources": ["neighbour"],
                "first_seen": now - 3_600, "last_seen": now - 20, "online": true}),
         // Gone two hours ago.
-        json!({"key": "84:47:09:38:a5:fc", "mac": "84:47:09:38:a5:fc", "name": "old-router",
+        json!({"key": "00:14:78:38:a5:fc", "mac": "00:14:78:38:a5:fc", "name": "old-router",
                "lease_hostname": "old-router", "interface": "opt1", "interface_name": "LAN2",
                "ipv4": "192.168.72.2", "sources": ["lease"],
                "lease": {"state": "expired", "expires": now - 3_600},
@@ -693,8 +698,9 @@ pub fn simulated_hosts(now: u64) -> Vec<Value> {
             "first_seen": now - 86_400, "last_seen": now - 30 - i, "online": true,
         }));
     }
-    // What the agent would guess from passive evidence (the printer's owner label
-    // comes from the seeded document, see [`apply_host_labels`]).
+    // What the agent's classifier makes of these MACs and names (only reasons it
+    // produces); the printer's owner label comes from the seeded document, see
+    // [`apply_host_labels`].
     for h in &mut hosts {
         let mac = h["mac"].as_str().unwrap_or_default();
         let (maker, kind, confidence, reasons): (Option<&str>, _, _, &[&str]) = match mac {
@@ -708,28 +714,20 @@ pub fn simulated_hosts(now: u64) -> Vec<Value> {
                 Some("Raspberry Pi"),
                 "server",
                 "low",
-                &[
-                    "MAC maker: Raspberry Pi",
-                    "Raspberry Pis often run as servers",
-                ],
+                &["MAC maker: Raspberry Pi"],
             ),
-            "3c:22:fb:10:9e:41" => (
-                Some("Wyze"),
-                "camera",
-                "medium",
-                &["MAC maker: Wyze", "DHCP options look like a Wyze camera"],
-            ),
-            "84:47:09:38:a5:fc" => (
+            "7c:78:b2:10:9e:41" => (Some("Wyze"), "camera", "medium", &["MAC maker: Wyze"]),
+            "00:14:78:38:a5:fc" => (
                 Some("TP-Link"),
                 "network",
                 "medium",
-                &["MAC maker: TP-Link", "Host name: old-router"],
+                &["MAC maker: TP-Link"],
             ),
             "00:1b:a9:44:02:7c" => (
-                Some("Brother"),
+                Some("Brother industries"),
                 "printer",
                 "medium",
-                &["MAC maker: Brother"],
+                &["MAC maker: Brother industries"],
             ),
             _ => (
                 Some("Private MAC"),

@@ -1142,7 +1142,7 @@ fn host_mode_offline_row_with_the_remote_address_is_not_the_caller() {
     let (r, card) = set_mode_on(
         hosts_mock(),
         Some("192.168.72.2:50000"),
-        "84:47:09:38:a5:fc",
+        "00:14:78:38:a5:fc",
         Some("quarantine"),
     );
     assert_eq!(r.as_deref(), Ok("applied"));
@@ -1495,8 +1495,7 @@ fn host_label_line_renders() {
             .has_class("host-label-guess", scraper::CaseSensitivity::CaseSensitive)
     );
     let title = line.value().attr("title").unwrap();
-    assert!(title.contains("MAC maker: Raspberry Pi"), "{title}");
-    assert!(title.contains('\n'), "one reason per line: {title}");
+    assert_eq!(title, "MAC maker: Raspberry Pi");
     // a confident guess is not italic
     let nas = label_line(mac_cell(host_row(&doc, "nas")));
     assert!(text(nas).ends_with("QEMU/KVM · Virtual machine"));
@@ -1538,7 +1537,11 @@ fn host_label_owner_not_guess() {
             .value()
             .has_class("host-label-guess", scraper::CaseSensitivity::CaseSensitive)
     );
-    assert!(line.value().attr("title").unwrap().contains("Set by you"));
+    // one reason per line: the owner's first, then the guess's (as the agent does)
+    assert_eq!(
+        line.value().attr("title"),
+        Some("Set by you\nMAC maker: Brother industries")
+    );
     // the editor is closed until ✎ is pressed
     let edit = mac_cell(host_row(&doc, "printer"))
         .select(&sel("button.icon-btn.host-label-edit"))

@@ -2172,3 +2172,48 @@ pub fn diff_class(kind: DiffKind) -> &'static str {
         DiffKind::Context => "diff-ctx",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{HostLabelView, HostRow};
+
+    /// Hostile maker, reasons and names reach the cell's markup only escaped.
+    #[test]
+    fn mac_cell_escapes_hostile_label_text() {
+        const BAD: &str = r#""><script>alert(1)</script>&'"#;
+        let h = HostRow {
+            mac: Some("aa:bb:cc:dd:ee:01".into()),
+            name: Some(BAD.into()),
+            host_label: Some(HostLabelView {
+                maker: Some(BAD.into()),
+                kind: "camera".into(),
+                confidence: "low".into(),
+                reasons: vec![format!("Host name: {BAD}"), BAD.into()],
+                by: "auto".into(),
+            }),
+            owner_kind: Some(BAD.into()),
+            owner_maker: Some(BAD.into()),
+            staged_label: true,
+            ..HostRow::default()
+        };
+        let html = mac_cell_html(&h, true, false);
+        assert!(!html.contains("<script"), "{html}");
+        assert!(!html.contains(BAD), "{html}");
+        assert!(!html.contains("&'"), "{html}");
+        let escaped = "&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;&amp;&#39;";
+        // maker (in the text), reasons (title), name (aria-label), owner fields (data-*)
+        assert!(html.matches(escaped).count() >= 5, "{html}");
+        assert!(
+            html.contains(&format!("data-maker=\"{escaped}\"")),
+            "{html}"
+        );
+        assert!(
+            html.contains(&format!("aria-label=\"Edit label for {escaped}\"")),
+            "{html}"
+        );
+        let editor = host_label_editor_html(BAD, BAD, BAD, false);
+        assert!(!editor.contains("<script"), "{editor}");
+        assert!(editor.contains(&format!("value=\"{escaped}\"")), "{editor}");
+    }
+}

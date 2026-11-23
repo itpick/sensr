@@ -18,6 +18,7 @@ const banner = (page: Page) => page.getByRole("region", { name: "Pending changes
 const row = (page: Page, host: string) =>
   rows(page).filter({ has: page.locator("td:first-child", { hasText: new RegExp(`^${host}$`) }) });
 const label = (page: Page, host: string) => row(page, host).locator(".host-label");
+const icon = (page: Page, host: string) => label(page, host).locator(".host-kind-icon");
 const pencil = (page: Page, host: string) => row(page, host).getByRole("button", { name: `Edit label for ${host}` });
 const typeSelect = (page: Page, host: string) => row(page, host).getByRole("combobox", { name: `Type for ${host}` });
 const makerField = (page: Page, host: string) => row(page, host).getByRole("textbox", { name: `Maker for ${host}` });
@@ -58,6 +59,8 @@ test.describe("host labels", () => {
     const mac = row(page, "bench-pi").locator("td").nth(1);
     await expect(mac).toContainText("b8:27:eb:7d:4e:25");
     await expect(label(page, "bench-pi")).toHaveText(shows(GUESS));
+    await expect(icon(page, "bench-pi")).toHaveText("🗄");
+    await expect(icon(page, "bench-pi")).toHaveAttribute("aria-hidden", "true");
     // a low-confidence guess is italic and explains itself on hover
     await expect(label(page, "bench-pi")).toHaveClass(/\bhost-label-guess\b/);
     await expect(label(page, "bench-pi")).toHaveAttribute("title", /MAC maker: Raspberry Pi/);
@@ -69,6 +72,7 @@ test.describe("host labels", () => {
     await typeSelect(page, "bench-pi").selectOption({ label: "Camera" });
     await row(page, "bench-pi").getByRole("button", { name: "Save" }).click();
     await expect(label(page, "bench-pi")).toHaveText(shows("Raspberry Pi · Camera"));
+    await expect(icon(page, "bench-pi")).toHaveText("📷");
     await expect(label(page, "bench-pi")).not.toHaveClass(/\bhost-label-guess\b/);
     await expect(label(page, "bench-pi")).toHaveAttribute("title", /Set by you/);
     await expect(typeSelect(page, "bench-pi")).toHaveCount(0);
@@ -85,7 +89,12 @@ test.describe("host labels", () => {
     await pencil(page, "bench-pi").click();
     await makerField(page, "bench-pi").fill("Pi Foundation");
     await row(page, "bench-pi").getByRole("button", { name: "Save" }).click();
-    await expect(label(page, "bench-pi")).toHaveText(shows("Pi Foundation · ", true));
+    // the kind stays the guess, but the owner's word makes the whole label sure: no "?"
+    await expect(label(page, "bench-pi")).toHaveText(shows("Pi Foundation · Server"));
+    await expect(icon(page, "bench-pi")).toHaveText("🗄");
+    await expect(label(page, "bench-pi")).not.toHaveClass(/\bhost-label-guess\b/);
+    // the guess's reasons follow the owner's
+    await expect(label(page, "bench-pi")).toHaveAttribute("title", "Set by you\nMAC maker: Raspberry Pi");
 
     await pencil(page, "bench-pi").click();
     await expect(makerField(page, "bench-pi")).toHaveValue("Pi Foundation");
@@ -110,7 +119,7 @@ test.describe("host labels", () => {
     await expect(typeSelect(page, "bench-pi")).toBeFocused();
     await makerField(page, "bench-pi").fill("Pi Foundation");
     await makerField(page, "bench-pi").press("Enter");
-    await expect(label(page, "bench-pi")).toHaveText(shows("Pi Foundation · ", true));
+    await expect(label(page, "bench-pi")).toHaveText(shows("Pi Foundation · Server"));
     await expect(typeSelect(page, "bench-pi")).toHaveCount(0);
     await expect(pencil(page, "bench-pi")).toBeFocused();
   });
@@ -133,6 +142,38 @@ test.describe("host labels", () => {
     await expect(typeSelect(page, "bench-pi")).toHaveValue("tv");
     await expect(makerField(page, "bench-pi")).toHaveValue("Acme");
     await page.keyboard.press("Escape");
+    await expect(label(page, "bench-pi")).toHaveText(shows(GUESS));
+  });
+
+  test("a randomised MAC reads as a private address", async ({ page }) => {
+    await open(page);
+    await expect(label(page, "device-02")).toHaveText(shows("Private MAC · Phone/laptop?"));
+    await expect(icon(page, "device-02")).toHaveText("📱");
+    await expect(label(page, "device-02")).toHaveClass(/\bhost-label-guess\b/);
+    await expect(label(page, "device-02")).toHaveAttribute("title", /^Randomised address/);
+  });
+
+  test("staged path", async ({ page }) => {
+    await open(page);
+    // Stage an unrelated change so the label lands beside it instead of applying at once.
+    await page.goto("/ui/system/general");
+    await hydrated(page);
+    await page.getByLabel("Hostname").fill("fw-labels");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+
+    await page.goto("/ui/core/dashboard");
+    await hydrated(page);
+    await pencil(page, "bench-pi").click();
+    await typeSelect(page, "bench-pi").selectOption("tv");
+    await row(page, "bench-pi").getByRole("button", { name: "Save" }).click();
+    await expect(row(page, "bench-pi").locator(".host-label-staged")).toHaveText("Staged — Apply to take effect");
+    // not in force yet: the guess still shows
+    await expect(label(page, "bench-pi")).toHaveText(shows(GUESS));
+
+    // Discarding drops the unrelated change and the staged label together.
+    await discardStaged(page);
+    await expect(row(page, "bench-pi").locator(".host-label-staged")).toHaveCount(0);
     await expect(label(page, "bench-pi")).toHaveText(shows(GUESS));
   });
 

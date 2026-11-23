@@ -417,6 +417,8 @@ span.btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
   .meter-row { grid-template-columns: 90px minmax(0, 1fr) auto; font-size: 12.5px; }
 }
 @media (max-width: 600px) {
+  /* a long maker wraps instead of widening the MAC column */
+  .host-label-line { white-space: normal; overflow-wrap: anywhere; }
   .wordmark { height: 28px; }
   .topbar { padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px)); }
   .page-head { padding-top: 12px; }
