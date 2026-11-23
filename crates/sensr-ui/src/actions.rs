@@ -1434,35 +1434,22 @@ pub struct LayoutData {
 /// Chrome data for the page being rendered.
 #[server(prefix = "/ui/fn", input = Json)]
 pub async fn chrome_data() -> Result<LayoutData, ServerFnError> {
-    use serde_json::Value;
     let b = imp::backend()?;
     let doc = b.get("interfaces").await.map_err(imp::err)?;
-    let interfaces = doc
-        .as_object()
-        .into_iter()
-        .flatten()
-        .map(|(id, r)| {
-            let desc = r
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            crate::menu::MenuInterface {
-                id: id.clone(),
-                description: if desc.is_empty() {
-                    id.to_uppercase()
-                } else {
-                    desc.to_owned()
-                },
-                dhcp_capable: crate::form::get_path(r, "ipv4.mode").and_then(Value::as_str)
-                    == Some("static"),
-            }
-        })
-        .collect();
+    let interfaces = crate::search::menu_interfaces(&doc);
     Ok(LayoutData {
         user: imp::user(),
         interfaces,
         pending: b.pending().await.map_err(imp::err)?,
     })
+}
+
+/// Global search: pages, settings, the caller's objects and hosts matching `q`, each only if
+/// the caller may open its page.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn global_search(q: String) -> Result<crate::search::SearchResults, ServerFnError> {
+    let b = imp::backend()?;
+    crate::search::run(b.as_ref(), &q).await.map_err(imp::err)
 }
 
 /// Current value of a settings form, secrets blanked.

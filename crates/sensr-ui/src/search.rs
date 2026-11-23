@@ -120,6 +120,32 @@ pub struct Candidate {
     pub url: String,
     /// Texts matched against the query; the title comes first.
     pub haystack: Vec<String>,
+    /// `haystack` case-folded once, when the candidate is built (see [`Candidate::new`]).
+    pub folded: Vec<String>,
+}
+
+#[cfg(feature = "ssr")]
+impl Candidate {
+    /// A candidate whose folded haystack is computed now, not on every search.
+    pub fn new(
+        group: String,
+        group_order: u32,
+        title: String,
+        detail: String,
+        url: String,
+        haystack: Vec<String>,
+    ) -> Self {
+        let folded = haystack.iter().map(|h| h.to_lowercase()).collect();
+        Self {
+            group,
+            group_order,
+            title,
+            detail,
+            url,
+            haystack,
+            folded,
+        }
+    }
 }
 
 #[cfg(feature = "ssr")]
@@ -131,6 +157,10 @@ const ORDER_HOSTS: u32 = 2;
 #[cfg(feature = "ssr")]
 const ORDER_GRIDS: u32 = 3;
 
+/// The sign-out link: an action, not a page.
+#[cfg(feature = "ssr")]
+const LOGOUT: &str = "/logout";
+
 #[cfg(feature = "ssr")]
 const CRUMB_SEP: &str = " › ";
 
@@ -140,16 +170,20 @@ pub fn page_candidates(menu: &[crate::menu::MenuItem]) -> Vec<Candidate> {
     fn walk(items: &[crate::menu::MenuItem], trail: &mut Vec<String>, out: &mut Vec<Candidate>) {
         for item in items {
             trail.push(item.label.clone());
-            if let Some(url) = item.url.as_ref().filter(|u| u.starts_with('/')) {
+            if let Some(url) = item
+                .url
+                .as_ref()
+                .filter(|u| u.starts_with('/') && u.as_str() != LOGOUT)
+            {
                 let crumb = trail.join(CRUMB_SEP);
-                out.push(Candidate {
-                    group: PAGES.to_owned(),
-                    group_order: ORDER_PAGES,
-                    title: item.label.clone(),
-                    detail: crumb.clone(),
-                    url: url.clone(),
-                    haystack: vec![item.label.clone(), crumb],
-                });
+                out.push(Candidate::new(
+                    PAGES.to_owned(),
+                    ORDER_PAGES,
+                    item.label.clone(),
+                    crumb.clone(),
+                    url.clone(),
+                    vec![item.label.clone(), crumb],
+                ));
             }
             walk(&item.children, trail, out);
             trail.pop();
@@ -186,14 +220,14 @@ pub fn setting_candidates() -> Vec<Candidate> {
                 if !f.help.is_empty() {
                     haystack.push(f.help.to_owned());
                 }
-                Candidate {
-                    group: SETTINGS.to_owned(),
-                    group_order: ORDER_SETTINGS,
-                    title: f.label.to_owned(),
-                    detail: crumb.clone(),
-                    url: format!("{page}#{}", f.dom_id(&dom)),
+                Candidate::new(
+                    SETTINGS.to_owned(),
+                    ORDER_SETTINGS,
+                    f.label.to_owned(),
+                    crumb.clone(),
+                    format!("{page}#{}", f.dom_id(&dom)),
                     haystack,
-                }
+                )
             })
         })
         .collect()
@@ -277,14 +311,14 @@ pub fn row_candidates(doc: &serde_json::Value) -> Vec<Candidate> {
                         .filter(|(j, _)| *j != t)
                         .map(|(_, (_, text))| text.clone()),
                 );
-                out.push(Candidate {
-                    group: grid.group_name().to_owned(),
-                    group_order: order,
+                out.push(Candidate::new(
+                    grid.group_name().to_owned(),
+                    order,
                     title,
                     detail,
-                    url: format!("{page}?edit={}", encode_component(&row.key)),
+                    format!("{page}?edit={}", encode_component(&row.key)),
                     haystack,
-                });
+                ));
             }
         }
     }
@@ -322,17 +356,17 @@ pub fn host_candidates(hosts: &crate::runtime::HostList) -> Vec<Candidate> {
                 .unwrap_or_default();
             let mut haystack = vec![title.clone()];
             haystack.extend(texts.into_iter().filter(|t| *t != title));
-            Candidate {
-                group: HOSTS.to_owned(),
-                group_order: ORDER_HOSTS,
+            Candidate::new(
+                HOSTS.to_owned(),
+                ORDER_HOSTS,
                 title,
                 detail,
-                url: format!(
+                format!(
                     "/ui/core/dashboard?host={}#w-hosts",
                     encode_component(&h.key)
                 ),
                 haystack,
-            }
+            )
         })
         .collect()
 }
@@ -361,7 +395,7 @@ fn score(field: &str, q: &str) -> u8 {
 
 #[cfg(feature = "ssr")]
 /// The page part of a link, which is what page privileges cover.
-fn page_of(url: &str) -> &str {
+pub(crate) fn page_of(url: &str) -> &str {
     url.split(['?', '#']).next().unwrap_or(url)
 }
 
@@ -369,6 +403,16 @@ fn page_of(url: &str) -> &str {
 /// best: [`PER_GROUP`] per group, [`MAX_HITS`] in all, groups in their order.
 #[cfg(feature = "ssr")]
 pub fn search(cands: &[Candidate], q: &str, may_access: &dyn Fn(&str) -> bool) -> SearchResults {
+    search_in(&[cands], q, may_access)
+}
+
+/// [`search`] over several candidate lists at once (so cached lists need not be copied).
+#[cfg(feature = "ssr")]
+pub fn search_in(
+    sets: &[&[Candidate]],
+    q: &str,
+    may_access: &dyn Fn(&str) -> bool,
+) -> SearchResults {
     use std::collections::HashMap;
     let query = normalize(q);
     if query.chars().count() < MIN_QUERY {
@@ -390,12 +434,12 @@ pub fn search(cands: &[Candidate], q: &str, may_access: &dyn Fn(&str) -> bool) -
     };
     // (score, best field, candidate)
     let mut matched: Vec<(u8, usize, &Candidate)> = Vec::new();
-    for c in cands {
+    for c in sets.iter().flat_map(|s| s.iter()) {
         let best = c
-            .haystack
+            .folded
             .iter()
             .enumerate()
-            .map(|(i, h)| (score(&h.to_lowercase(), &query), i))
+            .map(|(i, h)| (score(h, &query), i))
             .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
         if let Some((s, i)) = best.filter(|(s, _)| *s > 0)
             && ok(&c.url)
@@ -462,6 +506,115 @@ pub fn search(cands: &[Candidate], q: &str, may_access: &dyn Fn(&str) -> bool) -
     }
 }
 
+/// The dashboard check that gates host results: the inventory's own privilege.
+#[cfg(feature = "ssr")]
+const HOSTS_API: &str = "/api/v1/hosts";
+
+/// The interfaces the menu is built from, read from a config document.
+#[cfg(feature = "ssr")]
+pub fn menu_interfaces(interfaces: &serde_json::Value) -> Vec<crate::menu::MenuInterface> {
+    interfaces
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, r)| {
+            let desc = r
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            crate::menu::MenuInterface {
+                id: id.clone(),
+                description: if desc.is_empty() {
+                    id.to_uppercase()
+                } else {
+                    desc.to_owned()
+                },
+                dhcp_capable: crate::form::get_path(r, "ipv4.mode")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("static"),
+            }
+        })
+        .collect()
+}
+
+/// Config-derived candidates (pages and rows) for one document and one caller.
+#[cfg(feature = "ssr")]
+type Index = std::sync::Arc<Vec<Candidate>>;
+
+/// The last index built: `(config hash + the caller's access to every page, index)`.
+#[cfg(feature = "ssr")]
+static INDEX: std::sync::Mutex<Option<(String, Index)>> = std::sync::Mutex::new(None);
+
+#[cfg(feature = "ssr")]
+fn settings() -> &'static [Candidate] {
+    static SETTINGS_INDEX: std::sync::OnceLock<Vec<Candidate>> = std::sync::OnceLock::new();
+    SETTINGS_INDEX.get_or_init(setting_candidates)
+}
+
+/// Cache key: a hash of the document and which of the pages the caller may open, so an index
+/// built for one user is never served to another.
+#[cfg(feature = "ssr")]
+fn index_key(
+    doc: &serde_json::Value,
+    pages: &[Candidate],
+    may_access: &dyn Fn(&str) -> bool,
+) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    doc.to_string().hash(&mut h);
+    let mut probes: Vec<&str> = pages
+        .iter()
+        .map(|c| page_of(&c.url))
+        .chain(GridId::ALL.iter().map(|g| g.page_url()))
+        .chain(FormId::ALL.iter().map(|f| f.page_url()))
+        .collect();
+    probes.sort_unstable();
+    probes.dedup();
+    let granted: Vec<&str> = probes.into_iter().filter(|p| may_access(p)).collect();
+    format!("{:x}|{}", h.finish(), granted.join(","))
+}
+
+/// Answers a query for the caller behind `b`: pages, settings, rows of the staged document
+/// (cached per document and privilege set) and, if the caller may see the inventory, hosts.
+#[cfg(feature = "ssr")]
+pub async fn run(b: &dyn crate::api::Backend, q: &str) -> crate::api::ApiResult<SearchResults> {
+    if normalize(q).chars().count() < MIN_QUERY {
+        return Ok(search_in(&[], q, &|_| true));
+    }
+    let doc = b.get("").await?;
+    let menu = crate::menu::build(&menu_interfaces(&doc["interfaces"]));
+    let pages = page_candidates(&menu);
+    let key = index_key(&doc, &pages, &|u| b.may_access(u));
+    let cached = INDEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|(k, _)| *k == key)
+        .map(|(_, i)| i.clone());
+    let index = match cached {
+        Some(i) => i,
+        None => {
+            let mut all = pages;
+            all.extend(row_candidates(&doc));
+            let i: Index = std::sync::Arc::new(all);
+            *INDEX.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, i.clone()));
+            i
+        }
+    };
+    let hosts = if b.may_access(HOSTS_API) {
+        let list: crate::runtime::HostList =
+            crate::runtime::parse(b.runtime(crate::runtime::RuntimeSection::Hosts).await?);
+        host_candidates(&list)
+    } else {
+        Vec::new()
+    };
+    Ok(search_in(
+        &[index.as_slice(), settings(), &hosts],
+        q,
+        &|u| b.may_access(u),
+    ))
+}
+
 #[cfg(all(test, feature = "ssr"))]
 mod tests {
     use super::*;
@@ -473,14 +626,14 @@ mod tests {
     }
 
     fn cand(group: &str, order: u32, title: &str) -> Candidate {
-        Candidate {
-            group: group.to_owned(),
-            group_order: order,
-            title: title.to_owned(),
-            detail: String::new(),
-            url: format!("/x/{group}/{title}"),
-            haystack: vec![title.to_owned()],
-        }
+        Candidate::new(
+            group.to_owned(),
+            order,
+            title.to_owned(),
+            String::new(),
+            format!("/x/{group}/{title}"),
+            vec![title.to_owned()],
+        )
     }
 
     fn menu_cands() -> Vec<Candidate> {
@@ -776,5 +929,37 @@ mod tests {
                 "{g:?} has nothing to search"
             );
         }
+    }
+
+    #[test]
+    fn logout_is_not_a_page() {
+        let r = search(&menu_cands(), "logout", all());
+        assert!(group(&r, PAGES).is_none(), "{r:?}");
+    }
+
+    #[test]
+    fn multibyte_query_is_capped_by_chars_and_links_stay_valid() {
+        let long = "日".repeat(100);
+        let doc = aliases(1, "x");
+        let mut doc = doc;
+        doc["firewall"]["aliases"]["uuid-1"]["name"] = json!("日".repeat(64));
+        let r = search(&row_candidates(&doc), &long, all());
+        assert_eq!(r.query.chars().count(), 64);
+        let g = group(&r, "Aliases").expect("alias matches");
+        let more = g.more_url.as_deref().expect("more_url");
+        let enc = more.split("?q=").nth(1).unwrap();
+        assert_eq!(enc, "%E6%97%A5".repeat(64));
+    }
+
+    #[test]
+    fn row_key_with_reserved_characters_is_encoded() {
+        let doc = json!({"firewall": {"aliases": {"a/b?c#d": {"enabled": true, "name": "odd",
+            "content": {"type": "host", "entries": ["10.0.0.1"]}}}}});
+        let c = row_candidates(&doc);
+        assert!(
+            c.iter().any(|c| c.url.ends_with("?edit=a%2Fb%3Fc%23d")),
+            "{:?}",
+            c.iter().map(|c| &c.url).collect::<Vec<_>>()
+        );
     }
 }
