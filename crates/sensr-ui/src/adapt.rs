@@ -252,6 +252,58 @@ pub fn in_scope(grid: GridId, scope: &str, doc: &Value, item: &Value) -> bool {
     }
 }
 
+/// One grid row: its key, the stored item and the view.
+pub struct Row {
+    /// Row key (UUID, interface id, or index for array stores).
+    pub key: String,
+    /// The stored schema item.
+    pub item: Value,
+    /// The view row the grid shows (key included).
+    pub view: Value,
+}
+
+/// Rows of `grid` in `scope`, in display order (by `sequence` where the schema has one).
+pub fn rows(grid: GridId, scope: &str, doc: &Value) -> Vec<Row> {
+    let key_field = grid.meta().key;
+    let mut out: Vec<Row> = match store(grid, scope, doc) {
+        Store::Map(path) => get_path(doc, &path)
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter(|(_, item)| in_scope(grid, scope, doc, item))
+            .map(|(k, item)| (k.clone(), item.clone()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|(key, item)| {
+                let mut view = to_view(grid, doc, &item);
+                view[key_field] = Value::String(key.clone());
+                decorate(grid, doc, &key, &mut view);
+                Row { key, item, view }
+            })
+            .collect(),
+        Store::Array(path) => get_path(doc, &path)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(i, item)| {
+                let key = i.to_string();
+                let mut view = to_view(grid, doc, item);
+                view[key_field] = Value::String(key.clone());
+                Row {
+                    key,
+                    item: item.clone(),
+                    view,
+                }
+            })
+            .collect(),
+    };
+    if sequenced(grid) {
+        out.sort_by_key(|r| r.item.get("sequence").and_then(Value::as_u64).unwrap_or(1));
+    }
+    out
+}
+
 /// Whether rows of this grid carry a `sequence` that defines their order.
 pub fn sequenced(grid: GridId) -> bool {
     matches!(

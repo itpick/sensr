@@ -17,6 +17,7 @@ pub mod menu;
 pub mod models;
 pub mod pages;
 pub mod runtime;
+pub mod search;
 pub mod theme;
 
 #[cfg(feature = "ssr")]

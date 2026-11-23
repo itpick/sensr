@@ -500,7 +500,7 @@ pub fn SettingsFormIsland(
     let errors = RwSignal::new(Vec::<FieldError>::new());
     let status = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
-    let form_dom = format!("form-{form:?}").to_lowercase();
+    let form_dom = form.dom_id();
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         let inputs = values.get_untracked();
