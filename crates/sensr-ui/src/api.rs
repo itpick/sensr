@@ -719,6 +719,16 @@ mod server {
         /// Drops an unreserved host from the inventory (`key` as in
         /// [`crate::runtime::HostRow::key`]); it comes back if it is still on the network.
         fn forget_host(&self, key: String) -> BoxFuture<'_, ApiResult<()>>;
+        /// Puts the host with `mac` in `mode` (`isolated`, `quarantine`; `None` or
+        /// `normal` for Normal). `remote` is the client's address: quarantining the
+        /// device the request comes from is refused ([`ApiError::Conflict`]). Returns
+        /// `applied` when it took effect at once, `staged` when it waits for Apply.
+        fn set_host_mode(
+            &self,
+            mac: String,
+            mode: Option<String>,
+            remote: Option<std::net::IpAddr>,
+        ) -> BoxFuture<'_, ApiResult<String>>;
         /// The caller may read but not change anything (`user-config-readonly`), so the
         /// UI hides actions that would be refused.
         fn read_only(&self) -> bool {

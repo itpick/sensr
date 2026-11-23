@@ -1569,8 +1569,9 @@ pub fn DhcpLeases(initial: LeaseTable) -> impl IntoView {
 }
 
 /// Dashboard › Hosts: every client the router knows of, searchable and filterable by
-/// network, with Make static for leased hosts and Forget for unreserved ones. Refreshed
-/// with the other dashboard widgets; renders nothing when the caller may not see hosts.
+/// network, with Make static for leased hosts, Forget for unreserved ones and a Mode
+/// (Normal / Isolated / Quarantine) for hosts with a MAC. Refreshed with the other
+/// dashboard widgets; renders nothing when the caller may not see hosts.
 #[island]
 pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
     if initial.is_none() {
@@ -1583,6 +1584,9 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
     let show_all = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(None::<String>);
+    // The last Mode change's outcome; kept across refreshes (which clear `error`).
+    let note = RwSignal::new(None::<String>);
+    let mode_error = RwSignal::new(None::<String>);
 
     let refresh = move || {
         spawn_local(async move {
@@ -1648,6 +1652,63 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
         });
     };
 
+    let set_mode = move |mac: String, mode: String| {
+        let mode = (mode != "normal").then_some(mode);
+        busy.set(Some(mac.clone()));
+        spawn_local(async move {
+            match set_host_mode(mac, mode).await {
+                Ok(r) => {
+                    mode_error.set(None);
+                    note.set((r == "staged").then(|| "Staged — Apply to take effect".to_owned()));
+                    bump();
+                }
+                Err(e) => {
+                    note.set(None);
+                    mode_error.set(Some(server_message(&e)));
+                }
+            }
+            // also on a refusal: the select goes back to the host's actual mode
+            match hosts().await {
+                Ok(c) => card.set(c),
+                Err(e) => error.set(Some(format!("Could not read the hosts: {e}"))),
+            }
+            busy.set(None);
+        });
+    };
+
+    let mode_cell = move |h: &crate::runtime::HostRow, read_only: bool| {
+        // `id:` rows have no MAC to match on
+        let Some(mac) = h.mac.clone().filter(|_| !h.key.starts_with("id:")) else {
+            return view! { <span class="muted">"—"</span> }.into_any();
+        };
+        let current = h.locked_mode().unwrap_or("normal");
+        let badge = match current {
+            "isolated" => Some(view! { <span class="pill pill-warn">"Isolated"</span> }),
+            "quarantine" => Some(view! { <span class="pill pill-off">"Quarantine"</span> }),
+            _ => None,
+        };
+        if read_only {
+            return view! { {badge} }.into_any();
+        }
+        let label = format!("Mode for {}", h.label());
+        let options = [
+            ("normal", "Normal"),
+            ("isolated", "Isolated"),
+            ("quarantine", "Quarantine"),
+        ]
+        .map(|(v, t)| view! { <option value=v selected=v == current>{t}</option> });
+        let m = mac.clone();
+        view! {
+            {badge}
+            <select aria-label=label
+                disabled=move || busy.get().as_deref() == Some(m.as_str())
+                on:change=move |ev| set_mode(mac.clone(), event_target_value(&ev))>
+                {options}
+            </select>
+        }
+        .into_any()
+    };
+
     let row = move |h: &crate::runtime::HostRow, now: u64, read_only: bool| {
         let key = h.key.clone();
         let actions = if read_only {
@@ -1687,6 +1748,7 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
                 <td>{h.interface_name.clone()}</td>
                 <td>{h.source()}</td>
                 <td>{h.seen(now)}</td>
+                <td class="host-mode">{mode_cell(h, read_only)}</td>
                 <td class="host-actions">{actions}</td>
             </tr>
         }
@@ -1720,6 +1782,7 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
                                     <th scope="col">"Network"</th>
                                     <th scope="col">"Source"</th>
                                     <th scope="col">"Seen"</th>
+                                    <th scope="col">"Mode"</th>
                                     <th scope="col" aria-label="Actions"></th>
                                 </tr>
                             </thead>
@@ -1761,12 +1824,32 @@ pub fn HostsCard(initial: Option<HostCard>) -> impl IntoView {
             </div>
         })
     };
+    let footer = move || {
+        card.with(|c| {
+            let c = c.as_ref()?;
+            let locked = c.list.hosts.iter().any(|h| h.locked_mode().is_some());
+            let error = c.arp_error.clone();
+            (locked || error.is_some()).then(|| view! {
+                <div class="hosts-footer">
+                    {locked.then(|| view! {
+                        <p class="muted">"Same-network blocking works by redirecting the device's local traffic through the router (IPv4). It stops ordinary devices, not ones configured to bypass it."</p>
+                    })}
+                    {error.map(|e| view! {
+                        <p class="field-error">{format!("Same-network blocking is off: {e}")}</p>
+                    })}
+                </div>
+            })
+        })
+    };
     view! {
         {move || visible.get().then(|| view! {
             <section class="card card-wide hosts-card" aria-labelledby="w-hosts">
                 <h2 id="w-hosts">{move || card.with(|c| format!("Hosts ({})", c.as_ref().map_or(0, |c| c.list.hosts.len())))}</h2>
                 {toolbar}
                 {body}
+                {footer}
+                {move || note.get().map(|n| view! { <p class="muted" role="status">{n}</p> })}
+                {move || mode_error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
                 {move || error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
             </section>
         })}

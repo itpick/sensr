@@ -399,6 +399,20 @@ pub struct HostRow {
     /// A reservation for it is staged but not applied yet (set by the UI from the
     /// staged document, never sent by the agent).
     pub staged: bool,
+    /// Its host mode: `isolated` or `quarantine`; `None` (omitted) is Normal.
+    pub mode: Option<String>,
+}
+
+/// The ARP interceptor that enforces host modes between hosts of one network.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Intercept {
+    /// Redirecting now: it runs and a locked host has an address.
+    pub active: bool,
+    /// Interface ids with a locked host, while active.
+    pub interfaces: Vec<String>,
+    /// Why it could not start.
+    pub error: Option<String>,
 }
 
 /// `null` as the type's default, for fields an agent may send as `null`.
@@ -408,6 +422,16 @@ where
     T: Default + Deserialize<'de>,
 {
     Option::<T>::deserialize(d).map(Option::unwrap_or_default)
+}
+
+/// The value if it parses, else `None`: an odd block does not empty the whole list.
+fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v: Option<Value> = Option::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// The rows that parse; one odd row is dropped instead of failing the whole list.
@@ -445,6 +469,15 @@ impl HostRow {
             .filter(|n| !n.is_empty())
             .or_else(|| self.mac.clone())
             .unwrap_or_else(|| self.key.clone())
+    }
+
+    /// `isolated` or `quarantine`; `None` for Normal (and for a mode this UI does not know).
+    pub fn locked_mode(&self) -> Option<&'static str> {
+        match self.mode.as_deref() {
+            Some("isolated") => Some("isolated"),
+            Some("quarantine") => Some("quarantine"),
+            _ => None,
+        }
     }
 
     /// `static`, `dynamic` or `seen`.
@@ -497,6 +530,9 @@ pub struct HostList {
     /// Hosts, online first, then most recently seen.
     #[serde(deserialize_with = "lenient_rows")]
     pub hosts: Vec<HostRow>,
+    /// The ARP interceptor's state; `None` when the agent runs none.
+    #[serde(deserialize_with = "lenient")]
+    pub intercept: Option<Intercept>,
 }
 
 impl HostList {
@@ -741,6 +777,29 @@ mod tests {
         let orphan = row("orphan").expect("orphan");
         assert_eq!(orphan.interface, "");
         assert_eq!(orphan.seen(l.now), "never");
+    }
+
+    #[test]
+    fn parses_host_modes_and_the_intercept_block() {
+        let l: HostList = parse(json!({"now": 1, "hosts": [
+            {"key": "aa:bb:cc:dd:ee:01", "mac": "aa:bb:cc:dd:ee:01", "mode": "isolated"},
+            {"key": "aa:bb:cc:dd:ee:02", "mac": "aa:bb:cc:dd:ee:02", "mode": "quarantine"},
+            {"key": "aa:bb:cc:dd:ee:03", "mac": "aa:bb:cc:dd:ee:03"},
+            {"key": "aa:bb:cc:dd:ee:04", "mac": "aa:bb:cc:dd:ee:04", "mode": "later"}
+        ], "intercept": {"active": true, "interfaces": ["lan"], "error": null}}));
+        let modes: Vec<_> = l.hosts.iter().map(HostRow::locked_mode).collect();
+        assert_eq!(modes, [Some("isolated"), Some("quarantine"), None, None]);
+        assert_eq!(
+            l.intercept,
+            Some(Intercept {
+                active: true,
+                interfaces: vec!["lan".into()],
+                error: None
+            })
+        );
+        // an odd intercept block keeps the hosts
+        let odd: HostList = parse(json!({"now": 1, "hosts": [{"key": "k"}], "intercept": 5}));
+        assert_eq!((odd.hosts.len(), odd.intercept), (1, None));
     }
 
     #[test]

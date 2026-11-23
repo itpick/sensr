@@ -615,14 +615,17 @@ fn hosts_card_lists_first_20_and_show_all() {
         .collect();
     assert_eq!(
         heads,
-        ["Name", "MAC", "IP", "Network", "Source", "Seen", ""]
+        ["Name", "MAC", "IP", "Network", "Source", "Seen", "Mode", ""]
     );
     let search = doc.select(&sel("input[type=search]")).next().unwrap();
     assert_eq!(
         search.value().attr("placeholder"),
         Some("Search name, MAC or IP")
     );
-    let options: Vec<String> = doc.select(&sel("select option")).map(text).collect();
+    let options: Vec<String> = doc
+        .select(&sel(".grid-toolbar select option"))
+        .map(text)
+        .collect();
     assert_eq!(options, ["All networks", "LAN", "LAN2"]);
     assert_all_labelled(&doc, "hosts card");
 }
@@ -741,6 +744,7 @@ fn hosts_card_empty_list_says_so() {
         list: sensr_ui::runtime::HostList {
             now: HOSTS_NOW,
             hosts: Vec::new(),
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -860,6 +864,7 @@ fn hosts_card_filter_search_and_show_all() {
         list: sensr_ui::runtime::HostList {
             now: card.list.now,
             hosts: rows.into_iter().cloned().collect(),
+            ..card.list.clone()
         },
         ..card.clone()
     }));
@@ -870,4 +875,242 @@ fn hosts_card_filter_search_and_show_all() {
     assert_eq!(rows[0].name.as_deref(), Some("old-router"));
     // Filter and search combine.
     assert_eq!(card.visible("lan", "old-router", false).1, 0);
+}
+
+/// The Mode cell (second to last) of a host row.
+fn mode_cell<'a>(row: scraper::ElementRef<'a>) -> scraper::ElementRef<'a> {
+    let cells: Vec<_> = row.select(&sel("td")).collect();
+    cells[cells.len() - 2]
+}
+
+#[test]
+fn host_mode_select_present_for_mac_rows() {
+    let mut card = hosts_from(hosts_mock()).unwrap();
+    let base = card.list.hosts[0].clone();
+    card.list
+        .hosts
+        .retain(|h| h.name.as_deref() == Some("bench-pi"));
+    card.list.hosts.push(sensr_ui::runtime::HostRow {
+        key: "id:01:cc".into(),
+        mac: None,
+        name: Some("orphan".into()),
+        mode: None,
+        ..base
+    });
+    let doc = render_hosts(Some(card));
+    let heads: Vec<String> = doc
+        .select(&sel("thead th"))
+        .map(|h| text(h).trim().to_owned())
+        .collect();
+    assert_eq!(
+        heads,
+        ["Name", "MAC", "IP", "Network", "Source", "Seen", "Mode", ""]
+    );
+    let pi = mode_cell(host_row(&doc, "bench-pi"));
+    let select = pi.select(&sel("select")).next().expect("mode select");
+    assert_eq!(select.value().attr("aria-label"), Some("Mode for bench-pi"));
+    let options: Vec<(String, String)> = select
+        .select(&sel("option"))
+        .map(|o| (o.value().attr("value").unwrap_or("").to_owned(), text(o)))
+        .collect();
+    assert_eq!(
+        options,
+        [
+            ("normal".into(), "Normal".into()),
+            ("isolated".into(), "Isolated".into()),
+            ("quarantine".into(), "Quarantine".into()),
+        ]
+    );
+    let selected: Vec<String> = select.select(&sel("option[selected]")).map(text).collect();
+    assert_eq!(selected, ["Normal"]);
+    let orphan = mode_cell(host_row(&doc, "orphan"));
+    assert!(orphan.select(&sel("select")).next().is_none());
+    assert_eq!(text(orphan).trim(), "—");
+    assert_all_labelled(&doc, "hosts card with modes");
+}
+
+#[test]
+fn host_mode_badges() {
+    let card = hosts_from(hosts_mock()).unwrap();
+    let mode = |name: &str| {
+        card.list
+            .hosts
+            .iter()
+            .find(|h| h.name.as_deref() == Some(name))
+            .and_then(|h| h.mode.clone())
+    };
+    assert_eq!(mode("device-02").as_deref(), Some("isolated"));
+    assert_eq!(mode("device-05").as_deref(), Some("quarantine"));
+    assert_eq!(mode("bench-pi"), None);
+    let doc = render_hosts(Some(card));
+    let badge = |name: &str| {
+        mode_cell(host_row(&doc, name))
+            .select(&sel(".pill"))
+            .next()
+            .map(|b| (b.value().attr("class").unwrap_or("").to_owned(), text(b)))
+    };
+    let (class, label) = badge("device-02").expect("isolated badge");
+    assert!(class.split(' ').any(|c| c == "pill-warn"), "{class}");
+    assert_eq!(label, "Isolated");
+    let (class, label) = badge("device-05").expect("quarantine badge");
+    assert!(class.split(' ').any(|c| c == "pill-off"), "{class}");
+    assert_eq!(label, "Quarantine");
+    assert!(badge("bench-pi").is_none(), "Normal has no badge");
+    let selected: Vec<String> = mode_cell(host_row(&doc, "device-05"))
+        .select(&sel("option[selected]"))
+        .map(text)
+        .collect();
+    assert_eq!(selected, ["Quarantine"]);
+}
+
+#[test]
+fn host_mode_read_only_has_no_select() {
+    let m = hosts_mock().with_privileges(&["page-all", "user-config-readonly"]);
+    let card = hosts_from(m).unwrap();
+    let doc = render_hosts(Some(card));
+    for row in doc.select(&sel("tbody tr")) {
+        assert!(mode_cell(row).select(&sel("select")).next().is_none());
+    }
+    // the badges still say which hosts are locked
+    assert!(
+        mode_cell(host_row(&doc, "device-02"))
+            .select(&sel(".pill-warn"))
+            .next()
+            .is_some()
+    );
+    // the read-only mock refuses a change like the agent does
+    use sensr_ui::api::Backend;
+    let m = hosts_mock().with_privileges(&["page-all", "user-config-readonly"]);
+    assert!(
+        block(m.set_host_mode("b8:27:eb:7d:4e:25".into(), Some("isolated".into()), None)).is_err()
+    );
+}
+
+const FOOTER_LOCKED: &str = "Same-network blocking works by redirecting the device's local traffic through the router (IPv4). It stops ordinary devices, not ones configured to bypass it.";
+
+#[test]
+fn host_mode_footer_text() {
+    let card = hosts_from(hosts_mock()).unwrap();
+    assert!(card.list.intercept.as_ref().is_some_and(|i| i.active));
+    assert_eq!(card.arp_error, None);
+    let all = text(render_hosts(Some(card.clone())).root_element());
+    assert!(all.contains(FOOTER_LOCKED), "{all}");
+    assert!(!all.contains("Same-network blocking is off"));
+    // nobody locked: no footer
+    let mut normal = card.clone();
+    for h in &mut normal.list.hosts {
+        h.mode = None;
+    }
+    let all = text(render_hosts(Some(normal)).root_element());
+    assert!(!all.contains("Same-network blocking"), "{all}");
+    // the interceptor could not start
+    let mut broken = card;
+    broken.arp_error = Some("raw socket: permission denied".into());
+    let all = text(render_hosts(Some(broken)).root_element());
+    assert!(all.contains(FOOTER_LOCKED));
+    assert!(
+        all.contains("Same-network blocking is off: raw socket: permission denied"),
+        "{all}"
+    );
+}
+
+#[test]
+fn host_card_reads_arp_error_from_the_intercept_block() {
+    let l: sensr_ui::runtime::HostList = sensr_ui::runtime::parse(serde_json::json!({
+        "now": 1, "hosts": [],
+        "intercept": {"active": false, "interfaces": [], "error": "no raw socket"}
+    }));
+    assert_eq!(
+        l.intercept.and_then(|i| i.error).as_deref(),
+        Some("no raw socket")
+    );
+}
+
+const SELF_QUARANTINE: &str = "That's the device you're using — quarantine it from another device.";
+
+/// Runs the `set_host_mode` server fn against `m`, the request coming from `remote`.
+fn set_mode_on(
+    m: sensr_ui::mock::MockBackend,
+    remote: Option<&str>,
+    mac: &str,
+    mode: Option<&str>,
+) -> (Result<String, String>, sensr_ui::actions::HostCard) {
+    let handle: sensr_ui::api::BackendHandle = std::sync::Arc::new(m);
+    let owner = Owner::new();
+    owner.with(|| {
+        provide_context(handle);
+        if let Some(r) = remote {
+            let (mut parts, ()) = axum::http::Request::new(()).into_parts();
+            let addr: std::net::SocketAddr = r.parse().unwrap();
+            parts.extensions.insert(axum::extract::ConnectInfo(addr));
+            provide_context(parts);
+        }
+        let r = futures::executor::block_on(sensr_ui::actions::set_host_mode(
+            mac.into(),
+            mode.map(str::to_owned),
+        ))
+        .map_err(|e| sensr_ui::actions::server_message(&e));
+        let card = futures::executor::block_on(sensr_ui::actions::hosts())
+            .unwrap()
+            .unwrap();
+        (r, card)
+    })
+}
+
+#[test]
+fn self_quarantine_refused() {
+    let mac = sensr_ui::mock::MOCK_CLIENT_MAC;
+    // the mock (like the agent) refuses its own client
+    let (r, card) = set_mode_on(hosts_mock(), None, mac, Some("quarantine"));
+    assert_eq!(r, Err(SELF_QUARANTINE.to_owned()));
+    let own = card.list.hosts.iter().find(|h| h.key == mac).unwrap();
+    assert_eq!(own.mode, None, "nothing changed");
+    // isolating it is fine
+    let (r, _) = set_mode_on(hosts_mock(), None, mac, Some("isolated"));
+    assert_eq!(r.as_deref(), Ok("applied"));
+    // the card's own check: the request comes from nas's address
+    let (r, _) = set_mode_on(
+        hosts_mock(),
+        Some("192.168.1.20:50000"),
+        "52:54:00:AA:BB:01",
+        Some("quarantine"),
+    );
+    assert_eq!(r, Err(SELF_QUARANTINE.to_owned()));
+    // ...also as a dual-stack listener reports it
+    let (r, _) = set_mode_on(
+        hosts_mock(),
+        Some("[::ffff:192.168.1.20]:50000"),
+        "52:54:00:aa:bb:01",
+        Some("quarantine"),
+    );
+    assert_eq!(r, Err(SELF_QUARANTINE.to_owned()));
+}
+
+#[test]
+fn host_mode_set_and_back_to_normal() {
+    let (r, card) = set_mode_on(hosts_mock(), None, "b8:27:eb:7d:4e:25", Some("quarantine"));
+    assert_eq!(r.as_deref(), Ok("applied"));
+    let pi = |c: &sensr_ui::actions::HostCard| {
+        c.list
+            .hosts
+            .iter()
+            .find(|h| h.name.as_deref() == Some("bench-pi"))
+            .unwrap()
+            .mode
+            .clone()
+    };
+    assert_eq!(pi(&card).as_deref(), Some("quarantine"));
+    let (r, card) = set_mode_on(hosts_mock(), None, "02:00:00:00:00:02", None);
+    assert_eq!(r.as_deref(), Ok("applied"));
+    assert!(
+        card.list
+            .hosts
+            .iter()
+            .find(|h| h.name.as_deref() == Some("device-02"))
+            .unwrap()
+            .mode
+            .is_none()
+    );
+    let (r, _) = set_mode_on(hosts_mock(), None, "b8:27:eb:7d:4e:25", Some("bogus"));
+    assert!(r.is_err());
 }

@@ -33,11 +33,29 @@ test("search filters by MAC", async ({ page }) => {
 
 test("network filter shows only LAN2", async ({ page }) => {
   await open(page);
-  await card(page).getByRole("combobox").selectOption({ label: "LAN2" });
+  await card(page).getByRole("combobox", { name: "Network", exact: true }).selectOption({ label: "LAN2" });
   const lan = rows(page).locator("td:nth-child(4)").filter({ hasNotText: /^LAN2$/ });
   await expect(lan).toHaveCount(0);
   await expect(rows(page).first()).toBeVisible();
   await expect(rows(page).filter({ hasText: "nas" })).toHaveCount(0);
+});
+
+test("mode select isolates a host and quarantine of your own device is refused", async ({ page }) => {
+  // device-01 is the mock's own client; also runs before Forget, which may drop it
+  test.skip(!!process.env.SENSR_UI_BASE_URL, "relies on the mock's client MAC");
+  await open(page);
+  const pi = rows(page).filter({ hasText: "bench-pi" });
+  await pi.getByRole("combobox", { name: "Mode for bench-pi" }).selectOption("isolated");
+  await expect(pi.locator(".pill-warn")).toHaveText("Isolated");
+  await expect(card(page)).toContainText("Same-network blocking works by redirecting");
+  await pi.getByRole("combobox", { name: "Mode for bench-pi" }).selectOption("normal");
+  await expect(pi.locator(".pill")).toHaveCount(0);
+  const own = rows(page).filter({ hasText: "device-01" });
+  await own.getByRole("combobox", { name: "Mode for device-01" }).selectOption("quarantine");
+  await expect(card(page).getByRole("alert")).toHaveText(
+    "That's the device you're using — quarantine it from another device.",
+  );
+  await expect(own.getByRole("combobox", { name: "Mode for device-01" })).toHaveValue("normal");
 });
 
 test("forget removes a dynamic host", async ({ page }) => {
@@ -65,5 +83,6 @@ test.describe("read-only user", () => {
     await open(page);
     await expect(card(page).getByRole("button", { name: "Forget" })).toHaveCount(0);
     await expect(card(page).getByRole("button", { name: "Make static" })).toHaveCount(0);
+    await expect(card(page).getByRole("combobox", { name: /^Mode for / })).toHaveCount(0);
   });
 });

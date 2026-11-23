@@ -319,6 +319,38 @@ impl Backend for UiBackend {
         .boxed()
     }
 
+    fn set_host_mode(
+        &self,
+        mac: String,
+        mode: Option<String>,
+        remote: Option<std::net::IpAddr>,
+    ) -> BoxFuture<'_, ApiResult<String>> {
+        async move {
+            use sensr_ipc::HostModeMode;
+            let mode = match mode.as_deref() {
+                None | Some("normal") => None,
+                Some("isolated") => Some(HostModeMode::Isolated),
+                Some("quarantine") => Some(HostModeMode::Quarantine),
+                Some(other) => {
+                    return Err(ApiError::Backend(format!("unknown host mode {other:?}")));
+                }
+            };
+            let op = Op::HostModeSet {
+                mac,
+                mode,
+                remote_addr: remote,
+            };
+            match self.call(op).await? {
+                Response::Value(Some(v)) => match v.get("result").and_then(Value::as_str) {
+                    Some(r) => Ok(r.to_owned()),
+                    None => Err(ApiError::Backend(format!("unexpected agent reply {v}"))),
+                },
+                other => Err(unexpected(other)),
+            }
+        }
+        .boxed()
+    }
+
     fn read_only(&self) -> bool {
         self.caller
             .info

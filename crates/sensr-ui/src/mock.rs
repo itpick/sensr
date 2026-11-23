@@ -34,6 +34,8 @@ struct State {
     clock: Box<dyn Fn() -> u64 + Send>,
     /// Host keys dropped with Forget.
     forgotten: std::collections::HashSet<String>,
+    /// Host modes by MAC (`isolated` / `quarantine`); Normal hosts are absent.
+    modes: std::collections::BTreeMap<String, String>,
 }
 
 impl State {
@@ -154,6 +156,11 @@ impl MockBackend {
                 next_token: 1,
                 clock,
                 forgotten: Default::default(),
+                modes: [
+                    ("02:00:00:00:00:02".to_owned(), "isolated".to_owned()),
+                    ("02:00:00:00:00:05".to_owned(), "quarantine".to_owned()),
+                ]
+                .into(),
             }),
             users: vec![("root".into(), "sensr".into())],
             insight_dir: None,
@@ -373,11 +380,24 @@ impl Backend for MockBackend {
                 RuntimeSection::Aliases => simulated_feeds(&s.staged, t),
                 RuntimeSection::Ipv6 => simulated_pd(&s.staged, t),
                 RuntimeSection::Hosts => {
-                    let hosts: Vec<Value> = simulated_hosts(t)
+                    let mut hosts: Vec<Value> = simulated_hosts(t)
                         .into_iter()
                         .filter(|h| !s.forgotten.contains(h["key"].as_str().unwrap_or_default()))
                         .collect();
-                    json!({ "now": t, "hosts": hosts })
+                    let mut interfaces = std::collections::BTreeSet::new();
+                    for h in &mut hosts {
+                        if let Some(mode) = h["mac"].as_str().and_then(|m| s.modes.get(m)) {
+                            h["mode"] = json!(mode);
+                            interfaces
+                                .insert(h["interface"].as_str().unwrap_or_default().to_owned());
+                        }
+                    }
+                    let intercept = json!({
+                        "active": !interfaces.is_empty(),
+                        "interfaces": interfaces,
+                        "error": null,
+                    });
+                    json!({ "now": t, "hosts": hosts, "intercept": intercept })
                 }
             })
         }))
@@ -397,6 +417,40 @@ impl Backend for MockBackend {
             } else {
                 Err(ApiError::Conflict("host is reserved or unknown".into()))
             }
+        }))
+    }
+
+    fn set_host_mode(
+        &self,
+        mac: String,
+        mode: Option<String>,
+        remote: Option<std::net::IpAddr>,
+    ) -> BoxFuture<'_, ApiResult<String>> {
+        let _ = remote;
+        if self.read_only() {
+            return ready(Err(ApiError::Unauthorized));
+        }
+        let mac = mac.to_ascii_lowercase();
+        let mode = match mode.as_deref() {
+            None | Some("normal") => None,
+            Some(m @ ("isolated" | "quarantine")) => Some(m.to_owned()),
+            Some(other) => {
+                return ready(Err(ApiError::Backend(format!(
+                    "unknown host mode {other:?}"
+                ))));
+            }
+        };
+        if mode.as_deref() == Some("quarantine") && mac == MOCK_CLIENT_MAC {
+            return ready(Err(ApiError::Conflict(
+                crate::actions::SELF_QUARANTINE.to_owned(),
+            )));
+        }
+        ready(self.with(|s| {
+            match mode {
+                Some(m) => s.modes.insert(mac, m),
+                None => s.modes.remove(&mac),
+            };
+            Ok("applied".to_owned())
         }))
     }
 
@@ -427,6 +481,10 @@ impl Backend for MockBackend {
         })
     }
 }
+
+/// The MAC of the device the mock pretends every request comes from (`device-01`):
+/// quarantining it is refused, as the agent refuses the caller's own device.
+pub const MOCK_CLIENT_MAC: &str = "02:00:00:00:00:01";
 
 /// The host inventory as the agent would report it at `now`, sorted the agent's way
 /// (online first, then most recently seen): 25 hosts on LAN and LAN2 with one of each
