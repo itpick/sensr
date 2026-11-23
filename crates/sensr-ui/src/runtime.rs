@@ -568,14 +568,16 @@ impl HostList {
                 .map(str::to_ascii_lowercase)
         };
         for h in &mut self.hosts {
-            h.staged_mode = h.mac.as_deref().and_then(|mac| {
+            // the staged keys are lowercased; so is the row's MAC
+            let mac = h.mac.as_deref().map(str::to_ascii_lowercase);
+            h.staged_mode = mac.as_deref().and_then(|mac| {
                 let staged = modes.get(mac).copied().unwrap_or("normal");
                 (staged != h.locked_mode().unwrap_or("normal")).then(|| staged.to_owned())
             });
             // a reserved row's reservation is already applied
             h.staged = !h.reserved()
                 && reservations.iter().any(|r| {
-                    (h.mac.is_some() && get(r, "/client/hw_address").as_deref() == h.mac.as_deref())
+                    (mac.is_some() && get(r, "/client/hw_address") == mac)
                         || (h.ipv4.is_some() && get(r, "/ip_address") == h.ipv4)
                 });
         }
@@ -822,6 +824,31 @@ mod tests {
         // an odd intercept block keeps the hosts
         let odd: HostList = parse(json!({"now": 1, "hosts": [{"key": "k"}], "intercept": 5}));
         assert_eq!((odd.hosts.len(), odd.intercept), (1, None));
+    }
+
+    /// The agent's MAC may be uppercase; the staged document's is matched
+    /// case-insensitively.
+    #[test]
+    fn mark_staged_matches_an_uppercase_mac() {
+        let mut l: HostList = parse(json!({"now": 1, "hosts": [
+            {"key": "k1", "mac": "AA:BB:CC:DD:EE:01", "mode": "isolated"},
+            {"key": "k2", "mac": "AA:BB:CC:DD:EE:02"}
+        ]}));
+        l.mark_staged(&json!({
+            "firewall": {"host_modes": {
+                "a": {"mac": "aa:bb:cc:dd:ee:01", "mode": "isolated"},
+                "b": {"mac": "aa:bb:cc:dd:ee:02", "mode": "quarantine"}
+            }},
+            "dhcpv4": {"reservations": {
+                "r": {"client": {"hw_address": "aa:bb:cc:dd:ee:02"}, "ip_address": "192.168.1.9"}
+            }}
+        }));
+        assert_eq!(
+            l.hosts[0].staged_mode, None,
+            "already isolated: nothing staged"
+        );
+        assert_eq!(l.hosts[1].staged_mode.as_deref(), Some("quarantine"));
+        assert!(l.hosts[1].staged, "its reservation is staged");
     }
 
     #[test]
