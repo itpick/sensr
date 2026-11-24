@@ -122,20 +122,21 @@ in
     "vfat"
     "nls_cp437"
     "nls_iso8859_1"
-    # The RTL8156 USB NICs (LAN and LAN2). Loaded explicitly rather than left
-    # to udev's coldplug: on the Pi 4 the same dongles enumerate without ever
-    # binding, and auto-loading is the one difference between the boards.
-    "usbnet"
-    "r8152"
+    # Not usbnet/r8152 (the RTL8156 USB NICs): see boot.kernelModules below.
     # QEMU's virt machine (the image's boot test, nix/tests/pi5-qemu.sh)
     "virtio_pci"
     "virtio_blk"
   ];
-  boot.kernelModules = [
-    "bcm2835_wdt"
-    "usbnet"
-    "r8152"
-  ];
+  # The RTL8156 USB NICs (LAN and LAN2) are left to udev's coldplug, which
+  # loads r8152 after sensr-ifnames has restored their MAC-pinned names. The
+  # Pi 4 image loads it explicitly (its dongles once enumerated without
+  # binding); on a Pi 5 the same explicit load stalled every boot: with
+  # r8152 in modules-load.d (and the initrd), systemd started nothing after
+  # "Inserted module 'r8152'" at ~10 s, so the router never came up. That
+  # went unnoticed from Nov 18 until the first cold boot on 2026-11-23,
+  # since every release in between reached the router as a live switch.
+  # Booting the same system with systemd-modules-load masked worked.
+  boot.kernelModules = [ "bcm2835_wdt" ];
 
   # The 2.5 GbE USB dongles (Realtek RTL8156, 0bda:8156) that carry LAN and
   # LAN2 on a Pi 5 reset under the r8152 driver: one reset left eth1 with a
