@@ -8,6 +8,19 @@
 # package at once, atomically, and leaves the previous generation in the
 # profile for rollback.
 #
+# An install is health-gated (docs/research/04a §5.2, ISS-C-005): before the
+# switch the updater records the running generation and a baseline of the
+# health checks (sensr-update-health, ./update-health.sh); after it, the
+# checks must pass within updates.healthTimeout. If they do not, the updater
+# points the system profile back at the previous generation, runs its
+# switch-to-configuration switch, writes status phase "rolled-back" with the
+# failed checks, and remembers the release as bad so auto mode does not
+# install it again (a manual install still may). The exit status of the
+# switch itself only goes in the log: a unit that lost a race during
+# activation (the boot selftest against the agent's restart) makes it
+# non-zero on a box that is fine, and a switch that "succeeded" can still
+# leave DNS down. The gate decides.
+#
 # Who does what:
 #   sensr-update.service        root; handles a request the UI dropped in
 #                               /run/sensr/updates/request.json.
@@ -40,6 +53,28 @@ let
   requestFile = "${updateRun}/request.json";
   statusFile = "${updateRun}/status.json";
 
+  healthScript = pkgs.writeShellApplication {
+    name = "sensr-update-health";
+    runtimeInputs = with pkgs; [
+      coreutils
+      curl
+      dig
+      gawk
+      gnugrep
+      iproute2
+      iputils
+      jq
+      socat
+      systemd
+      cfg.package
+    ];
+    text =
+      builtins.replaceStrings
+        [ "@apiListen@" ]
+        [ (lib.escapeShellArg (if cfg.api.listen == null then "" else cfg.api.listen)) ]
+        (builtins.readFile ./update-health.sh);
+  };
+
   updateScript = pkgs.writeShellApplication {
     name = "sensr-update";
     runtimeInputs = with pkgs; [
@@ -50,6 +85,7 @@ let
       systemd
       util-linux
       zstd
+      healthScript
     ];
     text = ''
       set -euo pipefail
@@ -65,6 +101,13 @@ let
       # matches the manifest, so the page can name it ("v0.1.1") instead of
       # only the nixos label, which repeats across builds from one nixpkgs.
       release_file="$state_dir/running-release"
+      # Releases that failed the health gate here and were rolled back: auto
+      # mode skips them, a manual install may try again.
+      bad_file="$state_dir/bad-releases.json"
+      # The last rollback, shown on the page until an install succeeds.
+      rollback_file="$state_dir/last-rollback.json"
+      profile=/nix/var/nix/profiles/system
+      health_timeout=${toString upd.healthTimeout}
       work=""
       remote_tag=""
       remote_version=""
@@ -122,6 +165,40 @@ let
         printf '%s\n' "$1" > "$release_file.tmp" && mv "$release_file.tmp" "$release_file"
       }
 
+      rollback_json() {
+        jq -c . "$rollback_file" 2>/dev/null || echo null
+      }
+
+      # Reason the release the manifest offers was rolled back here before,
+      # or nothing. Matched by store path when the manifest names one.
+      bad_reason() {
+        [ -r "$bad_file" ] || return 0
+        jq -r --arg p "$remote_path" --arg t "$remote_tag" '
+          [ .[] | select(($p != "" and .store_path == $p) or ($p == "" and $t != "" and .tag == $t)) ]
+          | last | .reason // empty' "$bad_file" 2>/dev/null || true
+      }
+
+      mark_bad() { # store_path reason
+        local list='[]'
+        if [ -r "$bad_file" ]; then
+          list=$(jq -c 'if type == "array" then . else [] end' "$bad_file" 2>/dev/null || echo '[]')
+        fi
+        jq -n --argjson list "$list" --arg t "$remote_tag" --arg p "$1" --arg r "$2" \
+          --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          '[ $list[] | select(.store_path != $p) ] + [{tag: $t, store_path: $p, reason: $r, at: $at}]' \
+          > "$bad_file.tmp"
+        mv "$bad_file.tmp" "$bad_file"
+      }
+
+      forget_bad() { # store_path
+        [ -r "$bad_file" ] || return 0
+        if jq -c --arg p "$1" '[ .[] | select(.store_path != $p) ]' "$bad_file" > "$bad_file.tmp" 2>/dev/null; then
+          mv "$bad_file.tmp" "$bad_file"
+        else
+          rm -f "$bad_file.tmp"
+        fi
+      }
+
       # The status the UI reads. Every field is always present so the page
       # renders before the first check has run.
       write_status() {
@@ -138,6 +215,7 @@ let
           --arg checked "$last_checked" \
           --arg installed "$last_installed" \
           --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --argjson rollback "$(rollback_json)" \
           '{
             phase: $phase,
             message: $message,
@@ -151,6 +229,7 @@ let
             manifest_url: $manifest,
             last_check: (if $checked == "" then null else $checked end),
             last_install: (if $installed == "" then null else $installed end),
+            rollback: $rollback,
             updated_at: $at
           }' > "$status_file.tmp"
         mv "$status_file.tmp" "$status_file"
@@ -187,12 +266,13 @@ let
 
       available_json() {
         jq -n \
+          --arg tag "$remote_tag" \
           --arg version "$remote_version" \
           --arg sha "$remote_sha" \
           --arg url "$remote_system" \
           --arg path "$remote_path" \
           --arg notes "$remote_notes" \
-          '{version: $version, sha256: $sha, url: $url, store_path: $path, notes: $notes}'
+          '{tag: $tag, version: $version, sha256: $sha, url: $url, store_path: $path, notes: $notes}'
       }
 
       check() {
@@ -215,10 +295,19 @@ let
           write_status up-to-date "This system is up to date (''${remote_tag:-$cur})" null
           return 0
         fi
+        local bad
+        bad=$(bad_reason)
+        if [ -n "$bad" ]; then
+          write_status update-available "Release ''${remote_tag:-$remote_version} is available, but it was rolled back here before ($bad); automatic updates skip it" "$(available_json)"
+          return 0
+        fi
         write_status update-available "Release ''${remote_tag:-$remote_version} is available" "$(available_json)"
       }
 
+      # install [auto|manual]: auto (the timer) skips a release that was rolled
+      # back here; manual (the page, --install) tries it again.
       install() {
+        local how=''${1:-manual}
         work=$(mktemp -d)
         last_checked=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         if ! fetch_manifest; then
@@ -230,6 +319,12 @@ let
         if [ -n "$remote_path" ] && [ "$remote_path" = "$(current_system)" ]; then
           remember_release "$remote_tag"
           write_status up-to-date "This system is up to date (''${remote_tag:-$cur})" null
+          return 0
+        fi
+        local bad
+        bad=$(bad_reason)
+        if [ -n "$bad" ] && [ "$how" = auto ]; then
+          write_status update-available "Release ''${remote_tag:-$remote_version} was rolled back here before ($bad); automatic updates skip it. Install it by hand to try again." "$(available_json)"
           return 0
         fi
         if [ -z "$remote_sha" ]; then
@@ -273,27 +368,95 @@ let
           return 1
         fi
 
-        # Keep the imported generation even if the switch fails: the operator
-        # can then switch or boot it by hand.
-        if ! nix-env -p /nix/var/nix/profiles/system --set "$toplevel"; then
+        # What to come back to if the new generation is unhealthy: the
+        # running system (the profile's target on any box that booted it),
+        # its release tag, and how the health checks look right now.
+        local prev_system prev_label new_label
+        prev_system=$(current_system)
+        if [ -z "$prev_system" ] || [ ! -x "$prev_system/bin/switch-to-configuration" ]; then
+          write_status error "The running system ($prev_system) cannot be switched back to; not installing" "$(available_json)"
+          return 1
+        fi
+        prev_label=$(current_release)
+        prev_label=''${prev_label:-$(current_version)}
+        new_label=''${remote_tag:-$remote_version}
+        echo "sensr-update: previous generation $prev_system ($prev_label), profile $(readlink -f "$profile" 2>/dev/null || echo none)"
+        sensr-update-health baseline > "$work/baseline.json" || echo '{}' > "$work/baseline.json"
+
+        # Keep the imported generation even if it is rolled back: the
+        # operator can then switch to it or boot it by hand.
+        if ! nix-env -p "$profile" --set "$toplevel"; then
           write_status error "Could not set the system profile" "$(available_json)"
           return 1
         fi
 
-        write_status installing "Switching to ''${remote_tag:-$remote_version}" "$(available_json)"
+        write_status installing "Switching to $new_label" "$(available_json)"
         # Run the switch in its own transient unit: the activation restarts
         # changed units, and sensr-update.service is one of them. In this
         # unit's cgroup that restart could kill the script before it records
         # the outcome; a separate unit runs to completion either way.
-        if ! systemd-run --unit=sensr-update-switch --collect --wait \
-             "$toplevel/bin/switch-to-configuration" switch; then
-          write_status error "switch-to-configuration failed; the previous generation still boots" "$(available_json)"
-          return 1
+        local switch_rc=0
+        systemd-run --unit=sensr-update-switch --collect --wait \
+          "$toplevel/bin/switch-to-configuration" switch || switch_rc=$?
+        if [ "$switch_rc" != 0 ]; then
+          echo "sensr-update: switch-to-configuration exited $switch_rc; the health gate decides" >&2
         fi
 
-        last_installed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        remember_release "$remote_tag"
-        write_status "done" "Updated to ''${remote_tag:-$remote_version}" null
+        write_status verifying "Checking the router on $new_label" "$(available_json)"
+        if sensr-update-health gate --baseline "$work/baseline.json" --timeout "$health_timeout" > "$work/gate.json"; then
+          last_installed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          remember_release "$remote_tag"
+          forget_bad "$toplevel"
+          rm -f "$rollback_file"
+          write_status "done" "Updated to $new_label" null
+          return 0
+        fi
+
+        rollback "$prev_system" "$prev_label" "$new_label" "$toplevel"
+        return 1
+      }
+
+      # rollback PREV_SYSTEM PREV_LABEL NEW_LABEL NEW_SYSTEM: the gate failed
+      # on NEW_SYSTEM; go back to PREV_SYSTEM and say why.
+      rollback() {
+        local prev=$1 prev_label=$2 new_label=$3 new=$4 reason failed
+        reason=$(jq -r '[.failed[] as $f | "\($f): \(.reasons[$f] // "failed")"] | join("; ")' "$work/gate.json" 2>/dev/null || true)
+        reason=''${reason:-the health checks did not pass}
+        failed=$(jq -c '.failed // []' "$work/gate.json" 2>/dev/null || echo '[]')
+        echo "sensr-update: $new_label failed the health gate ($reason); rolling back to $prev_label" >&2
+        write_status rolling-back "Rolling back to $prev_label: $reason" "$(available_json)"
+
+        local rb_rc=0 healthy=false
+        nix-env -p "$profile" --set "$prev" || rb_rc=$?
+        systemd-run --unit=sensr-update-rollback --collect --wait \
+          "$prev/bin/switch-to-configuration" switch || rb_rc=$?
+        if [ "$rb_rc" != 0 ]; then
+          echo "sensr-update: switching back to $prev exited $rb_rc" >&2
+        fi
+        if sensr-update-health gate --baseline "$work/baseline.json" --timeout "$health_timeout" > "$work/rollback-gate.json"; then
+          healthy=true
+          echo "sensr-update: $prev_label passes the health gate again" >&2
+        else
+          echo "sensr-update: after the rollback the gate still fails: $(jq -c '.reasons' "$work/rollback-gate.json" 2>/dev/null || true)" >&2
+        fi
+
+        mark_bad "$new" "$reason"
+        jq -n \
+          --arg from "$new_label" \
+          --arg to "$prev_label" \
+          --arg reason "$reason" \
+          --argjson failed "$failed" \
+          --arg store_path "$new" \
+          --argjson healthy "$healthy" \
+          --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          '{from: $from, to: $to, reason: $reason, failed: $failed, store_path: $store_path, healthy_after: $healthy, at: $at}' \
+          > "$rollback_file.tmp"
+        mv "$rollback_file.tmp" "$rollback_file"
+        local note=""
+        if [ "$healthy" != true ]; then
+          note=" (the previous generation does not pass every check either; see journalctl -u sensr-update)"
+        fi
+        write_status rolled-back "Rolled back from $new_label to $prev_label: $reason$note" "$(available_json)"
       }
 
       # Handle the UI request. The file is removed before the action so a
@@ -307,7 +470,7 @@ let
           rm -f "$request_file"
           case "$(printf '%s' "$req" | jq -r '.mode // "check"')" in
             check) check ;;
-            install) install ;;
+            install) install manual ;;
             auto-on) set_auto true; write_status idle "Automatic updates are on" null ;;
             auto-off) set_auto false; write_status idle "Automatic updates are off" null ;;
             *) write_status error "Unknown update request" null ;;
@@ -317,7 +480,7 @@ let
 
       case "''${1:---timer}" in
         --check) check ;;
-        --install) install ;;
+        --install) install manual ;;
         --handle) handle_request ;;
         --timer)
           # A request that arrived while the path unit was busy is still on
@@ -326,7 +489,7 @@ let
           # Auto mode installs; otherwise the check still refreshes what the
           # page shows, so the operator sees a pending update.
           if [ "$(state_auto)" = true ]; then
-            install
+            install auto
           else
             check
           fi
@@ -366,6 +529,16 @@ in
       default = "6h";
       description = "How often the timer checks (systemd time span).";
     };
+    healthTimeout = mkOption {
+      type = types.ints.positive;
+      default = 120;
+      description = ''
+        Seconds the new generation has, after its switch, to pass every
+        health check (sensr-update-health: agent, DNS, DHCP, API, default
+        route and gateway, no failed sensr units) before the updater switches
+        back to the previous one.
+      '';
+    };
   };
 
   config = lib.mkIf (cfg.enable && upd.enable) {
@@ -375,6 +548,10 @@ in
       "d ${updateRun} 0775 root sensr-api -"
       "d ${updateState} 0700 root root -"
     ];
+
+    # The gate the updater runs, for an operator to run by hand as well
+    # (`sensr-update-health gate --timeout 10`).
+    environment.systemPackages = [ healthScript ];
 
     systemd.services.sensr-update = {
       description = "sensr system update: handle a web UI request";
@@ -411,10 +588,12 @@ in
         ProtectHome = true;
         ProtectKernelTunables = true;
         ProtectKernelLogs = true;
+        # AF_NETLINK: the health gate reads routes and sockets (ip, ss).
         RestrictAddressFamilies = [
           "AF_UNIX"
           "AF_INET"
           "AF_INET6"
+          "AF_NETLINK"
         ];
         SystemCallFilter = [
           "@system-service"
@@ -451,10 +630,12 @@ in
         ProtectHome = true;
         ProtectKernelTunables = true;
         ProtectKernelLogs = true;
+        # AF_NETLINK: the health gate reads routes and sockets (ip, ss).
         RestrictAddressFamilies = [
           "AF_UNIX"
           "AF_INET"
           "AF_INET6"
+          "AF_NETLINK"
         ];
         SystemCallFilter = [
           "@system-service"

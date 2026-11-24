@@ -1864,9 +1864,12 @@ pub fn UpdatesLive(initial: UpdateStatus) -> impl IntoView {
         st.with(|s| {
             let (class, label) = match s.phase.as_str() {
                 "error" => ("pill pill-off", "error"),
+                "rolled-back" => ("pill pill-off", "rolled back"),
                 "update-available" => ("pill pill-info", "update available"),
                 "up-to-date" | "done" => ("pill pill-on", "up to date"),
-                "checking" | "downloading" | "installing" => ("pill pill-info", "working"),
+                "checking" | "downloading" | "installing" | "verifying" | "rolling-back" => {
+                    ("pill pill-info", "working")
+                }
                 _ => ("pill", "idle"),
             };
             view! { <span class=class>{label}</span> }
@@ -1877,7 +1880,7 @@ pub fn UpdatesLive(initial: UpdateStatus) -> impl IntoView {
         <div class="card">
             <h2>"System updates"</h2>
             <p class="intro">
-                "An update replaces the whole system closure: the sensr binaries, the daemons and every package they use, atomically, with no reboot: the switch takes effect at once and only restarts the services it changes. A new kernel starts at the next reboot you choose. The previous generation stays on the box for rollback."
+                "An update replaces the whole system closure: the sensr binaries, the daemons and every package they use, atomically, with no reboot: the switch takes effect at once and only restarts the services it changes. A new kernel starts at the next reboot you choose. If DNS, DHCP, the agent or the web UI are not healthy after the switch, sensr switches back to the previous generation by itself."
             </p>
             <dl class="stat-tiles" aria-label="Update state">
                 <div>
@@ -1897,6 +1900,10 @@ pub fn UpdatesLive(initial: UpdateStatus) -> impl IntoView {
                     <dd>{move || st.with(|s| s.last_check.clone()).unwrap_or_else(|| "never".to_owned())}</dd>
                 </div>
             </dl>
+
+            {move || st.with(|s| s.rollback.as_ref().map(|r| view! {
+                <p class="field-error" role="alert" id="update-rollback">{r.summary()}</p>
+            }))}
 
             {move || st.with(|s| match &s.available {
                 None => view! {
