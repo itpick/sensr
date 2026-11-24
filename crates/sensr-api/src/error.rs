@@ -37,6 +37,8 @@ fn status_of(kind: ErrorKind) -> StatusCode {
         ErrorKind::NotFound => StatusCode::NOT_FOUND,
         ErrorKind::Validation => StatusCode::UNPROCESSABLE_ENTITY,
         ErrorKind::Conflict => StatusCode::CONFLICT,
+        ErrorKind::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+        ErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         ErrorKind::ApplyFailed | ErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

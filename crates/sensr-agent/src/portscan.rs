@@ -797,9 +797,14 @@ pub enum ScanNowError {
     /// [`MAX_SCAN_NOW`] scans are running already.
     #[error("too many scans are running")]
     TooMany,
-    /// Not a host the router scans (unknown, no IPv4 address, not on an
+    /// No such MAC in the inventory.
+    #[error("no such host")]
+    Unknown,
+    /// A known host the router does not scan (no IPv4 address, not on an
     /// internal network, in Quarantine, or the router itself).
-    #[error("this host cannot be scanned")]
+    #[error(
+        "this host cannot be scanned: it needs an IPv4 address on an internal network and must not be quarantined"
+    )]
     NotScannable,
     /// No document applied yet, or the service stopped.
     #[error("the port scanner is not running")]
@@ -1189,9 +1194,10 @@ impl PortScan {
         if st.scan_now >= MAX_SCAN_NOW {
             return Err(ScanNowError::TooMany);
         }
-        let t = host
-            .as_ref()
-            .and_then(|h| eligible(h, &plan.internal, &plan.quarantine, &plan.own))
+        let Some(host) = host else {
+            return Err(ScanNowError::Unknown);
+        };
+        let t = eligible(&host, &plan.internal, &plan.quarantine, &plan.own)
             .ok_or(ScanNowError::NotScannable)?;
         st.running.insert(mac.clone());
         st.scan_now += 1;
@@ -1225,6 +1231,41 @@ impl PortScan {
         lock(&self.state)
             .running
             .contains(&mac.to_ascii_lowercase())
+    }
+
+    /// `GET /api/v1/hosts/<mac>/ports`: `{last_scan, scanning, all_filtered,
+    /// ports}` with the open ports only (`port`, `service`, `first_seen`,
+    /// `last_seen`, `new`); `last_scan` is `null` before the first scan.
+    /// `None` for a MAC that is not in the inventory.
+    pub fn view(&self, mac: &str) -> Option<serde_json::Value> {
+        self.hosts.host(mac)?;
+        let now = self.now();
+        let r = self.ports(&mac.to_ascii_lowercase()).unwrap_or_default();
+        let ports: Vec<serde_json::Value> = r
+            .open()
+            .map(|p| {
+                serde_json::json!({
+                    "port": p.port,
+                    "service": p.service,
+                    "first_seen": p.first_seen,
+                    "last_seen": p.last_seen,
+                    "new": p.is_new(now),
+                })
+            })
+            .collect();
+        Some(serde_json::json!({
+            "last_scan": (r.last_scan != 0).then_some(r.last_scan),
+            "scanning": self.scanning(mac),
+            "all_filtered": r.all_filtered,
+            "ports": ports,
+        }))
+    }
+
+    /// How many ports `mac` has open as of its last scan; `None` when it was
+    /// never scanned.
+    pub fn open_count(&self, mac: &str) -> Option<u32> {
+        let r = self.ports(&mac.to_ascii_lowercase())?;
+        (r.last_scan != 0).then(|| u32::try_from(r.open().count()).unwrap_or(u32::MAX))
     }
 
     /// `mac`'s results.

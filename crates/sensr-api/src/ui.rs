@@ -32,7 +32,9 @@ fn ui_error(e: ClientError) -> ApiError {
             ),
             ErrorKind::Unauthenticated | ErrorKind::Forbidden => ApiError::Unauthorized,
             ErrorKind::NotFound => ApiError::NotFound(e.message),
-            ErrorKind::Conflict => ApiError::Conflict(e.message),
+            ErrorKind::Conflict | ErrorKind::TooManyRequests | ErrorKind::Unavailable => {
+                ApiError::Conflict(e.message)
+            }
             _ => ApiError::Backend(e.message),
         },
         other => ApiError::Backend(other.to_string()),
@@ -402,6 +404,27 @@ impl Backend for UiBackend {
                     Some(r) => Ok(r.to_owned()),
                     None => Err(ApiError::Backend(format!("unexpected agent reply {v}"))),
                 },
+                other => Err(unexpected(other)),
+            }
+        }
+        .boxed()
+    }
+
+    fn host_ports(&self, mac: String) -> BoxFuture<'_, ApiResult<sensr_ui::api::HostPortsView>> {
+        async move {
+            match self.call(Op::HostPorts { mac }).await? {
+                Response::Value(Some(v)) => serde_json::from_value(v)
+                    .map_err(|e| ApiError::Backend(format!("bad ports reply: {e}"))),
+                other => Err(unexpected(other)),
+            }
+        }
+        .boxed()
+    }
+
+    fn host_scan_now(&self, mac: String) -> BoxFuture<'_, ApiResult<()>> {
+        async move {
+            match self.call(Op::HostScanNow { mac }).await? {
+                Response::Value(_) => Ok(()),
                 other => Err(unexpected(other)),
             }
         }

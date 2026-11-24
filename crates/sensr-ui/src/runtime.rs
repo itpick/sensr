@@ -418,6 +418,8 @@ pub struct HostRow {
     /// Screen-time minutes since local midnight (from the insight database, set by the UI
     /// when the caller may read it); `None` when there is no such data.
     pub today_minutes: Option<u32>,
+    /// Ports found open by the last port scan; `None` when never scanned.
+    pub open_ports: Option<u32>,
     /// Lookups over the last 24 hours by category key ([`CATEGORIES`] order), for the
     /// Hosts card's colour preview; empty when there is no DNS data.
     #[serde(deserialize_with = "null_default")]

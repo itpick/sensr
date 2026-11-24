@@ -577,7 +577,7 @@ fn scan_now_spam_is_refused() {
     rig.scan(MAC3);
     assert_eq!(
         rig.svc.scan_now("aa:bb:cc:dd:ee:99"),
-        Err(ScanNowError::NotScannable)
+        Err(ScanNowError::Unknown)
     );
 }
 

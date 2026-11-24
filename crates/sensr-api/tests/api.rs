@@ -602,6 +602,93 @@ async fn host_activity_route() {
     ));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn host_ports_routes() {
+    use sensr_agent::portscan::ScanNowError;
+    const MAC: &str = "aa:bb:cc:00:00:21";
+    const BUSY: &str = "aa:bb:cc:00:00:22";
+    const LIMIT: &str = "aa:bb:cc:00:00:23";
+    const OFF: &str = "aa:bb:cc:00:00:24";
+    const DOWN: &str = "aa:bb:cc:00:00:25";
+    let fx = start().await;
+    {
+        let mut st = fx.applier.state.lock().unwrap();
+        for m in [MAC, BUSY, LIMIT, OFF, DOWN] {
+            st.ports.push((
+                m.into(),
+                json!({"last_scan": 90, "all_filtered": false, "ports": [
+                    {"port": 23, "service": "telnet", "first_seen": 80,
+                     "last_seen": 90, "new": true}]}),
+            ));
+        }
+        st.scan_errors.push((BUSY.into(), ScanNowError::Busy));
+        st.scan_errors.push((LIMIT.into(), ScanNowError::TooMany));
+        st.scan_errors
+            .push((OFF.into(), ScanNowError::NotScannable));
+        st.scan_errors.push((DOWN.into(), ScanNowError::NotReady));
+    }
+    let viewer = pw("hostviewer", "pw");
+    let path = |m: &str, what: &str| format!("/api/v1/hosts/{m}/{what}");
+    let (st, body) = http(&fx, "GET", &path(MAC, "ports"), Some(&viewer), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["last_scan"], 90);
+    assert_eq!(body["scanning"], false);
+    assert_eq!(body["ports"][0]["port"], 23);
+    assert_eq!(body["ports"][0]["new"], true);
+
+    let (st, body) = http(&fx, "POST", &path(MAC, "scan"), Some(&viewer), None).await;
+    assert_eq!(st, 202, "{body}");
+    assert_eq!(body, json!({"started": true}));
+    let (_, body) = http(&fx, "GET", &path(MAC, "ports"), Some(&viewer), None).await;
+    assert_eq!(body["scanning"], true);
+    // a second POST while it runs
+    let (st, _) = http(&fx, "POST", &path(MAC, "scan"), Some(&viewer), None).await;
+    assert_eq!(st, 409);
+    for (m, want) in [(BUSY, 409), (OFF, 409), (LIMIT, 429), (DOWN, 503)] {
+        let (st, body) = http(&fx, "POST", &path(m, "scan"), Some(&viewer), None).await;
+        assert_eq!(st, want, "{m}: {body}");
+    }
+    let (st, body) = http(&fx, "POST", &path(OFF, "scan"), Some(&viewer), None).await;
+    assert!(
+        body.to_string().contains("cannot be scanned"),
+        "{st} {body}"
+    );
+
+    // unknown MAC
+    let none = "aa:bb:cc:00:00:99";
+    for (method, what) in [("GET", "ports"), ("POST", "scan")] {
+        let (st, _) = http(&fx, method, &path(none, what), Some(&viewer), None).await;
+        assert_eq!(st, 404, "{method} {what}");
+    }
+
+    // read-only may look, not scan; others may not even look
+    let reader = pw("hostreader", "pw");
+    let (st, _) = http(&fx, "GET", &path(BUSY, "ports"), Some(&reader), None).await;
+    assert_eq!(st, 200);
+    let (st, _) = http(&fx, "POST", &path(BUSY, "scan"), Some(&reader), None).await;
+    assert_eq!(st, 403);
+    let watcher = pw("watcher", "pw");
+    let (st, _) = http(&fx, "GET", &path(MAC, "ports"), Some(&watcher), None).await;
+    assert_eq!(st, 403);
+    let (st, _) = http(&fx, "POST", &path(DOWN, "scan"), Some(&watcher), None).await;
+    assert_eq!(st, 403);
+
+    // the UI's backend
+    use sensr_ui::api::ApiError;
+    let b = ui_backend(&fx, "hostviewer", "pw").await;
+    let v = b.host_ports(BUSY.into()).await.unwrap();
+    assert_eq!(v.last_scan, Some(90));
+    assert_eq!((v.ports[0].port, v.ports[0].new), (23, true));
+    assert!(matches!(
+        b.host_scan_now(BUSY.into()).await,
+        Err(ApiError::Conflict(_))
+    ));
+    assert!(matches!(
+        b.host_ports(none.into()).await,
+        Err(ApiError::NotFound(_))
+    ));
+}
+
 /// The wasm bundle's copy of the category list matches the schema's.
 #[test]
 fn ui_category_list_matches_the_schema() {

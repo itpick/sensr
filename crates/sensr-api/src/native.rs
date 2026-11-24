@@ -390,6 +390,37 @@ pub async fn host_activity(
     }
 }
 
+/// `GET /api/v1/hosts/{mac}/ports`: the open TCP ports the daily scan found
+/// on one host, `{last_scan, scanning, all_filtered, ports}` (`last_scan` is
+/// `null` before the first scan; each port has `new` when first seen within
+/// 24 hours). 404 for a MAC not in the inventory.
+pub async fn host_ports(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    Path(mac): Path<String>,
+) -> ApiResult {
+    match call(&state, &caller, Op::HostPorts { mac }).await? {
+        Response::Value(Some(v)) => Ok(Json(v)),
+        other => Err(unexpected(other)),
+    }
+}
+
+/// `POST /api/v1/hosts/{mac}/scan`: scan one host's ports now in the
+/// background; 202 `{"started": true}`. 404 for an unknown MAC, 409 while that
+/// host is being scanned or when it is not one the router scans (no IPv4
+/// address, not on an internal network, quarantined), 429 while two such
+/// scans run, 503 when the scanner is not running, 403 to read-only principals.
+pub async fn host_scan(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    Path(mac): Path<String>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    match call(&state, &caller, Op::HostScanNow { mac }).await? {
+        Response::Value(Some(v)) => Ok((StatusCode::ACCEPTED, Json(v))),
+        other => Err(unexpected(other)),
+    }
+}
+
 /// Body of `POST /api/v1/hosts/forget`.
 #[derive(Deserialize)]
 pub struct ForgetBody {

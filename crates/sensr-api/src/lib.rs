@@ -84,6 +84,8 @@ pub const ROUTES: &[Route] = &[
     ("/api/v1/hosts/{mac}/activity", || {
         get(native::host_activity)
     }),
+    ("/api/v1/hosts/{mac}/ports", || get(native::host_ports)),
+    ("/api/v1/hosts/{mac}/scan", || post(native::host_scan)),
     ("/api/v1/insight/top", || get(insight::top)),
     ("/api/v1/insight/series", || get(insight::series)),
     ("/api/v1/insight/service-override", || {
