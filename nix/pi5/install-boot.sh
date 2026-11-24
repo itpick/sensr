@@ -1,7 +1,11 @@
 # sensr-pi*-install-boot: put a NixOS generation on the board's FAT partition
 # so the EEPROM bootloader starts it directly (no UEFI, no U-Boot).
 #
-#   sensr-pi*-install-boot TOPLEVEL [--dir DIR] [--slot current|next]
+#   sensr-pi*-install-boot TOPLEVEL [--dir DIR] [--slot current|next] [--adopt]
+#
+#   --adopt   take over a partition whose config.txt this script did not
+#             write: keep that file as config.txt.pre-adopt-DATE, install
+#             TOPLEVEL into current/ and write our config.txt for it
 #
 # Layout of the FAT partition (DIR, default /boot/firmware):
 #
@@ -20,6 +24,15 @@
 # (sensr-pi5-tryboot-commit.service): a generation that never comes up is
 # never booted again, because any reset after the trial reads config.txt.
 # The image build calls it with --slot current.
+#
+# config.txt decides what every plain boot starts, so it is only rewritten
+# when this script owns it: it carries our "Written by" line and boots
+# os_prefix=current/, or there is none and the card is not a dormant trial
+# card (config.txt.sensr-dormant, nix/pi5/trial-install.sh). Anything else
+# (a config.txt written by hand, by another OS, or edited to boot another
+# folder) is left alone and the new generation is only staged: rewriting
+# such a file once pointed a router at a stale trial slot that could not
+# boot. --adopt hands the partition over explicitly.
 set -euo pipefail
 
 name=$(basename "$0")
@@ -27,12 +40,14 @@ toplevel=$1
 shift
 dir=/boot/firmware
 slot=
+adopt=0
 # 1: a running system installs into next/ and commits after a trial boot.
 tryboot_enabled=@tryboot@
 while [ $# -gt 0 ]; do
   case $1 in
     --dir) dir=$2; shift 2 ;;
     --slot) slot=$2; shift 2 ;;
+    --adopt) adopt=1; shift ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -40,6 +55,32 @@ done
 if [ ! -d "$dir" ]; then
   echo "$name: $dir is not mounted" >&2
   exit 1
+fi
+
+# 0 when FILE is missing or carries our "Written by" line.
+ours() {
+  [ ! -e "$1" ] || grep -q '^# sensr, .*Written by [^ ]*install-boot' "$1"
+}
+
+# 0 when config.txt is ours to rewrite (see the header).
+owns_config() {
+  if [ -e "$dir/config.txt" ]; then
+    ours "$dir/config.txt" && grep -qx 'os_prefix=current/' "$dir/config.txt"
+  else
+    [ ! -e "$dir/config.txt.sensr-dormant" ]
+  fi
+}
+
+if [ "$adopt" = 1 ]; then
+  if [ -n "$slot" ] && [ "$slot" != current ]; then
+    echo "$name: --adopt installs into current/; it cannot be used with --slot $slot" >&2
+    exit 2
+  fi
+  if [ ! -e "$dir/config.txt" ] && [ -e "$dir/config.txt.sensr-dormant" ]; then
+    echo "$name: $dir is a dormant trial card; sensr-pi5-trial-install --commit makes it the default" >&2
+    exit 2
+  fi
+  slot=current
 fi
 
 if [ -z "$slot" ]; then
@@ -97,14 +138,42 @@ fi
 mv "$tmp" "$dir/$slot"
 rm -rf "$dir/$slot.old"
 
-config_txt current/ > "$dir/config.txt.new"
-mv "$dir/config.txt.new" "$dir/config.txt"
-if [ "$slot" = next ]; then
-  config_txt next/ > "$dir/tryboot.txt.new"
-  mv "$dir/tryboot.txt.new" "$dir/tryboot.txt"
-  echo "$name: $(cat "$dir/next/system") is in next/;" \
-    "sensr-pi5-tryboot boots it once, and it becomes current after it comes up"
+if [ "$adopt" = 1 ] && [ -e "$dir/config.txt" ] && ! owns_config; then
+  backup="$dir/config.txt.pre-adopt-$(date +%Y%m%d%H%M%S)"
+  cp "$dir/config.txt" "$backup"
+  echo "$name: adopting $dir: the old config.txt is kept as $(basename "$backup")"
+  rm "$dir/config.txt"
+fi
+
+if owns_config; then
+  config_txt current/ > "$dir/config.txt.new"
+  mv "$dir/config.txt.new" "$dir/config.txt"
+  sync -f "$dir/config.txt"
 else
+  if [ -e "$dir/config.txt" ]; then
+    boots=$(sed -n 's/^os_prefix=//p' "$dir/config.txt" | tail -n 1)
+    why="its config.txt was not written by $name (it boots os_prefix=${boots:-<none>})"
+  else
+    why="it is a dormant trial card (config.txt.sensr-dormant)"
+  fi
+  {
+    echo "$name: WARNING: $dir is not managed by sensr's boot slots: $why."
+    echo "$name: config.txt is left as it is, so a reboot does not start this generation;"
+    echo "$name: $(cat "$dir/$slot/system") is only staged in $slot/."
+    echo "$name: to boot sensr's slots from now on: $name $toplevel --adopt"
+  } >&2
+fi
+# tryboot.txt is rewritten or removed only when it is ours too.
+if [ "$slot" = next ]; then
+  if ours "$dir/tryboot.txt"; then
+    config_txt next/ > "$dir/tryboot.txt.new"
+    mv "$dir/tryboot.txt.new" "$dir/tryboot.txt"
+    sync -f "$dir/tryboot.txt"
+    echo "$name: $(cat "$dir/next/system") is in next/;" \
+      "sensr-pi5-tryboot boots it once, and it becomes current after it comes up"
+  else
+    echo "$name: WARNING: $dir/tryboot.txt was not written by $name; left as it is" >&2
+  fi
+elif [ -e "$dir/tryboot.txt" ] && ours "$dir/tryboot.txt"; then
   rm -f "$dir/tryboot.txt"
 fi
-sync -f "$dir/config.txt"

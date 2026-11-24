@@ -28,6 +28,13 @@ jobs:
       # the boot apply's emergency firewall
       - run: NFT_WRAP=sudo scripts/nft-check-goldens.sh crates/sensr-apply/tests/golden
 
+  boot-scripts:
+    # the Pi bootloader installer against fake FAT partitions (no Nix, no Pi)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: bash nix/pi5/install-boot-test.sh
+
   xtask:
     runs-on: ubuntu-24.04
     steps:
