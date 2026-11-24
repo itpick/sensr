@@ -1,0 +1,114 @@
+# The seed folder on its own FAT partition, mounted by label the way the Pi
+# images mount it (/boot/firmware, nofail, 90 s device timeout).
+#
+# Regression for 2026-11-24: sensr-ifnames ran before udev's coldplug but
+# waited for the seed folder's mount, whose /dev/disk/by-label device only
+# coldplug creates. The cycle broke only when the device timeout expired, so
+# every Pi 5 boot sat silent for 90 s and was power-cycled as hung. Here the
+# names must come from the seed on the first boot and from the state
+# directory on the second, and on both boots coldplug must run before the
+# FAT is mounted and nothing may time out waiting for a device.
+{
+  pkgs,
+  sensrModules,
+}:
+let
+  wanMac = "52:54:00:ab:00:01";
+  lanMac = "52:54:00:ab:00:02";
+  # A Pi-like FAT partition holding the seed folder: the MAC-to-name lines
+  # and, so the agent binds the same roles, a seed.toml that agrees.
+  fat = pkgs.runCommand "sensr-seed-fat.img"
+    {
+      nativeBuildInputs = with pkgs; [
+        dosfstools
+        mtools
+      ];
+    }
+    ''
+      truncate -s 32M $out
+      mkfs.vfat -n FIRMWARE $out
+      printf '%s wan\n%s lan\n' ${wanMac} ${lanMac} > ifnames
+      printf 'hostname = "fatseed"\n[interfaces]\nwan = "%s"\nlan = "%s"\n' ${wanMac} ${lanMac} > seed.toml
+      mmd -i $out ::sensr
+      mcopy -i $out ifnames seed.toml ::sensr/
+    '';
+in
+pkgs.testers.runNixOSTest {
+  name = "sensr-ifnames-fat";
+  nodes.machine =
+    { ... }:
+    {
+      imports = sensrModules ++ [ ../images/common.nix ];
+      virtualisation.memorySize = 1024;
+      virtualisation.vlans = [ ];
+      users.users.root.hashedPassword = pkgs.lib.mkForce null;
+      services.sensr.applier = "slice";
+      services.sensr.seedDir = "/boot/firmware/sensr";
+      # as nix/images/pi5.nix mounts it (a test VM's file systems come from
+      # virtualisation.fileSystems; plain fileSystems is overridden)
+      virtualisation.fileSystems."/boot/firmware" = {
+        device = "/dev/disk/by-label/FIRMWARE";
+        fsType = "vfat";
+        options = [
+          "nofail"
+          "x-systemd.device-timeout=90s"
+          "umask=0077"
+        ];
+      };
+      # snapshot=on: the store image stays read-only, writes go to a
+      # throwaway overlay (fresh again on every start, like a reseeded card)
+      virtualisation.qemu.options = [
+        "-drive if=virtio,format=raw,snapshot=on,file=${fat}"
+        "-netdev user,id=nwan -device virtio-net-pci,netdev=nwan,mac=${wanMac}"
+        "-netdev user,id=nlan -device virtio-net-pci,netdev=nlan,mac=${lanMac}"
+      ];
+    };
+
+  testScript = ''
+    def mac(dev):
+        return machine.succeed(f"cat /sys/class/net/{dev}/address").strip()
+
+    def usec(unit, prop):
+        return int(machine.succeed(f"systemctl show -P {prop} {unit}").strip())
+
+    def boot_checks(source):
+        machine.wait_for_unit("multi-user.target")
+        print(machine.execute(
+            "lsblk -o NAME,FSTYPE,LABEL,MOUNTPOINTS; "
+            "systemctl status --no-pager boot-firmware.mount sensr-ifnames.service sensr-ifnames-seed.service; "
+            "journalctl -b --no-pager -o short-monotonic | grep -iE 'firmware|ifnames|udev-trigger|Coldplug|Timed out' | head -60"
+        )[1])
+        machine.wait_for_unit("boot-firmware.mount")
+        machine.wait_until_succeeds("test -e /sys/class/net/wan && test -e /sys/class/net/lan", timeout=60)
+        print(machine.succeed("ip -br link"))
+        assert mac("wan") == "${wanMac}", mac("wan")
+        assert mac("lan") == "${lanMac}", mac("lan")
+        # coldplug ran before the FAT was mounted: nothing early waited for it
+        trigger = usec("systemd-udev-trigger.service", "ExecMainStartTimestampMonotonic")
+        mounted = usec("boot-firmware.mount", "ActiveEnterTimestampMonotonic")
+        assert 0 < trigger < mounted, (trigger, mounted)
+        machine.fail("journalctl -b --no-pager | grep -E 'Timed out waiting for device|Dependency failed for /boot/firmware'")
+        machine.succeed("systemctl is-active sensr-ifnames.service sensr-ifnames-seed.service")
+        log = machine.succeed("journalctl -b -u sensr-ifnames-seed.service --no-pager")
+        assert source in log, log
+
+    with subtest("first boot: names from the seed on the FAT partition"):
+        machine.start()
+        boot_checks("from /boot/firmware/sensr/ifnames")
+
+    with subtest("second boot: names from the state directory, seed not waited for"):
+        # the agent's own copies; written here if it has not yet
+        machine.succeed(
+            "mkdir -p /var/lib/sensr/links && "
+            "for f in /run/systemd/network/10-sensr-*.link; do "
+            "  b=$(basename $f); test -e /var/lib/sensr/links/$b || cp $f /var/lib/sensr/links/; "
+            "done && sync"
+        )
+        machine.shutdown()
+        machine.start()
+        boot_checks("names restored from /var/lib/sensr/links")
+
+    with subtest("nothing failed"):
+        machine.succeed("test -z \"$(systemctl list-units --failed --no-legend)\" || (systemctl list-units --failed; false)")
+  '';
+}
