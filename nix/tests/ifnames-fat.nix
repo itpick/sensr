@@ -80,7 +80,7 @@ pkgs.testers.runNixOSTest {
         )[1])
         machine.wait_for_unit("boot-firmware.mount")
         machine.wait_until_succeeds("test -e /sys/class/net/wan && test -e /sys/class/net/lan", timeout=60)
-        print(machine.succeed("ip -br link; systemd-analyze blame | head -15"))
+        print(machine.succeed("ip -br link"))
         assert mac("wan") == "${wanMac}", mac("wan")
         assert mac("lan") == "${lanMac}", mac("lan")
         # coldplug ran before the FAT was mounted: nothing early waited for it
