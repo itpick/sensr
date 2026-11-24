@@ -282,10 +282,9 @@ impl SliceApplier {
                 running: Arc::default(),
                 stopped: Arc::default(),
             };
-            let scan_hosts = Arc::downgrade(&hosts);
             let ps = crate::portscan::PortScan::system(
                 state.join("ports.json"),
-                Arc::new(move || scan_hosts.upgrade().map(|h| h.hosts()).unwrap_or_default()),
+                Arc::new(Arc::downgrade(&hosts)),
             );
             ps.start();
             a.portscan = Some(ps);
@@ -1402,7 +1401,7 @@ mod tests {
                 8,
             ),
             state.path().join("ports.json"),
-            Arc::new(move || hosts.clone()),
+            Arc::new(Mutex::new(hosts)),
             Arc::new(unix_now),
             Arc::new(|_: &str| 0),
         );

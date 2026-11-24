@@ -128,10 +128,38 @@ pub enum Probe {
     Open,
     /// Refused (or reset): the host is there and nothing listens.
     Closed,
+    /// An ICMP host-unreachable or host-down within the timeout
+    /// (`EHOSTUNREACH`, `EHOSTDOWN`): the port counts as closed, but the
+    /// kernel also says this when the neighbour lookup failed, so on its
+    /// own it does not prove the host is there.
+    Rejected,
     /// No answer before the timeout.
     Filtered,
-    /// No route or no neighbour: the host is not there.
+    /// The router cannot send (`ENETUNREACH`, `EPERM`, anything else that
+    /// says nothing about the port): the scan stops without a result.
     Unreachable,
+}
+
+/// Errno values for [`classify`] where `std::io::ErrorKind` has no stable
+/// kind.
+mod errno {
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    pub const EHOSTDOWN: i32 = 64;
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
+    pub const EHOSTDOWN: i32 = 112;
+}
+
+/// What a failed connect says about the port.
+pub fn classify(e: &std::io::Error) -> Probe {
+    use std::io::ErrorKind as K;
+    match e.kind() {
+        K::ConnectionRefused | K::ConnectionReset => Probe::Closed,
+        K::TimedOut | K::WouldBlock => Probe::Filtered,
+        K::HostUnreachable => Probe::Rejected,
+        _ if e.raw_os_error() == Some(errno::EHOSTDOWN) => Probe::Rejected,
+        // ENETUNREACH, EPERM/EACCES (a local firewall), the rest
+        _ => Probe::Unreachable,
+    }
 }
 
 /// Makes one connection attempt (a fake in tests).
@@ -146,20 +174,13 @@ pub struct TcpConnector;
 
 impl Connector for TcpConnector {
     fn probe(&self, addr: SocketAddr, timeout: Duration) -> Probe {
-        use std::io::ErrorKind as K;
         match std::net::TcpStream::connect_timeout(&addr, timeout) {
             // dropped here: closed straight after the handshake
             Ok(s) => {
                 drop(s);
                 Probe::Open
             }
-            Err(e) => match e.kind() {
-                K::ConnectionRefused | K::ConnectionReset => Probe::Closed,
-                K::TimedOut | K::WouldBlock => Probe::Filtered,
-                // EHOSTUNREACH (no ARP answer), ENETUNREACH, and anything
-                // else that says nothing about the port
-                _ => Probe::Unreachable,
-            },
+            Err(e) => classify(&e),
         }
     }
 }
@@ -227,9 +248,32 @@ pub enum ScanError {
     /// Stopped by an agent shutdown or an apply.
     #[error("cancelled")]
     Cancelled,
-    /// The host was not there (unreachable, or no port answered at all).
+    /// The router could not reach the host's network
+    /// ([`Probe::Unreachable`]).
     #[error("host unreachable")]
     Unreachable,
+}
+
+/// One host's per-port findings.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScanOutcome {
+    /// Accepted, sorted.
+    pub open: Vec<u16>,
+    /// Refused or rejected: these, and only these, close a known port.
+    pub closed: BTreeSet<u16>,
+    /// No answer, even on the retry of a port that was open before.
+    pub filtered: BTreeSet<u16>,
+    /// Some port was accepted or refused with a reset: the host is there.
+    pub answered: bool,
+}
+
+impl ScanOutcome {
+    fn absorb(&mut self, other: ScanOutcome) {
+        self.open.extend(other.open);
+        self.closed.extend(other.closed);
+        self.filtered.extend(other.filtered);
+        self.answered |= other.answered;
+    }
 }
 
 /// Scans one host.
@@ -271,26 +315,47 @@ impl Scanner {
         }
     }
 
-    /// The open ports of `ip` among `ports`, sorted. At most `per_host`
-    /// attempts are in flight; each lane takes every `per_host`-th port, so
-    /// a host that drops everything takes `ceil(ports / per_host)` timeouts.
+    /// What each of `ports` on `ip` does. At most `per_host` attempts are
+    /// in flight; each lane takes every `per_host`-th port, so a host that
+    /// drops everything takes `ceil(ports / per_host)` timeouts. A port of
+    /// `recheck` (open at the last scan) that comes back filtered is tried
+    /// once more.
     ///
     /// Fails with [`ScanError::Cancelled`] once `cancel` is set (nothing is
-    /// started after that) and with [`ScanError::Unreachable`] when the host
-    /// is not there or no port answered: neither is a complete result.
+    /// started after that) and with [`ScanError::Unreachable`] when the
+    /// router cannot send: neither is a result.
     pub fn scan_host(
         &self,
         ip: Ipv4Addr,
         ports: &[u16],
+        recheck: &BTreeSet<u16>,
         cancel: &AtomicBool,
-    ) -> Result<Vec<u16>, ScanError> {
+    ) -> Result<ScanOutcome, ScanError> {
+        let mut out = self.pass(ip, ports, cancel)?;
+        let again: Vec<u16> = out.filtered.intersection(recheck).copied().collect();
+        if !again.is_empty() {
+            for p in &again {
+                out.filtered.remove(p);
+            }
+            out.absorb(self.pass(ip, &again, cancel)?);
+        }
+        out.open.sort_unstable();
+        Ok(out)
+    }
+
+    /// One pass over `ports`.
+    fn pass(
+        &self,
+        ip: Ipv4Addr,
+        ports: &[u16],
+        cancel: &AtomicBool,
+    ) -> Result<ScanOutcome, ScanError> {
         let lanes = self.per_host.min(ports.len()).max(1);
         let gone = AtomicBool::new(false);
-        let answered = AtomicBool::new(false);
-        let open = Mutex::new(Vec::new());
+        let out = Mutex::new(ScanOutcome::default());
         std::thread::scope(|s| {
             for lane in 0..lanes {
-                let (gone, answered, open) = (&gone, &answered, &open);
+                let (gone, out) = (&gone, &out);
                 let r = std::thread::Builder::new()
                     .name("sensr-portscan".into())
                     .spawn_scoped(s, move || {
@@ -305,13 +370,23 @@ impl Scanner {
                                 return;
                             }
                             let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
-                            match self.connector.probe(addr, self.timeout) {
+                            let probe = self.connector.probe(addr, self.timeout);
+                            let mut o = lock(out);
+                            match probe {
                                 Probe::Open => {
-                                    answered.store(true, Ordering::SeqCst);
-                                    lock(open).push(port);
+                                    o.answered = true;
+                                    o.open.push(port);
                                 }
-                                Probe::Closed => answered.store(true, Ordering::SeqCst),
-                                Probe::Filtered => {}
+                                Probe::Closed => {
+                                    o.answered = true;
+                                    o.closed.insert(port);
+                                }
+                                Probe::Rejected => {
+                                    o.closed.insert(port);
+                                }
+                                Probe::Filtered => {
+                                    o.filtered.insert(port);
+                                }
                                 Probe::Unreachable => gone.store(true, Ordering::SeqCst),
                             }
                         }
@@ -326,12 +401,10 @@ impl Scanner {
         if cancel.load(Ordering::SeqCst) {
             return Err(ScanError::Cancelled);
         }
-        if gone.load(Ordering::SeqCst) || !answered.load(Ordering::SeqCst) {
+        if gone.load(Ordering::SeqCst) {
             return Err(ScanError::Unreachable);
         }
-        let mut open = open.into_inner().unwrap_or_else(|e| e.into_inner());
-        open.sort_unstable();
-        Ok(open)
+        Ok(out.into_inner().unwrap_or_else(|e| e.into_inner()))
     }
 }
 
@@ -362,11 +435,15 @@ impl PortEntry {
 /// One host's results.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
 pub struct HostPorts {
-    /// The last complete scan, Unix seconds.
+    /// The last scan with a result, Unix seconds.
     pub last_scan: u64,
     /// Open and recently closed ports, by port.
     #[serde(default)]
     pub ports: Vec<PortEntry>,
+    /// The last scan found the host up but no port answered (it drops
+    /// everything); its ports were left as they were.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all_filtered: bool,
 }
 
 impl HostPorts {
@@ -382,12 +459,16 @@ const FILE_VERSION: u64 = 1;
 #[derive(Serialize)]
 struct FileOut<'a> {
     version: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_sweep: Option<u64>,
     hosts: &'a BTreeMap<String, HostPorts>,
 }
 
 #[derive(Deserialize)]
 struct FileIn {
     version: u64,
+    #[serde(default)]
+    last_sweep: Option<u64>,
     hosts: BTreeMap<String, HostPorts>,
 }
 
@@ -395,6 +476,8 @@ struct FileIn {
 pub struct PortStore {
     path: PathBuf,
     hosts: BTreeMap<String, HostPorts>,
+    /// When the last daily sweep that ran to the end started.
+    pub last_sweep: Option<u64>,
 }
 
 impl PortStore {
@@ -402,9 +485,13 @@ impl PortStore {
     /// unparsable or of another version. An unusable file is renamed to
     /// `ports.json.bad` so the next save keeps it.
     pub fn load(path: PathBuf) -> Self {
+        let mut last_sweep = None;
         let hosts = match std::fs::read(&path) {
             Ok(b) => match serde_json::from_slice::<FileIn>(&b) {
-                Ok(f) if f.version == FILE_VERSION => Some(f.hosts),
+                Ok(f) if f.version == FILE_VERSION => {
+                    last_sweep = f.last_sweep;
+                    Some(f.hosts)
+                }
                 Ok(f) => {
                     tracing::warn!(
                         version = f.version,
@@ -424,14 +511,22 @@ impl PortStore {
                 Some(BTreeMap::new())
             }
         };
-        let hosts = hosts.unwrap_or_else(|| {
+        let mut hosts = hosts.unwrap_or_else(|| {
             let bad = path.with_extension("json.bad");
             if let Err(e) = std::fs::rename(&path, &bad) {
                 tracing::warn!(path = %bad.display(), error = %e, "keeping the old port scan results");
             }
             BTreeMap::new()
         });
-        Self { path, hosts }
+        // a hand-edited or older file is held to the same bound
+        for h in hosts.values_mut() {
+            cap_ports(&mut h.ports);
+        }
+        Self {
+            path,
+            hosts,
+            last_sweep,
+        }
     }
 
     /// One host's results.
@@ -439,17 +534,19 @@ impl PortStore {
         self.hosts.get(&mac.to_ascii_lowercase())
     }
 
-    /// Records a complete scan of `mac` at `now` that found `open`: those
-    /// are (again) open, every other kept port is closed from `now`.
-    pub fn merge(&mut self, mac: &str, open: &[u16], now: u64) {
+    /// Records a scan of `mac` at `now`: open ports are (again) open, a
+    /// known port is closed only when `o` has it refused or rejected, and a
+    /// filtered one is left as it was.
+    pub fn merge(&mut self, mac: &str, o: &ScanOutcome, now: u64) {
         let h = self.hosts.entry(mac.to_ascii_lowercase()).or_default();
         h.last_scan = now;
-        let open: BTreeSet<u16> = open.iter().copied().collect();
+        h.all_filtered = o.open.is_empty() && o.closed.is_empty();
+        let open: BTreeSet<u16> = o.open.iter().copied().collect();
         for e in &mut h.ports {
             if open.contains(&e.port) {
                 e.last_seen = now;
                 e.closed_at = None;
-            } else if e.closed_at.is_none() {
+            } else if e.closed_at.is_none() && o.closed.contains(&e.port) {
                 e.closed_at = Some(now);
             }
             e.service = service(e.port).to_owned();
@@ -487,24 +584,37 @@ impl PortStore {
         }
     }
 
-    /// Writes the file: a temporary file, synced, renamed over it.
-    pub fn persist(&self) -> std::io::Result<()> {
-        use std::io::Write;
-        if let Some(dir) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir)?;
-        }
+    /// The file's contents now (taken under the caller's lock, written by
+    /// [`write_file`] outside it).
+    pub fn snapshot(&self) -> std::io::Result<(PathBuf, Vec<u8>)> {
         let bytes = serde_json::to_vec(&FileOut {
             version: FILE_VERSION,
+            last_sweep: self.last_sweep,
             hosts: &self.hosts,
         })
         .map_err(std::io::Error::other)?;
-        let tmp = self.path.with_extension("json.tmp");
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp, &self.path)
+        Ok((self.path.clone(), bytes))
     }
+
+    /// Writes the file now ([`Self::snapshot`] then [`write_file`]).
+    pub fn persist(&self) -> std::io::Result<()> {
+        let (path, bytes) = self.snapshot()?;
+        write_file(&path, &bytes)
+    }
+}
+
+/// Writes `bytes` to `path`: a temporary file, synced, renamed over it.
+pub fn write_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)
 }
 
 /// Keeps at most [`MAX_PORTS_PER_HOST`]: open ports first (lowest first),
@@ -625,9 +735,10 @@ impl Plan {
     }
 }
 
-/// Whether `h` may be scanned at all: a MAC and an IPv4 address on an
-/// internal interface (never a WAN), not in Quarantine, not one of the
-/// router's own addresses, and a usable unicast address.
+/// Whether `h` may be scanned at all: a MAC and an IPv4 address inside one
+/// of its internal interface's networks (never a WAN or a remote address),
+/// not in Quarantine, not one of the router's own addresses, and a usable
+/// unicast address.
 fn eligible(
     h: &Host,
     internal: &[InternalIf],
@@ -638,14 +749,16 @@ fn eligible(
     let ip = h.ipv4?;
     let iface = h.interface.as_deref()?;
     let on = internal.iter().find(|i| i.id == iface)?;
-    let usable = !(ip.is_unspecified()
-        || ip.is_loopback()
-        || ip.is_broadcast()
-        || ip.is_multicast()
-        || on
-            .subnets
-            .iter()
-            .any(|n| n.network() == ip || n.broadcast() == ip && n.prefix_len() < 31));
+    let inside = on.subnets.is_empty() || on.subnets.iter().any(|n| n.contains(&ip));
+    let usable = inside
+        && !(ip.is_unspecified()
+            || ip.is_loopback()
+            || ip.is_broadcast()
+            || ip.is_multicast()
+            || on
+                .subnets
+                .iter()
+                .any(|n| n.prefix_len() < 31 && (n.network() == ip || n.broadcast() == ip)));
     if !usable || quarantine.contains(&mac) || own.contains(&IpAddr::V4(ip)) {
         return None;
     }
@@ -693,12 +806,47 @@ pub enum ScanNowError {
     NotReady,
 }
 
-/// The current hosts of the inventory.
-pub type HostsFn = dyn Fn() -> Vec<Host> + Send + Sync;
+/// The inventory as the scanner reads it.
+pub trait HostSource: Send + Sync {
+    /// Every row (once per sweep).
+    fn hosts(&self) -> Vec<Host>;
+    /// The row with this MAC (any case).
+    fn host(&self, mac: &str) -> Option<Host>;
+}
+
+impl HostSource for std::sync::Weak<crate::hosts::HostCollector> {
+    fn hosts(&self) -> Vec<Host> {
+        self.upgrade().map(|h| h.hosts()).unwrap_or_default()
+    }
+    fn host(&self, mac: &str) -> Option<Host> {
+        self.upgrade()?.host(mac)
+    }
+}
+
+impl HostSource for Mutex<Vec<Host>> {
+    fn hosts(&self) -> Vec<Host> {
+        lock(self).clone()
+    }
+    fn host(&self, mac: &str) -> Option<Host> {
+        lock(self)
+            .iter()
+            .find(|h| {
+                h.mac
+                    .as_deref()
+                    .is_some_and(|m| m.eq_ignore_ascii_case(mac))
+            })
+            .cloned()
+    }
+}
+
 /// Unix seconds now.
 pub type NowFn = dyn Fn() -> u64 + Send + Sync;
 /// The UTC offset of a time zone, seconds east.
 pub type OffsetFn = dyn Fn(&str) -> i64 + Send + Sync;
+
+/// A missed daily sweep (the agent was down at its time and the last one is
+/// over a day old) runs this long after start, not during boot.
+pub const CATCH_UP_DELAY_SECS: u64 = 300;
 
 struct State {
     plan: Option<Plan>,
@@ -706,6 +854,8 @@ struct State {
     running: BTreeSet<String>,
     /// Scan-now jobs running.
     scan_now: usize,
+    /// When the service was made.
+    started: u64,
     /// The schedule counts from here: the next run is the first
     /// `hosts.portscan.time` after it.
     anchor: u64,
@@ -717,11 +867,32 @@ struct State {
     stopped: bool,
 }
 
+/// Marks a host running for as long as it lives (and, for scan-now, holds
+/// one of the [`MAX_SCAN_NOW`] slots).
+struct Running<'a> {
+    state: &'a Mutex<State>,
+    mac: String,
+    scan_now: bool,
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        let mut st = lock(self.state);
+        st.running.remove(&self.mac);
+        if self.scan_now {
+            st.scan_now = st.scan_now.saturating_sub(1);
+        }
+    }
+}
+
 /// The port scan service, owned by the slice applier.
 pub struct PortScan {
     scanner: Scanner,
     store: Mutex<PortStore>,
-    hosts: Arc<HostsFn>,
+    /// Held from a snapshot of the store to the end of its write, so an
+    /// older snapshot never lands after a newer one.
+    writing: Mutex<()>,
+    hosts: Arc<dyn HostSource>,
     now: Arc<NowFn>,
     offset: Arc<OffsetFn>,
     state: Mutex<State>,
@@ -738,14 +909,15 @@ impl PortScan {
     pub fn new(
         scanner: Scanner,
         path: PathBuf,
-        hosts: Arc<HostsFn>,
+        hosts: Arc<dyn HostSource>,
         now: Arc<NowFn>,
         offset: Arc<OffsetFn>,
     ) -> Arc<Self> {
-        let anchor = now();
+        let started = now();
         Arc::new(Self {
             scanner,
             store: Mutex::new(PortStore::load(path)),
+            writing: Mutex::new(()),
             hosts,
             now,
             offset,
@@ -753,7 +925,8 @@ impl PortScan {
                 plan: None,
                 running: BTreeSet::new(),
                 scan_now: 0,
-                anchor,
+                started,
+                anchor: started,
                 sweep_since: None,
                 cancel: Arc::default(),
                 stopped: false,
@@ -766,7 +939,7 @@ impl PortScan {
 
     /// The production service: real connects, the system clock, the
     /// configured time zone via `date`.
-    pub fn system(path: PathBuf, hosts: Arc<HostsFn>) -> Arc<Self> {
+    pub fn system(path: PathBuf, hosts: Arc<dyn HostSource>) -> Arc<Self> {
         let cache: Mutex<Option<(String, u64, i64)>> = Mutex::default();
         Self::new(
             Scanner::system(),
@@ -846,13 +1019,15 @@ impl PortScan {
         self.wake.notify_all();
     }
 
-    /// One schedule check: starts the daily sweep when its time has come,
-    /// or resumes one a cancel interrupted, and runs it to the end (in the
-    /// caller's thread).
+    /// One schedule check: starts the daily sweep when its time has come
+    /// (or [`CATCH_UP_DELAY_SECS`] after start when the last finished one
+    /// is over a day old), or resumes one a cancel interrupted, and runs it
+    /// to the end (in the caller's thread).
     pub fn tick(&self) {
         let Ok(_one) = self.sweeping.try_lock() else {
             return;
         };
+        let last_sweep = lock(&self.store).last_sweep;
         let (since, plan, cancel) = {
             let mut st = lock(&self.state);
             let Some(plan) = st.plan.clone().filter(|p| p.enabled && !st.stopped) else {
@@ -861,7 +1036,10 @@ impl PortScan {
             let now = self.now();
             if st.sweep_since.is_none() {
                 let off = (self.offset)(&plan.timezone);
-                let due = next_run(st.anchor as i64, off, plan.time);
+                let mut due = next_run(st.anchor as i64, off, plan.time);
+                if last_sweep.is_some_and(|t| now.saturating_sub(t) > 86_400) {
+                    due = due.min((st.started + CATCH_UP_DELAY_SECS) as i64);
+                }
                 if (now as i64) < due {
                     return;
                 }
@@ -875,14 +1053,41 @@ impl PortScan {
             if st.sweep_since == Some(since) {
                 st.sweep_since = None;
             }
+            drop(st);
+            self.save(|s| s.last_sweep = Some(since));
         }
+    }
+
+    /// Changes the store and writes it, the write outside the store's lock.
+    fn save(&self, change: impl FnOnce(&mut PortStore)) {
+        let _w = lock(&self.writing);
+        let snap = {
+            let mut store = lock(&self.store);
+            change(&mut store);
+            store.snapshot()
+        };
+        if let Err(e) = snap.and_then(|(path, bytes)| write_file(&path, &bytes)) {
+            tracing::warn!(error = %e, "saving port scan results");
+        }
+    }
+
+    /// Marks `mac` running; `None` if it already is.
+    fn claim(&self, mac: &str) -> Option<Running<'_>> {
+        lock(&self.state)
+            .running
+            .insert(mac.to_owned())
+            .then(|| Running {
+                state: &self.state,
+                mac: mac.to_owned(),
+                scan_now: false,
+            })
     }
 
     /// Scans every target not scanned since `since`: interfaces in
     /// parallel, one host at a time on each. True when it ran to the end.
     fn sweep(&self, since: u64, plan: &Plan, cancel: &AtomicBool) -> bool {
         let now = self.now();
-        let hosts = (self.hosts)();
+        let hosts = self.hosts.hosts();
         let mut by_iface: BTreeMap<String, Vec<Target>> = BTreeMap::new();
         for t in targets(&hosts, &plan.internal, &plan.quarantine, &plan.own, now) {
             let done = lock(&self.store)
@@ -892,6 +1097,7 @@ impl PortScan {
                 by_iface.entry(t.interface.clone()).or_default().push(t);
             }
         }
+        drop(hosts);
         let count: usize = by_iface.values().map(Vec::len).sum();
         tracing::info!(hosts = count, "port scan started");
         std::thread::scope(|s| {
@@ -903,9 +1109,9 @@ impl PortScan {
                             if cancel.load(Ordering::SeqCst) {
                                 return;
                             }
-                            if lock(&self.state).running.insert(t.mac.clone()) {
+                            // a scan-now of it is running: that one counts
+                            if let Some(_running) = self.claim(&t.mac) {
                                 self.scan_target(t, &plan.ports, cancel);
-                                lock(&self.state).running.remove(&t.mac);
                             }
                         }
                     });
@@ -920,8 +1126,12 @@ impl PortScan {
     }
 
     /// Scans `t` (the caller has marked it running) under its interface's
-    /// lock and saves a complete result; a cancelled or failed scan, or one
-    /// whose address moved to another host meanwhile, changes nothing.
+    /// lock and saves what it found. Nothing changes after a cancel, when
+    /// the router could not send, when the address moved to another host
+    /// meanwhile, or when no port answered with a reset or an accept and the
+    /// host was not seen within [`crate::hosts::ONLINE_SECS`] (it is
+    /// probably gone). A host that is up but drops everything gets its scan
+    /// time and the `all_filtered` mark, its ports untouched.
     fn scan_target(&self, t: &Target, ports: &[u16], cancel: &AtomicBool) {
         let iface = Arc::clone(
             lock(&self.iface_locks)
@@ -932,30 +1142,35 @@ impl PortScan {
         if cancel.load(Ordering::SeqCst) {
             return;
         }
-        let open = match self.scanner.scan_host(t.ip, ports, cancel) {
-            Ok(open) => open,
+        let recheck: BTreeSet<u16> = lock(&self.store)
+            .get(&t.mac)
+            .map(|h| h.open().map(|e| e.port).collect())
+            .unwrap_or_default();
+        let outcome = match self.scanner.scan_host(t.ip, ports, &recheck, cancel) {
+            Ok(o) => o,
             Err(e) => {
                 tracing::debug!(mac = %t.mac, ip = %t.ip, error = %e, "port scan without a result");
                 return;
             }
         };
-        let still = (self.hosts)().iter().any(|h| {
-            h.mac
-                .as_deref()
-                .is_some_and(|m| m.eq_ignore_ascii_case(&t.mac))
-                && h.ipv4 == Some(t.ip)
-        });
-        if !still {
+        let now = self.now();
+        let Some(h) = self.hosts.host(&t.mac).filter(|h| h.ipv4 == Some(t.ip)) else {
             tracing::debug!(mac = %t.mac, ip = %t.ip, "address changed during the port scan; result dropped");
             return;
+        };
+        if !outcome.answered {
+            let alive = h
+                .last_seen
+                .is_some_and(|s| now.saturating_sub(s) <= crate::hosts::ONLINE_SECS);
+            if !alive {
+                tracing::debug!(mac = %t.mac, ip = %t.ip, "no port answered and the host is not seen; result dropped");
+                return;
+            }
         }
-        let now = self.now();
-        let mut store = lock(&self.store);
-        store.merge(&t.mac, &open, now);
-        store.prune(now);
-        if let Err(e) = store.persist() {
-            tracing::warn!(error = %e, "saving port scan results");
-        }
+        self.save(|store| {
+            store.merge(&t.mac, &outcome, now);
+            store.prune(now);
+        });
     }
 
     /// Scans `mac` now in the background. Refused while that host is being
@@ -963,7 +1178,7 @@ impl PortScan {
     /// router does not scan; allowed when the daily scan is off.
     pub fn scan_now(self: &Arc<Self>, mac: &str) -> Result<(), ScanNowError> {
         let mac = mac.to_ascii_lowercase();
-        let hosts = (self.hosts)();
+        let host = self.hosts.host(&mac);
         let mut st = lock(&self.state);
         let Some(plan) = st.plan.clone().filter(|_| !st.stopped) else {
             return Err(ScanNowError::NotReady);
@@ -974,14 +1189,9 @@ impl PortScan {
         if st.scan_now >= MAX_SCAN_NOW {
             return Err(ScanNowError::TooMany);
         }
-        let t = hosts
-            .iter()
-            .filter(|h| {
-                h.mac
-                    .as_deref()
-                    .is_some_and(|m| m.eq_ignore_ascii_case(&mac))
-            })
-            .find_map(|h| eligible(h, &plan.internal, &plan.quarantine, &plan.own))
+        let t = host
+            .as_ref()
+            .and_then(|h| eligible(h, &plan.internal, &plan.quarantine, &plan.own))
             .ok_or(ScanNowError::NotScannable)?;
         st.running.insert(mac.clone());
         st.scan_now += 1;
@@ -991,16 +1201,20 @@ impl PortScan {
         let r = std::thread::Builder::new()
             .name("sensr-portscan-now".into())
             .spawn(move || {
+                let _running = Running {
+                    state: &s.state,
+                    mac: t.mac.clone(),
+                    scan_now: true,
+                };
                 s.scan_target(&t, &plan.ports, &cancel);
-                let mut st = lock(&s.state);
-                st.running.remove(&t.mac);
-                st.scan_now -= 1;
             });
         if let Err(e) = r {
             tracing::warn!(error = %e, "scan now not started");
-            let mut st = lock(&self.state);
-            st.running.remove(&mac);
-            st.scan_now -= 1;
+            drop(Running {
+                state: &self.state,
+                mac,
+                scan_now: true,
+            });
             return Err(ScanNowError::NotReady);
         }
         Ok(())

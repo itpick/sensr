@@ -110,11 +110,11 @@ impl Rig {
     fn in_dir(scanner: Scanner, hosts: Vec<Host>, dir: tempfile::TempDir) -> Self {
         let hosts = Arc::new(Mutex::new(hosts));
         let now = Arc::new(AtomicU64::new(NOW));
-        let (h, n) = (Arc::clone(&hosts), Arc::clone(&now));
+        let n = Arc::clone(&now);
         let svc = PortScan::new(
             scanner,
             dir.path().join("ports.json"),
-            Arc::new(move || lock(&h).clone()),
+            Arc::clone(&hosts) as Arc<dyn HostSource>,
             Arc::new(move || n.load(Ordering::SeqCst)),
             // a fixed UTC+1 zone
             Arc::new(|_: &str| 3600),
@@ -144,6 +144,16 @@ impl Rig {
             assert!(t.elapsed() < Duration::from_secs(20), "scan did not end");
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+}
+
+/// A scan that found `open` and every other port refused.
+fn complete(open: &[u16]) -> ScanOutcome {
+    ScanOutcome {
+        open: open.to_vec(),
+        closed: (1..=u16::MAX).filter(|p| !open.contains(p)).collect(),
+        filtered: BTreeSet::new(),
+        answered: true,
     }
 }
 
@@ -204,10 +214,13 @@ fn scan_host_reports_open_ports_sorted() {
         .scan_host(
             "192.168.1.50".parse().unwrap(),
             &port_list(&[]),
+            &BTreeSet::new(),
             &AtomicBool::new(false),
         )
         .unwrap();
-    assert_eq!(open, [22, 80, 8080]);
+    assert_eq!(open.open, [22, 80, 8080]);
+    assert!(open.answered && open.filtered.is_empty());
+    assert_eq!(open.closed.len(), port_list(&[]).len() - 3);
 }
 
 #[test]
@@ -297,13 +310,17 @@ fn slow_host_bounded_time() {
         PER_HOST,
     );
     let ports = port_list(&[]);
-    let r = s.scan_host(
-        "192.168.1.66".parse().unwrap(),
-        &ports,
-        &AtomicBool::new(false),
-    );
-    // nothing answered: not a result that may close ports
-    assert_eq!(r, Err(ScanError::Unreachable));
+    let r = s
+        .scan_host(
+            "192.168.1.66".parse().unwrap(),
+            &ports,
+            &BTreeSet::new(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    // nothing answered: nothing that may close a port
+    assert!(!r.answered && r.open.is_empty() && r.closed.is_empty());
+    assert_eq!(r.filtered.len(), ports.len());
     assert_eq!(attempts.load(Ordering::SeqCst), ports.len());
     assert!(most.load(Ordering::SeqCst) <= PER_HOST);
     // ceil(1045 / 8) timeouts of 1.5 s: 196.5 s, about 3.3 minutes
@@ -568,7 +585,7 @@ fn scan_now_spam_is_refused() {
 fn merge_marks_new_and_closed() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = PortStore::load(dir.path().join("ports.json"));
-    s.merge(&MAC1.to_uppercase(), &[22, 80], NOW);
+    s.merge(&MAC1.to_uppercase(), &complete(&[22, 80]), NOW);
     let h = s.get(MAC1).unwrap().clone();
     assert_eq!(h.last_scan, NOW);
     assert_eq!(open_ports(&h), [22, 80]);
@@ -578,7 +595,7 @@ fn merge_marks_new_and_closed() {
 
     // a day later: 22 closed, 80 still open, 23 new
     let day2 = NOW + 86_400;
-    s.merge(MAC1, &[80, 23], day2);
+    s.merge(MAC1, &complete(&[80, 23]), day2);
     let h = s.get(MAC1).unwrap();
     let by: BTreeMap<u16, &PortEntry> = h.ports.iter().map(|e| (e.port, e)).collect();
     assert_eq!(by[&22].closed_at, Some(day2));
@@ -592,22 +609,22 @@ fn merge_marks_new_and_closed() {
     assert_eq!(open_ports(h), [23, 80]);
 
     // closed stays closed from when it closed, and reopens
-    s.merge(MAC1, &[80, 23], day2 + 10);
+    s.merge(MAC1, &complete(&[80, 23]), day2 + 10);
     assert_eq!(s.get(MAC1).unwrap().ports[0].closed_at, Some(day2));
-    s.merge(MAC1, &[22, 80, 23], day2 + 20);
+    s.merge(MAC1, &complete(&[22, 80, 23]), day2 + 20);
     assert_eq!(s.get(MAC1).unwrap().ports[0].closed_at, None);
-    s.merge(MAC1, &[80, 23], day2 + 30);
+    s.merge(MAC1, &complete(&[80, 23]), day2 + 30);
 
     // closed entries are kept 90 days
     s.prune(day2 + 30 + KEEP_SECS);
     assert!(s.get(MAC1).unwrap().ports.iter().any(|e| e.port == 22));
-    s.merge(MAC1, &[80, 23], day2 + 40 + KEEP_SECS);
+    s.merge(MAC1, &complete(&[80, 23]), day2 + 40 + KEEP_SECS);
     s.prune(day2 + 40 + KEEP_SECS);
     assert_eq!(open_ports(s.get(MAC1).unwrap()), [23, 80]);
     assert_eq!(s.get(MAC1).unwrap().ports.len(), 2);
 
     // a host not scanned for 90 days goes
-    s.merge(MAC2, &[443], NOW);
+    s.merge(MAC2, &complete(&[443]), NOW);
     s.prune(NOW + KEEP_SECS + 1);
     assert!(s.get(MAC2).is_none());
 
@@ -633,9 +650,9 @@ fn ports_per_host_are_capped() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = PortStore::load(dir.path().join("ports.json"));
     let first: Vec<u16> = (1..=1000).collect();
-    s.merge(MAC1, &first, NOW);
+    s.merge(MAC1, &complete(&first), NOW);
     let second: Vec<u16> = (2000..2100).collect();
-    s.merge(MAC1, &second, NOW + 1);
+    s.merge(MAC1, &complete(&second), NOW + 1);
     let h = s.get(MAC1).unwrap();
     assert_eq!(h.ports.len(), MAX_PORTS_PER_HOST);
     // every open port is kept; the rest are the latest closed
@@ -885,4 +902,226 @@ fn targets_skip_quarantine_router_wan_and_stale() {
     );
     rig.scan(MAC3);
     assert!(rig.svc.ports(MAC3).is_some());
+}
+
+#[test]
+fn addresses_outside_the_interface_are_never_scanned() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = {
+        let calls = Arc::clone(&calls);
+        FnConnector(move |_: SocketAddr, _| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Probe::Closed
+        })
+    };
+    // a lease or neighbour entry claims a public address on the LAN
+    let rig = Rig::new(
+        scanner(Arc::new(c)),
+        vec![
+            host(MAC1, "8.8.8.8", "lan", Some(NOW)),
+            host(MAC2, "192.168.20.5", "lan", Some(NOW)),
+        ],
+    );
+    let doc = home_router();
+    rig.apply(&doc);
+    let plan = Plan::from_doc(&doc, &[]);
+    let hosts = lock(&rig.hosts).clone();
+    assert!(targets(&hosts, &plan.internal, &plan.quarantine, &plan.own, NOW).is_empty());
+    assert_eq!(rig.svc.scan_now(MAC1), Err(ScanNowError::NotScannable));
+    // another internal network's address on the wrong interface, too
+    assert_eq!(rig.svc.scan_now(MAC2), Err(ScanNowError::NotScannable));
+    rig.now.store(NOW + 86_400, Ordering::SeqCst);
+    rig.svc.tick();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn connect_errors_map_to_probes() {
+    use std::io::{Error, ErrorKind};
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    let (refused, timedout, hostdown, hostunreach, netunreach) = (61, 60, 64, 65, 51);
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
+    let (refused, timedout, hostdown, hostunreach, netunreach) = (111, 110, 112, 113, 101);
+    let errno = |n: i32| classify(&Error::from_raw_os_error(n));
+    assert_eq!(errno(refused), Probe::Closed);
+    assert_eq!(errno(timedout), Probe::Filtered);
+    // an ICMP answer within the timeout: the port is closed
+    assert_eq!(errno(hostunreach), Probe::Rejected);
+    assert_eq!(errno(hostdown), Probe::Rejected);
+    // the router cannot send: no result
+    assert_eq!(errno(netunreach), Probe::Unreachable);
+    assert_eq!(errno(1), Probe::Unreachable); // EPERM
+    assert_eq!(errno(13), Probe::Unreachable); // EACCES
+    assert_eq!(
+        classify(&Error::from(ErrorKind::ConnectionReset)),
+        Probe::Closed
+    );
+    assert_eq!(classify(&Error::from(ErrorKind::TimedOut)), Probe::Filtered);
+}
+
+#[test]
+fn filtered_open_port_is_retried_and_kept() {
+    let phase2 = Arc::new(AtomicBool::new(false));
+    let tries: Arc<Mutex<BTreeMap<u16, usize>>> = Arc::default();
+    let c = {
+        let (phase2, tries) = (Arc::clone(&phase2), Arc::clone(&tries));
+        FnConnector(move |a: SocketAddr, _| {
+            let p = a.port();
+            if !phase2.load(Ordering::SeqCst) {
+                return if [22, 80, 443].contains(&p) {
+                    Probe::Open
+                } else {
+                    Probe::Closed
+                };
+            }
+            let n = {
+                let mut t = lock(&tries);
+                let n = t.entry(p).or_default();
+                *n += 1;
+                *n
+            };
+            match p {
+                // a lost SYN: answers on the retry
+                22 if n == 1 => Probe::Filtered,
+                22 => Probe::Open,
+                // silent now, twice
+                80 => Probe::Filtered,
+                // a never-open port that times out stays unknown
+                8080 => Probe::Filtered,
+                _ => Probe::Closed,
+            }
+        })
+    };
+    let rig = Rig::new(
+        scanner(Arc::new(c)),
+        vec![host(MAC1, "192.168.1.50", "lan", Some(NOW))],
+    );
+    rig.apply(&home_router());
+    rig.scan(MAC1);
+    assert_eq!(open_ports(&rig.svc.ports(MAC1).unwrap()), [22, 80, 443]);
+    phase2.store(true, Ordering::SeqCst);
+    let t2 = NOW + 7200;
+    rig.now.store(t2, Ordering::SeqCst);
+    rig.scan(MAC1);
+    let t = lock(&tries).clone();
+    assert_eq!((t[&22], t[&80], t[&443], t[&8080], t[&23]), (2, 2, 1, 1, 1));
+    let h = rig.svc.ports(MAC1).unwrap();
+    let by: BTreeMap<u16, &PortEntry> = h.ports.iter().map(|e| (e.port, e)).collect();
+    assert_eq!((by[&22].last_seen, by[&22].closed_at), (t2, None));
+    // kept as it was: still open, last seen at the first scan
+    assert_eq!((by[&80].last_seen, by[&80].closed_at), (NOW, None));
+    // refused: closed
+    assert_eq!(by[&443].closed_at, Some(t2));
+    assert!(!by.contains_key(&8080));
+    assert_eq!(h.last_scan, t2);
+    assert!(!h.all_filtered);
+}
+
+#[test]
+fn a_host_dropping_everything_keeps_its_ports() {
+    let mode = Arc::new(Mutex::new("answer"));
+    let c = {
+        let mode = Arc::clone(&mode);
+        FnConnector(move |a: SocketAddr, _| match *lock(&mode) {
+            "answer" if a.port() == 22 => Probe::Open,
+            "answer" => Probe::Closed,
+            "rejected" => Probe::Rejected,
+            _ => Probe::Filtered,
+        })
+    };
+    let rig = Rig::new(
+        scanner(Arc::new(c)),
+        vec![host(MAC1, "192.168.1.50", "lan", Some(NOW))],
+    );
+    rig.apply(&home_router());
+    rig.scan(MAC1);
+    let before = rig.svc.ports(MAC1).unwrap();
+    assert_eq!(open_ports(&before), [22]);
+
+    // not seen for 15 minutes: probably gone, nothing changes
+    for m in ["filtered", "rejected"] {
+        *lock(&mode) = m;
+        rig.now.store(NOW + 900, Ordering::SeqCst);
+        rig.scan(MAC1);
+        assert_eq!(rig.svc.ports(MAC1).unwrap(), before, "{m}");
+    }
+
+    // seen a minute ago and silent: scanned, marked, ports untouched
+    *lock(&mode) = "filtered";
+    lock(&rig.hosts)[0].last_seen = Some(NOW + 840);
+    rig.scan(MAC1);
+    let h = rig.svc.ports(MAC1).unwrap();
+    assert_eq!(h.last_scan, NOW + 900);
+    assert!(h.all_filtered);
+    assert_eq!(h.ports, before.ports);
+    let v: serde_json::Value = serde_json::from_str(&rig.file()).unwrap();
+    assert_eq!(v["hosts"][MAC1]["all_filtered"], true);
+
+    // up and answering with ICMP rejects only: those close the port
+    *lock(&mode) = "rejected";
+    rig.now.store(NOW + 960, Ordering::SeqCst);
+    rig.scan(MAC1);
+    let h = rig.svc.ports(MAC1).unwrap();
+    assert!(open_ports(&h).is_empty());
+    assert!(!h.all_filtered);
+    assert_eq!(h.ports[0].closed_at, Some(NOW + 960));
+}
+
+#[test]
+fn a_missed_sweep_catches_up_after_start() {
+    for (last, expect) in [(NOW - 2 * 86_400, true), (NOW - 3600, false)] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ports.json"),
+            serde_json::json!({"version": 1, "last_sweep": last, "hosts": {}}).to_string(),
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = {
+            let calls = Arc::clone(&calls);
+            FnConnector(move |_: SocketAddr, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Probe::Closed
+            })
+        };
+        let rig = Rig::in_dir(
+            scanner(Arc::new(c)),
+            vec![host(MAC1, "192.168.1.50", "lan", Some(NOW))],
+            dir,
+        );
+        rig.apply(&home_router());
+        rig.now
+            .store(NOW + CATCH_UP_DELAY_SECS - 1, Ordering::SeqCst);
+        rig.svc.tick();
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "not during boot");
+        rig.now.store(NOW + CATCH_UP_DELAY_SECS, Ordering::SeqCst);
+        rig.svc.tick();
+        assert_eq!(calls.load(Ordering::SeqCst) > 0, expect, "last={last}");
+        if expect {
+            let v: serde_json::Value = serde_json::from_str(&rig.file()).unwrap();
+            assert_eq!(v["last_sweep"], NOW + CATCH_UP_DELAY_SECS);
+            // once
+            let n = calls.load(Ordering::SeqCst);
+            rig.now.store(NOW + 3600, Ordering::SeqCst);
+            rig.svc.tick();
+            assert_eq!(calls.load(Ordering::SeqCst), n);
+        }
+    }
+}
+
+#[test]
+fn load_caps_ports_per_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("ports.json");
+    let ports: Vec<serde_json::Value> = (1..=2000u16)
+        .map(|port| serde_json::json!({"port": port, "first_seen": 1, "last_seen": 1}))
+        .collect();
+    std::fs::write(
+        &p,
+        serde_json::json!({"version": 1, "hosts": {MAC1: {"last_scan": 1, "ports": ports}}})
+            .to_string(),
+    )
+    .unwrap();
+    let s = PortStore::load(p);
+    assert_eq!(s.get(MAC1).unwrap().ports.len(), MAX_PORTS_PER_HOST);
 }

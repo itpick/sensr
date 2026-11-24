@@ -1107,6 +1107,19 @@ impl HostCollector {
         lock(&self.state).inv.hosts().cloned().collect()
     }
 
+    /// A copy of the row with MAC `mac` (any case).
+    pub fn host(&self, mac: &str) -> Option<Host> {
+        lock(&self.state)
+            .inv
+            .hosts()
+            .find(|h| {
+                h.mac
+                    .as_deref()
+                    .is_some_and(|m| m.eq_ignore_ascii_case(mac))
+            })
+            .cloned()
+    }
+
     /// The MAC of the inventory host holding `ip`; when a stale row still
     /// lists the address too, the most recently seen one.
     pub fn mac_for_ip(&self, ip: IpAddr) -> Option<String> {
