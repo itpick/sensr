@@ -41,7 +41,12 @@ let
 
   installBoot = pkgs.writeShellApplication {
     name = "sensr-pi4-install-boot";
-    runtimeInputs = [ pkgs.coreutils ];
+    # grep and sed read config.txt before deciding whether it may be rewritten
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.gnugrep
+      pkgs.gnused
+    ];
     text =
       builtins.replaceStrings
         [ "@bootFiles@" "@extraCmdline@" "@tryboot@" "@watchdogTimeout@" "@section@" "@board@" ]
