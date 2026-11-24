@@ -407,6 +407,17 @@ mod tests {
         assert!("America/Argentina/Buenos_Aires".parse::<Timezone>().is_ok());
         assert!("Etc/GMT+5".parse::<Timezone>().is_ok());
         assert!("../etc/passwd".parse::<Timezone>().is_err());
+        for bad in [
+            "",
+            "a b",
+            "America//Chicago",
+            "/UTC",
+            "UTC/",
+            "Etc/../x",
+            "Amer\nica",
+        ] {
+            assert!(bad.parse::<Timezone>().is_err(), "{bad:?}");
+        }
         assert!(
             "Default allow LAN to any rule"
                 .parse::<Description>()

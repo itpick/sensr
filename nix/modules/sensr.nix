@@ -813,6 +813,9 @@ in
         ProtectKernelTunables = false;
         ProtectKernelLogs = true;
         ProtectHostname = false;
+        # system.timezone: `timedatectl set-timezone` asks systemd-timedated over
+        # the system bus (AF_UNIX; `time.timeZone` stays unset so the zone is
+        # mutable). The agent never writes /etc/localtime itself.
         RestrictAddressFamilies = [
           "AF_UNIX"
           "AF_NETLINK"

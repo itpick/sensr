@@ -576,6 +576,7 @@ impl SliceModels {
             unbound: unbound(doc)?,
             wireguard: wireguard(doc, secrets)?,
             ntp: ntp(doc)?,
+            timezone: Some(doc.system.timezone.to_string()),
         })
     }
 }
