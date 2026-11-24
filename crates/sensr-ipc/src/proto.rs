@@ -291,7 +291,8 @@ pub enum Op {
     },
     /// The host's open TCP ports from the port scan. Answered with
     /// [`Response::Value`] `{last_scan, scanning, all_filtered, ports}`;
-    /// [`ErrorKind::NotFound`] for a MAC not in the inventory.
+    /// [`ErrorKind::NotFound`] for a MAC not in the inventory and
+    /// [`ErrorKind::Unavailable`] when there is no port scanner.
     HostPorts {
         /// The host's MAC address.
         mac: String,

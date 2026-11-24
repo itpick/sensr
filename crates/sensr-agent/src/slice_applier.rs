@@ -849,8 +849,12 @@ impl Applier for SliceApplier {
         Ok(self.hosts.as_ref().is_some_and(|h| h.forget(key)))
     }
 
-    fn host_ports(&self, mac: &str) -> Option<Value> {
-        self.portscan.as_ref()?.view(mac)
+    fn host_ports(&self, mac: &str) -> Result<Value, crate::portscan::ScanNowError> {
+        self.portscan
+            .as_ref()
+            .ok_or(crate::portscan::ScanNowError::NotReady)?
+            .view(mac)
+            .ok_or(crate::portscan::ScanNowError::Unknown)
     }
 
     fn host_scan_now(&self, mac: &str) -> Result<(), crate::portscan::ScanNowError> {
@@ -1433,6 +1437,8 @@ mod tests {
             Arc::new(|_: &str| 0),
         );
         let (a, _, _) = moded_applier(&root);
+        // no scanner attached: the ports view is unavailable, not "no such host"
+        assert_eq!(a.host_ports(mac), Err(ScanNowError::NotReady));
         let mut a = a.with_portscan(Arc::clone(&ps));
         assert_eq!(ps.scan_now(mac), Err(ScanNowError::NotReady));
         a.apply(None, &home_router()).unwrap();
@@ -1446,7 +1452,10 @@ mod tests {
         let v = a.host_ports(mac).unwrap();
         assert_eq!(v["last_scan"], Value::Null);
         assert_eq!(v["ports"], serde_json::json!([]));
-        assert!(a.host_ports("aa:aa:aa:aa:aa:aa").is_none());
+        assert_eq!(
+            a.host_ports("aa:aa:aa:aa:aa:aa"),
+            Err(ScanNowError::Unknown)
+        );
         assert_eq!(
             a.host_scan_now("aa:aa:aa:aa:aa:aa"),
             Err(ScanNowError::Unknown)

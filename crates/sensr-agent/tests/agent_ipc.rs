@@ -865,6 +865,15 @@ async fn host_ports_and_scan_now_ops() {
     })
     .await
     .unwrap();
+    // no port scanner: unavailable, not "no such host"
+    fx.applier.state.lock().unwrap().ports_unavailable = true;
+    let e = agent_err(
+        c.call(Op::HostPorts {
+            mac: "aa:bb:cc:dd:ee:02".into(),
+        })
+        .await,
+    );
+    assert_eq!(e.kind, ErrorKind::Unavailable);
 }
 
 const MODE_MAC: &str = "aa:bb:cc:dd:ee:01";

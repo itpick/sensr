@@ -1188,15 +1188,15 @@ impl PortScan {
         let Some(plan) = st.plan.clone().filter(|_| !st.stopped) else {
             return Err(ScanNowError::NotReady);
         };
+        let Some(host) = host else {
+            return Err(ScanNowError::Unknown);
+        };
         if st.running.contains(&mac) {
             return Err(ScanNowError::Busy);
         }
         if st.scan_now >= MAX_SCAN_NOW {
             return Err(ScanNowError::TooMany);
         }
-        let Some(host) = host else {
-            return Err(ScanNowError::Unknown);
-        };
         let t = eligible(&host, &plan.internal, &plan.quarantine, &plan.own)
             .ok_or(ScanNowError::NotScannable)?;
         st.running.insert(mac.clone());

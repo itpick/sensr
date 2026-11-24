@@ -559,9 +559,10 @@ fn scan_now_spam_is_refused() {
     assert_eq!(rig.svc.scan_now(MAC2), Ok(()));
     assert_eq!(rig.svc.scan_now(MAC3), Err(ScanNowError::TooMany));
     assert!(rig.svc.scanning(MAC1) && rig.svc.scanning(MAC2) && !rig.svc.scanning(MAC3));
+    // an unknown MAC is unknown even while the scan-now slots are full
     assert_eq!(
         rig.svc.scan_now("aa:bb:cc:dd:ee:99"),
-        Err(ScanNowError::TooMany)
+        Err(ScanNowError::Unknown)
     );
     {
         let (m, cv) = &*gate;

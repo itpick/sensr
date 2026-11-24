@@ -994,8 +994,8 @@ impl<A: Applier> Agent<A> {
                     .await
             }
             Op::HostPorts { mac } => match inner.applier.host_ports(&mac) {
-                Some(v) => Ok(Response::Value(Some(v))),
-                None => Err(err(ErrorKind::NotFound, "no such host")),
+                Ok(v) => Ok(Response::Value(Some(v))),
+                Err(e) => Err(scan_error(e)),
             },
             Op::HostScanNow { mac } => match inner.applier.host_scan_now(&mac) {
                 Ok(()) => Ok(Response::Value(Some(serde_json::json!({"started": true})))),

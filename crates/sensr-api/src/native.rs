@@ -393,7 +393,8 @@ pub async fn host_activity(
 /// `GET /api/v1/hosts/{mac}/ports`: the open TCP ports the daily scan found
 /// on one host, `{last_scan, scanning, all_filtered, ports}` (`last_scan` is
 /// `null` before the first scan; each port has `new` when first seen within
-/// 24 hours). 404 for a MAC not in the inventory.
+/// 24 hours). 404 for a MAC not in the inventory, 503 when the scanner is not
+/// running.
 pub async fn host_ports(
     State(state): State<Arc<AppState>>,
     Extension(caller): Extension<Caller>,
