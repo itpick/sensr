@@ -173,6 +173,12 @@ in
     ];
   };
 
+  # A Pi that resets (watchdog, panic=10, a pulled plug) loses everything
+  # journald has not synced, by default the last 5 minutes: on 2026-11-24
+  # three boots in a reset loop each left a journal that ends at ~19 s, so
+  # nothing showed why they reset. Sync every 5 s; the volume is small.
+  services.journald.settings.Journal.SyncIntervalSec = "5s";
+
   # The trial installer's log partition (sensr-pi5-trial-install
   # --logs-mib) is not declared here: the plain SD image has only the FAT and
   # root partitions, and a fileSystems entry for a missing label still makes
