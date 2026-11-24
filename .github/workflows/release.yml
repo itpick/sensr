@@ -1,12 +1,26 @@
-# Publishes the images the install page links to, plus the closures the
-# in-app updater (nix/modules/updates.nix) installs from.
+# Publishes the closures the in-app updater (nix/modules/updates.nix) installs
+# from, then the images the install page links to.
 #
 #   git tag v26.11.1 && git push origin v26.11.1
 #
 # Every asset is a stable name under releases/latest/download/, which is what
-# docs/index.html and the updater's default manifest URL point at. Each image
+# docs/index.html and the updater's default manifest URL point at. Each asset
 # gets a .sha256 next to it, and update-manifest.json lists, per board, the
 # system closure and its digest.
+#
+# Routers only need the system closures, so those go out first:
+#
+#   updater-x86_64  ─┐
+#                    ├─ publish-update ─┬─ attach-x86_64  ─┐
+#   updater-aarch64 ─┘                  │                  ├─ manifest-images
+#   images-x86_64  ─────────────────────┼──┘               │
+#   images-aarch64 ─────────────────────┴─ attach-aarch64 ─┘
+#
+# publish-update creates the release with the closures and update-manifest.json
+# as soon as both toplevels are built. The SD/ISO/qcow2 builds run alongside
+# and are attached to the same release when they finish; manifest-images then
+# adds each board's `image` entry to the manifests without touching the
+# updater fields. Until then the install page dims the missing downloads.
 name: release
 
 on:
@@ -18,17 +32,25 @@ on:
         description: "Release tag (e.g. v26.11.1); the tag must exist"
         required: true
 
+# One run per tag at a time: a re-run or dispatch of the same tag waits for
+# the running one instead of racing it on the same release.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 permissions:
-  contents: write
+  contents: read
 
 env:
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
-  x86_64:
+  updater-x86_64:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
       - name: Make room for the store
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: DeterminateSystems/nix-installer-action@main
@@ -45,16 +67,9 @@ jobs:
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
           skipPush: ${{ github.event_name == 'pull_request' }}
           pushFilter: '(\.img(\.zst)?|\.iso|\.qcow2?|-sd-image-.*|-nixos-disk-image|-installer.*)$'
-      - name: Build the installer ISO and the qcow2 image
-        run: |
-          mkdir -p out
-          iso=$(nix build -L --print-out-paths .#images.iso)
-          cp "$iso/iso/sensr-x86_64-installer.iso" out/sensr-x86_64-installer.iso
-          qcow=$(nix build -L --print-out-paths .#images.qcow)
-          img=$(find "$qcow" -type f -name '*.qcow2' -print -quit)
-          zstd -T0 -10 -o out/sensr-x86_64.qcow2.zst "$img"
       - name: Pack the updater closures
         run: |
+          mkdir -p out
           for board in qcow iso; do
             top=$(nix build -L --print-out-paths ".#nixosConfigurations.$board.config.system.build.toplevel")
             nix-store -qR "$top" | xargs nix-store --export | zstd -T0 -10 -o "out/sensr-$board.closure.tar.zst"
@@ -66,29 +81,100 @@ jobs:
       - name: Digests
         run: |
           cd out
-          for f in sensr-x86_64-installer.iso sensr-x86_64.qcow2.zst \
-                   sensr-qcow.closure.tar.zst sensr-iso.closure.tar.zst; do
+          for f in sensr-qcow.closure.tar.zst sensr-iso.closure.tar.zst; do
             sha256sum "$f" > "$f.sha256"
           done
       - uses: actions/upload-artifact@v5
         with:
-          name: release-x86_64
+          name: updater-x86_64
           path: out/*
           retention-days: 3
 
-  aarch64:
+  updater-aarch64:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
       - name: Make room for the store
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: DeterminateSystems/nix-installer-action@main
-      # Binary cache (see "CI binary cache" in README.md). No-op until the
-      # CACHIX_CACHE variable exists; pulls without a token; pushes only
-      # outside pull_request runs. Disk images are not pushed: they are
-      # large, never substituted (release.yml recompresses them anyway), and
-      # would burn the free-tier quota. Toplevels and the crane dependency
-      # closures are what make the next build fast.
+      # Binary cache: see updater-x86_64.
+      - uses: cachix/cachix-action@v17
+        if: vars.CACHIX_CACHE != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          skipPush: ${{ github.event_name == 'pull_request' }}
+          pushFilter: '(\.img(\.zst)?|\.iso|\.qcow2?|-sd-image-.*|-nixos-disk-image|-installer.*)$'
+      - name: Pack the updater closures
+        run: |
+          mkdir -p out
+          for board in pi4 pi5; do
+            top=$(nix build -L --print-out-paths ".#nixosConfigurations.$board.config.system.build.toplevel")
+            nix-store -qR "$top" | xargs nix-store --export | zstd -T0 -10 -o "out/sensr-$board.closure.tar.zst"
+            cat "$top/nixos-version" > "out/sensr-$board.version"
+            echo "$top" > "out/sensr-$board.toplevel"
+          done
+      - name: Digests
+        run: |
+          cd out
+          for f in sensr-pi4.closure.tar.zst sensr-pi5.closure.tar.zst; do
+            sha256sum "$f" > "$f.sha256"
+          done
+      - uses: actions/upload-artifact@v5
+        with:
+          name: updater-aarch64
+          path: out/*
+          retention-days: 3
+
+  images-x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+      - name: Make room for the store
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: DeterminateSystems/nix-installer-action@main
+      # Binary cache: see updater-x86_64.
+      - uses: cachix/cachix-action@v17
+        if: vars.CACHIX_CACHE != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          skipPush: ${{ github.event_name == 'pull_request' }}
+          pushFilter: '(\.img(\.zst)?|\.iso|\.qcow2?|-sd-image-.*|-nixos-disk-image|-installer.*)$'
+      - name: Build the installer ISO and the qcow2 image
+        run: |
+          mkdir -p out
+          iso=$(nix build -L --print-out-paths .#images.iso)
+          cp "$iso/iso/sensr-x86_64-installer.iso" out/sensr-x86_64-installer.iso
+          qcow=$(nix build -L --print-out-paths .#images.qcow)
+          img=$(find "$qcow" -type f -name '*.qcow2' -print -quit)
+          zstd -T0 -10 -o out/sensr-x86_64.qcow2.zst "$img"
+      - name: Digests
+        run: |
+          cd out
+          for f in sensr-x86_64-installer.iso sensr-x86_64.qcow2.zst; do
+            sha256sum "$f" > "$f.sha256"
+          done
+      - uses: actions/upload-artifact@v5
+        with:
+          name: images-x86_64
+          path: out/*
+          retention-days: 3
+
+  images-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+      - name: Make room for the store
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: DeterminateSystems/nix-installer-action@main
+      # Binary cache: see updater-x86_64.
       - uses: cachix/cachix-action@v17
         if: vars.CACHIX_CACHE != ''
         with:
@@ -111,51 +197,55 @@ jobs:
             fi
             zstd -T0 -10 -o "out/sensr-$board.img.zst" "$file"
           done
-      - name: Pack the updater closures
-        run: |
-          for board in pi4 pi5; do
-            top=$(nix build -L --print-out-paths ".#nixosConfigurations.$board.config.system.build.toplevel")
-            nix-store -qR "$top" | xargs nix-store --export | zstd -T0 -10 -o "out/sensr-$board.closure.tar.zst"
-            cat "$top/nixos-version" > "out/sensr-$board.version"
-            echo "$top" > "out/sensr-$board.toplevel"
-          done
       - name: Digests
         run: |
           cd out
-          for f in sensr-pi4.img.zst sensr-pi5.img.zst \
-                   sensr-pi4.closure.tar.zst sensr-pi5.closure.tar.zst; do
+          for f in sensr-pi4.img.zst sensr-pi5.img.zst; do
             sha256sum "$f" > "$f.sha256"
           done
       - uses: actions/upload-artifact@v5
         with:
-          name: release-aarch64
+          name: images-aarch64
           path: out/*
           retention-days: 3
 
-  publish:
-    needs: [x86_64, aarch64]
+  # Creates the release with what routers need. Runs as soon as both
+  # toplevels are packed, without waiting for any disk image.
+  publish-update:
+    needs: [updater-x86_64, updater-aarch64]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
       - uses: actions/download-artifact@v5
         with:
+          pattern: updater-*
           path: assets
           merge-multiple: true
+      - name: Check every closure is present
+        run: |
+          set -euo pipefail
+          missing=0
+          for board in pi4 pi5 qcow iso; do
+            for f in "sensr-$board.closure.tar.zst" "sensr-$board.closure.tar.zst.sha256" \
+                     "sensr-$board.version" "sensr-$board.toplevel"; do
+              [ -s "assets/$f" ] || { echo "missing $f"; missing=1; }
+            done
+          done
+          exit $missing
       - name: Assemble the manifests
         run: |
           set -euo pipefail
           base="https://github.com/itpick/sensr/releases/download/$TAG"
           # Per-board entries: the version is the built system's own
           # nixos-version, which is what the updater compares against.
-          jq -n --arg base "$base" '{}' > images.json
+          echo '{}' > images.json
           for board in pi4 pi5 qcow iso; do
-            img=""
-            case "$board" in
-              pi4) img=sensr-pi4.img.zst ;;
-              pi5) img=sensr-pi5.img.zst ;;
-              qcow) img=sensr-x86_64.qcow2.zst ;;
-              iso) img=sensr-x86_64-installer.iso ;;
-            esac
             version=$(cat "assets/sensr-$board.version")
             path=$(cat "assets/sensr-$board.toplevel")
             closure="sensr-$board.closure.tar.zst"
@@ -165,14 +255,18 @@ jobs:
                --arg s "$sha" --arg p "$path" --argjson n "$size" \
                '.[$b] = {version: $v, store_path: $p, system: $u, sha256: $s, size: $n}' \
                images.json > images.tmp && mv images.tmp images.json
-            # The same entry carries the download the install page links to.
-            jq --arg b "$board" --arg img "$img" --arg iu "$base/$img" \
-               --arg isha "$(cut -d' ' -f1 "assets/$img.sha256")" \
-               '.[$b].image = {name: $img, url: $iu, sha256: $isha}' \
-               images.json > images.tmp && mv images.tmp images.json
           done
-          jq -n --arg tag "$TAG" --arg rev "$GITHUB_SHA" \
-             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          # A re-run of this job must not drop the image entries that
+          # manifest-images already added for this tag.
+          if gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p update-manifest.json -O old.json 2>/dev/null; then
+            jq --slurpfile old old.json '
+              reduce (keys[]) as $b (.;
+                if $old[0].images[$b].image then .[$b].image = $old[0].images[$b].image else . end)' \
+              images.json > images.tmp && mv images.tmp images.json
+          fi
+          rev=$(git rev-parse HEAD)
+          at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          jq -n --arg tag "$TAG" --arg rev "$rev" --arg at "$at" \
              --slurpfile images images.json \
              '{
                 product: "sensr",
@@ -184,8 +278,7 @@ jobs:
                 images: $images[0]
               }' > assets/update-manifest.json
           # A plain manifest of the publishable files (docs/PLAN.md §6).
-          jq -n --arg tag "$TAG" --arg rev "$GITHUB_SHA" \
-             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          jq -n --arg tag "$TAG" --arg rev "$rev" --arg at "$at" \
              --slurpfile images images.json \
              '{
                 product: "sensr",
@@ -194,37 +287,115 @@ jobs:
                 published: $at,
                 images: $images[0]
               }' > assets/manifest.json
-      - name: Check every linked asset is present
+      - name: Publish
         run: |
           set -euo pipefail
-          missing=0
-          for f in sensr-pi4.img.zst sensr-pi5.img.zst \
-                   sensr-x86_64.qcow2.zst sensr-x86_64-installer.iso \
-                   sensr-pi4.closure.tar.zst sensr-pi5.closure.tar.zst \
-                   sensr-qcow.closure.tar.zst sensr-iso.closure.tar.zst; do
-            [ -f "assets/$f" ] && [ -f "assets/$f.sha256" ] || { echo "missing $f"; missing=1; }
-          done
-          exit $missing
-      - name: Publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
           files=(
-            assets/sensr-pi4.img.zst assets/sensr-pi4.img.zst.sha256
-            assets/sensr-pi5.img.zst assets/sensr-pi5.img.zst.sha256
-            assets/sensr-x86_64.qcow2.zst assets/sensr-x86_64.qcow2.zst.sha256
-            assets/sensr-x86_64-installer.iso assets/sensr-x86_64-installer.iso.sha256
             assets/sensr-pi4.closure.tar.zst assets/sensr-pi4.closure.tar.zst.sha256
             assets/sensr-pi5.closure.tar.zst assets/sensr-pi5.closure.tar.zst.sha256
             assets/sensr-qcow.closure.tar.zst assets/sensr-qcow.closure.tar.zst.sha256
             assets/sensr-iso.closure.tar.zst assets/sensr-iso.closure.tar.zst.sha256
-            assets/update-manifest.json assets/manifest.json
           )
-          # The publish job runs outside the checkout's working tree only if
-          # checkout is removed; gh still needs to know the repository.
+          # Only the newest tag may be "Latest": a re-run of an older tag
+          # must not take it back from a newer release.
+          newest=$(git ls-remote --tags --refs origin 'v*' | sed 's#.*refs/tags/##' | sort -V | tail -n1)
+          latest=false
+          [ "$newest" = "$TAG" ] && latest=true
+          echo "newest tag: $newest; marking $TAG latest: $latest"
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" --clobber -R "$GITHUB_REPOSITORY" "${files[@]}"
           else
-            gh release create "$TAG" --title "sensr $TAG" --generate-notes --latest \
+            # Not "Latest" yet: releases/latest/download/update-manifest.json
+            # must not resolve to a release that has no manifest.
+            gh release create "$TAG" --title "sensr $TAG" --generate-notes --latest=false \
               -R "$GITHUB_REPOSITORY" "${files[@]}"
           fi
+          # The manifest goes up after the closures it names, and the release
+          # becomes "Latest" only once both are there.
+          gh release upload "$TAG" --clobber -R "$GITHUB_REPOSITORY" \
+            assets/update-manifest.json assets/manifest.json
+          if [ "$latest" = true ]; then
+            gh release edit "$TAG" --latest -R "$GITHUB_REPOSITORY"
+          fi
+
+  attach-x86_64:
+    needs: [publish-update, images-x86_64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: images-x86_64
+          path: assets
+      - name: Attach the x86_64 images
+        run: |
+          set -euo pipefail
+          files=()
+          for f in sensr-x86_64-installer.iso sensr-x86_64.qcow2.zst; do
+            [ -f "assets/$f" ] && [ -f "assets/$f.sha256" ] || { echo "missing $f"; exit 1; }
+            files+=("assets/$f" "assets/$f.sha256")
+          done
+          gh release upload "$TAG" --clobber -R "$GITHUB_REPOSITORY" "${files[@]}"
+
+  attach-aarch64:
+    needs: [publish-update, images-aarch64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: images-aarch64
+          path: assets
+      - name: Attach the Pi images
+        run: |
+          set -euo pipefail
+          files=()
+          for f in sensr-pi4.img.zst sensr-pi5.img.zst; do
+            [ -f "assets/$f" ] && [ -f "assets/$f.sha256" ] || { echo "missing $f"; exit 1; }
+            files+=("assets/$f" "assets/$f.sha256")
+          done
+          gh release upload "$TAG" --clobber -R "$GITHUB_REPOSITORY" "${files[@]}"
+
+  # Adds each board's image download to the manifests already on the release.
+  # One job after both attach jobs, so nothing races on the manifest; it only
+  # adds `.images[board].image` and keeps every updater field as published.
+  manifest-images:
+    needs: [attach-x86_64, attach-aarch64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Add the image entries
+        run: |
+          set -euo pipefail
+          mkdir -p m && cd m
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" \
+            -p update-manifest.json -p manifest.json -p '*.img.zst.sha256' \
+            -p 'sensr-x86_64*.sha256'
+          base="https://github.com/itpick/sensr/releases/download/$TAG"
+          for mf in update-manifest.json manifest.json; do
+            [ "$(jq -r .tag "$mf")" = "$TAG" ] || { echo "$mf is not for $TAG"; exit 1; }
+            for board in pi4 pi5 qcow iso; do
+              case "$board" in
+                pi4) img=sensr-pi4.img.zst ;;
+                pi5) img=sensr-pi5.img.zst ;;
+                qcow) img=sensr-x86_64.qcow2.zst ;;
+                iso) img=sensr-x86_64-installer.iso ;;
+              esac
+              jq -e --arg b "$board" '.images[$b].system and .images[$b].sha256' "$mf" >/dev/null \
+                || { echo "$mf lost the updater entry for $board"; exit 1; }
+              jq --arg b "$board" --arg img "$img" --arg iu "$base/$img" \
+                 --arg isha "$(cut -d' ' -f1 "$img.sha256")" \
+                 '.images[$b].image = {name: $img, url: $iu, sha256: $isha}' \
+                 "$mf" > tmp.json && mv tmp.json "$mf"
+            done
+          done
+          gh release upload "$TAG" --clobber -R "$GITHUB_REPOSITORY" update-manifest.json manifest.json
