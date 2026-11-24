@@ -1,6 +1,8 @@
 # sensr — master reconstruction plan
 
-Status: v1, 2026-11-15. This is the single plan that turns the seven research
+Status: v1, written 2026-11-15, status refreshed 2026-11-24. Phase 0 is done and
+much of Phase 1 is shipped (releases v0.1.0 to v0.1.24; see §8). This is the
+single plan that turns the seven research
 documents in `docs/research/` into phases, crates, tests and tasks. It does not
 repeat the research; it references it by ID (`IF-006`, `ISS-C-001`, `BIZ-014`,
 `T-0006`). Per-ID tracking (status, owner, PR) lives next to the IDs in
@@ -126,6 +128,16 @@ final.
 
 Crates are created in the phase that first needs them; the scaffold already has
 the eight marked ✓.
+
+*Status note, 2026-11-24.* The research docs (02, 03) and the table below name
+`sensr-services` and `sensr-api-compat`; neither crate exists. Their jobs landed
+in the real crates: per-daemon rendering and reload in `sensr-apply`, DNS
+blocklists and lease registration in `sensr-dns`, alias data feeds in
+`sensr-feeds`, and the REST API and OPNsense compat façade in `sensr-api`.
+Others that were not in the original map: `sensr-fingerprint` (smart host
+labels), `sensr-flow` (traffic accounting and IDS alerts), `sensr-monitor`
+(gateway monitor), `sensr-ipc` and `sensr-schema-derive`. `ls crates` is the
+authoritative list.
 
 | Crate | Kind | Responsibility | OPNsense counterpart | Phase |
 |---|---|---|---|---|
@@ -661,14 +673,17 @@ and HA.
 **Goal.** Everything OPNsense Business Edition adds, as open core features
 (05 §4.3 stance C), plus the P1 identity/audit items 05 ranks highest.
 
+**Shipped so far:** OIDC, SAML and WebAuthn login (BIZ-001, BIZ-002, BIZ-003) are in
+`sensr-api` and `sensr-auth`; the rest of the scope below is open.
+
 **Scope.** BE-001 (open `stable`/`lts` channels with signed caches, free
 GeoIP — BIZ-010 finalised), BE-003 (WAF: Caddy + Coraza + OWASP CRS, virtual
 servers/locations incl. Exchange preset, client-cert auth, HA-aware ACME,
 OIDC pre-auth — BIZ-019 stage 1), BE-004 (`sensr-dns` authoritative with RFC
 2136/TSIG, AXFR/NOTIFY, primary/secondary — BIZ-020, DNS-BIND-001, PLG-DNS-001),
-BE-005 (OIDC for admin login, CP zones, WAF — BIZ-001, BIZ-024, SYS-AUTH-009),
+BE-005 (OIDC for admin login (shipped), CP zones, WAF — BIZ-001, BIZ-024, SYS-AUTH-009),
 BE-006 (user self-service portal — BIZ-022, GUI-007 extension), BE-009
-(hardware notes). BIZ-002 (SAML), BIZ-003 (WebAuthn/passkeys), BIZ-004
+(hardware notes). BIZ-002 (SAML, shipped), BIZ-003 (WebAuthn/passkeys, shipped), BIZ-004
 (scoped RBAC: roles × permissions × tenant/site/node tree, built-in auditor
 role), BIZ-005 (`sensr-audit` hash-chained, signed, exportable), BIZ-006
 (service accounts), BIZ-012 (paid/curated feed hook; VND-002 generic
@@ -1078,13 +1093,17 @@ parity badge and the manifest link per release; wordmark colours stay
    router (DHCP WAN, LAN + IoT VLAN, WireGuard road warriors, Unbound, Kea/ISC
    DHCP, GeoIP/URL aliases, port forwards, outbound NAT). Every "imports the
    daily-driver config" exit criterion means "imports `corpus/home-router.xml`".
-2. ANSWERED 2026-11-15 — **Lab and CI infrastructure.** All-virtual testing for
+2. ANSWERED 2026-11-15, RESOLVED 2026-11-24 — **Lab and CI infrastructure.**
+   Resolved: the owner's home router is a Raspberry Pi 5 running sensr, so
+   there is real Pi hardware, and updates are installed on it from the in-app
+   updater. Originally: all-virtual testing for
    now: no Pi or physical hardware lab. `nixosTest` suites and image boots run in
    KVM on the `nixtop` builder (x86_64 NixOS, 16 cores, 30 GB; checkout, VM disks
    and artifacts under `/mnt/vms/sensr`). aarch64/Pi images are boot-tested in
    QEMU only. Hardware lab criteria in §3 and §6 are deferred until the owner
    reopens this.
-3. OWNER — **Binary cache and signing.** Cachix (hosted, paid tier for private
+3. RESOLVED 2026-11-24 — **Binary cache and signing.** The binary cache shipped
+   (#110, Cachix-backed CI); release signing is still open (see §8). Original question: Cachix (hosted, paid tier for private
    `lts`) vs self-hosted attic on pick.haus; who holds the Nix signing key and
    the release-signing key (hardware token?).
 4. OWNER — **Unbound first, hickory later** (§2.1): confirm. The alternative
@@ -1111,137 +1130,25 @@ parity badge and the manifest link per release; wordmark colours stay
 
 ---
 
-## 8. Next 10 tasks (Phase 0, start tomorrow)
+## 8. Current focus
 
-Each is one PR, small, tests first (03 IDs name the tests), on `main` via PR.
-Crate dependency additions use the versions in `Cargo.toml` workspace deps
-(all latest; Renovate keeps them so).
+The ten Phase 0 tasks that used to be listed here are done: schema harness and
+field types, constraints, `#[derive(SensrModel)]`, the OPNsense importer, the
+config store, the rule IR and renderers, the PD state machine, `sensr-apply`
+with `sensr-ipc` and the agent/API skeletons, and the `xtask` gates with the
+first VM test. Their follow-ons (ACL, importer mappers, alias feeds, the
+`sensr-ui` shell, binary cache publishing, Pi 5 image boots) have shipped too.
+sensr is young, but it is a real router now: releases v0.1.0 to v0.1.24 carry
+Pi 4/Pi 5 images, an x86 ISO and a qcow2, and the owner's home router is a
+Raspberry Pi 5 running it, upgraded from the in-app updater.
 
-Every task starts by reading the upstream artefacts named in parentheses
-under `reference/opnsense/core/` (§2.6 workflow) and ends by flipping their
-`reference/COVERAGE.toml` rows to `done`.
+What is being worked on now:
 
-1. **Schema harness + scalar field types** (`src/opnsense/mvc/app/models/
-   OPNsense/Base/FieldTypes/{Boolean,Integer,Text,StrictText,Base64,Email,
-   Port,Protocol,Country,Option}Field.php` and their tests under
-   `mvc/tests/app/models/OPNsense/Base/FieldTypes/`). `crates/sensr-schema/src/{lib,
-   fields/mod,fields/{boolean,integer,text,strict_text,base64,email,port,
-   protocol,country,option},testing}.rs`. Write `testing::{validate,
-   validate_err} -> Vec<ValidatorKind>` first, then the tests
-   T-0094..T-0106, T-0115..T-0124, T-0129..T-0134, T-0146..T-0153,
-   T-0223..T-0247, T-0248..T-0286 (`fields::*::tests::*_tNNNN`), then the
-   newtypes (`FromStr`/`Display`/serde, `FieldMeta`, `Mask`, `ChangeCase`,
-   well-known ports table frozen in `well_known.rs`). Add `proptest`
-   never-panic shadows for every `FromStr`.
-2. **Network-aware field types and reference fields** (`Base/FieldTypes/
-   {Hostname,Network,IPPort,MacAddress,CSVList,AutoNumber,UpdateOnlyText,
-   ModelRelation,Interface,Certificate,AuthenticationServer,AuthGroup,
-   NetworkAlias,VirtualIP}Field.php` + fixture dirs under `mvc/tests/app/
-   models/OPNsense/Base/FieldTypes/*Config/`). `fields/{hostname,
-   network,ip_port,mac,csv_list,auto_number,update_only,relation,iface_ref,
-   cert_ref,auth_server,auth_group,net_or_alias,vip_ref}.rs` with a
-   `RefContext` trait resolved against a `Document` fixture. Tests first:
-   T-0074..T-0093, T-0107..T-0114, T-0125..T-0128, T-0135..T-0145,
-   T-0154..T-0222, T-0287..T-0291. Fixtures: the matching upstream
-   `config.xml` files copied under `crates/sensr-import-opnsense/tests/
-   fixtures/opnsense/<Name>/` (loaded through the importer stub from task 5;
-   until then a hand-written JSON twin is acceptable and deleted in task 5).
-3. **Constraints module** (`Base/Constraints/*.php`, `mvc/tests/app/models/
-   OPNsense/Base/Constraints/`). `sensr-schema/src/constraints/{unique,all_or_none,
-   single_select,set,set_if,depend,compared}.rs` with OPNsense's exact
-   messages (`Number should be unique.`, `All fields should contain data or
-   none of them`, `Only one option could be selected`, `When "value1" is
-   enabled, "value2" is required.`). Tests first: T-0038..T-0072 plus
-   `all_messages_end_with_period` (T-0361/T-0362).
-4. **`#[derive(SensrModel)]` v0 + lint-model rules** (`Base/BaseModel.php`,
-   `Base/BaseModelMigration.php`, `mvc/tests/app/models/OPNsense/Base/
-   BaseModel/`, `Mk/lint.mk` `lint-model` XPath rules). New crate
-   `crates/sensr-schema-derive` (`syn`/`quote`); generates `Default`
-   application, `validate(&self, &RefContext) -> Validations` (dotted-path
-   keys), `get/set_by_path`, UUID-keyed `ArrayField<T>`, `SCHEMA_VERSION`,
-   `Migration` registry via `inventory`. Tests first: T-0022..T-0037 using a
-   Rust `TestModel` mirroring upstream's (`general.FromEmail`,
-   `arraytypes.item{number,optfield}`) and migrations `M0_0_1`, `M1_0_0`,
-   `M1_0_1`; `trybuild` compile-fail cases for T-0348..T-0360, T-0363.
-5. **Importer core: XML tree + listtags + round-trip** (`Core/Config.php`,
-   `src/etc/inc/config.inc` `listtags()`, `mvc/tests/app/library/OPNsense/
-   Core/`, `service/tests/`). `crates/sensr-import-
-   opnsense/src/{xml,listtags,tree,report}.rs`: `quick-xml` → `Node` tree
-   with attributes (`version`, `persisted_at`), always-list table, repeated-
-   sibling rule, byte-exact serializer. Fixtures `Core/ConfigConfig/backup/
-   {array,object}.xml`, `service/tests/config/config.xml`. Tests first:
-   T-0002..T-0004, T-0320, T-0321, T-0305 (dnsmasq legacy alias join),
-   `fuzz_config_xml` target skeleton. Corpus directory layout and
-   `xtask lint-fixtures` (T-0347).
-6. **Config store** (`Core/Config.php` revision/backup/lock semantics,
-   `Core/Api/BackupController.php`). `crates/sensr-config/src/{store,revision,history,diff,
-   audit,migrate}.rs`: `rusqlite` schema (revisions: id, parent, blake3,
-   json, username, time, description, impersonated_by, user_apitoken;
-   audit; secrets), `Store::open(path | default_document)`, `commit(tx)`,
-   `history()`, `diff(a,b)` (JSON patch + unified text), atomic
-   `config.json` export, `RevisionCommitted` broadcast. Tests first: T-0001,
-   T-0028, properties "concurrent commits serialise", "history never loses a
-   revision", "restore then commit yields a new revision" (03 §4.8),
-   `every_fixture_validates_t0382`, `corpus_migrates_to_head_t0383`.
-7. **Rule IR + two renderers** (`library/OPNsense/Firewall/{Rule,FilterRule,
-   Plugin,Util}.php`, `src/etc/inc/filter.lib.inc` system rules,
-   `mvc/tests/app/library/OPNsense/Firewall/FilterRuleTest/`). `crates/sensr-rules/src/{ir,normalize,
-   render/pf,render/nft,system_rules,label}.rs` + `docs/pf-to-nft.md`
-   (semantics table, one golden pair per row). Tests first: T-0006..T-0008
-   as `insta` goldens for `render::pf` (byte-exact with the three upstream
-   `.conf` fixtures) and `render::nft` (`tests/golden/{direction,icmp,
-   protocol}.nft`); `nft -c -f` of every `.nft` golden in CI (dev shell has
-   `nftables`); `label::calc_rule_hash` reproduces OPNsense's md5 for a
-   recorded rule set; `prop_label_stable`.
-8. **`sensr-net::ipv6::pd` + PD state machine types** (`library/OPNsense/
-   Interface/Idassoc.php`, `src/etc/inc/interfaces.inc` track6/dhcp6c paths,
-   `src/etc/rc.newwanipv6`). `crates/sensr-net/
-   src/ipv6/pd.rs`: `calculate_prefix`, `delegation_size`,
-   `usable_prefix_length`; `DelegatedPrefix { prefix, preferred_until,
-   valid_until, iaid }` with `redb` persistence and the derived-consumer
-   fan-out trait (RA, DHCPv6 subnets, NPTv6, nft sets, HOME_NET). Tests
-   first: T-0009..T-0011, `prop_usable_length_alignment_t0011`, persistence
-   round-trip, deprecate-then-remove sequence with a fake clock (RFC 9096).
-9. **`sensr-apply` core + `sensr-ipc` + agent/api skeletons** (`service/
-   configd.py`, `service/modules/{processhandler,template,actions/*}.py`,
-   `conf/actions.d/*.conf`, `library/OPNsense/Core/{Backend,Shell}.php`,
-   `src/etc/rc.syshook`, `service/tests/{core,template}.py`).
-   `crates/sensr-apply/src/{cmd,actions,plan,templates,hooks,confirm}.rs`
-   (`safe_format`, `ActionRegistry`, `Plan`, minijinja + `Targets` with a
-   shipped `Sample` module, commit-confirm timer with injectable clock);
-   `crates/sensr-ipc` (CBOR frames, `Request`/`Response` enums, stream
-   frames, `SO_PEERCRED`); `sensr-agent` serves `config.get/set/history`
-   over `/run/sensr/agent.sock`; `sensr config get / --json` works. Tests
-   first: T-0005 (one case per upstream assertion + `prop_never_unquoted`),
-   T-0317..T-0319, T-0322, T-0323 (renders every module against
-   `fixtures/full.sensr`), confirm-timer reverts on timeout, IPC fuzz target,
-   clippy `disallowed-methods` for `Command::new` (T-0372).
-10. **`xtask` parity + source-coverage gates + lints + Nix skeleton + first
-    VM test** (`Mk/{lint,style,sweep}.mk`, `Scripts/*.sh`, `src/etc/
-    rc.syshook.d/early/99-selftest`, `reference/opnsense/tools/build/test.sh`).
-    `crates/xtask` with `parity` (parses 03, scans tests and `nix/tests`,
-    `--check` against `tests/parity-baseline.txt`, `--badge`),
-    `source-coverage` (globs the pinned trees, diffs against
-    `reference/COVERAGE.toml`, checks the manifest's pin against
-    `reference/REFS`; seed the manifest with every path as `todo` and the
-    Phase 0 rows as `done`), `upstream-diff <old> <new>`, `lint-shell`,
-    `lint-fixtures`, `lint-messages`, `lint-exec`, `lint-whitespace`,
-    `lint-version`, `freshness` (flake-input age + overlay versions vs
-    upstream), `bundle-size`; wire into `ci.yml` and `flake.nix` checks;
-    `nix/overlays/default.nix` (crane packages), `nix/modules/sensr.nix`
-    (`services.sensr.{enable,configFile}`, agent + api units with the
-    sandboxing from §2.3, `sensr-selftest.service`), `nix/images/qcow.nix`,
-    `nix/tests/boot-first-run.nix` asserting units active, `sensr config get /`
-    returns an object (T-0401), `/etc/sensr/version.json` parses with
-    `product_id == "sensr"` (T-0391), `/run/current-system` resolves
-    (T-0392), closure contains the agent path from `version.json` (T-0393).
-    Update `docs/index.html` seed table to `config.json`/`seed.toml` and add
-    `docs/research/README.md` cross-links.
-
-Follow-on tasks queued after these ten (still Phase 0): `sensr-auth::acl`
-with the upstream fixture (T-0012..T-0021, `every_route_has_privilege_t0368`);
-importer mappers for `system`, `interfaces`, `filter`, `nat`, `Firewall/*`,
-`unbound`, `Kea`, `wireguard`, `trust`, users/groups/apikeys; alias resolvers
-with hermetic fetchers (T-0324..T-0333); `sensr-ui` shell (menu tree, top bar,
-tokens, one generated form, one grid); binary cache publishing; Pi 5 image
-boot in QEMU.
+1. **Safe updates.** Health-gated rollback, store garbage collection and
+   config schema migrations that run before an update is blessed.
+2. **Signed updates.** The update channel and images carry signatures that the
+   router checks before installing.
+3. **Optimistic concurrency.** Config writes carry the revision they were based
+   on, so two admins (or the UI and the CLI) cannot silently overwrite each other.
+4. **House test as a CI gate.** The multi-VM house scenario that screenshots the
+   UI (`nix/tests/house.nix`) becomes a required check.
