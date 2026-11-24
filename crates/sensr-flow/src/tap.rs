@@ -72,6 +72,17 @@ pub fn bind(path: &Path, group: Option<&str>) -> io::Result<UnixListener> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
     if let Some(g) = group {
         set_group(path, g)?;
+        // Unbound reaches the socket through its directory, which systemd
+        // creates as the unit's RuntimeDirectory owned by our primary group;
+        // a chgrp in ExecStartPre did not survive on the router (2026-11-24),
+        // leaving Unbound unable to traverse it. We own the directory and
+        // are a member of the group, so set it ourselves.
+        if let Some(dir) = path.parent()
+            && let Err(e) = set_group(dir, g)
+        {
+            tracing::warn!(dir = %dir.display(), group = g, error = %e,
+                    "could not set the dnstap directory's group; Unbound may not reach the socket");
+        }
     }
     Ok(l)
 }
