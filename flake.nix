@@ -164,6 +164,12 @@
             inherit pkgs;
             sensrModules = testModules;
           };
+          # the seed on a by-label FAT mount, as on a Pi: no boot may wait
+          # for it before udev's coldplug
+          ifnames-fat = import ./nix/tests/ifnames-fat.nix {
+            inherit pkgs;
+            sensrModules = testModules;
+          };
           pi5-trial-install = import ./nix/tests/pi5-trial-install.nix {
             inherit pkgs;
             trialInstall = pkgs.writeShellApplication {

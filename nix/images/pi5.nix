@@ -130,12 +130,11 @@ in
   # The RTL8156 USB NICs (LAN and LAN2) are left to udev's coldplug, which
   # loads r8152 after sensr-ifnames has restored their MAC-pinned names. The
   # Pi 4 image loads it explicitly (its dongles once enumerated without
-  # binding); on a Pi 5 the same explicit load stalled every boot: with
-  # r8152 in modules-load.d (and the initrd), systemd started nothing after
-  # "Inserted module 'r8152'" at ~10 s, so the router never came up. That
-  # went unnoticed from Nov 18 until the first cold boot on 2026-11-23,
-  # since every release in between reached the router as a live switch.
-  # Booting the same system with systemd-modules-load masked worked.
+  # binding). On a Pi 5 it was dropped on 2026-11-23 when every boot went
+  # silent after "Inserted module 'r8152'" at ~10 s. That silence turned out
+  # to be sensr-ifnames waiting for the FAT mount before udev's coldplug (a
+  # 90 s dependency cycle, fixed in nix/modules/sensr.nix; test:
+  # nix/tests/ifnames-fat.nix), not r8152. Coldplug loads it either way.
   boot.kernelModules = [ "bcm2835_wdt" ];
 
   # The 2.5 GbE USB dongles (Realtek RTL8156, 0bda:8156) that carry LAN and
