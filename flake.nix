@@ -201,6 +201,12 @@
                   (builtins.readFile ./nix/pi5/trial-health.sh);
             };
           };
+          # in-app updates: the health gate keeps a good release and rolls
+          # a bad one back (ISS-C-005)
+          upgrade = import ./nix/tests/upgrade.nix {
+            inherit pkgs;
+            sensrModules = testModules;
+          };
           # every way a trial boot can end, ending back on the previous OS
           trial-revert = import ./nix/tests/trial-revert.nix {
             inherit pkgs;

@@ -1000,7 +1000,14 @@ The appliance consumes the former: `services.sensr.updates` (`nix/modules/
 updates.nix`) checks the manifest, verifies the digest, imports the closure
 and runs `switch-to-configuration switch`, so one update replaces the sensr
 binaries and every package they use atomically; the previous generation stays
-in the profile for rollback. The timer and the System › Updates page share
+in the profile for rollback. After the switch a health gate
+(`sensr-update-health`: agent and its boot apply, local DNS answer, Kea
+sockets on every DHCP interface, API on loopback, default route and gateway,
+no newly failed sensr units; checks already failing before the switch are not
+required) must pass within `updates.healthTimeout` (120 s), or the updater
+switches back to the previous generation, reports "rolled-back" with the
+failed checks, and auto mode skips that release from then on
+(`nix/tests/upgrade.nix`). The timer and the System › Updates page share
 one root unit; the unprivileged web UI only writes a request file and reads
 the status file. Automatic installs are off until enabled on that page.
 

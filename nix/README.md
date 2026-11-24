@@ -4,7 +4,7 @@
 |---|---|
 | `overlays/default.nix` | `pkgs.sensr` (the workspace, crane) and `pkgs.sensr-kea` (Kea without kea-shell/Python) |
 | `modules/sensr.nix` | `services.sensr`: agent, API, daemon units, selftest, `/etc/sensr/version.json` |
-| `modules/updates.nix` | `services.sensr.updates`: manifest check, closure import, `switch-to-configuration`, timer and the request/status files the System › Updates page uses |
+| `modules/updates.nix` | `services.sensr.updates`: manifest check, closure import, `switch-to-configuration`, the post-switch health gate (`modules/update-health.sh`) with automatic rollback, timer and the request/status files the System › Updates page uses |
 | `images/common.nix` | what every image shares (panic/watchdog policy, no baked-in login, perlless) |
 | `images/qcow.nix` | `nix build .#images.qcow`: x86_64 UEFI qcow2, systemd-boot with boot counting |
 | `images/iso.nix` | `nix build .#images.iso`: x86_64 UEFI/BIOS live installer, `nixos-install` from the ISO store |
@@ -15,6 +15,7 @@
 | `pi5/trial-install.sh` | `sensr-pi5-trial-install`: one tryboot trial of sensr on a Pi 5 running another OS, from NVMe/USB or (OS on NVMe) the SD card; log partition; commit/uncommit |
 | `pi5/trial-health.sh` | `sensr-trial-health`: a trial boot's self-health gate (reboot to the previous OS on failure), confirm, UDP journal stream |
 | `tests/pi5-trial-install.nix` | `checks.x86_64-linux.pi5-trial-install`: both layouts on disk images, a model of the firmware's documented boot selection, the health gate |
+| `tests/upgrade.nix` | `checks.x86_64-linux.upgrade`: the in-app updater against a file:// manifest; bad releases (rejected boot apply, dead Unbound) roll back to the previous generation, auto mode skips them, a good one stays |
 | `pending.nix` | which assertions wait on crates that have not landed |
 
 ## Contract between the module and the Rust crates

@@ -292,12 +292,40 @@ pub struct UpdateCandidate {
     pub notes: String,
 }
 
+/// The last install the health gate failed, which `sensr-update` rolled back.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateRollback {
+    /// The release that was rolled back.
+    #[serde(default)]
+    pub from: String,
+    /// The release the box is back on.
+    #[serde(default)]
+    pub to: String,
+    /// The failed checks, each with what it saw.
+    #[serde(default)]
+    pub reason: String,
+    /// When, RFC 3339.
+    #[serde(default)]
+    pub at: Option<String>,
+}
+
+impl UpdateRollback {
+    /// One line for the page.
+    pub fn summary(&self) -> String {
+        format!(
+            "Rolled back from {} to {}: {}",
+            self.from, self.to, self.reason
+        )
+    }
+}
+
 /// State of the in-app updater, as `sensr-update` leaves it in
 /// `/run/sensr/updates/status.json` (nix/modules/updates.nix).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateStatus {
     /// `idle`, `checking`, `update-available`, `downloading`, `installing`,
-    /// `up-to-date`, `done` or `error`.
+    /// `verifying`, `rolling-back`, `rolled-back`, `up-to-date`, `done` or
+    /// `error`.
     #[serde(default)]
     pub phase: String,
     /// One line for the page.
@@ -321,6 +349,9 @@ pub struct UpdateStatus {
     /// Last successful install, RFC 3339.
     #[serde(default)]
     pub last_install: Option<String>,
+    /// The last rollback, until an install succeeds.
+    #[serde(default)]
+    pub rollback: Option<UpdateRollback>,
     /// When the status was written, RFC 3339.
     #[serde(default)]
     pub updated_at: Option<String>,
@@ -342,7 +373,7 @@ impl UpdateStatus {
     pub fn busy(&self) -> bool {
         matches!(
             self.phase.as_str(),
-            "checking" | "downloading" | "installing"
+            "checking" | "downloading" | "installing" | "verifying" | "rolling-back"
         )
     }
 
@@ -963,6 +994,20 @@ mod tests {
             "current": {"version": "sd-card-26.11.1", "tag": "v0.1.1", "image": "pi4"}
         }));
         assert_eq!(tagged.current.label(), "v0.1.1");
+        assert!(s.rollback.is_none());
+        let rolled: UpdateStatus = parse(json!({
+            "phase": "rolled-back",
+            "rollback": {
+                "from": "v0.2.0", "to": "v0.1.9", "reason": "dns: unbound did not answer",
+                "failed": ["dns"], "healthy_after": true, "at": "2026-11-23T10:00:00Z"
+            }
+        }));
+        assert!(!rolled.busy());
+        assert_eq!(
+            rolled.rollback.unwrap().summary(),
+            "Rolled back from v0.2.0 to v0.1.9: dns: unbound did not answer"
+        );
+        assert!(parse::<UpdateStatus>(json!({"phase": "verifying"})).busy());
         // An older service, or a disabled module, gives the defaults.
         let e: UpdateStatus = parse(Value::Null);
         assert!(!e.busy() && !e.has_update());
