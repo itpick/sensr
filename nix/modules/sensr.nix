@@ -527,131 +527,39 @@ in
       };
     };
 
-    # A USB Ethernet adapter can wedge after an xHCI reset (seen on the Pi 5:
-    # "r8152-cfgselector 4-1: reset SuperSpeed USB device", then the carrier
-    # never returns). The netdev stays in /sys/class/net but every ioctl
-    # answers ENODEV - "ip link set up" and ethtool both fail with "No such
-    # device" - so neither a config apply nor a link bounce can revive it, and
-    # the only cure was a reboot. Re-authorising the USB device makes the
-    # firmware re-enumerate it: the pinned name comes back, and networkd
-    # applies the interface's .network (addresses, routes) again by itself.
+    # Ethernet adapter watchdog: USB adapters that wedge after an xHCI reset,
+    # and the Pi 5's built-in port (macb) when its transmit queue stalls.
+    # The script and its reasons: nix/modules/nic-recover.sh (tests:
+    # nix/modules/nic-recover-test.sh).
     systemd.services.sensr-nic-recover = {
       description = "Prevent and recover Ethernet adapter wedges (USB adapters, Pi 5 macb)";
+      # Everything the script calls besides the three store paths below. A
+      # missing tool fails quietly in a timer unit: `awk` was not here, and
+      # the macb RX ring was never raised (2026-11-23).
+      path = [
+        pkgs.coreutils
+        pkgs.findutils
+        pkgs.gnugrep
+        pkgs.gnused
+        pkgs.gawk
+      ];
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = pkgs.writeShellScript "sensr-nic-recover" ''
-          set -u
-          ethtool=${pkgs.ethtool}/bin/ethtool
-          ip=${pkgs.iproute2}/bin/ip
-          systemctl=${config.systemd.package}/bin/systemctl
-          log() { echo "sensr-nic-recover: $*"; }
-          # Kea's per-subnet sockets remember the interface index they were
-          # bound to (SO_BINDTODEVICE). A re-enumerated NIC keeps its pinned
-          # name but gets a new index, so such a socket stays listed by `ss`
-          # while the kernel no longer delivers to it: the link looks perfect
-          # and no DHCP client gets a lease. Track the index and rebind Kea
-          # when it changes.
-          idxdir=/run/sensr/nic-recover
-          mkdir -p "$idxdir"
-          rebind_dhcp() {
-            log "$1 re-enumerated; restarting sensr-kea-dhcp4 to rebind its sockets"
-            "$systemctl" restart sensr-kea-dhcp4.service ||
-              log "WARNING: sensr-kea-dhcp4 restart failed"
-          }
-          for devlink in /sys/class/net/*/device; do
-            [ -e "$devlink" ] || continue
-            name=$(basename "$(dirname "$devlink")")
-            path=$(readlink -f "$devlink") || continue
-            # The Pi 5's built-in port (RP1 macb) stalls its transmit queue
-            # with EEE on: "NETDEV WATCHDOG: transmit queue 0 timed out",
-            # a ~5 s outage every 10-15 min on a live WAN (2026-11-23, 308
-            # in 3 days). Its 512-slot RX ring also overflowed under load
-            # (rx_resource_errors). Both settings reset with the link, so they
-            # are re-checked every tick; the ring change bounces the link once.
-            drv=$(basename "$(readlink -f /sys/class/net/"$name"/device/driver 2>/dev/null)" 2>/dev/null)
-            if [ "$drv" = macb ]; then
-              if "$ethtool" --show-eee "$name" 2>/dev/null | grep -q 'EEE status: enabled'; then
-                "$ethtool" --set-eee "$name" eee off 2>/dev/null && log "$name (macb): EEE off"
-              fi
-              rx=$("$ethtool" -g "$name" 2>/dev/null | sed -n '/^Current/,$p' | awk '/^RX:/{print $2; exit}')
-              if [ -n "$rx" ] && [ "$rx" -lt 2048 ] 2>/dev/null; then
-                "$ethtool" -G "$name" rx 2048 2>/dev/null && log "$name (macb): RX ring $rx -> 2048"
-              fi
-              continue
-            fi
-            # USB adapters only: the USB bus is in the resolved device path.
-            case $path in */usb[0-9]*/*) ;; *) continue ;; esac
-            usb=$(basename "$(dirname "$path")")
-            # Prevention, before the cure: USB autosuspend and EEE are the
-            # states the r8152 resets out of. Both are cheap, idempotent and
-            # must be re-applied after a re-enumeration, which starts the
-            # device in 'auto' again.
-            control=/sys/bus/usb/devices/$usb/power/control
-            if [ "$(cat "$control" 2>/dev/null)" != on ]; then
-              echo on > "$control" 2>/dev/null && log "$name ($usb): USB autosuspend off"
-            fi
-            # U1/U2 link states are the xHCI side of the same problem; the
-            # per-port knob is 0 (neither) on this kernel.
-            bus=''${usb%%-*}
-            for lpm in /sys/bus/usb/devices/usb$bus/*/usb$bus-port*/usb3_lpm_permit; do
-              [ -e "$lpm" ] || continue
-              if [ "$(cat "$lpm" 2>/dev/null)" != 0 ]; then
-                echo 0 > "$lpm" 2>/dev/null && log "$name ($usb): USB3 LPM off"
-              fi
-            done
-            if "$ethtool" --show-eee "$name" 2>/dev/null | grep -q 'EEE status: enabled'; then
-              "$ethtool" --set-eee "$name" eee off 2>/dev/null && log "$name: EEE off"
-            fi
-            idxf=$idxdir/ifindex.$name
-            idx=$(cat /sys/class/net/"$name"/ifindex 2>/dev/null)
-            if [ -n "$idx" ]; then
-              if [ -e "$idxf" ] && [ "$(cat "$idxf")" != "$idx" ]; then
-                rebind_dhcp "$name"
-              fi
-              echo "$idx" > "$idxf"
-            fi
-            # ethtool works on a healthy link whether it is up or down; it is
-            # the ioctl that answers ENODEV once the driver has lost the device.
-            "$ethtool" "$name" >/dev/null 2>&1 && continue
-            authorized=/sys/bus/usb/devices/$usb/authorized
-            [ -e "$authorized" ] || continue
-            stamp=/run/sensr/nic-recover/$usb
-            mkdir -p "''${stamp%/*}"
-            now=$(date +%s)
-            # One attempt every two minutes: re-enumeration is not free, and a
-            # port that is simply unplugged must not be cycled forever.
-            if [ -e "$stamp" ] && [ $((now - $(cat "$stamp"))) -lt 120 ]; then
-              continue
-            fi
-            echo "$now" > "$stamp"
-            log "$name ($usb) is wedged (ethtool: ENODEV); re-enumerating the USB device"
-            echo 0 > "$authorized"
-            sleep 2
-            echo 1 > "$authorized"
-            # Wait for it to come back, then make sure the link is up;
-            # networkd applies the address configuration as soon as the netdev
-            # exists under its pinned name.
-            for _ in $(seq 1 30); do
-              sleep 1
-              new=$(cd /sys/bus/usb/devices/"$usb" 2>/dev/null &&
-                ls -d */net/* 2>/dev/null | head -n1)
-              [ -n "$new" ] || continue
-              new=$(basename "$new")
-              "$ip" link set dev "$new" up 2>/dev/null || continue
-              log "$name came back as $new and is up"
-              # Record the new index before restarting Kea, so the next tick
-              # does not see a change and restart it a second time.
-              cat /sys/class/net/"$new"/ifindex > "$idxf" 2>/dev/null || true
-              rebind_dhcp "$name"
-              break
-            done
-          done
-        '';
+        ExecStart = pkgs.writeShellScript "sensr-nic-recover" (
+          builtins.replaceStrings
+            [ "@ethtool@" "@ip@" "@systemctl@" ]
+            [
+              "${pkgs.ethtool}/bin/ethtool"
+              "${pkgs.iproute2}/bin/ip"
+              "${config.systemd.package}/bin/systemctl"
+            ]
+            (builtins.readFile ./nic-recover.sh)
+        );
       };
     };
 
     systemd.timers.sensr-nic-recover = {
-      description = "Check for wedged USB Ethernet adapters";
+      description = "Check for wedged Ethernet adapters";
       wantedBy = [ "timers.target" ];
       timerConfig = {
         OnBootSec = "90s";
