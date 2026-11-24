@@ -72,7 +72,7 @@ macb_tick() { # NAME DEVICE_PATH
     [ -r "$f" ] && total=$((total + $(cat "$f")))
   done
   st=$state/macb.$name
-  if ! read -r prev streak last last_hard < "$st" 2>/dev/null; then
+  if ! { [ -r "$st" ] && read -r prev streak last last_hard < "$st"; }; then
     prev=$total streak=0 last=0 last_hard=0
   fi
   if [ "$total" -gt "$prev" ]; then
