@@ -3,7 +3,7 @@
 //! sequence is tested without root). OPNsense counterpart: configd's
 //! reconfigure actions plus `rc.filter_configure`.
 //!
-//! Order of a commit: secrets → sysctls → MAC pins (`.link` files, kept
+//! Order of a commit: secrets → sysctls → time zone → MAC pins (`.link` files, kept
 //! for the next boot, and renames of cards that carry the wrong name) →
 //! interface files + networkd →
 //! qdiscs → nft ruleset (one atomic transaction) → service files → WireGuard
@@ -27,7 +27,7 @@ use crate::appliers::convert::{self, ConvertError, SecretsDir};
 use crate::appliers::interfaces::InterfacesModel;
 use crate::appliers::sysctl::{Sysctl, SysctlApplyError};
 use crate::appliers::{
-    SliceError, SliceModels, emergency, insight, kea, nft, ntp, suricata, unbound,
+    SliceError, SliceModels, emergency, insight, kea, nft, ntp, suricata, timezone, unbound,
 };
 use crate::cmd::{Cmd, CmdError, Runner};
 use crate::hooks::{HookLevel, Hooks};
@@ -185,6 +185,8 @@ pub enum Outcome {
     StartFailed,
     /// A ruleset load failed (IDS queue, accounting, the emergency table).
     LoadFailed,
+    /// The system time zone was rejected or could not be set; it stays as it was.
+    ZoneUnchanged,
 }
 
 /// Longest message shown per problem (the UI banner keeps one line each).
@@ -222,6 +224,7 @@ impl std::fmt::Display for Degraded {
             Outcome::EmergencyFirewall => write!(f, "emergency firewall active: {msg}"),
             Outcome::StartFailed => write!(f, "{unit} failed to start: {msg}"),
             Outcome::LoadFailed => write!(f, "{unit} could not be loaded: {msg}"),
+            Outcome::ZoneUnchanged => write!(f, "the time zone stays as it was: {msg}"),
         }
     }
 }
@@ -236,6 +239,8 @@ struct Isolation {
     withheld_units: std::collections::BTreeSet<String>,
     /// the ruleset was rejected (with this message): not loaded
     nft_rejected: Option<String>,
+    /// the time zone was rejected: not set
+    zone_rejected: bool,
 }
 
 impl Isolation {
@@ -546,6 +551,12 @@ impl Engine {
                 other => EngineError::Nft(other),
             })?;
         }
+        if let Some(zone) = &p.models.timezone {
+            timezone::validate(&self.opts.root, zone).map_err(|e| EngineError::Rejected {
+                backend: "timedatectl",
+                message: e.to_string(),
+            })?;
+        }
         self.check_files(p, &["unbound.conf", "ntp.toml"])
     }
 
@@ -608,6 +619,17 @@ impl Engine {
                 Err(nft::NftError::Rejected { message, .. }) => iso.nft_rejected = Some(message),
                 Err(other) => iso.nft_rejected = Some(other.to_string()),
             }
+        }
+        if let Some(zone) = &p.models.timezone
+            && let Err(e) = timezone::validate(&self.opts.root, zone)
+        {
+            iso.zone_rejected = true;
+            iso.degraded.push(Degraded {
+                backend: "timedatectl",
+                unit: None,
+                message: e.to_string(),
+                outcome: Outcome::ZoneUnchanged,
+            });
         }
         for (path, spec) in &p.plan.files {
             let early = path
@@ -879,6 +901,25 @@ impl Engine {
                 std::fs::write(&path, format!("{v}\n"))
                     .map_err(|source| EngineError::Io { path, source })?;
             }
+        }
+
+        // the time zone is read back from the system, so it needs no plan
+        // entry: an unchanged zone is no command, boot apply included
+        if let Some(cmd) = p
+            .models
+            .timezone
+            .as_deref()
+            .filter(|_| iso.as_deref().is_none_or(|i| !i.zone_rejected))
+            .and_then(|z| timezone::command(&self.opts.root, z))
+        {
+            let set = self.run(&cmd, &mut report);
+            isolate(
+                iso.as_deref_mut(),
+                set,
+                "timedatectl",
+                "the time zone",
+                Outcome::ZoneUnchanged,
+            )?;
         }
 
         // links first: everything else refers to devices and addresses
@@ -2129,6 +2170,111 @@ mod tests {
         assert!(text.ends_with('…'), "{text}");
         let msg = text.split_once(": ").unwrap().1;
         assert_eq!(msg.chars().count(), MAX_MESSAGE);
+    }
+
+    fn zone_root(root: &Path, zones: &[&str], localtime: Option<&str>) {
+        for z in zones {
+            let f = root.join("etc/zoneinfo").join(z);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, b"TZif2").unwrap();
+        }
+        if let Some(z) = localtime {
+            std::os::unix::fs::symlink(format!("/etc/zoneinfo/{z}"), root.join("etc/localtime"))
+                .unwrap();
+        }
+    }
+
+    fn zone_doc(zone: &str) -> Document {
+        let mut doc = home_router();
+        doc.system.timezone = zone.parse().unwrap();
+        doc
+    }
+
+    fn set_zone_calls(runner: &FakeRunner) -> Vec<String> {
+        runner
+            .call_lines()
+            .into_iter()
+            .filter(|c| c.starts_with("timedatectl"))
+            .collect()
+    }
+
+    #[test]
+    fn unchanged_time_zone_runs_no_command() {
+        let root = tempfile::tempdir().unwrap();
+        zone_root(root.path(), &["America/Chicago"], Some("America/Chicago"));
+        let (mut e, runner) = engine(root.path());
+        let p = e
+            .prepare(&zone_doc("America/Chicago"), &Runtime::default())
+            .unwrap();
+        e.commit(p).unwrap();
+        assert!(set_zone_calls(&runner).is_empty());
+    }
+
+    #[test]
+    fn changed_time_zone_is_set_once_through_timedatectl() {
+        let root = tempfile::tempdir().unwrap();
+        zone_root(
+            root.path(),
+            &["America/Chicago", "Etc/UTC"],
+            Some("Etc/UTC"),
+        );
+        let (mut e, runner) = engine(root.path());
+        let p = e
+            .prepare(&zone_doc("America/Chicago"), &Runtime::default())
+            .unwrap();
+        e.commit(p).unwrap();
+        assert_eq!(
+            set_zone_calls(&runner),
+            ["timedatectl 'set-timezone' 'America/Chicago'"]
+        );
+    }
+
+    #[test]
+    fn boot_apply_sets_the_time_zone_too() {
+        let root = tempfile::tempdir().unwrap();
+        zone_root(root.path(), &["America/Chicago"], None);
+        let (mut e, runner) = engine(root.path());
+        let p = e
+            .prepare(&zone_doc("America/Chicago"), &Runtime::default())
+            .unwrap();
+        let (_, degraded) = e.commit_isolated(p).unwrap();
+        assert!(degraded.is_empty(), "{degraded:?}");
+        assert_eq!(
+            set_zone_calls(&runner),
+            ["timedatectl 'set-timezone' 'America/Chicago'"]
+        );
+    }
+
+    #[test]
+    fn unknown_time_zone_is_rejected_and_nothing_changes() {
+        let root = tempfile::tempdir().unwrap();
+        zone_root(root.path(), &["America/Chicago"], None);
+        let (mut e, runner) = engine(root.path());
+        let p = e
+            .prepare(&zone_doc("America/Chicag"), &Runtime::default())
+            .unwrap();
+        let err = e.commit(p).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                EngineError::Rejected {
+                    backend: "timedatectl",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(set_zone_calls(&runner).is_empty());
+        assert!(runner.call_lines().iter().all(|c| !c.contains("'restart'")));
+
+        // at boot the rest still applies and the zone is reported
+        let p = e
+            .prepare(&zone_doc("America/Chicag"), &Runtime::default())
+            .unwrap();
+        let (_, degraded) = e.commit_isolated(p).unwrap();
+        assert_eq!(degraded.len(), 1, "{degraded:?}");
+        assert_eq!(degraded[0].outcome, Outcome::ZoneUnchanged);
+        assert!(set_zone_calls(&runner).is_empty());
     }
 
     #[test]

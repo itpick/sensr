@@ -22,6 +22,7 @@ pub mod ntp;
 pub mod qdisc;
 pub mod suricata;
 pub mod sysctl;
+pub mod timezone;
 pub mod unbound;
 pub mod wireguard;
 
@@ -49,6 +50,8 @@ pub struct SliceModels {
     pub wireguard: wireguard::WireguardModel,
     /// Time service (`None`: no time servers configured).
     pub ntp: Option<ntp::NtpModel>,
+    /// System time zone (`None`: leave it as it is).
+    pub timezone: Option<String>,
 }
 
 /// Failure to build the slice plan.
