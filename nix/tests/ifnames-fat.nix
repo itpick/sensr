@@ -44,8 +44,9 @@ pkgs.testers.runNixOSTest {
       users.users.root.hashedPassword = pkgs.lib.mkForce null;
       services.sensr.applier = "slice";
       services.sensr.seedDir = "/boot/firmware/sensr";
-      # as nix/images/pi5.nix mounts it
-      fileSystems."/boot/firmware" = {
+      # as nix/images/pi5.nix mounts it (a test VM's file systems come from
+      # virtualisation.fileSystems; plain fileSystems is overridden)
+      virtualisation.fileSystems."/boot/firmware" = {
         device = "/dev/disk/by-label/FIRMWARE";
         fsType = "vfat";
         options = [
@@ -72,6 +73,11 @@ pkgs.testers.runNixOSTest {
 
     def boot_checks(source):
         machine.wait_for_unit("multi-user.target")
+        print(machine.execute(
+            "lsblk -o NAME,FSTYPE,LABEL,MOUNTPOINTS; "
+            "systemctl status --no-pager boot-firmware.mount sensr-ifnames.service sensr-ifnames-seed.service; "
+            "journalctl -b --no-pager -o short-monotonic | grep -iE 'firmware|ifnames|udev-trigger|Coldplug|Timed out' | head -60"
+        )[1])
         machine.wait_for_unit("boot-firmware.mount")
         machine.wait_until_succeeds("test -e /sys/class/net/wan && test -e /sys/class/net/lan", timeout=60)
         print(machine.succeed("ip -br link; systemd-analyze blame | head -15"))
