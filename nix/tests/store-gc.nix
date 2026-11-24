@@ -61,7 +61,7 @@ pkgs.testers.runNixOSTest {
     router.succeed("test -e $(readlink -f /run/current-system)")
 
     # What the cleanup did is exposed.
-    router.succeed("jq -e '.deleted_generations == [5,4,3,1]' /run/sensr/updates/gc.json")
+    router.succeed("${pkgs.jq}/bin/jq -e '.deleted_generations == [5,4,3,1]' /run/sensr/updates/gc.json")
 
     # A second run has nothing left to delete.
     router.succeed("systemctl start sensr-store-gc.service")
