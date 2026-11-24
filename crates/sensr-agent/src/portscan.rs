@@ -1261,11 +1261,15 @@ impl PortScan {
         }))
     }
 
-    /// How many ports `mac` has open as of its last scan; `None` when it was
-    /// never scanned.
-    pub fn open_count(&self, mac: &str) -> Option<u32> {
+    /// The ports `mac` has open as of its last scan, lowest first; `None` when
+    /// it was never scanned.
+    pub fn open_list(&self, mac: &str) -> Option<Vec<u16>> {
         let r = self.ports(&mac.to_ascii_lowercase())?;
-        (r.last_scan != 0).then(|| u32::try_from(r.open().count()).unwrap_or(u32::MAX))
+        (r.last_scan != 0).then(|| {
+            let mut v: Vec<u16> = r.open().map(|p| p.port).collect();
+            v.sort_unstable();
+            v
+        })
     }
 
     /// `mac`'s results.

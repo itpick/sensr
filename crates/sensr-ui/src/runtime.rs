@@ -420,6 +420,10 @@ pub struct HostRow {
     pub today_minutes: Option<u32>,
     /// Ports found open by the last port scan; `None` when never scanned.
     pub open_ports: Option<u32>,
+    /// The TCP ports found open by the last port scan, lowest first (for global search);
+    /// empty when none or never scanned.
+    #[serde(deserialize_with = "null_default")]
+    pub open_port_list: Vec<u16>,
     /// Lookups over the last 24 hours by category key ([`CATEGORIES`] order), for the
     /// Hosts card's colour preview; empty when there is no DNS data.
     #[serde(deserialize_with = "null_default")]

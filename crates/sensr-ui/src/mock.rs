@@ -418,11 +418,13 @@ impl Backend for MockBackend {
                         let mac = h["mac"].as_str().unwrap_or_default().to_owned();
                         let seeded = simulated_ports(t).iter().any(|(m, ..)| *m == mac);
                         if seeded || s.scanned.contains_key(&mac) {
-                            let n = simulated_ports(t)
+                            let list: Vec<u16> = simulated_ports(t)
                                 .iter()
                                 .find(|(m, ..)| *m == mac)
-                                .map_or(0, |(_, ports)| ports.len());
-                            h["open_ports"] = json!(n);
+                                .map(|(_, ports)| ports.iter().map(|p| p.0).collect())
+                                .unwrap_or_default();
+                            h["open_ports"] = json!(list.len());
+                            h["open_port_list"] = json!(list);
                         }
                     }
                     let modes = host_modes(&s.head().doc);
@@ -533,7 +535,7 @@ impl Backend for MockBackend {
                 ));
             }
             if s.scans.len() >= 2 {
-                return Err(ApiError::Conflict("too many scans are running".into()));
+                return Err(ApiError::TooMany("too many scans are running".into()));
             }
             // a few seconds, like a real scan of a quiet host
             s.scans.insert(mac, t + MOCK_SCAN_SECS);
@@ -2675,6 +2677,22 @@ mod tests {
             block(m.host_scan_now("00:00:00:00:00:00".into())),
             Err(ApiError::NotFound(_))
         ));
+        // two scans at once at most, then "too many"
+        block(m.host_scan_now(KID_TABLET.into())).unwrap();
+        block(m.host_scan_now(LAPTOP.into())).unwrap();
+        assert!(matches!(
+            block(m.host_scan_now(CAMERA.into())),
+            Err(ApiError::TooMany(_))
+        ));
+        // the runtime view lists the open ports, for search
+        let hosts: crate::runtime::HostList =
+            crate::runtime::parse(block(m.runtime(RuntimeSection::Hosts)).unwrap());
+        let tel = hosts
+            .hosts
+            .iter()
+            .find(|h| h.mac.as_deref() == Some("02:00:00:00:00:05"))
+            .unwrap();
+        assert_eq!(tel.open_port_list, [23]);
     }
 
     #[test]

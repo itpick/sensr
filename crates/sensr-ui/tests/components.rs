@@ -2468,3 +2468,199 @@ fn wordmark_text_fits_its_box_in_any_font() {
     assert!(html.contains("textLength=\"168\""), "{html}");
     assert!(html.contains("lengthAdjust=\"spacingAndGlyphs\""), "{html}");
 }
+
+// ------------------------------------------------------------ open ports
+
+const DEVICE_05: &str = "02:00:00:00:00:05";
+
+fn ports_card(doc: &Html) -> scraper::ElementRef<'_> {
+    doc.select(&sel("section[aria-labelledby=hp-p]"))
+        .next()
+        .expect("Open ports card")
+}
+
+fn ports_rows(card: scraper::ElementRef<'_>) -> Vec<Vec<String>> {
+    card.select(&sel("tbody tr"))
+        .map(|r| {
+            r.select(&sel("td"))
+                .map(|td| {
+                    td.text()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn host_page_open_ports_card_lists_ports() {
+    let p = host_page_from(hosts_mock(), DEVICE_05, "today", None);
+    let doc = render_host_page(p, host_query("today"));
+    let card = ports_card(&doc);
+    assert_eq!(text(card.select(&sel("h2")).next().unwrap()), "Open ports");
+    let heads: Vec<String> = card.select(&sel("thead th")).map(text).collect();
+    assert_eq!(heads, ["Port", "Service", "First seen"]);
+    assert_eq!(ports_rows(card), [["23/tcp", "telnet", "1 h ago new"]]);
+    let pill = card.select(&sel("td .pill")).next().expect("new pill");
+    assert_eq!(text(pill), "new");
+    assert_eq!(
+        text(card.select(&sel(".ports-status")).next().unwrap()).trim(),
+        "Last scanned 3 h ago"
+    );
+    // Scan now is a plain form post back to this host
+    let form = card.select(&sel("form")).next().expect("scan form");
+    assert_eq!(form.value().attr("method"), Some("post"));
+    assert_eq!(form.value().attr("action"), Some("/ui/fn/host_scan"));
+    let key = form.select(&sel("input[name=key]")).next().unwrap();
+    assert_eq!(key.value().attr("value"), Some(DEVICE_05));
+    let button = form.select(&sel("button[type=submit]")).next().unwrap();
+    assert_eq!(text(button), "Scan now");
+    assert!(button.value().attr("disabled").is_none());
+    // nothing to poll for
+    assert!(card.value().attr("data-scanning").is_none());
+    assert!(!doc.html().contains("host_scanning"));
+}
+
+#[test]
+fn host_page_open_ports_old_ports_have_no_pill() {
+    let p = host_page_from(hosts_mock(), "52:54:00:aa:bb:01", "today", None);
+    let doc = render_host_page(p, host_query("today"));
+    let card = ports_card(&doc);
+    let ports: Vec<String> = ports_rows(card).into_iter().map(|r| r[0].clone()).collect();
+    assert_eq!(
+        ports,
+        ["22/tcp", "80/tcp", "443/tcp", "8080/tcp", "8443/tcp"]
+    );
+    assert!(card.select(&sel(".pill")).next().is_none());
+}
+
+#[test]
+fn host_page_open_ports_empty_and_never_scanned() {
+    let p = host_page_from(hosts_mock(), "3c:22:fb:81:4d:0a", "today", None);
+    let doc = render_host_page(p, host_query("today"));
+    let card = ports_card(&doc);
+    assert!(card.select(&sel("table")).next().is_none());
+    assert!(
+        text(card).contains("No open ports found."),
+        "{}",
+        text(card)
+    );
+    assert!(text(card).contains("Last scanned 3 h ago") || text(card).contains("Last scanned"));
+
+    let p = host_page_from(hosts_mock(), KID_TABLET, "today", None);
+    let doc = render_host_page(p, host_query("today"));
+    let card = ports_card(&doc);
+    assert!(card.select(&sel("table")).next().is_none());
+    assert_eq!(
+        text(card.select(&sel(".ports-status")).next().unwrap()).trim(),
+        "Not scanned yet"
+    );
+    assert!(card.select(&sel("form button")).next().is_some());
+}
+
+#[test]
+fn host_page_open_ports_scanning_polls() {
+    let m = hosts_mock();
+    futures::executor::block_on(sensr_ui::api::Backend::host_scan_now(&m, KID_TABLET.into()))
+        .unwrap();
+    let p = host_page_from(m, KID_TABLET, "today", None);
+    let mut q = host_query("today");
+    q.scan = Some("started".into());
+    let doc = render_host_page(p, q);
+    let card = ports_card(&doc);
+    assert_eq!(card.value().attr("data-scanning"), Some(KID_TABLET));
+    let button = card.select(&sel("form button")).next().unwrap();
+    assert!(button.value().attr("disabled").is_some());
+    assert_eq!(text(button), "Scanning…");
+    let status = card.select(&sel(".ports-status")).next().unwrap();
+    assert_eq!(status.value().attr("role"), Some("status"));
+    assert!(text(status).contains("Scanning"), "{}", text(status));
+    // a short inline poll, no island, of the server function's fixed path
+    assert!(doc.html().contains("fetch('/ui/fn/host_scanning'"));
+    assert_eq!(
+        <sensr_ui::actions::HostScanning as leptos::server_fn::ServerFn>::PATH,
+        "/ui/fn/host_scanning"
+    );
+    assert_eq!(
+        <sensr_ui::actions::HostScan as leptos::server_fn::ServerFn>::PATH,
+        "/ui/fn/host_scan"
+    );
+}
+
+#[test]
+fn host_page_open_ports_scan_refusals_say_why() {
+    for (code, want) in [
+        ("too_many", "Too many scans running, try again in a minute."),
+        ("unavailable", "The port scanner isn't running."),
+        ("busy", "A scan of this host is already running."),
+        (
+            "not_scannable",
+            "This host can't be scanned: it needs an IPv4 address on an internal network and must not be in Quarantine.",
+        ),
+        ("forbidden", "You may not scan hosts."),
+        ("whatever", "The router refused the scan."),
+    ] {
+        let p = host_page_from(hosts_mock(), DEVICE_05, "today", None);
+        let mut q = host_query("today");
+        q.scan = Some(code.into());
+        let doc = render_host_page(p, q);
+        let card = ports_card(&doc);
+        let alert = card
+            .select(&sel("[role=alert]"))
+            .next()
+            .unwrap_or_else(|| panic!("{code}"));
+        assert_eq!(text(alert).trim(), want, "{code}");
+    }
+    // finished: the started note turns into a done note
+    let p = host_page_from(hosts_mock(), DEVICE_05, "today", None);
+    let mut q = host_query("today");
+    q.scan = Some("started".into());
+    let doc = render_host_page(p, q);
+    let card = ports_card(&doc);
+    assert!(card.select(&sel("[role=alert]")).next().is_none());
+    assert!(text(card).contains("Scan finished."), "{}", text(card));
+}
+
+#[test]
+fn host_page_open_ports_read_only_has_no_scan_button() {
+    let m = hosts_mock().with_privileges(&["page-all", "user-config-readonly"]);
+    let p = host_page_from(m, DEVICE_05, "today", None);
+    let doc = render_host_page(p, host_query("today"));
+    let card = ports_card(&doc);
+    assert!(card.select(&sel("form")).next().is_none());
+    assert_eq!(ports_rows(card).len(), 1);
+}
+
+#[test]
+fn hosts_card_shows_open_port_count() {
+    let doc = render_hosts(Some(hosts_named(&[
+        "bench-pi",
+        "kid-tablet",
+        "laptop",
+        "nas",
+    ])));
+    let count = |name: &str| {
+        mac_cell(host_row(&doc, name))
+            .select(&sel(".host-open-ports"))
+            .next()
+            .map(|e| text(e).trim().to_owned())
+    };
+    assert_eq!(count("bench-pi").as_deref(), Some("3 open"));
+    assert_eq!(count("nas").as_deref(), Some("5 open"));
+    assert_eq!(count("kid-tablet"), None, "never scanned");
+    assert_eq!(count("laptop"), None, "nothing open");
+    let c = mac_cell(host_row(&doc, "bench-pi"))
+        .select(&sel(".host-open-ports"))
+        .next()
+        .unwrap();
+    assert!(
+        c.value()
+            .has_class("muted", scraper::CaseSensitivity::CaseSensitive)
+    );
+    // after the label line
+    let html = mac_cell(host_row(&doc, "bench-pi")).html();
+    assert!(html.find("host-label-line").unwrap() < html.find("host-open-ports").unwrap());
+}

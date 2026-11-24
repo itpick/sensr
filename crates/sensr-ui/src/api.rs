@@ -41,6 +41,12 @@ pub enum ApiError {
     /// The operation is not possible in the current state (e.g. confirm with nothing pending).
     #[error("conflict: {0}")]
     Conflict(String),
+    /// Too many such requests are running; try again later (HTTP 429).
+    #[error("too many requests: {0}")]
+    TooMany(String),
+    /// The service behind the request is not running (HTTP 503).
+    #[error("unavailable: {0}")]
+    Unavailable(String),
     /// Transport or backend failure.
     #[error("backend error: {0}")]
     Backend(String),
@@ -870,12 +876,13 @@ mod server {
             page: u32,
         ) -> BoxFuture<'_, ApiResult<HostActivityView>>;
         /// The open TCP ports the port scan found on the host with `mac`. An unknown MAC
-        /// is [`ApiError::NotFound`].
+        /// is [`ApiError::NotFound`], no port scanner [`ApiError::Unavailable`].
         fn host_ports(&self, mac: String) -> BoxFuture<'_, ApiResult<HostPortsView>>;
         /// Scans the host's ports now, in the background (poll [`Backend::host_ports`]
         /// until `scanning` is false). [`ApiError::Conflict`] while that host is being
-        /// scanned, while two scans run, when the host is not one the router scans or
-        /// the scanner is not running; [`ApiError::NotFound`] for an unknown MAC.
+        /// scanned or when the host is not one the router scans, [`ApiError::TooMany`]
+        /// while two scans run, [`ApiError::Unavailable`] when the scanner is not
+        /// running and [`ApiError::NotFound`] for an unknown MAC.
         fn host_scan_now(&self, mac: String) -> BoxFuture<'_, ApiResult<()>>;
         /// Drops an unreserved host from the inventory (`key` as in
         /// [`crate::runtime::HostRow::key`]); it comes back if it is still on the network.

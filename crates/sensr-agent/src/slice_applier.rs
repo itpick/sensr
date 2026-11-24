@@ -995,15 +995,17 @@ impl SliceApplier {
     }
 }
 
-/// Adds `open_ports` (how many the last scan found) to each row of a hosts view
-/// that has been scanned; rows never scanned get none.
+/// Adds `open_ports` (how many the last scan found) and `open_port_list` (which,
+/// lowest first) to each row of a hosts view that has been scanned; rows never
+/// scanned get neither.
 fn add_open_ports(view: &mut Value, ps: &crate::portscan::PortScan) {
     let Some(rows) = view["hosts"].as_array_mut() else {
         return;
     };
     for row in rows {
-        if let Some(n) = row["mac"].as_str().and_then(|m| ps.open_count(m)) {
-            row["open_ports"] = n.into();
+        if let Some(list) = row["mac"].as_str().and_then(|m| ps.open_list(m)) {
+            row["open_ports"] = list.len().into();
+            row["open_port_list"] = list.into();
         }
     }
 }
@@ -1449,6 +1451,7 @@ mod tests {
         };
         // never scanned: no count at all, and the ports view says so
         assert!(row(&a).get("open_ports").is_none());
+        assert!(row(&a).get("open_port_list").is_none());
         let v = a.host_ports(mac).unwrap();
         assert_eq!(v["last_scan"], Value::Null);
         assert_eq!(v["ports"], serde_json::json!([]));
@@ -1469,6 +1472,7 @@ mod tests {
         let open: Vec<u16> = ps.ports(mac).unwrap().open().map(|e| e.port).collect();
         assert_eq!(open, [22]);
         assert_eq!(row(&a)["open_ports"], 1);
+        assert_eq!(row(&a)["open_port_list"], serde_json::json!([22]));
         let v = a.host_ports(mac).unwrap();
         assert_eq!(v["scanning"], false);
         assert_eq!(v["ports"][0]["port"], 22);

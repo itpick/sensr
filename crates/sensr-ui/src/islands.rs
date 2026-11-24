@@ -2644,6 +2644,9 @@ fn mac_cell_html(h: &crate::runtime::HostRow, edit: bool, open: bool) -> String 
         }
         out += "</span>";
     }
+    if let Some(n) = h.open_ports.filter(|n| *n > 0) {
+        out += &format!(r#"<span class="muted host-open-ports">{n} open</span>"#);
+    }
     if h.staged_label {
         out += r#"<span class="muted host-label-staged">Staged — Apply to take effect</span>"#;
     }
