@@ -287,6 +287,7 @@ ul.plain { list-style: none; padding: 0; margin: 8px 0; }
 .host-label-guess { font-style: italic; }
 .host-kind-icon { margin-right: 4px; font-style: normal; }
 .host-label-staged { display: block; font-size: 12px; }
+.host-open-ports { display: block; font-size: 12px; line-height: 18px; }
 .icon-btn.host-label-edit { width: 20px; min-width: 20px; height: 20px; padding: 0; margin-left: 4px; font-size: 12px; vertical-align: top; color: var(--muted); }
 .host-label-edit:hover, .host-label-edit:focus-visible { color: inherit; }
 .host-label-editor { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 0; }
@@ -440,6 +441,14 @@ span.btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
 .dom-act { text-align: right; white-space: nowrap; }
 .dom-svc { overflow-wrap: anywhere; }
 .dom-svc .dot { vertical-align: 0; }
+.ports-head { display: flex; flex-wrap: wrap; gap: 8px 12px; justify-content: space-between; align-items: center; }
+.ports-head h2 { margin: 0; }
+.ports-status { margin: 6px 0 10px; }
+.ports-done { margin: 0 0 10px; }
+.ports { width: auto; min-width: min(100%, 420px); }
+.ports td { vertical-align: middle; }
+.ports th.num, .ports td.num { text-align: right; white-space: nowrap; }
+.ports .pill { margin-left: 6px; }
 .modal-small { width: min(460px, calc(100vw - 24px)); }
 .modal-small .field-stack { margin: 10px 0; }
 .modal-small .field-stack p { margin: 0; }

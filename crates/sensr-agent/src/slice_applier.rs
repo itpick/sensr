@@ -49,6 +49,8 @@ pub struct SliceApplier {
     intercept: Option<Intercept>,
     /// Passive DHCP/mDNS evidence for host labels.
     fingerprint: Option<Fingerprint>,
+    /// The daily TCP port scan of the inventory's LAN hosts.
+    portscan: Option<Arc<crate::portscan::PortScan>>,
 }
 
 /// Builds a (not yet started) sniffer.
@@ -280,6 +282,12 @@ impl SliceApplier {
                 running: Arc::default(),
                 stopped: Arc::default(),
             };
+            let ps = crate::portscan::PortScan::system(
+                state.join("ports.json"),
+                Arc::new(Arc::downgrade(&hosts)),
+            );
+            ps.start();
+            a.portscan = Some(ps);
             feed_from_polls(&hosts, &ic, Some(&fp), &a.applied, &a.host_modes);
             a.intercept = Some(ic);
             a.fingerprint = Some(fp);
@@ -345,6 +353,18 @@ impl SliceApplier {
         self
     }
 
+    /// With an explicit port scanner (tests).
+    #[cfg(test)]
+    fn with_portscan(mut self, ps: Arc<crate::portscan::PortScan>) -> SliceApplier {
+        self.portscan = Some(ps);
+        self
+    }
+
+    /// The port scanner, on the host.
+    pub fn portscan(&self) -> Option<&Arc<crate::portscan::PortScan>> {
+        self.portscan.as_ref()
+    }
+
     /// Alias feed status of the applied document (API, UI).
     pub fn alias_status(&self) -> Vec<sensr_feeds::AliasStatus> {
         let (Some(f), Some((doc, _))) = (&self.feeds, lock(&self.applied).as_ref().cloned()) else {
@@ -383,6 +403,7 @@ impl SliceApplier {
             host_modes: Arc::new(Mutex::new(HostModeSets::default())),
             intercept: None,
             fingerprint: None,
+            portscan: None,
         })
     }
 
@@ -812,6 +833,9 @@ impl Applier for SliceApplier {
                 .and_then(|p| serde_json::to_value(p.view(unix_now())).ok()),
             sensr_ipc::RuntimeSection::Hosts => self.hosts.as_ref().map(|h| {
                 let mut v = h.view(unix_now());
+                if let Some(ps) = &self.portscan {
+                    add_open_ports(&mut v, ps);
+                }
                 if let Some(ic) = &self.intercept {
                     v["intercept"] =
                         serde_json::to_value(ic.interceptor.status()).unwrap_or_default();
@@ -823,6 +847,21 @@ impl Applier for SliceApplier {
 
     fn forget_host(&mut self, key: &str) -> Result<bool, ApplyError> {
         Ok(self.hosts.as_ref().is_some_and(|h| h.forget(key)))
+    }
+
+    fn host_ports(&self, mac: &str) -> Result<Value, crate::portscan::ScanNowError> {
+        self.portscan
+            .as_ref()
+            .ok_or(crate::portscan::ScanNowError::NotReady)?
+            .view(mac)
+            .ok_or(crate::portscan::ScanNowError::Unknown)
+    }
+
+    fn host_scan_now(&self, mac: &str) -> Result<(), crate::portscan::ScanNowError> {
+        self.portscan
+            .as_ref()
+            .ok_or(crate::portscan::ScanNowError::NotReady)?
+            .scan_now(mac)
     }
 
     fn client_mac(&self, ip: std::net::IpAddr) -> Option<String> {
@@ -938,6 +977,10 @@ impl SliceApplier {
         if let Some(h) = &self.hosts {
             h.set_document(&doc);
         }
+        if let Some(ps) = &self.portscan {
+            let own: Vec<std::net::IpAddr> = addrs.values().flatten().map(|a| a.addr).collect();
+            ps.set_document(&doc, &own);
+        }
         *lock(&self.applied) = Some((doc, addrs));
         if let Some(ic) = &self.intercept {
             // after `applied`, so no refresh can land an older document later
@@ -952,6 +995,21 @@ impl SliceApplier {
     }
 }
 
+/// Adds `open_ports` (how many the last scan found) and `open_port_list` (which,
+/// lowest first) to each row of a hosts view that has been scanned; rows never
+/// scanned get neither.
+fn add_open_ports(view: &mut Value, ps: &crate::portscan::PortScan) {
+    let Some(rows) = view["hosts"].as_array_mut() else {
+        return;
+    };
+    for row in rows {
+        if let Some(list) = row["mac"].as_str().and_then(|m| ps.open_list(m)) {
+            row["open_ports"] = list.len().into();
+            row["open_port_list"] = list.into();
+        }
+    }
+}
+
 impl Drop for SliceApplier {
     fn drop(&mut self) {
         // clean shutdown: keep the last `last_seen`s the throttle held back
@@ -960,6 +1018,10 @@ impl Drop for SliceApplier {
         }
         if let Some(fp) = &self.fingerprint {
             fp.stop();
+        }
+        // scans in flight end without saving a partial result
+        if let Some(ps) = &self.portscan {
+            ps.stop();
         }
         // and leave no neighbour pointing at the router (blocks 2 s)
         if let Some(ic) = &self.intercept {
@@ -1329,6 +1391,109 @@ mod tests {
         )
         .unwrap();
         doc
+    }
+
+    #[test]
+    fn apply_feeds_the_port_scanner_and_drop_stops_it() {
+        use crate::portscan::{PortScan, Probe, ScanNowError, Scanner};
+        struct Answer;
+        impl crate::portscan::Connector for Answer {
+            fn probe(&self, a: std::net::SocketAddr, _: Duration) -> Probe {
+                if a.port() == 22 {
+                    Probe::Open
+                } else {
+                    Probe::Closed
+                }
+            }
+        }
+        let root = fake_root();
+        let state = tempfile::tempdir().unwrap();
+        let mac = "aa:bb:cc:dd:ee:51";
+        let hosts = vec![crate::hosts::Host {
+            key: mac.into(),
+            mac: Some(mac.into()),
+            client_id: None,
+            name: None,
+            reserved_name: None,
+            lease_hostname: None,
+            interface: Some("lan".into()),
+            ipv4: Some("192.168.1.51".parse().unwrap()),
+            ipv6: Vec::new(),
+            sources: Default::default(),
+            lease: None,
+            first_seen: 0,
+            last_seen: Some(unix_now()),
+            evidence: Default::default(),
+        }];
+        let ps = PortScan::new(
+            Scanner::new(
+                Arc::new(Answer),
+                Arc::new(crate::portscan::SystemClock::default()),
+                None,
+                Duration::from_millis(10),
+                8,
+            ),
+            state.path().join("ports.json"),
+            Arc::new(Mutex::new(hosts)),
+            Arc::new(unix_now),
+            Arc::new(|_: &str| 0),
+        );
+        let (a, _, _) = moded_applier(&root);
+        // no scanner attached: the ports view is unavailable, not "no such host"
+        assert_eq!(a.host_ports(mac), Err(ScanNowError::NotReady));
+        let mut a = a.with_portscan(Arc::clone(&ps));
+        assert_eq!(ps.scan_now(mac), Err(ScanNowError::NotReady));
+        a.apply(None, &home_router()).unwrap();
+        let row = |_: &SliceApplier| {
+            let mut v = serde_json::json!({"hosts": [{"mac": mac}, {"key": "id:1"}]});
+            add_open_ports(&mut v, &ps);
+            v["hosts"][0].clone()
+        };
+        // never scanned: no count at all, and the ports view says so
+        assert!(row(&a).get("open_ports").is_none());
+        assert!(row(&a).get("open_port_list").is_none());
+        let v = a.host_ports(mac).unwrap();
+        assert_eq!(v["last_scan"], Value::Null);
+        assert_eq!(v["ports"], serde_json::json!([]));
+        assert_eq!(
+            a.host_ports("aa:aa:aa:aa:aa:aa"),
+            Err(ScanNowError::Unknown)
+        );
+        assert_eq!(
+            a.host_scan_now("aa:aa:aa:aa:aa:aa"),
+            Err(ScanNowError::Unknown)
+        );
+        a.host_scan_now(mac).unwrap();
+        let t = std::time::Instant::now();
+        while ps.scanning(mac) {
+            assert!(t.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let open: Vec<u16> = ps.ports(mac).unwrap().open().map(|e| e.port).collect();
+        assert_eq!(open, [22]);
+        assert_eq!(row(&a)["open_ports"], 1);
+        assert_eq!(row(&a)["open_port_list"], serde_json::json!([22]));
+        let v = a.host_ports(mac).unwrap();
+        assert_eq!(v["scanning"], false);
+        assert_eq!(v["ports"][0]["port"], 22);
+        assert_eq!(v["ports"][0]["service"], "ssh");
+        assert_eq!(v["ports"][0]["new"], true);
+        assert!(state.path().join("ports.json").exists());
+        // a quarantine apply takes the host out of the scan
+        a.apply(None, &{
+            use sensr_schema::PathAccess;
+            let mut d = home_router();
+            d.set_by_path(
+                "firewall.host_modes.6d0de000-0000-4000-8000-000000000001",
+                serde_json::json!({"mac": mac, "mode": "quarantine"}),
+            )
+            .unwrap();
+            d
+        })
+        .unwrap();
+        assert_eq!(ps.scan_now(mac), Err(ScanNowError::NotScannable));
+        drop(a);
+        assert_eq!(ps.scan_now(mac), Err(ScanNowError::NotReady));
     }
 
     #[test]

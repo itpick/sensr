@@ -1749,6 +1749,8 @@ pub struct HostQuery {
     pub saved: Option<String>,
     /// The override editor's refusal.
     pub error: Option<String>,
+    /// How Scan now went (see [`crate::actions::host_scan`]).
+    pub scan: Option<String>,
 }
 
 impl HostQuery {
@@ -1769,6 +1771,7 @@ impl HostQuery {
             edit: qm.get("edit").filter(|e| !e.is_empty()),
             saved: qm.get("saved"),
             error: qm.get("error"),
+            scan: qm.get("scan"),
         }
     }
 }
@@ -2188,6 +2191,129 @@ fn domains_card(
     .into_any()
 }
 
+/// Polls `/ui/fn/host_scanning` every 2 s for the host in the card's `data-scanning`, and
+/// reloads the page when its scan is done; gives up after 5 minutes.
+const SCAN_POLL: &str = "(function(){var c=document.getElementById('open-ports');if(!c||!window.fetch)return;var m=c.dataset.scanning,n=0;function t(){if(++n>150){var s=c.querySelector('.ports-status');if(s)s.textContent='Still scanning. Reload the page later to see the results.';return;}fetch('/ui/fn/host_scanning',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mac:m})}).then(function(r){return r.ok?r.json():true;}).then(function(b){if(b===false)location.reload();else setTimeout(t,2000);},function(){setTimeout(t,2000);});}setTimeout(t,2000);})();";
+
+/// The Open ports card: what the last port scan found open, when it ran, and Scan now (a
+/// plain form post; while a scan runs a line of script polls and reloads when it is done).
+fn ports_card(p: &crate::actions::HostPageData, q: &HostQuery) -> Option<AnyView> {
+    let v = match (&p.ports, &p.ports_note) {
+        (Some(v), _) => v,
+        (None, Some(note)) => {
+            return Some(
+                view! {
+                    <section class="card hp-wide" id="open-ports" aria-labelledby="hp-p">
+                        <h2 id="hp-p">"Open ports"</h2>
+                        <p class="muted">{note.clone()}</p>
+                    </section>
+                }
+                .into_any(),
+            );
+        }
+        (None, None) => return None,
+    };
+    let now = i64::try_from(p.now).unwrap_or(0);
+    let mac = p.host.mac.clone().unwrap_or_default();
+    let scanning = v.scanning;
+    let last = v.last_scan.map_or_else(
+        || "Not scanned yet".to_owned(),
+        |t| format!("Last scanned {}", ago(now, i64::try_from(t).unwrap_or(0))),
+    );
+    let status = if scanning {
+        format!("Scanning… {last}")
+    } else {
+        last
+    };
+    let error = q.scan.as_deref().and_then(|code| match code {
+        "started" => None,
+        "too_many" => Some("Too many scans running, try again in a minute."),
+        "unavailable" => Some(crate::actions::SCANNER_DOWN),
+        "busy" => (!scanning).then_some("A scan of this host is already running."),
+        "not_scannable" => Some(
+            "This host can't be scanned: it needs an IPv4 address on an internal network and must not be in Quarantine.",
+        ),
+        "forbidden" => Some("You may not scan hosts."),
+        _ => Some("The router refused the scan."),
+    });
+    let finished = matches!(q.scan.as_deref(), Some("started" | "busy")) && !scanning;
+    let form = p.can_scan.then(|| {
+        view! {
+            <form method="post" action="/ui/fn/host_scan" class="ports-scan">
+                <input type="hidden" name="key" value=p.host.key.clone()/>
+                <input type="hidden" name="range" value=q.range.clone()/>
+                <input type="hidden" name="page" value=q.page.to_string()/>
+                <input type="hidden" name="q" value=q.q.clone()/>
+                <button type="submit" class="btn btn-sm" disabled=scanning>
+                    {if scanning { "Scanning…" } else { "Scan now" }}
+                </button>
+            </form>
+        }
+    });
+    let rows = v
+        .ports
+        .iter()
+        .map(|port| {
+            let service = if port.service.is_empty() {
+                "—".to_owned()
+            } else {
+                port.service.clone()
+            };
+            view! {
+                <tr>
+                    <td class="num">{format!("{}/tcp", port.port)}</td>
+                    <td>{service}</td>
+                    <td class="num">{ago(now, i64::try_from(port.first_seen).unwrap_or(0))}
+                        {port.new.then(|| view! { <span class="pill pill-info">"new"</span> })}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    let table = if v.ports.is_empty() {
+        v.last_scan
+            .map(|_| view! { <p class="muted">"No open ports found."</p> }.into_any())
+    } else {
+        Some(
+            view! {
+                <div class="table-wrap">
+                    <table class="ports">
+                        <thead><tr>
+                            <th scope="col" class="num">"Port"</th>
+                            <th scope="col">"Service"</th>
+                            <th scope="col" class="num">"First seen"</th>
+                        </tr></thead>
+                        <tbody>{rows}</tbody>
+                    </table>
+                </div>
+            }
+            .into_any(),
+        )
+    };
+    Some(
+        view! {
+            <section class="card hp-wide" id="open-ports" aria-labelledby="hp-p"
+                data-scanning=scanning.then_some(mac)>
+                <div class="ports-head">
+                    <h2 id="hp-p">"Open ports"</h2>
+                    {form}
+                </div>
+                <p class="muted ports-status" role="status">{status}</p>
+                {error.map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
+                {finished.then(|| view! { <p class="ports-done">"Scan finished."</p> })}
+                {v.all_filtered.then(|| view! {
+                    <p class="muted small">"On the last scan the host answered on no port (it may drop everything), so these are from before."</p>
+                })}
+                {table}
+                {scanning.then(|| view! {
+                    <noscript><p class="muted small">"Reload the page to see the results."</p></noscript>
+                    <script inner_html=SCAN_POLL></script>
+                })}
+            </section>
+        }
+        .into_any(),
+    )
+}
+
 /// The service override editor: a dialog with a plain form, opened by the page's URL
 /// (`edit=`), so it needs no island; a line of script makes it modal when scripting is on.
 fn override_dialog(
@@ -2297,10 +2423,12 @@ pub fn host_page_body(p: crate::actions::HostPageData, q: HostQuery) -> AnyView 
         .into_any()
     });
     let dialog = p.draft.as_ref().map(|d| override_dialog(&p, d, &q));
+    let ports = ports_card(&p, &q);
     view! {
         <div class="hp-grid">
             {header}
             {saved}
+            {ports}
             {note}
             {body}
         </div>

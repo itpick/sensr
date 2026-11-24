@@ -17,6 +17,7 @@ pub mod gateways;
 pub mod hosts;
 pub mod ifnames;
 pub mod pd;
+pub mod portscan;
 pub mod redact;
 pub mod seed;
 pub mod slice_applier;

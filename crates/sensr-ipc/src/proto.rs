@@ -289,6 +289,24 @@ pub enum Op {
         #[serde(default)]
         maker: Option<String>,
     },
+    /// The host's open TCP ports from the port scan. Answered with
+    /// [`Response::Value`] `{last_scan, scanning, all_filtered, ports}`;
+    /// [`ErrorKind::NotFound`] for a MAC not in the inventory and
+    /// [`ErrorKind::Unavailable`] when there is no port scanner.
+    HostPorts {
+        /// The host's MAC address.
+        mac: String,
+    },
+    /// Scan the host's ports now, in the background. Answered with
+    /// [`Response::Value`] `{"started": true}`; [`ErrorKind::NotFound`] for
+    /// an unknown MAC, [`ErrorKind::Conflict`] while that host is being
+    /// scanned or when it is not one the router scans,
+    /// [`ErrorKind::TooManyRequests`] while two such scans run and
+    /// [`ErrorKind::Unavailable`] when the scanner is not running.
+    HostScanNow {
+        /// The host's MAC address.
+        mac: String,
+    },
     /// Set what a domain suffix counts as on the per-host DNS activity page
     /// (`insight.dns.service_overrides`): writes the entry for `suffix`, or
     /// removes it when `service` and `category` are both `None`. Commits and
@@ -398,6 +416,7 @@ impl Op {
                 | Op::HostForget { .. }
                 | Op::HostModeSet { .. }
                 | Op::HostLabelSet { .. }
+                | Op::HostScanNow { .. }
                 | Op::ServiceOverrideSet { .. }
         )
     }
@@ -596,6 +615,10 @@ pub enum ErrorKind {
     /// The request conflicts with current state (e.g. nothing to commit,
     /// nothing to confirm, a confirm already pending).
     Conflict,
+    /// Too many requests of this kind are running (HTTP 429).
+    TooManyRequests,
+    /// The service behind the request is not running (HTTP 503).
+    Unavailable,
     /// The apply pipeline failed; the previous state stays in force.
     ApplyFailed,
     /// A bug or I/O failure in the agent.
@@ -747,6 +770,14 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn host_ports_ops() {
+        assert!(Op::HostScanNow { mac: "x".into() }.is_write());
+        assert!(!Op::HostPorts { mac: "x".into() }.is_write());
+        let v: Op = serde_json::from_value(serde_json::json!({"HostPorts": {"mac": "m"}})).unwrap();
+        assert_eq!(v, Op::HostPorts { mac: "m".into() });
     }
 
     #[test]

@@ -152,6 +152,12 @@ mod flaky {
         ) -> BoxFuture<'_, ApiResult<String>> {
             self.inner.set_host_label(m, k, mk)
         }
+        fn host_ports(&self, m: String) -> BoxFuture<'_, ApiResult<HostPortsView>> {
+            self.inner.host_ports(m)
+        }
+        fn host_scan_now(&self, m: String) -> BoxFuture<'_, ApiResult<()>> {
+            self.inner.host_scan_now(m)
+        }
         fn host_activity(
             &self,
             m: String,

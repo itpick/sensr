@@ -34,6 +34,10 @@ struct State {
     clock: Box<dyn Fn() -> u64 + Send>,
     /// Host keys dropped with Forget.
     forgotten: std::collections::HashSet<String>,
+    /// Port scans under way: lowercase MAC to the time the scan ends.
+    scans: HashMap<String, u64>,
+    /// When a host was last scanned here (Scan now), over the seeded time.
+    scanned: HashMap<String, u64>,
 }
 
 impl State {
@@ -43,6 +47,18 @@ impl State {
 
     /// Lapses an expired confirm window: the box rolls back on its own.
     fn tick(&mut self) {
+        // finished port scans
+        let t = (self.clock)();
+        let done: Vec<(String, u64)> = self
+            .scans
+            .iter()
+            .filter(|(_, end)| **end <= t)
+            .map(|(m, end)| (m.clone(), *end))
+            .collect();
+        for (mac, end) in done {
+            self.scans.remove(&mac);
+            self.scanned.insert(mac, end);
+        }
         if let (Some(w), Some(back)) = (&self.confirm, self.confirm_fallback)
             && (self.clock)() >= w.deadline
         {
@@ -156,6 +172,8 @@ impl MockBackend {
                 next_token: 1,
                 clock,
                 forgotten: Default::default(),
+                scans: HashMap::new(),
+                scanned: HashMap::new(),
             }),
             users: vec![("root".into(), "sensr".into())],
             insight_dir: None,
@@ -396,6 +414,19 @@ impl Backend for MockBackend {
                             apply_mock_mix(h, self.stale_feed);
                         }
                     }
+                    for h in &mut hosts {
+                        let mac = h["mac"].as_str().unwrap_or_default().to_owned();
+                        let seeded = simulated_ports(t).iter().any(|(m, ..)| *m == mac);
+                        if seeded || s.scanned.contains_key(&mac) {
+                            let list: Vec<u16> = simulated_ports(t)
+                                .iter()
+                                .find(|(m, ..)| *m == mac)
+                                .map(|(_, ports)| ports.iter().map(|p| p.0).collect())
+                                .unwrap_or_default();
+                            h["open_ports"] = json!(list.len());
+                            h["open_port_list"] = json!(list);
+                        }
+                    }
                     let modes = host_modes(&s.head().doc);
                     let mut interfaces = std::collections::BTreeSet::new();
                     for h in &mut hosts {
@@ -446,6 +477,69 @@ impl Backend for MockBackend {
             // the applied overrides re-attribute names, as the daemon's catalogue does
             apply_mock_overrides(&mut v, &s.head().doc);
             Ok(v)
+        }))
+    }
+
+    fn host_ports(&self, mac: String) -> BoxFuture<'_, ApiResult<HostPortsView>> {
+        if !self.may_access("/api/v1/hosts") {
+            return ready(Err(ApiError::Unauthorized));
+        }
+        let mac = mac.to_ascii_lowercase();
+        ready(self.with(|s| {
+            let t = (s.clock)();
+            if !mock_host_exists(s, &mac, t) {
+                return Err(ApiError::NotFound("no such host".into()));
+            }
+            let seeded = simulated_ports(t)
+                .into_iter()
+                .find(|(m, ..)| *m == mac)
+                .map(|(_, ports)| ports);
+            let last_scan = s
+                .scanned
+                .get(&mac)
+                .copied()
+                .or_else(|| seeded.as_ref().map(|_| t.saturating_sub(3 * 3_600)));
+            let ports = seeded
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(port, service, first_seen)| PortView {
+                    port,
+                    service: service.to_owned(),
+                    first_seen,
+                    last_seen: last_scan.unwrap_or(t),
+                    new: t.saturating_sub(first_seen) < 86_400,
+                })
+                .collect();
+            Ok(HostPortsView {
+                last_scan,
+                scanning: s.scans.contains_key(&mac),
+                all_filtered: false,
+                ports,
+            })
+        }))
+    }
+
+    fn host_scan_now(&self, mac: String) -> BoxFuture<'_, ApiResult<()>> {
+        if !self.may_access("/api/v1/hosts") || self.read_only() {
+            return ready(Err(ApiError::Unauthorized));
+        }
+        let mac = mac.to_ascii_lowercase();
+        ready(self.with(|s| {
+            let t = (s.clock)();
+            if !mock_host_exists(s, &mac, t) {
+                return Err(ApiError::NotFound("no such host".into()));
+            }
+            if s.scans.contains_key(&mac) {
+                return Err(ApiError::Conflict(
+                    "a scan of this host is already running".into(),
+                ));
+            }
+            if s.scans.len() >= 2 {
+                return Err(ApiError::TooMany("too many scans are running".into()));
+            }
+            // a few seconds, like a real scan of a quiet host
+            s.scans.insert(mac, t + MOCK_SCAN_SECS);
+            Ok(())
         }))
     }
 
@@ -808,6 +902,55 @@ pub fn apply_host_labels(hosts: &mut [Value], doc: &Value) {
 /// The MAC of the device the mock pretends every request comes from (`device-01`):
 /// quarantining it is refused, as the agent refuses the caller's own device.
 pub const MOCK_CLIENT_MAC: &str = "02:00:00:00:00:01";
+
+/// How long a mock Scan now takes, in seconds.
+const MOCK_SCAN_SECS: u64 = 3;
+
+/// A device in the inventory that is not forgotten.
+fn mock_host_exists(s: &State, mac: &str, now: u64) -> bool {
+    simulated_hosts(now).iter().any(|h| {
+        h["mac"]
+            .as_str()
+            .is_some_and(|m| m.eq_ignore_ascii_case(mac))
+            && !s.forgotten.contains(h["key"].as_str().unwrap_or_default())
+    })
+}
+
+/// A port the mock found open: `(port, service, first_seen)`.
+pub type MockPort = (u16, &'static str, u64);
+
+/// The open ports the mock's last scan found, by MAC: `(port, service, first_seen)`.
+/// Hosts not listed were never scanned. `device-05` has a new telnet port.
+pub fn simulated_ports(now: u64) -> Vec<(String, Vec<MockPort>)> {
+    let old = now.saturating_sub(86_400 * 20);
+    vec![
+        (
+            "52:54:00:aa:bb:01".into(),
+            vec![
+                (22, "ssh", old),
+                (80, "http", old),
+                (443, "https", old),
+                (8080, "http-alt", old),
+                (8443, "https-alt", old),
+            ],
+        ),
+        (
+            "b8:27:eb:7d:4e:25".into(),
+            vec![
+                (22, "ssh", old),
+                (8080, "http-alt", old),
+                (8443, "https-alt", old),
+            ],
+        ),
+        (CAMERA.into(), vec![(554, "rtsp", old)]),
+        (
+            "02:00:00:00:00:05".into(),
+            vec![(23, "telnet", now.saturating_sub(3_600))],
+        ),
+        // scanned: nothing open
+        (LAPTOP.into(), Vec::new()),
+    ]
+}
 
 /// The host inventory as the agent would report it at `now`, sorted the agent's way
 /// (online first, then most recently seen): 25 hosts on LAN and LAN2 with one of each
@@ -2472,6 +2615,94 @@ mod tests {
 
     fn block<T>(f: BoxFuture<'_, T>) -> T {
         futures::executor::block_on(f)
+    }
+
+    #[test]
+    fn mock_ports_and_scan_now() {
+        const T0: u64 = 1_800_000_000;
+        let t = Arc::new(AtomicU64::new(T0));
+        let c = t.clone();
+        let m = MockBackend::with_clock(Box::new(move || c.load(Ordering::SeqCst)));
+        let hosts: crate::runtime::HostList =
+            crate::runtime::parse(block(m.runtime(RuntimeSection::Hosts)).unwrap());
+        let count = |mac: &str| {
+            hosts
+                .hosts
+                .iter()
+                .find(|h| h.mac.as_deref() == Some(mac))
+                .unwrap()
+                .open_ports
+        };
+        // the view count and the ports view agree for every host
+        for h in &hosts.hosts {
+            let mac = h.mac.clone().unwrap();
+            let v = block(m.host_ports(mac)).unwrap();
+            assert_eq!(h.open_ports, v.last_scan.map(|_| v.ports.len() as u32));
+        }
+        assert_eq!(count("b8:27:eb:7d:4e:25"), Some(3));
+        assert_eq!(count(KID_TABLET), None);
+        let ports = |mac: &str| block(m.host_ports(mac.into())).unwrap();
+        let pi: Vec<u16> = ports("b8:27:eb:7d:4e:25")
+            .ports
+            .iter()
+            .map(|p| p.port)
+            .collect();
+        assert!(pi.contains(&8080) && pi.contains(&8443));
+        assert_eq!(ports(CAMERA).ports[0].port, 554);
+        let tel = ports("02:00:00:00:00:05");
+        assert_eq!((tel.ports[0].port, tel.ports[0].new), (23, true));
+        assert!(!ports("b8:27:eb:7d:4e:25").ports.iter().any(|p| p.new));
+        let never = ports(KID_TABLET);
+        assert_eq!(
+            (never.last_scan, never.scanning, never.ports.len()),
+            (None, false, 0)
+        );
+        assert!(matches!(
+            block(m.host_ports("00:00:00:00:00:00".into())),
+            Err(ApiError::NotFound(_))
+        ));
+
+        // Scan now: scanning, then done a few seconds later with a last scan time
+        block(m.host_scan_now(KID_TABLET.into())).unwrap();
+        assert!(ports(KID_TABLET).scanning);
+        assert!(matches!(
+            block(m.host_scan_now(KID_TABLET.into())),
+            Err(ApiError::Conflict(_))
+        ));
+        t.fetch_add(MOCK_SCAN_SECS, Ordering::SeqCst);
+        let done = ports(KID_TABLET);
+        assert!(!done.scanning);
+        assert_eq!(done.last_scan, Some(T0 + MOCK_SCAN_SECS));
+        assert!(matches!(
+            block(m.host_scan_now("00:00:00:00:00:00".into())),
+            Err(ApiError::NotFound(_))
+        ));
+        // two scans at once at most, then "too many"
+        block(m.host_scan_now(KID_TABLET.into())).unwrap();
+        block(m.host_scan_now(LAPTOP.into())).unwrap();
+        assert!(matches!(
+            block(m.host_scan_now(CAMERA.into())),
+            Err(ApiError::TooMany(_))
+        ));
+        // the runtime view lists the open ports, for search
+        let hosts: crate::runtime::HostList =
+            crate::runtime::parse(block(m.runtime(RuntimeSection::Hosts)).unwrap());
+        let tel = hosts
+            .hosts
+            .iter()
+            .find(|h| h.mac.as_deref() == Some("02:00:00:00:00:05"))
+            .unwrap();
+        assert_eq!(tel.open_port_list, [23]);
+    }
+
+    #[test]
+    fn mock_scan_now_is_refused_read_only() {
+        let m = MockBackend::new().with_privileges(&["page-all", "user-config-readonly"]);
+        assert_eq!(
+            block(m.host_scan_now(KID_TABLET.into())),
+            Err(ApiError::Unauthorized)
+        );
+        assert!(block(m.host_ports(KID_TABLET.into())).is_ok());
     }
 
     fn mock_with_clock() -> (MockBackend, Arc<AtomicU64>) {

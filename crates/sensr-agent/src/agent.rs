@@ -993,6 +993,14 @@ impl<A: Applier> Agent<A> {
                 self.set_host_label(inner, principal, &mac, kind, maker)
                     .await
             }
+            Op::HostPorts { mac } => match inner.applier.host_ports(&mac) {
+                Ok(v) => Ok(Response::Value(Some(v))),
+                Err(e) => Err(scan_error(e)),
+            },
+            Op::HostScanNow { mac } => match inner.applier.host_scan_now(&mac) {
+                Ok(()) => Ok(Response::Value(Some(serde_json::json!({"started": true})))),
+                Err(e) => Err(scan_error(e)),
+            },
             Op::ServiceOverrideSet {
                 suffix,
                 service,
@@ -1373,6 +1381,17 @@ fn label(s: Source) -> String {
     }
 }
 
+fn scan_error(e: crate::portscan::ScanNowError) -> IpcError {
+    use crate::portscan::ScanNowError as E;
+    let kind = match e {
+        E::Unknown => ErrorKind::NotFound,
+        E::Busy | E::NotScannable => ErrorKind::Conflict,
+        E::TooMany => ErrorKind::TooManyRequests,
+        E::NotReady => ErrorKind::Unavailable,
+    };
+    err(kind, e.to_string())
+}
+
 fn apply_error(e: ApplyError) -> IpcError {
     match e {
         ApplyError::Invalid(validations) => validation(validations),
@@ -1449,6 +1468,8 @@ fn op_name(op: &Op) -> &'static str {
         Op::HostForget { .. } => "host.forget",
         Op::HostModeSet { .. } => "host.mode_set",
         Op::HostLabelSet { .. } => "host.label_set",
+        Op::HostPorts { .. } => "host.ports",
+        Op::HostScanNow { .. } => "host.scan_now",
         Op::ServiceOverrideSet { .. } => "insight.service_override_set",
     }
 }

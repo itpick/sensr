@@ -765,6 +765,13 @@ pub struct HostPageData {
     pub can_edit: bool,
     /// The override editor, open for one looked-up name.
     pub draft: Option<OverrideDraft>,
+    /// What the port scan found on it; `None` (with [`HostPageData::ports_note`] saying
+    /// why, unless it has no MAC) when there is nothing to show.
+    pub ports: Option<crate::api::HostPortsView>,
+    /// Why there are no ports to show.
+    pub ports_note: Option<String>,
+    /// The caller may start a port scan (Scan now).
+    pub can_scan: bool,
 }
 
 /// The service override editor's starting values for a looked-up name.
@@ -792,6 +799,7 @@ pub async fn host_page(
     page: u32,
     edit: Option<String>,
 ) -> Result<HostPageData, ServerFnError> {
+    use crate::api::ApiError;
     use serde_json::Value;
     tracing::debug!(key, range, page, "host page load");
     let b = imp::backend()?;
@@ -831,6 +839,16 @@ pub async fn host_page(
             Ok(v) => out.activity = Some(v),
             Err(e) => out.note = Some(format!("Could not read the DNS activity: {e}")),
         },
+    }
+    if let Some(mac) = host.mac.clone().filter(|_| !host.key.starts_with("id:")) {
+        out.can_scan = !b.read_only();
+        match b.host_ports(mac).await {
+            Ok(v) => out.ports = Some(v),
+            Err(ApiError::Unavailable(_)) => {
+                out.ports_note = Some(SCANNER_DOWN.into());
+            }
+            Err(e) => out.ports_note = Some(format!("Could not read the open ports: {e}")),
+        }
     }
     if let Some(qname) = edit
         .map(|q| q.trim().trim_end_matches('.').to_ascii_lowercase())
@@ -876,6 +894,70 @@ pub async fn host_page(
     }
     out.host = host;
     Ok(out)
+}
+
+/// The Open ports card's note when the agent has no port scanner running.
+pub const SCANNER_DOWN: &str = "The port scanner isn't running.";
+
+/// Whether a port scan of the host with `mac` is running: the Open ports card polls this
+/// while Scan now runs.
+#[server(prefix = "/ui/fn", endpoint = "host_scanning", input = Json)]
+pub async fn host_scanning(mac: String) -> Result<bool, ServerFnError> {
+    let b = imp::backend()?;
+    if !b.may_access("/api/v1/hosts") {
+        return Err(ServerFnError::new("you may not view hosts"));
+    }
+    Ok(b.host_ports(mac).await.map_err(imp::err)?.scanning)
+}
+
+/// The Open ports card's Scan now form target (a plain form post: no scripting needed).
+/// Starts a scan of the host `key` and goes back to its page (with its `range`, domains
+/// `page` and search `q`) with `scan=` saying how it went: `started`, `busy`, `too_many`,
+/// `not_scannable`, `unavailable`, `forbidden` or `refused`. The redirect is rebuilt from
+/// those fields, each percent-encoded.
+#[server(prefix = "/ui/fn", endpoint = "host_scan")]
+pub async fn host_scan(
+    key: String,
+    range: Option<String>,
+    page: Option<u32>,
+    q: Option<String>,
+) -> Result<(), ServerFnError> {
+    use crate::api::ApiError;
+    let back = crate::pages::host_back_url(
+        &key,
+        range.as_deref().unwrap_or_default(),
+        page.unwrap_or(0),
+        q.as_deref().unwrap_or_default(),
+    );
+    let done = |code: &str| -> Result<(), ServerFnError> {
+        let sep = if back.contains('?') { '&' } else { '?' };
+        leptos_axum::redirect(&format!("{back}{sep}scan={code}#open-ports"));
+        Ok(())
+    };
+    if back == "/" {
+        leptos_axum::redirect("/");
+        return Ok(());
+    }
+    let b = imp::backend()?;
+    if b.read_only() || !b.may_access("/api/v1/hosts") {
+        return done("forbidden");
+    }
+    let mac = key.trim().to_ascii_lowercase();
+    match b.host_scan_now(mac.clone()).await {
+        Ok(()) => done("started"),
+        Err(ApiError::Unauthorized) => done("forbidden"),
+        Err(ApiError::TooMany(_)) => done("too_many"),
+        Err(ApiError::Unavailable(_)) => done("unavailable"),
+        // a conflict is either a scan of it running or a host the router does not scan
+        Err(ApiError::Conflict(_)) => match b.host_ports(mac).await {
+            Ok(v) if v.scanning => done("busy"),
+            _ => done("not_scannable"),
+        },
+        Err(e) => {
+            tracing::info!("scan now refused: {e}");
+            done("refused")
+        }
+    }
 }
 
 pub use service_override_form::*;

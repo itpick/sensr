@@ -41,6 +41,12 @@ pub enum ApiError {
     /// The operation is not possible in the current state (e.g. confirm with nothing pending).
     #[error("conflict: {0}")]
     Conflict(String),
+    /// Too many such requests are running; try again later (HTTP 429).
+    #[error("too many requests: {0}")]
+    TooMany(String),
+    /// The service behind the request is not running (HTTP 503).
+    #[error("unavailable: {0}")]
+    Unavailable(String),
     /// Transport or backend failure.
     #[error("backend error: {0}")]
     Backend(String),
@@ -396,6 +402,37 @@ impl TrafficRow {
     pub fn total(&self) -> u64 {
         self.up.saturating_add(self.down)
     }
+}
+
+/// One open port on a host's Open ports card.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PortView {
+    /// The TCP port.
+    pub port: u16,
+    /// Well-known service name, or empty.
+    pub service: String,
+    /// First found open (Unix seconds).
+    pub first_seen: u64,
+    /// Last found open (Unix seconds).
+    pub last_seen: u64,
+    /// First seen within the last 24 hours.
+    pub new: bool,
+}
+
+/// What the port scan knows about one host: the open ports of its last scan.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostPortsView {
+    /// When it was last scanned (Unix seconds); `None` if never.
+    pub last_scan: Option<u64>,
+    /// A scan of it is running now.
+    pub scanning: bool,
+    /// The host was up but answered no port (it drops everything); the ports shown
+    /// are from before.
+    pub all_filtered: bool,
+    /// Open ports, lowest first.
+    pub ports: Vec<PortView>,
 }
 
 /// A device's DNS activity page: its header (from the host inventory) and what it did over
@@ -838,6 +875,15 @@ mod server {
             range: String,
             page: u32,
         ) -> BoxFuture<'_, ApiResult<HostActivityView>>;
+        /// The open TCP ports the port scan found on the host with `mac`. An unknown MAC
+        /// is [`ApiError::NotFound`], no port scanner [`ApiError::Unavailable`].
+        fn host_ports(&self, mac: String) -> BoxFuture<'_, ApiResult<HostPortsView>>;
+        /// Scans the host's ports now, in the background (poll [`Backend::host_ports`]
+        /// until `scanning` is false). [`ApiError::Conflict`] while that host is being
+        /// scanned or when the host is not one the router scans, [`ApiError::TooMany`]
+        /// while two scans run, [`ApiError::Unavailable`] when the scanner is not
+        /// running and [`ApiError::NotFound`] for an unknown MAC.
+        fn host_scan_now(&self, mac: String) -> BoxFuture<'_, ApiResult<()>>;
         /// Drops an unreserved host from the inventory (`key` as in
         /// [`crate::runtime::HostRow::key`]); it comes back if it is still on the network.
         fn forget_host(&self, key: String) -> BoxFuture<'_, ApiResult<()>>;

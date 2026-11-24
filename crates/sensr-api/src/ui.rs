@@ -33,6 +33,8 @@ fn ui_error(e: ClientError) -> ApiError {
             ErrorKind::Unauthenticated | ErrorKind::Forbidden => ApiError::Unauthorized,
             ErrorKind::NotFound => ApiError::NotFound(e.message),
             ErrorKind::Conflict => ApiError::Conflict(e.message),
+            ErrorKind::TooManyRequests => ApiError::TooMany(e.message),
+            ErrorKind::Unavailable => ApiError::Unavailable(e.message),
             _ => ApiError::Backend(e.message),
         },
         other => ApiError::Backend(other.to_string()),
@@ -408,6 +410,27 @@ impl Backend for UiBackend {
         .boxed()
     }
 
+    fn host_ports(&self, mac: String) -> BoxFuture<'_, ApiResult<sensr_ui::api::HostPortsView>> {
+        async move {
+            match self.call(Op::HostPorts { mac }).await? {
+                Response::Value(Some(v)) => serde_json::from_value(v)
+                    .map_err(|e| ApiError::Backend(format!("bad ports reply: {e}"))),
+                other => Err(unexpected(other)),
+            }
+        }
+        .boxed()
+    }
+
+    fn host_scan_now(&self, mac: String) -> BoxFuture<'_, ApiResult<()>> {
+        async move {
+            match self.call(Op::HostScanNow { mac }).await? {
+                Response::Value(_) => Ok(()),
+                other => Err(unexpected(other)),
+            }
+        }
+        .boxed()
+    }
+
     fn set_host_label(
         &self,
         mac: String,
@@ -720,6 +743,14 @@ pub fn router(state: Arc<AppState>, site_root: PathBuf) -> axum::Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn busy_scanner_errors_stay_distinct() {
+        let e = |kind| ui_error(ClientError::Agent(sensr_ipc::IpcError::new(kind, "m")));
+        assert_eq!(e(ErrorKind::Conflict), ApiError::Conflict("m".into()));
+        assert_eq!(e(ErrorKind::TooManyRequests), ApiError::TooMany("m".into()));
+        assert_eq!(e(ErrorKind::Unavailable), ApiError::Unavailable("m".into()));
+    }
 
     #[test]
     fn the_banner_shows_seed_and_apply_problems() {

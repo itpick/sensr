@@ -792,6 +792,90 @@ async fn host_forget_is_refused_for_readonly() {
     );
 }
 
+#[tokio::test]
+async fn host_ports_and_scan_now_ops() {
+    use sensr_agent::portscan::ScanNowError;
+    let fx = Fx::start(true).await;
+    {
+        let mut st = fx.applier.state.lock().unwrap();
+        for m in [
+            "aa:bb:cc:dd:ee:01",
+            "aa:bb:cc:dd:ee:02",
+            "aa:bb:cc:dd:ee:03",
+        ] {
+            st.ports.push((
+                m.into(),
+                json!({"last_scan": 5, "all_filtered": false, "ports": []}),
+            ));
+        }
+        st.scan_errors
+            .push(("aa:bb:cc:dd:ee:02".into(), ScanNowError::TooMany));
+        st.scan_errors
+            .push(("aa:bb:cc:dd:ee:03".into(), ScanNowError::NotReady));
+    }
+    let mut c = fx.client().await;
+    let op = |m: &str| Op::HostScanNow { mac: m.into() };
+    let r = c.call(op("aa:bb:cc:dd:ee:01")).await.unwrap();
+    assert_eq!(r, Response::Value(Some(json!({"started": true}))));
+    let r = c
+        .call(Op::HostPorts {
+            mac: "aa:bb:cc:dd:ee:01".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        r,
+        Response::Value(Some(
+            json!({"last_scan": 5, "all_filtered": false, "ports": [], "scanning": true})
+        ))
+    );
+    // a second POST while it runs
+    let e = agent_err(c.call(op("aa:bb:cc:dd:ee:01")).await);
+    assert_eq!(e.kind, ErrorKind::Conflict);
+    assert_eq!(
+        agent_err(c.call(op("aa:bb:cc:dd:ee:02")).await).kind,
+        ErrorKind::TooManyRequests
+    );
+    assert_eq!(
+        agent_err(c.call(op("aa:bb:cc:dd:ee:03")).await).kind,
+        ErrorKind::Unavailable
+    );
+    assert_eq!(
+        agent_err(c.call(op("aa:bb:cc:dd:ee:99")).await).kind,
+        ErrorKind::NotFound
+    );
+    let e = agent_err(
+        c.call(Op::HostPorts {
+            mac: "aa:bb:cc:dd:ee:99".into(),
+        })
+        .await,
+    );
+    assert_eq!(e.kind, ErrorKind::NotFound);
+    // read-only may read the ports but not start a scan
+    c.set_principal(Principal {
+        readonly: true,
+        ..c.principal().clone()
+    });
+    assert_eq!(
+        agent_err(c.call(op("aa:bb:cc:dd:ee:03")).await).kind,
+        ErrorKind::Forbidden
+    );
+    c.call(Op::HostPorts {
+        mac: "aa:bb:cc:dd:ee:02".into(),
+    })
+    .await
+    .unwrap();
+    // no port scanner: unavailable, not "no such host"
+    fx.applier.state.lock().unwrap().ports_unavailable = true;
+    let e = agent_err(
+        c.call(Op::HostPorts {
+            mac: "aa:bb:cc:dd:ee:02".into(),
+        })
+        .await,
+    );
+    assert_eq!(e.kind, ErrorKind::Unavailable);
+}
+
 const MODE_MAC: &str = "aa:bb:cc:dd:ee:01";
 
 async fn mode_set(

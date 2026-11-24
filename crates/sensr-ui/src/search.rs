@@ -122,6 +122,8 @@ pub struct Candidate {
     pub haystack: Vec<String>,
     /// `haystack` case-folded once, when the candidate is built (see [`Candidate::new`]).
     folded: Vec<String>,
+    /// Open TCP ports a port query (`port 23`, `23/tcp`, `tcp 23`) matches exactly.
+    pub ports: Vec<u16>,
 }
 
 #[cfg(feature = "ssr")]
@@ -144,9 +146,32 @@ impl Candidate {
             url,
             haystack,
             folded,
+            ports: Vec::new(),
         }
     }
 }
+
+/// The port a query asks for: `port 23`, `23/tcp`, `tcp 23`, `tcp/23` or `port 23/tcp`
+/// (case-folded, any spacing); `None` for anything else.
+#[cfg(feature = "ssr")]
+fn port_query(q: &str) -> Option<u16> {
+    let q = q.split_whitespace().collect::<Vec<_>>().join(" ");
+    let n = if let Some(r) = q.strip_prefix("port ") {
+        r.strip_suffix("/tcp").unwrap_or(r)
+    } else if let Some(r) = q.strip_prefix("tcp ").or_else(|| q.strip_prefix("tcp/")) {
+        r
+    } else {
+        q.strip_suffix("/tcp")?
+    };
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse().ok().filter(|p| *p > 0)
+}
+
+/// Marks a hit matched by [`Candidate::ports`] rather than a haystack field.
+#[cfg(feature = "ssr")]
+const PORT_FIELD: usize = usize::MAX;
 
 #[cfg(feature = "ssr")]
 const ORDER_PAGES: u32 = 0;
@@ -363,14 +388,16 @@ pub fn host_candidates(hosts: &crate::runtime::HostList) -> Vec<Candidate> {
                 .unwrap_or_default();
             let mut haystack = vec![title.clone()];
             haystack.extend(texts.into_iter().filter(|t| *t != title));
-            Candidate::new(
+            let mut c = Candidate::new(
                 HOSTS.to_owned(),
                 ORDER_HOSTS,
                 title,
                 detail,
                 crate::runtime::host_href(&h.key),
                 haystack,
-            )
+            );
+            c.ports.clone_from(&h.open_port_list);
+            c
         })
         .collect()
 }
@@ -436,9 +463,18 @@ pub fn search_in(
         allowed.insert(page.to_owned(), a);
         a
     };
+    let port = port_query(&query);
     // (score, best field, candidate)
     let mut matched: Vec<(u8, usize, &Candidate)> = Vec::new();
     for c in sets.iter().flat_map(|s| s.iter()) {
+        // a port query matches open ports exactly ("23/tcp" is not 8023); the text
+        // match below still finds rules and pages
+        if port.is_some_and(|p| c.ports.contains(&p)) {
+            if ok(&c.url) {
+                matched.push((4, PORT_FIELD, c));
+            }
+            continue;
+        }
         let best = c
             .folded
             .iter()
@@ -503,6 +539,7 @@ pub fn search_in(
         }
         let matched_text = c.haystack.get(*field).filter(|t| **t != c.title);
         let detail = match matched_text {
+            _ if *field == PORT_FIELD => format!("{}/tcp open", port.unwrap_or_default()),
             Some(t) if *field > 0 && c.group != PAGES && c.group != SETTINGS => t.clone(),
             _ => c.detail.clone(),
         };
@@ -937,6 +974,50 @@ mod tests {
             let hit = &group(&r, HOSTS).unwrap_or_else(|| panic!("{q}")).hits[0];
             assert_eq!(hit.url, "/ui/hosts/aa:bb:cc:dd:ee:ff");
             assert_eq!(hit.title, "doorbell");
+        }
+    }
+
+    #[test]
+    fn port_queries_match_hosts_with_that_port_open() {
+        let row = |mac: &str, name: &str, ports: &[u16]| HostRow {
+            key: mac.into(),
+            mac: Some(mac.into()),
+            name: Some(name.into()),
+            ipv4: Some("192.168.1.23".into()),
+            open_ports: Some(u32::try_from(ports.len()).unwrap()),
+            open_port_list: ports.to_vec(),
+            ..HostRow::default()
+        };
+        let hosts = HostList {
+            hosts: vec![
+                row("02:00:00:00:00:05", "device-05", &[23]),
+                row("02:00:00:00:00:06", "nas", &[22, 2323, 8023]),
+                row("02:00:00:00:00:07", "quiet", &[]),
+            ],
+            ..HostList::default()
+        };
+        let cands = host_candidates(&hosts);
+        for q in [
+            "port 23",
+            "23/tcp",
+            "tcp 23",
+            "TCP/23",
+            "port  23",
+            "port 23/tcp",
+        ] {
+            let r = search(&cands, q, all());
+            let g = group(&r, HOSTS).unwrap_or_else(|| panic!("{q}"));
+            let titles: Vec<_> = g.hits.iter().map(|h| h.title.as_str()).collect();
+            assert_eq!(titles, ["device-05"], "{q}: 2323 and 8023 are other ports");
+            assert_eq!(g.hits[0].url, "/ui/hosts/02:00:00:00:00:05");
+            assert_eq!(g.hits[0].detail, "23/tcp open", "{q}");
+        }
+        let r = search(&cands, "port 8023", all());
+        assert_eq!(group(&r, HOSTS).unwrap().hits[0].title, "nas");
+        // a port nobody has open, and nonsense, match no host
+        for q in ["port 24", "port 0", "port 70000", "tcp x"] {
+            let r = search(&cands, q, all());
+            assert!(group(&r, HOSTS).is_none(), "{q}");
         }
     }
 

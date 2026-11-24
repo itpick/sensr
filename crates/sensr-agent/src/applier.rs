@@ -60,6 +60,21 @@ pub trait Applier: Send + 'static {
         Ok(false)
     }
 
+    /// The port scan's results for the host with `mac` as JSON
+    /// (`{last_scan, scanning, all_filtered, ports}`);
+    /// [`ScanNowError::Unknown`](crate::portscan::ScanNowError::Unknown) when
+    /// the host is unknown and
+    /// [`ScanNowError::NotReady`](crate::portscan::ScanNowError::NotReady)
+    /// when this pipeline has no port scan.
+    fn host_ports(&self, _mac: &str) -> Result<Value, crate::portscan::ScanNowError> {
+        Err(crate::portscan::ScanNowError::NotReady)
+    }
+
+    /// Starts a port scan of the host with `mac` in the background.
+    fn host_scan_now(&self, _mac: &str) -> Result<(), crate::portscan::ScanNowError> {
+        Err(crate::portscan::ScanNowError::NotReady)
+    }
+
     /// The MAC of the inventory host holding `ip` (lowercase), if any: who a
     /// request comes from, for the self-quarantine guard.
     fn client_mac(&self, _ip: std::net::IpAddr) -> Option<String> {
@@ -189,6 +204,16 @@ pub struct FakeState {
     pub forgettable: Vec<String>,
     /// Answers for [`Applier::client_mac`].
     pub client_macs: Vec<(std::net::IpAddr, String)>,
+    /// Canned [`Applier::host_ports`] answers by MAC; a MAC without one is
+    /// unknown.
+    pub ports: Vec<(String, Value)>,
+    /// Errors [`Applier::host_scan_now`] gives by MAC; the others start (and
+    /// are listed in `scans`).
+    pub scan_errors: Vec<(String, crate::portscan::ScanNowError)>,
+    /// MACs [`Applier::host_scan_now`] started a scan of.
+    pub scans: Vec<String>,
+    /// [`Applier::host_ports`] answers as if no port scanner were attached.
+    pub ports_unavailable: bool,
 }
 
 /// Test double: records applies, can be told to fail.
@@ -263,6 +288,40 @@ impl Applier for FakeApplier {
         let before = st.forgettable.len();
         st.forgettable.retain(|k| k != key);
         Ok(st.forgettable.len() != before)
+    }
+
+    fn host_ports(&self, mac: &str) -> Result<Value, crate::portscan::ScanNowError> {
+        use crate::portscan::ScanNowError;
+        let mac = mac.to_ascii_lowercase();
+        let st = self.lock();
+        if st.ports_unavailable {
+            return Err(ScanNowError::NotReady);
+        }
+        let (_, v) = st
+            .ports
+            .iter()
+            .find(|(m, _)| *m == mac)
+            .ok_or(ScanNowError::Unknown)?;
+        let mut v = v.clone();
+        v["scanning"] = st.scans.contains(&mac).into();
+        Ok(v)
+    }
+
+    fn host_scan_now(&self, mac: &str) -> Result<(), crate::portscan::ScanNowError> {
+        use crate::portscan::ScanNowError;
+        let mac = mac.to_ascii_lowercase();
+        let mut st = self.lock();
+        if !st.ports.iter().any(|(m, _)| *m == mac) {
+            return Err(ScanNowError::Unknown);
+        }
+        if let Some((_, e)) = st.scan_errors.iter().find(|(m, _)| *m == mac) {
+            return Err(*e);
+        }
+        if st.scans.contains(&mac) {
+            return Err(ScanNowError::Busy);
+        }
+        st.scans.push(mac);
+        Ok(())
     }
 
     fn client_mac(&self, ip: std::net::IpAddr) -> Option<String> {
