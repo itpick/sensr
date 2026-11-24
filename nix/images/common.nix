@@ -55,4 +55,6 @@
   nixpkgs.flake.setFlakeRegistry = false;
   # Journald is the log store; keep it bounded on small cards.
   services.journald.settings.Journal.SystemMaxUse = "256M";
+  # ...and never let it take the last of the disk from the store.
+  services.journald.settings.Journal.SystemKeepFree = "1G";
 }

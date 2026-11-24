@@ -206,6 +206,11 @@
             inherit pkgs;
             sensrModules = testModules;
           };
+          # the daily cleanup of old system generations
+          store-gc = import ./nix/tests/store-gc.nix {
+            inherit pkgs;
+            sensrModules = testModules;
+          };
           qcow-boot = import ./nix/tests/qcow-boot.nix {
             inherit pkgs;
             image = self.images.qcow;
