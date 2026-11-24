@@ -57,6 +57,13 @@ jobs:
         if: github.event_name == 'schedule'
         run: cargo xtask freshness --daemons
 
+  nic-recover:
+    # the Ethernet adapter watchdog against a fake /sys (no Pi needed)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: bash nix/modules/nic-recover-test.sh
+
   ui:
     # sensr-ui: wasm clippy, release build with cargo-leptos, island bundle budget,
     # browser tests (screenshots light/dark × desktop/phone, axe, interactions, load timings).
