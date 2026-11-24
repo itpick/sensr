@@ -1102,6 +1102,11 @@ impl HostCollector {
             .collect()
     }
 
+    /// A copy of every inventory row (the port scan's targets).
+    pub fn hosts(&self) -> Vec<Host> {
+        lock(&self.state).inv.hosts().cloned().collect()
+    }
+
     /// The MAC of the inventory host holding `ip`; when a stale row still
     /// lists the address too, the most recently seen one.
     pub fn mac_for_ip(&self, ip: IpAddr) -> Option<String> {

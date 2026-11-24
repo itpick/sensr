@@ -49,6 +49,8 @@ pub struct SliceApplier {
     intercept: Option<Intercept>,
     /// Passive DHCP/mDNS evidence for host labels.
     fingerprint: Option<Fingerprint>,
+    /// The daily TCP port scan of the inventory's LAN hosts.
+    portscan: Option<Arc<crate::portscan::PortScan>>,
 }
 
 /// Builds a (not yet started) sniffer.
@@ -280,6 +282,13 @@ impl SliceApplier {
                 running: Arc::default(),
                 stopped: Arc::default(),
             };
+            let scan_hosts = Arc::downgrade(&hosts);
+            let ps = crate::portscan::PortScan::system(
+                state.join("ports.json"),
+                Arc::new(move || scan_hosts.upgrade().map(|h| h.hosts()).unwrap_or_default()),
+            );
+            ps.start();
+            a.portscan = Some(ps);
             feed_from_polls(&hosts, &ic, Some(&fp), &a.applied, &a.host_modes);
             a.intercept = Some(ic);
             a.fingerprint = Some(fp);
@@ -345,6 +354,18 @@ impl SliceApplier {
         self
     }
 
+    /// With an explicit port scanner (tests).
+    #[cfg(test)]
+    fn with_portscan(mut self, ps: Arc<crate::portscan::PortScan>) -> SliceApplier {
+        self.portscan = Some(ps);
+        self
+    }
+
+    /// The port scanner, on the host.
+    pub fn portscan(&self) -> Option<&Arc<crate::portscan::PortScan>> {
+        self.portscan.as_ref()
+    }
+
     /// Alias feed status of the applied document (API, UI).
     pub fn alias_status(&self) -> Vec<sensr_feeds::AliasStatus> {
         let (Some(f), Some((doc, _))) = (&self.feeds, lock(&self.applied).as_ref().cloned()) else {
@@ -383,6 +404,7 @@ impl SliceApplier {
             host_modes: Arc::new(Mutex::new(HostModeSets::default())),
             intercept: None,
             fingerprint: None,
+            portscan: None,
         })
     }
 
@@ -938,6 +960,10 @@ impl SliceApplier {
         if let Some(h) = &self.hosts {
             h.set_document(&doc);
         }
+        if let Some(ps) = &self.portscan {
+            let own: Vec<std::net::IpAddr> = addrs.values().flatten().map(|a| a.addr).collect();
+            ps.set_document(&doc, &own);
+        }
         *lock(&self.applied) = Some((doc, addrs));
         if let Some(ic) = &self.intercept {
             // after `applied`, so no refresh can land an older document later
@@ -960,6 +986,10 @@ impl Drop for SliceApplier {
         }
         if let Some(fp) = &self.fingerprint {
             fp.stop();
+        }
+        // scans in flight end without saving a partial result
+        if let Some(ps) = &self.portscan {
+            ps.stop();
         }
         // and leave no neighbour pointing at the router (blocks 2 s)
         if let Some(ic) = &self.intercept {
@@ -1329,6 +1359,81 @@ mod tests {
         )
         .unwrap();
         doc
+    }
+
+    #[test]
+    fn apply_feeds_the_port_scanner_and_drop_stops_it() {
+        use crate::portscan::{PortScan, Probe, ScanNowError, Scanner};
+        struct Answer;
+        impl crate::portscan::Connector for Answer {
+            fn probe(&self, a: std::net::SocketAddr, _: Duration) -> Probe {
+                if a.port() == 22 {
+                    Probe::Open
+                } else {
+                    Probe::Closed
+                }
+            }
+        }
+        let root = fake_root();
+        let state = tempfile::tempdir().unwrap();
+        let mac = "aa:bb:cc:dd:ee:51";
+        let hosts = vec![crate::hosts::Host {
+            key: mac.into(),
+            mac: Some(mac.into()),
+            client_id: None,
+            name: None,
+            reserved_name: None,
+            lease_hostname: None,
+            interface: Some("lan".into()),
+            ipv4: Some("192.168.1.51".parse().unwrap()),
+            ipv6: Vec::new(),
+            sources: Default::default(),
+            lease: None,
+            first_seen: 0,
+            last_seen: Some(unix_now()),
+            evidence: Default::default(),
+        }];
+        let ps = PortScan::new(
+            Scanner::new(
+                Arc::new(Answer),
+                Arc::new(crate::portscan::SystemClock::default()),
+                None,
+                Duration::from_millis(10),
+                8,
+            ),
+            state.path().join("ports.json"),
+            Arc::new(move || hosts.clone()),
+            Arc::new(unix_now),
+            Arc::new(|_: &str| 0),
+        );
+        let (a, _, _) = moded_applier(&root);
+        let mut a = a.with_portscan(Arc::clone(&ps));
+        assert_eq!(ps.scan_now(mac), Err(ScanNowError::NotReady));
+        a.apply(None, &home_router()).unwrap();
+        ps.scan_now(mac).unwrap();
+        let t = std::time::Instant::now();
+        while ps.scanning(mac) {
+            assert!(t.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let open: Vec<u16> = ps.ports(mac).unwrap().open().map(|e| e.port).collect();
+        assert_eq!(open, [22]);
+        assert!(state.path().join("ports.json").exists());
+        // a quarantine apply takes the host out of the scan
+        a.apply(None, &{
+            use sensr_schema::PathAccess;
+            let mut d = home_router();
+            d.set_by_path(
+                "firewall.host_modes.6d0de000-0000-4000-8000-000000000001",
+                serde_json::json!({"mac": mac, "mode": "quarantine"}),
+            )
+            .unwrap();
+            d
+        })
+        .unwrap();
+        assert_eq!(ps.scan_now(mac), Err(ScanNowError::NotScannable));
+        drop(a);
+        assert_eq!(ps.scan_now(mac), Err(ScanNowError::NotReady));
     }
 
     #[test]
