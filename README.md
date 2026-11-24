@@ -6,10 +6,20 @@ A firewall and router OS written in Rust on NixOS. The goal is feature parity wi
 [OPNsense](https://opnsense.org/), including its Business Edition features, plus
 atomic upgrades, rollback and a typed, tested configuration model.
 
-**Status: in development.** No images have been released yet. Start with the plan in [`docs/PLAN.md`](docs/PLAN.md).
-If you need a router today, use [opnsense-pi](https://github.com/itpick/opnsense-pi) or [vyos-pi](https://github.com/itpick/vyos-pi).
+**Status: early, in development.** Releases v0.1.0 to v0.1.24 are on
+[GitHub Releases](https://github.com/itpick/sensr/releases) with Raspberry Pi 4 and Pi 5 SD
+images, an x86 ISO and a qcow2. The author's home router is a Raspberry Pi 5 running sensr,
+upgraded from the in-app updater. It is still young: expect rough edges and missing OPNsense
+features. For a mature option, see [opnsense-pi](https://github.com/itpick/opnsense-pi) or
+[vyos-pi](https://github.com/itpick/vyos-pi). The plan is in [`docs/PLAN.md`](docs/PLAN.md).
 
-**Install page:** https://itpick.github.io/sensr/ (images are listed there once released)
+What works today, briefly: host inventory with smart device labels, per-host Isolated and
+Quarantine modes, per-host DNS activity (screen time per service, from Unbound dnstap),
+global search, traffic graphs, IDS (Suricata), WireGuard, DNS blocklists, gateway monitoring,
+OIDC, SAML and WebAuthn login, in-app updates, and boot-apply fault isolation with an
+emergency firewall. CI is backed by a Cachix binary cache.
+
+**Install page:** https://itpick.github.io/sensr/ (lists the images in the latest release)
 
 **Related projects:**
 - [opnsense-pi](https://github.com/itpick/opnsense-pi) ([download page](https://itpick.github.io/opnsense-pi/)): OPNsense images for Raspberry Pi 4/5
@@ -42,7 +52,7 @@ kernel, and bind each interface to a NIC by MAC address.
 
 2 GB is the floor: the firewall, DHCP, DNS, NAT and the web UI fit in it.
 More RAM is what makes Suricata, big DNS blocklists and a busy connection
-table comfortable. The Pi 4 image is what this project runs on at home, on
+table comfortable. The author's home router is a Pi 5; the Pi 4 is supported too, on
 both the 2 GB and 4 GB boards.
 
 ## Research (written with Fable)
@@ -56,14 +66,39 @@ both the 2 GB and 4 GB boards.
 | [04b Plugin issues](docs/research/04b-issues-plugins.md) | All 3,230 opnsense/plugins issues, plugin health, and a tier for each plugin |
 | [05 Business features](docs/research/05-business-features.md) | Business Edition and its add-ons, competitor features, and the BIZ-001 to BIZ-032 plan |
 | [06 Rust + NixOS stack](docs/research/06-rust-nixos-stack.md) | Lessons from opnsense-pi, OS base, a crate for each subsystem with its latest version, and the dependency freshness policy |
+| [07 Performance evaluation](docs/research/07-performance-evaluation.md) | OPNsense, VyOS and a NixOS + Rust prototype compared on forwarding, boot, footprint and config apply |
 
 ## Layout
 
 ```
-crates/   Rust workspace (sensr-schema, -config, -rules, -import-opnsense, -agent, -api, -ui, -cli)
+crates/   Rust workspace (see below)
 docs/     plan, research, install page (GitHub Pages)
-flake.nix NixOS modules, images and VM tests (being built out)
+flake.nix NixOS modules, images, the router update and VM tests (the house test, boot tests)
 ```
+
+Crates under `crates/`:
+
+| Crate | Purpose |
+|---|---|
+| `sensr-agent` | Privileged daemon: owns the config store, runs the apply pipeline and commit-confirm |
+| `sensr-api` | Unprivileged HTTP API (native REST, OPNsense compat façade, login incl. OIDC, SAML, WebAuthn) |
+| `sensr-apply` | Apply engine: plans, typed commands, actions, templates, hooks, commit-confirm |
+| `sensr-auth` | Authentication and authorization: privileges/ACL, password hashes, API keys |
+| `sensr-cli` | The `sensr` command line |
+| `sensr-config` | Config document store: revisions, history, audit |
+| `sensr-dns` | DNS blocklists for Unbound, DHCP lease registration, resolver statistics |
+| `sensr-feeds` | Alias data feeds: URL tables, GeoIP and ASN, host names, neighbour table |
+| `sensr-fingerprint` | Smart host labels from an embedded OUI table and passive evidence |
+| `sensr-flow` | Traffic accounting and IDS alert storage |
+| `sensr-import-opnsense` | Lossless importer from an OPNsense `config.xml` |
+| `sensr-ipc` | Typed IPC between the API/CLI and the agent |
+| `sensr-monitor` | Gateway monitor (dpinger equivalent) |
+| `sensr-net` | Network model and state, IPv6 prefix delegation |
+| `sensr-rules` | Firewall rule IR, alias resolution, nftables renderer |
+| `sensr-schema` | Typed config field types, constraints, versioned migrations |
+| `sensr-schema-derive` | `#[derive(SensrModel)]` and `#[derive(SensrOptions)]` |
+| `sensr-ui` | Leptos web UI with the OPNsense-style layout |
+| `xtask` | Repository checks: test parity, source coverage, dependency freshness |
 
 ## Build
 
