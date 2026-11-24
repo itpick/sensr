@@ -40,6 +40,26 @@ let
   requestFile = "${updateRun}/request.json";
   statusFile = "${updateRun}/status.json";
 
+  gcScript = pkgs.writeShellApplication {
+    name = "sensr-store-gc";
+    runtimeInputs = with pkgs; [
+      coreutils
+      jq
+      nix
+      util-linux
+    ];
+    text =
+      builtins.replaceStrings
+        [ "@keep@" "@bootDir@" "@stateDir@" "@runDir@" ]
+        [
+          (toString upd.keepGenerations)
+          (lib.escapeShellArg upd.bootDir)
+          updateState
+          updateRun
+        ]
+        (builtins.readFile ./store-gc.sh);
+  };
+
   updateScript = pkgs.writeShellApplication {
     name = "sensr-update";
     runtimeInputs = with pkgs; [
@@ -72,6 +92,7 @@ let
       remote_sha=""
       remote_path=""
       remote_notes=""
+      remote_size=0
       last_checked=""
       last_installed=""
       trap 'if [ -n "''${work:-}" ]; then rm -rf "$work"; fi' EXIT
@@ -183,6 +204,7 @@ let
         remote_sha=$(jq -r --arg b "$board" '.images[$b].sha256 // ""' "$mf")
         remote_path=$(jq -r --arg b "$board" '.images[$b].store_path // ""' "$mf")
         remote_notes=$(jq -r '.notes // ""' "$mf")
+        remote_size=$(jq -r --arg b "$board" '.images[$b].size // 0' "$mf")
       }
 
       available_json() {
@@ -193,6 +215,35 @@ let
           --arg path "$remote_path" \
           --arg notes "$remote_notes" \
           '{version: $version, sha256: $sha, url: $url, store_path: $path, notes: $notes}'
+      }
+
+      free_bytes() {
+        df -B1 --output=avail /nix | tail -n1 | tr -d ' '
+      }
+
+      gib() { # bytes -> "1.5"
+        local t=$(( $1 * 10 / 1073741824 ))
+        printf '%d.%d' $(( t / 10 )) $(( t % 10 ))
+      }
+
+      # Room for the import: max(2 GiB, 2x the release's closure archive from
+      # the manifest). Short of it, collect garbage (old generations first);
+      # still short, refuse before downloading anything.
+      ensure_space() {
+        local need=$(( 2 * remote_size )) free
+        [ "$need" -ge 2147483648 ] || need=2147483648
+        free=$(free_bytes)
+        if [ "$free" -ge "$need" ]; then
+          return 0
+        fi
+        write_status installing "Freeing disk space" "$(available_json)"
+        ${gcScript}/bin/sensr-store-gc --locked || true
+        free=$(free_bytes)
+        if [ "$free" -ge "$need" ]; then
+          return 0
+        fi
+        write_status error "Not enough free space for the update ($(gib "$free") GiB free, $(gib "$need") needed)" "$(available_json)"
+        return 1
       }
 
       check() {
@@ -236,6 +287,7 @@ let
           write_status error "The manifest has no sha256 for '$board'" "$(available_json)"
           return 1
         fi
+        ensure_space || return 1
         write_status downloading "Downloading ''${remote_tag:-$remote_version}" "$(available_json)"
 
         local archive="$work/closure.tar.zst"
@@ -361,6 +413,23 @@ in
         decides when that happens until they turn it on in System > Updates.
       '';
     };
+    keepGenerations = mkOption {
+      type = types.ints.unsigned;
+      default = 5;
+      description = ''
+        How many older system generations the daily store cleanup keeps for
+        rollback, besides the current one, the one booted, and those the boot
+        partition names. Everything older is deleted and garbage collected.
+      '';
+    };
+    bootDir = mkOption {
+      type = types.str;
+      default = "/boot/firmware";
+      description = ''
+        The firmware partition whose current/, next/ and previous/ slots name
+        the systems the board can boot; each gets a GC root.
+      '';
+    };
     interval = mkOption {
       type = types.str;
       default = "6h";
@@ -460,6 +529,39 @@ in
           "@system-service"
           "@mount"
         ];
+      };
+    };
+
+    systemd.services.sensr-store-gc = {
+      description = "sensr: delete old system generations and collect garbage";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${gcScript}/bin/sensr-store-gc";
+        TimeoutStartSec = "2h";
+        Nice = 15;
+        IOSchedulingClass = "idle";
+        ProtectSystem = "strict";
+        ReadWritePaths = [
+          "/nix"
+          "/run"
+          "/var"
+          updateState
+        ];
+        PrivateTmp = true;
+        ProtectHome = true;
+        ProtectKernelTunables = true;
+        ProtectKernelLogs = true;
+      };
+    };
+
+    systemd.timers.sensr-store-gc = {
+      description = "Daily cleanup of old system generations";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        # 04:15 plus or minus 30 minutes.
+        OnCalendar = "*-*-* 03:45:00";
+        RandomizedDelaySec = "1h";
+        Persistent = true;
       };
     };
 
