@@ -959,10 +959,32 @@ pub struct HostCollector {
     /// Called after each poll with what it read (the ARP interceptor's
     /// inputs follow the inventory's).
     on_poll: Mutex<Option<PollHook>>,
+    /// Told about each new scan candidate.
+    scan_notify: Mutex<Option<Arc<dyn ScanNotify>>>,
 }
 
 /// Sees each poll's neighbour table and leases.
 pub type PollHook = Arc<dyn Fn(&[NeighEntry], &[KeaLease]) + Send + Sync>;
+
+/// Told about devices new on the network, for their automatic first port
+/// scan (the agent's `sensr-scan` notifier, [`crate::scan_notify`]). Called
+/// from the poll, so it must not block.
+pub trait ScanNotify: Send + Sync {
+    /// A MAC row became a scan candidate (an IPv4 address, and seen on the
+    /// network rather than only reserved): created so, or it gained its
+    /// first IPv4 address or its first sighting.
+    fn new_device(&self, mac: &str, ipv4: Ipv4Addr);
+}
+
+/// `(mac, ipv4)` of a row worth port-scanning: a MAC row with an IPv4
+/// address that was actually on the network (a lease or a neighbour entry;
+/// a reservation alone is only an address set aside).
+fn scan_candidate(h: &Host) -> Option<(&str, Ipv4Addr)> {
+    if h.sources.iter().all(|s| *s == Source::Reserved) {
+        return None;
+    }
+    Some((h.mac.as_deref()?, h.ipv4?))
+}
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -995,7 +1017,28 @@ impl HostCollector {
                 labels: BTreeMap::new(),
             }),
             on_poll: Mutex::new(None),
+            scan_notify: Mutex::new(None),
         })
+    }
+
+    /// Tells `n` about every row that becomes a scan candidate in a later
+    /// poll (rows loaded or already known are in [`Self::scan_candidates`]).
+    pub fn set_scan_notify(&self, n: Arc<dyn ScanNotify>) {
+        *lock(&self.scan_notify) = Some(n);
+    }
+
+    /// The devices worth port-scanning now: MAC rows with an IPv4 address
+    /// that were seen on the network (`Known` for the scan daemon).
+    pub fn scan_candidates(&self) -> Vec<sensr_scan::proto::KnownDevice> {
+        let st = lock(&self.state);
+        st.inv
+            .hosts()
+            .filter_map(scan_candidate)
+            .map(|(mac, ipv4)| sensr_scan::proto::KnownDevice {
+                mac: mac.to_owned(),
+                ipv4,
+            })
+            .collect()
     }
 
     /// Runs `hook` after every poll, outside the inventory lock.
@@ -1026,12 +1069,28 @@ impl HostCollector {
         }
         // outside the lock: this runs `ip` and reads Kea's files
         let (neigh, leases) = (self.sources)();
-        let (neigh, leases) = {
+        let notify = lock(&self.scan_notify).clone();
+        let (neigh, leases, fresh) = {
             let mut st = lock(&self.state);
             let st = &mut *st;
             st.snap.neigh = neigh;
             st.snap.leases = leases;
+            let had: Option<BTreeSet<String>> = notify.as_ref().map(|_| {
+                st.inv
+                    .hosts()
+                    .filter_map(scan_candidate)
+                    .map(|(mac, _)| mac.to_owned())
+                    .collect()
+            });
             let change = st.inv.observe(&st.snap, now);
+            let fresh: Vec<(String, Ipv4Addr)> = had.map_or_else(Vec::new, |had| {
+                st.inv
+                    .hosts()
+                    .filter_map(scan_candidate)
+                    .filter(|(mac, _)| !had.contains(*mac))
+                    .map(|(mac, ip)| (mac.to_owned(), ip))
+                    .collect()
+            });
             let read = (
                 std::mem::take(&mut st.snap.neigh),
                 std::mem::take(&mut st.snap.leases),
@@ -1043,8 +1102,13 @@ impl HostCollector {
             if let Err(e) = st.store.maybe_flush(&st.inv, now) {
                 tracing::warn!(error = %e, "saving the host inventory");
             }
-            read
+            (read.0, read.1, fresh)
         };
+        if let Some(n) = notify {
+            for (mac, ip) in fresh {
+                n.new_device(&mac, ip);
+            }
+        }
         let hook = lock(&self.on_poll).clone();
         if let Some(hook) = hook {
             hook(&neigh, &leases);
@@ -2431,5 +2495,137 @@ mod collector {
         let ip = IpAddr::V4(lan.subnets[0].hosts().nth(41).unwrap());
         assert_eq!(c.mac_for_ip(ip).as_deref(), Some(MAC));
         assert_eq!(c.mac_for_ip("198.51.100.7".parse().unwrap()), None);
+    }
+
+    /// Records [`ScanNotify::new_device`] calls.
+    #[derive(Default)]
+    struct FakeNotify(Mutex<Vec<(String, Ipv4Addr)>>);
+
+    impl ScanNotify for FakeNotify {
+        fn new_device(&self, mac: &str, ipv4: Ipv4Addr) {
+            lock(&self.0).push((mac.to_owned(), ipv4));
+        }
+    }
+
+    /// The collector, the neighbour table its sources return, the notifier
+    /// and the LAN.
+    type ScanRig = (
+        Arc<HostCollector>,
+        Arc<Mutex<Vec<NeighEntry>>>,
+        Arc<FakeNotify>,
+        InternalIf,
+    );
+
+    /// A collector on the document's LAN whose neighbour table the test
+    /// sets, with a fake scan notifier.
+    fn scan_collector(dir: &tempfile::TempDir) -> ScanRig {
+        let doc = home_router();
+        let lan = internal_interfaces(&doc)
+            .into_iter()
+            .find(|i| i.id == "lan")
+            .expect("lan");
+        let table: Arc<Mutex<Vec<NeighEntry>>> = Arc::default();
+        let t = Arc::clone(&table);
+        let c = HostCollector::new(
+            HostStore::new(dir.path().join("hosts.json")),
+            Arc::new(move || (lock(&t).clone(), Vec::new())),
+        );
+        c.set_document(&doc);
+        let n = Arc::new(FakeNotify::default());
+        c.set_scan_notify(n.clone());
+        (c, table, n, lan)
+    }
+
+    fn reachable(mac: &str, ip: IpAddr, lan: &InternalIf) -> NeighEntry {
+        NeighEntry {
+            mac: mac.into(),
+            ip,
+            dev: lan.device.clone(),
+            state: vec!["REACHABLE".into()],
+        }
+    }
+
+    #[test]
+    fn new_row_with_ipv4_notifies_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, table, n, lan) = scan_collector(&dir);
+        let v4 = lan.subnets[0].hosts().nth(41).unwrap();
+        lock(&table).push(reachable(MAC, IpAddr::V4(v4), &lan));
+        c.poll(1000);
+        assert_eq!(*lock(&n.0), vec![(MAC.to_owned(), v4)]);
+        // the same snapshot again: nothing new
+        c.poll(1030);
+        assert_eq!(lock(&n.0).len(), 1);
+
+        // a row first seen with only an IPv6 address notifies once it gains
+        // an IPv4 one
+        let other = "aa:bb:cc:dd:ee:43";
+        let v4b = lan.subnets[0].hosts().nth(42).unwrap();
+        lock(&table).push(reachable(other, "fe80::43".parse().unwrap(), &lan));
+        c.poll(1060);
+        assert_eq!(lock(&n.0).len(), 1, "no IPv4 yet");
+        lock(&table).push(reachable(other, IpAddr::V4(v4b), &lan));
+        c.poll(1090);
+        assert_eq!(lock(&n.0)[1..], [(other.to_owned(), v4b)]);
+        c.poll(1120);
+        assert_eq!(lock(&n.0).len(), 2);
+
+        // a changed address is not a new device
+        lock(&table)[0].ip = IpAddr::V4(lan.subnets[0].hosts().nth(50).unwrap());
+        c.poll(1150);
+        assert_eq!(lock(&n.0).len(), 2);
+    }
+
+    #[test]
+    fn reserved_row_notifies_when_the_device_appears() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, table, n, lan) = scan_collector(&dir);
+        // the golden document reserves 192.168.1.10 for this MAC
+        let nas = "02:00:5e:10:00:0a";
+        c.poll(1000);
+        assert!(lock(&n.0).is_empty(), "a reservation alone is not a device");
+        assert!(c.scan_candidates().iter().all(|d| d.mac != nas));
+        lock(&table).push(reachable(nas, "192.168.1.10".parse().unwrap(), &lan));
+        c.poll(1030);
+        assert_eq!(
+            *lock(&n.0),
+            vec![(nas.to_owned(), "192.168.1.10".parse().unwrap())]
+        );
+    }
+
+    #[test]
+    fn loaded_rows_do_not_notify_and_are_scan_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, table, _, lan) = scan_collector(&dir);
+        let v4 = lan.subnets[0].hosts().nth(41).unwrap();
+        lock(&table).push(reachable(MAC, IpAddr::V4(v4), &lan));
+        // an IPv6-only row is not a candidate
+        lock(&table).push(reachable(
+            "aa:bb:cc:dd:ee:44",
+            "fe80::44".parse().unwrap(),
+            &lan,
+        ));
+        c.poll(1000);
+        c.shutdown();
+        let want = vec![sensr_scan::proto::KnownDevice {
+            mac: MAC.into(),
+            ipv4: v4,
+        }];
+        assert_eq!(c.scan_candidates(), want);
+
+        // restarted: the saved rows are known (sent in `Known`), not new
+        let (again, table2, n, _) = scan_collector(&dir);
+        *lock(&table2) = lock(&table).clone();
+        assert_eq!(again.scan_candidates(), want);
+        again.poll(1030);
+        assert!(lock(&n.0).is_empty());
+    }
+
+    #[test]
+    fn without_a_notifier_polls_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, _) = collector(&dir);
+        c.poll(1000);
+        assert_eq!(c.scan_candidates().len(), 1);
     }
 }

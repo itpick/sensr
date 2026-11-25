@@ -32,6 +32,8 @@ sensr-ipc.workspace = true
 sensr-monitor.workspace = true
 sensr-net.workspace = true
 sensr-rules.workspace = true
+# the scan daemon's socket client (automatic first-join scans)
+sensr-scan = { workspace = true, features = ["client"] }
 sensr-schema.workspace = true
 serde.workspace = true
 serde_json.workspace = true

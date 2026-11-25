@@ -5001,6 +5001,7 @@ dependencies = [
  "sensr-monitor",
  "sensr-net",
  "sensr-rules",
+ "sensr-scan",
  "sensr-schema",
  "serde",
  "serde_json",

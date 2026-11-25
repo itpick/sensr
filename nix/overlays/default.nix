@@ -1,7 +1,8 @@
 # pkgs.sensr: the whole Cargo workspace built with crane, one derivation that
-# carries every binary (sensr-agent, sensr-api, sensr). The dependency-only
-# derivation (cargoArtifacts) is cached separately, so a change to sensr's own
-# code does not rebuild the crates.io graph.
+# carries every binary (sensr-agent, sensr-api, sensr, sensr-insight,
+# sensr-scan). The dependency-only derivation (cargoArtifacts) is cached
+# separately, so a change to sensr's own code does not rebuild the crates.io
+# graph.
 #
 # The toolchain is the one rust-toolchain.toml pins, so Nix and cargo always
 # build with the same compiler. Needs rust-overlay's overlay applied first
@@ -43,8 +44,11 @@ let
     pname = "sensr";
     version = workspaceToml.workspace.package.version;
     strictDeps = true;
-    # xtask is developer tooling and never ships in an image.
-    cargoExtraArgs = "--locked --workspace"
+    # xtask is developer tooling and never ships in an image. The sensr-scan
+    # binary needs its crate's `daemon` feature (the crate's default is the
+    # light shared part the agent and apply link against); in commonArgs so
+    # the dependency-only build caches the daemon's crates too.
+    cargoExtraArgs = "--locked --workspace --features sensr-scan/daemon"
       + lib.optionalString (builtins.pathExists (src + "/crates/xtask")) " --exclude xtask";
   };
 
