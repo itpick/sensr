@@ -1,5 +1,5 @@
 # sensr-nic-recover: one tick of the Ethernet adapter watchdog
-# (sensr-nic-recover.timer, every 30 s). Prevents and cures the wedges seen
+# (sensr-nic-recover.service runs one every 5 s). Prevents and cures the wedges seen
 # on the Pi 5 router:
 #
 # - USB adapters (r8152) that wedge after an xHCI reset: the netdev stays in
@@ -64,9 +64,10 @@ macb_tick() { # NAME DEVICE_PATH
     "$ethtool" -G "$name" rx 2048 2>/dev/null && log "$name (macb): RX ring $rx -> 2048"
   fi
 
-  # The kernel counts every transmit watchdog timeout per queue. A count
-  # that rose since the last tick, twice in a row, is a stall of 30 s or
-  # more: longer than the ~5 s ones that clear by themselves.
+  # The kernel counts every transmit watchdog timeout per queue (one per
+  # ~5 s of stall). A count that rose since the last tick, twice in a row,
+  # is a stall of about 10 s or more: longer than the ~5 s ones that clear
+  # by themselves.
   total=0
   for f in "$sys/class/net/$name"/queues/tx-*/tx_timeout; do
     [ -r "$f" ] && total=$((total + $(cat "$f")))
