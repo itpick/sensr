@@ -32,9 +32,9 @@ test.describe("port scanner", () => {
     await expect(line).toHaveText(/^22 ssh · \+3389 new · scanned \w{3} \d{1,2} · Scan now$/);
     // what the port said is its tooltip
     await expect(line.locator(".port-chip").first()).toHaveAttribute("title", /OpenSSH/);
-    await line.getByRole("button", { name: "Scan now" }).click();
+    await line.getByRole("button", { name: "Scan now: bench-pi" }).click();
     await expect(line).toHaveText("22 ssh · +3389 new · scanning…");
-    await expect(line.getByRole("button", { name: "Scan now" })).toHaveCount(0);
+    await expect(line.getByRole("button")).toHaveCount(0);
     // the Port Scanner page lists it as queued
     await cancelQueued(page, "192.168.1.112");
   });
@@ -43,6 +43,8 @@ test.describe("port scanner", () => {
     await login(page);
     await cancelQueued(page, "192.168.1.0/24");
     await expect(queue(page)).toContainText(/12 of 254 alive/);
+    // the actions the read-only test expects to be absent, by the same pattern
+    await expect(page.getByRole("button", { name: /^Cancel( |$)|^Scan now(: |$)/ }).first()).toBeVisible();
     const form = page.getByRole("region", { name: "New scan" });
     const target = form.getByLabel("Address, network or range");
     await target.fill("8.8.8.8");
@@ -81,11 +83,12 @@ test.describe("read-only user", () => {
     await page.goto("/ui/core/dashboard");
     await hydrated(page);
     await expect(row(page, "nas").locator(".host-ports")).toContainText('80 http "Synology"');
-    await expect(card(page).getByRole("button", { name: "Scan now" })).toHaveCount(0);
+    await expect(card(page).getByRole("button", { name: /^Scan now(: |$)/ })).toHaveCount(0);
     await page.goto("/ui/portscan");
     await hydrated(page);
     await expect(page.getByRole("table", { name: "Device scans" })).toContainText("nas");
     await expect(page.getByRole("region", { name: "New scan" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /Cancel|Scan now/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^Cancel( |$)|^Scan now(: |$)/ })).toHaveCount(0);
+    // (the same pattern finds them for an administrator: see the New scan test)
   });
 });

@@ -9,7 +9,7 @@
 //! untrusted: views carry it as plain text, and pages render it only as text.
 
 use crate::runtime::{HostPorts, OPEN_FILTERED_TIP, PortChip, port_name};
-use sensr_scan::proto::{JobKind, JobProgress, Refusal, StatusView};
+use sensr_scan::proto::{JobKind, Refusal, StatusView};
 use sensr_scan::types::{Changes, Ident, JobView, PortRow, PortState, Proto, ScanView};
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +52,7 @@ pub struct QueueRow {
     pub progress: String,
 }
 
+#[cfg(feature = "ssr")]
 impl QueueRow {
     /// The rows of the daemon's status: the running job first.
     pub fn of(s: &StatusView) -> Vec<QueueRow> {
@@ -355,16 +356,23 @@ pub fn scanning(status: Option<&StatusView>, ipv4: Option<&str>) -> bool {
             .any(|q| q.kind == JobKind::Device && q.target == ip)
 }
 
+#[cfg(feature = "ssr")]
 /// The running job's progress in words: `12 of 254 alive · address 3 of 12 · 4100 TCP
 /// and 31 UDP probes` for a range, `4100 TCP and 31 UDP probes` for a device.
-pub fn progress_text(p: &JobProgress) -> String {
+pub fn progress_text(p: &sensr_scan::proto::JobProgress) -> String {
     let probes = format!("{} TCP and {} UDP probes", p.tcp_done, p.udp_done);
     if p.kind == JobKind::Device {
         return probes;
     }
-    let size = sensr_scan::target::parse(&p.target)
-        .map(|t| sensr_scan::target::addresses(&t, &[]).count())
-        .unwrap_or(p.address_total as usize);
+    // the range's size as the limit counts it, less an IPv4 network's own and broadcast
+    // addresses, which are never scanned (see `target::addresses`)
+    let size = sensr_scan::target::parse(&p.target).map_or(u64::from(p.address_total), |t| {
+        let n = sensr_scan::target::count(&t);
+        match t {
+            sensr_scan::target::Target::Net(ipnet::IpNet::V4(v4)) if v4.prefix_len() <= 30 => n - 2,
+            _ => n,
+        }
+    });
     match p.alive {
         None => format!("finding live hosts among {size} addresses"),
         Some(a) => format!(
@@ -417,9 +425,9 @@ mod server {
         })
     }
 
-    type Latest = BTreeMap<String, HostPorts>;
-    type LatestCache = Option<(PathBuf, i64, Vec<u64>, Vec<String>, Latest)>;
-    static LATEST: Mutex<LatestCache> = Mutex::new(None);
+    pub(super) type Latest = BTreeMap<String, HostPorts>;
+    pub(super) type LatestCache = Option<(PathBuf, i64, Vec<u64>, Vec<String>, Latest)>;
+    pub(super) static LATEST: Mutex<LatestCache> = Mutex::new(None);
 
     /// The latest scan of each of `macs` (lowercase) that has one. Reused for
     /// [`CACHE_SECS`] while `jobs` (see [`jobs_key`]) is unchanged; a read that fails is
@@ -453,7 +461,7 @@ mod server {
         }
     }
 
-    fn read_latest(dir: &Path, macs: &[String]) -> Result<Latest, String> {
+    pub(super) fn read_latest(dir: &Path, macs: &[String]) -> Result<Latest, String> {
         let Some(s) = store(dir)? else {
             return Ok(Latest::new());
         };
@@ -559,8 +567,11 @@ mod server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sensr_scan::proto::QueuedJob;
+    use sensr_scan::proto::{JobProgress, QueuedJob};
     use sensr_scan::types::{ScanStatus, TlsInfo};
+
+    /// The tests of the shared [`latest`] cache run one at a time.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn row(proto: Proto, port: u16, state: PortState, ident: Ident) -> PortRow {
         PortRow {
@@ -719,6 +730,7 @@ mod tests {
 
     #[test]
     fn latest_is_cached_until_jobs_change() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         use sensr_scan::store::Store;
         let d = tempfile::tempdir().unwrap();
         let macs = vec!["aa:bb:cc:dd:ee:ff".to_owned()];
@@ -764,6 +776,54 @@ mod tests {
         let bad = tempfile::tempdir().unwrap();
         std::fs::write(bad.path().join(sensr_scan::config::DB), b"not a database").unwrap();
         assert!(latest(bad.path(), &macs, &[], 2_000).is_empty());
+    }
+
+    #[test]
+    fn latest_keeps_the_last_good_read_when_a_read_fails() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        use sensr_scan::store::Store;
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join(sensr_scan::config::DB);
+        let macs = vec!["aa:bb:cc:dd:ee:01".to_owned()];
+        {
+            let s = Store::open(&db).unwrap();
+            let job = s
+                .begin_job(JobKind::Device, "192.168.1.9", Some(&macs[0]), false, false)
+                .unwrap();
+            s.write_scan(
+                job,
+                "192.168.1.9".parse().unwrap(),
+                Some(&macs[0]),
+                1,
+                1,
+                ScanStatus::Complete,
+                false,
+                &[row(Proto::Tcp, 22, PortState::Open, Ident::default())],
+            )
+            .unwrap();
+        }
+        let good = latest(d.path(), &macs, &[1], 5_000);
+        assert_eq!(good[&macs[0]].open[0].port, 22);
+        // the database turns unreadable; a fresh read (jobs changed) fails
+        for f in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(d.path().join(format!("{}{f}", sensr_scan::config::DB)));
+        }
+        std::fs::write(&db, b"not a database").unwrap();
+        assert!(server::read_latest(d.path(), &macs).is_err());
+        assert_eq!(
+            latest(d.path(), &macs, &[], 5_001),
+            good,
+            "last good read of the same dir"
+        );
+        // and the failure did not replace the cache entry
+        assert_eq!(
+            LATEST
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|c| (c.0.clone(), c.2.clone())),
+            Some((d.path().to_owned(), vec![1]))
+        );
     }
 
     #[test]

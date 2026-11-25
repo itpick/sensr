@@ -1488,7 +1488,7 @@ pub fn portscan_body(
     p: crate::portscan::PortscanView,
     q: &crate::portscan::PortscanQuery,
 ) -> AnyView {
-    use crate::islands::{chip_html, ports_line_html};
+    use crate::islands::{chip_view, dotted, ports_items};
     let can = p.can_scan;
     let message = q.message().map(|(bad, m)| {
         if bad {
@@ -1575,17 +1575,17 @@ pub fn portscan_body(
                         <form method="post" action="/ui/fn/portscan_submit" class="row-actions">
                             <input type="hidden" name="target" value=ip/>
                             <input type="hidden" name="mac" value=d.mac.clone()/>
-                            <button type="submit" class="btn btn-sm" aria-label=format!("Scan {} now", d.name)>"Scan now"</button>
+                            <button type="submit" class="btn btn-sm" aria-label=format!("Scan now: {}", d.name)>"Scan now"</button>
                         </form>
                     }
                 });
-            let line = ports_line_html(&d.ports, &d.key, None);
-            let line = if line.is_empty() { "not scanned".to_owned() } else { line };
+            let items = ports_items(&d.ports, &d.key);
+            let none = items.is_empty().then_some("not scanned");
             view! {
                 <tr>
                     <td><a href=crate::runtime::host_href(&d.key)>{d.name.clone()}</a></td>
                     <td class="num">{d.ipv4.clone().unwrap_or_default()}</td>
-                    <td class="muted" inner_html=line></td>
+                    <td class="muted">{dotted(items)}{none}</td>
                     <td class="col-actions">{scan}</td>
                 </tr>
             }
@@ -1599,9 +1599,9 @@ pub fn portscan_body(
                 .results
                 .iter()
                 .map(|x| {
-                    let ports = x.open.iter().map(chip_html).collect::<Vec<_>>().join(" · ");
-                    let ports = if ports.is_empty() { "nothing open".to_owned() } else { ports };
-                    view! { <li><span class="num">{x.address.clone()}</span>": "<span inner_html=ports></span></li> }
+                    let none = x.open.is_empty().then_some("nothing open");
+                    let ports = dotted(x.open.iter().map(chip_view).collect());
+                    view! { <li><span class="num">{x.address.clone()}</span>": "{ports}{none}</li> }
                 })
                 .collect_view();
             view! {

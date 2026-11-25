@@ -2532,10 +2532,12 @@ fn hosts_line_shows_ports() {
         tips[1].contains("Synology") && tips[1].contains("nginx"),
         "{tips:?}"
     );
-    assert!(
-        row.select(&sel(".host-ports button"))
-            .any(|b| text(b) == "Scan now")
-    );
+    let button = row.select(&sel(".host-ports button")).next().unwrap();
+    assert_eq!(text(button), "Scan now");
+    assert_eq!(button.value().attr("aria-label"), Some("Scan now: nas"));
+    // the date is UTC, the full time in its tooltip
+    let date = row.select(&sel(".host-ports .port-date")).next().unwrap();
+    assert_eq!(date.value().attr("title"), Some("2026-11-25 12:00:00 UTC"));
     // the name stays the link's text
     assert_eq!(name_text(row.select(&sel("td")).next().unwrap()), "nas");
 

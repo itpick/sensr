@@ -2192,27 +2192,26 @@ pub fn HostsCard(
         });
     };
 
-    // The muted line under the name: the latest port scan, and Scan now. Markup with a
-    // delegated click handler, like the MAC cell, to keep the island bundle small.
+    // The muted line under the name: the latest port scan, and Scan now.
     let ports_line = move |h: &crate::runtime::HostRow, can_scan: bool| {
-        let p = h.ports.clone()?;
+        let p = h.ports.as_ref()?;
         let can = can_scan && h.ipv4.is_some() && !p.scanning;
         if p.is_empty() && !can {
             return None;
         }
-        let key = h.key.clone();
-        let html = {
-            let key = key.clone();
-            move || {
-                let off = busy.with(|b| b.as_deref() == Some(key.as_str()));
-                ports_line_html(&p, &key, can.then_some(off))
-            }
-        };
-        let host = h.clone();
-        Some(view! {
-            <p class="host-ports muted small" inner_html=html
-                on:click=move |ev| if scan_clicked(&ev) { scan_now(host.clone()) }></p>
-        })
+        let mut items = ports_items(p, &h.key);
+        if can {
+            let (k, host) = (h.key.clone(), h.clone());
+            items.push(
+                view! {
+                    <button type="button" class="btn btn-sm" aria-label=format!("Scan now: {}", h.label())
+                        disabled=move || busy.get().as_deref() == Some(k.as_str())
+                        on:click=move |_| scan_now(host.clone())>"Scan now"</button>
+                }
+                .into_any(),
+            );
+        }
+        Some(view! { <p class="host-ports muted small">{dotted(items)}</p> })
     };
 
     let set_mode = move |mac: String, mode: String, select: NodeRef<leptos::html::Select>| {
@@ -2498,72 +2497,50 @@ fn start_result(r: Result<ScanStart, ServerFnError>) -> Result<u64, String> {
     }
 }
 
-/// Whether a click landed on a Scan now button of a ports line (`data-scan`).
-#[cfg(feature = "hydrate")]
-fn scan_clicked(ev: &leptos::ev::MouseEvent) -> bool {
-    use wasm_bindgen::JsCast;
-    ev.target()
-        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-        .is_some_and(|e| e.has_attribute("data-scan"))
+/// `items` with ` · ` between them.
+pub fn dotted(items: Vec<AnyView>) -> impl IntoView {
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| view! { {(i > 0).then_some(" · ")}{v} })
+        .collect_view()
 }
 
-/// Clicks only reach handlers in the browser.
-#[cfg(not(feature = "hydrate"))]
-fn scan_clicked(_ev: &leptos::ev::MouseEvent) -> bool {
-    false
+/// One port: its text (`80 http "Synology"`), greyed for open|filtered, with what it said
+/// as the tooltip. Device text is text and attribute values only.
+pub fn chip_view(c: &crate::runtime::PortChip) -> AnyView {
+    let tip = (!c.tip.is_empty()).then(|| c.tip.clone());
+    view! { <span class="port-chip" class:port-of=c.open_filtered title=tip>{c.text()}</span> }
+        .into_any()
 }
 
-/// Markup of a device's latest scan, items joined with ` · `: its open ports (`port-chip`,
-/// open|filtered greyed as `port-of`, each with what it said as the tooltip), `+N more`
-/// (to the host page of `key`), the changes, `scanning…` or the scan date, `partial scan`
-/// or `no response`, and with `scan` a Scan now button (`Some(true)`: disabled). Every
-/// text the device sent is escaped.
-pub fn ports_line_html(p: &crate::runtime::HostPorts, key: &str, scan: Option<bool>) -> String {
-    let mut items: Vec<String> = p.open.iter().map(chip_html).collect();
+/// A device's latest scan as line items: its open ports, `+N more` (to the host page of
+/// `key`), the changes, `scanning…` or the scan date (UTC; the full time in the tooltip),
+/// and `partial scan` / `no response`.
+pub fn ports_items(p: &crate::runtime::HostPorts, key: &str) -> Vec<AnyView> {
+    let mut items: Vec<AnyView> = p.open.iter().map(chip_view).collect();
     if p.more > 0 {
-        items.push(format!(
-            r#"<a href="{}#ports">+{} more</a>"#,
-            escape_html(&crate::runtime::host_href(key)),
-            p.more
-        ));
+        let href = format!("{}#ports", crate::runtime::host_href(key));
+        items.push(view! { <a href=href>{format!("+{} more", p.more)}</a> }.into_any());
     }
     for ch in &p.changes {
-        items.push(format!(
-            r#"<span class="port-change">{}</span>"#,
-            escape_html(ch)
-        ));
+        items.push(view! { <span class="port-change">{ch.clone()}</span> }.into_any());
     }
     if p.scanning {
-        items.push(r#"<span class="port-scanning">scanning…</span>"#.to_owned());
+        items.push(view! { <span class="port-scanning">"scanning…"</span> }.into_any());
     } else {
         if let Some(t) = p.scanned_at {
-            items.push(format!("scanned {}", crate::runtime::fmt_day(t)));
+            let full = crate::runtime::fmt_time(u64::try_from(t).unwrap_or(0));
+            items.push(
+                view! { <span class="port-date" title=full>{format!("scanned {}", crate::runtime::fmt_day(t))}</span> }
+                    .into_any(),
+            );
         }
         if let Some(n) = p.status_note() {
-            items.push(format!(r#"<span class="port-note">{n}</span>"#));
+            items.push(view! { <span class="port-note">{n}</span> }.into_any());
         }
     }
-    if let Some(off) = scan {
-        items.push(format!(
-            r#"<button type="button" class="btn btn-sm" data-scan=""{}>Scan now</button>"#,
-            if off { " disabled" } else { "" }
-        ));
-    }
-    items.join(" · ")
-}
-
-/// One port chip's markup (see [`ports_line_html`]).
-pub fn chip_html(c: &crate::runtime::PortChip) -> String {
-    let title = if c.tip.is_empty() {
-        String::new()
-    } else {
-        format!(r#" title="{}""#, escape_html(&c.tip))
-    };
-    format!(
-        r#"<span class="port-chip{}"{title}>{}</span>"#,
-        if c.open_filtered { " port-of" } else { "" },
-        escape_html(&c.text())
-    )
+    items
 }
 
 /// The key to the Hosts card's row shading: every category's colour.
@@ -2835,7 +2812,8 @@ mod tests {
     use super::*;
     use crate::runtime::{HostLabelView, HostRow};
 
-    /// Device text reaches the ports line only escaped; the line reads as the card shows it.
+    /// Device text reaches the ports line only as escaped text; the line reads as the card
+    /// shows it.
     #[test]
     fn ports_line_escapes_device_text() {
         use crate::runtime::{HostPorts, PortChip};
@@ -2856,24 +2834,38 @@ mod tests {
             status: "failed".into(),
             scanning: false,
         };
-        let html = ports_line_html(&p, "id:<x>", Some(true));
+        let render = |p: &HostPorts| {
+            let owner = Owner::new();
+            owner.with(|| view! { <p>{dotted(ports_items(p, "id:<x>"))}</p> }.to_html())
+        };
+        let html = render(&p);
         assert!(!html.contains("<img") && !html.contains(BAD), "{html}");
-        let esc = "&lt;img src=x onerror=alert(1)&gt;&quot;&amp;&#39;";
         // service and label in the chip text, its title, the change
-        assert_eq!(html.matches(esc).count(), 4, "{html}");
-        assert!(html.contains(r#"class="port-chip port-of""#));
-        assert!(
-            html.contains(r#"href="/ui/hosts/id:%3Cx%3E#ports">+2 more</a>"#),
+        assert_eq!(
+            html.matches("&lt;img src=x onerror=alert(1)&gt;").count(),
+            4,
             "{html}"
         );
-        assert!(html.ends_with(
-            r#" · scanned Nov 25 · <span class="port-note">no response</span> · <button type="button" class="btn btn-sm" data-scan="" disabled>Scan now</button>"#
-        ), "{html}");
+        assert!(html.contains("port-chip port-of"), "{html}");
+        assert!(
+            html.contains(r#"href="/ui/hosts/id:%3Cx%3E#ports""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"title="2026-11-25 12:00:00 UTC""#),
+            "{html}"
+        );
+        let text: String = html
+            .split('<')
+            .filter_map(|t| t.split_once('>').map(|x| x.1))
+            .collect();
+        assert!(text.contains(" · +2 more · "), "{text}");
+        assert!(text.ends_with("scanned Nov 25 · no response"), "{text}");
         let scanning = HostPorts {
             scanning: true,
             ..p
         };
-        assert!(ports_line_html(&scanning, "k", None).ends_with("scanning…</span>"));
+        assert!(render(&scanning).contains("scanning…"));
     }
 
     /// Hostile maker, reasons and names reach the cell's markup only escaped.

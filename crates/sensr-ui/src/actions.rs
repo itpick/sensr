@@ -243,7 +243,6 @@ mod imp {
         cur
     }
 
-    /// Seconds since the Unix epoch.
     /// The caller may start and cancel port scans: the API's start privilege, and not
     /// read-only (the API refuses read-only principals the same way).
     pub fn may_scan(b: &BackendHandle) -> bool {
@@ -335,6 +334,7 @@ mod imp {
         crate::portscan::apply(hosts, &latest, status.as_ref());
     }
 
+    /// Seconds since the Unix epoch.
     pub fn now() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1397,8 +1397,6 @@ pub async fn insight_data(
     .map_err(ServerFnError::new)
 }
 
-/// Services › Intrusion Detection › Alerts: one page, newest first. `text` is a signature id
-/// or part of the message; `host` an address on either side.
 pub use crate::portscan::{PortscanView, ScanStart};
 
 #[cfg(feature = "ssr")]
@@ -1574,6 +1572,8 @@ pub async fn portscan_page() -> Result<PortscanView, ServerFnError> {
     Ok(page)
 }
 
+/// Services › Intrusion Detection › Alerts: one page, newest first. `text` is a signature id
+/// or part of the message; `host` an address on either side.
 #[server(prefix = "/ui/fn", input = Json)]
 pub async fn ids_alerts(text: String, host: String, page: u32) -> Result<AlertPage, ServerFnError> {
     let b = imp::backend()?;
