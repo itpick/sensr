@@ -73,6 +73,14 @@ in
         -t ${final.python3} -t ${final.bison} -t ${final.flex} -t ${final.gnum4} {} +
     '';
 
+  # The runtime guard's built-in core pack (BPF objects, manifest, default
+  # rules), built against the kernel the images boot.
+  sensr-guard-bpf = final.callPackage ../packages/sensr-guard-bpf.nix {
+    src = src + "/bpf/guard";
+    version = workspaceToml.workspace.package.version;
+    kernel = final.linuxPackages_latest.kernel;
+  };
+
   sensr = craneLib.buildPackage (
     commonArgs
     // {

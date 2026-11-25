@@ -116,15 +116,24 @@
         screenshots = true;
       };
 
-      packages = forAll (pkgs: {
-        default = pkgs.sensr;
-        sensr = pkgs.sensr;
-      });
+      packages = forAll (
+        pkgs:
+        {
+          default = pkgs.sensr;
+          sensr = pkgs.sensr;
+        }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          sensr-guard-bpf = pkgs.sensr-guard-bpf;
+        }
+      );
 
       checks = forLinux (
         pkgs:
         {
           sensr = pkgs.sensr;
+          # The runtime guard's core pack: objects, sections, never-block
+          # list (both arches; aarch64 runs in CI's nix-aarch64 job).
+          guard-bpf-build = import ./nix/tests/guard-bpf-build.nix { inherit pkgs; };
         }
         // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
           boot-first-run = import ./nix/tests/boot-first-run.nix {

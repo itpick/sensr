@@ -1,0 +1,122 @@
+[
+  {
+    "id": "core-exec-tmp",
+    "enabled": true,
+    "description": "A program starts from /tmp (outside /nix/store)",
+    "hook": "exec",
+    "target": { "path_prefix": "/tmp" },
+    "action": "alert"
+  },
+  {
+    "id": "core-exec-var-tmp",
+    "enabled": true,
+    "description": "A program starts from /var/tmp (outside /nix/store)",
+    "hook": "exec",
+    "target": { "path_prefix": "/var/tmp" },
+    "action": "alert"
+  },
+  {
+    "id": "core-exec-dev-shm",
+    "enabled": true,
+    "description": "A program starts from /dev/shm (outside /nix/store)",
+    "hook": "exec",
+    "target": { "path_prefix": "/dev/shm" },
+    "action": "alert"
+  },
+  {
+    "id": "core-exec-run-user",
+    "enabled": true,
+    "description": "A program starts from /run/user (outside /nix/store)",
+    "hook": "exec",
+    "target": { "path_prefix": "/run/user" },
+    "action": "alert"
+  },
+  {
+    "id": "core-exec-home",
+    "enabled": true,
+    "description": "A program starts from /home (outside /nix/store)",
+    "hook": "exec",
+    "target": { "path_prefix": "/home" },
+    "action": "alert"
+  },
+  {
+    "id": "core-exec-root-home",
+    "enabled": true,
+    "description": "A program starts from /root (outside /nix/store)",
+    "hook": "exec",
+    "target": { "path_prefix": "/root" },
+    "action": "alert"
+  },
+  {
+    "id": "core-exec-var-lib",
+    "enabled": true,
+    "description": "A program starts from /var/lib (outside /nix/store)",
+    "hook": "exec",
+    "target": { "path_prefix": "/var/lib" },
+    "action": "alert"
+  },
+  {
+    "id": "core-listen-any",
+    "enabled": true,
+    "description": "A new listening port opens",
+    "hook": "listen",
+    "target": "any",
+    "action": "alert"
+  },
+  {
+    "id": "core-write-nix-store",
+    "enabled": true,
+    "description": "A write under /nix/store",
+    "hook": "file_write",
+    "target": { "path_prefix": "/nix/store" },
+    "action": "alert"
+  },
+  {
+    "id": "core-write-boot-firmware",
+    "enabled": true,
+    "description": "A write under /boot/firmware (the updater and bootlog write here too)",
+    "hook": "file_write",
+    "target": { "path_prefix": "/boot/firmware" },
+    "action": "alert"
+  },
+  {
+    "id": "core-write-etc-sensr",
+    "enabled": true,
+    "description": "A write under /etc/sensr",
+    "hook": "file_write",
+    "target": { "path_prefix": "/etc/sensr" },
+    "action": "alert"
+  },
+  {
+    "id": "core-module-load",
+    "enabled": true,
+    "description": "A kernel module loads",
+    "hook": "module",
+    "target": "any",
+    "action": "alert"
+  },
+  {
+    "id": "core-bpf-load",
+    "enabled": true,
+    "description": "A process other than sensr-guard loads a BPF program or creates a BPF link",
+    "hook": "bpf",
+    "target": "any",
+    "action": "alert"
+  },
+  {
+    "id": "core-bpf-block-others",
+    "enabled": false,
+    "description": "Only sensr-guard may load BPF programs (suggested block)",
+    "hook": "bpf",
+    "target": "any",
+    "action": "block"
+  },
+  {
+    "id": "core-setuid-root",
+    "enabled": true,
+    "description": "A process gains uid 0 via setuid",
+    "hook": "setuid",
+    "target": { "uid": 0 },
+    "action": "alert"
+  }
+]
