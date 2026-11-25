@@ -112,10 +112,10 @@ pub struct ScanArgs {
     /// Allow a target outside the local networks.
     #[arg(long)]
     pub public_ok: bool,
-    /// Confirm a large range.
+    /// Scan a device on the exclude list anyway.
     #[arg(long)]
     pub confirm: bool,
-    /// Scan even if the target is on the exclude list.
+    /// Scan a range's excluded devices too (they are skipped otherwise).
     #[arg(long)]
     pub include_excluded: bool,
     /// sensr-scan control socket.
@@ -627,13 +627,25 @@ fn scan(args: &ScanArgs, out: &mut dyn Write) -> anyhow::Result<()> {
                     writeln!(out, "{}", serde_json::json!({ "job_id": job_id }))?;
                 }
                 Reply::Started { job_id } => writeln!(out, "{job_id}")?,
-                Reply::Refused { reason } => bail!("scan refused: {reason}"),
+                Reply::Refused { reason } => {
+                    bail!("scan refused: {reason}{}", refusal_hint(&reason))
+                }
                 other => bail!("unexpected reply from sensr-scan: {other:?}"),
             }
         }
         (None, None) => bail!("give a target to scan, or `status` or `show`"),
     }
     Ok(())
+}
+
+/// The flag that gets past a refusal, if one does.
+fn refusal_hint(r: &sensr_scan::proto::Refusal) -> &'static str {
+    use sensr_scan::proto::Refusal;
+    match r {
+        Refusal::Public => " (--public-ok)",
+        Refusal::Excluded => " (--confirm)",
+        _ => "",
+    }
 }
 
 fn scan_line(out: &mut dyn Write, s: &sensr_scan::types::ScanView) -> anyhow::Result<()> {
@@ -1034,6 +1046,14 @@ mod tests {
             panic!()
         };
         assert!(a.confirm);
+    }
+
+    #[test]
+    fn refusals_name_the_flag_that_gets_past_them() {
+        use sensr_scan::proto::Refusal;
+        assert_eq!(refusal_hint(&Refusal::Public), " (--public-ok)");
+        assert_eq!(refusal_hint(&Refusal::Excluded), " (--confirm)");
+        assert_eq!(refusal_hint(&Refusal::Disabled), "");
     }
 
     #[test]

@@ -112,6 +112,8 @@ pub struct MockBackend {
     scan_dir: Option<std::path::PathBuf>,
     /// The port scanner's socket cannot be reached.
     scanner_down: bool,
+    /// Every start request the daemon was sent, oldest first.
+    scan_requests: std::sync::Arc<Mutex<Vec<sensr_scan::proto::StartReq>>>,
 }
 
 impl Default for MockBackend {
@@ -173,7 +175,15 @@ impl MockBackend {
             stale_feed: false,
             scan_dir: None,
             scanner_down: false,
+            scan_requests: Default::default(),
         }
+    }
+
+    /// The start requests sent to the port scanner (shared: read it after the mock is
+    /// moved into a handle).
+    #[must_use]
+    pub fn scan_requests(&self) -> std::sync::Arc<Mutex<Vec<sensr_scan::proto::StartReq>>> {
+        std::sync::Arc::clone(&self.scan_requests)
     }
 
     /// Reads port scans from `dir` instead of the daemon's directory.
@@ -191,27 +201,59 @@ impl MockBackend {
     }
 
     /// The daemon's answer: refusals as sensr-scan gives them (public targets, bad or
-    /// too large ones), jobs queued in memory, and the seeded database's running range
-    /// job reported running with fixed progress.
+    /// too large ones, a device on the config's `portscan.exclude` list without
+    /// `confirm`), jobs queued in memory, and the seeded database's running range job
+    /// reported running with fixed progress.
     fn scan_reply(&self, req: sensr_scan::proto::Request) -> sensr_scan::proto::Reply {
-        use sensr_scan::proto::{JobKind, JobProgress, QueuedJob, Reply, Request, StatusView};
+        use sensr_scan::config::Exclude;
+        use sensr_scan::proto::{
+            JobKind, JobProgress, QueuedJob, Refusal, Reply, Request, StatusView,
+        };
         match req {
             Request::Start(r) => {
+                self.scan_requests
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(r.clone());
+                let exclude = self.with(|s| {
+                    s.head().doc["portscan"]["exclude"]
+                        .as_object()
+                        .map(|m| {
+                            m.values()
+                                .filter_map(|e| e["target"].as_str())
+                                .map(|t| match t.parse() {
+                                    Ok(ip) => Exclude::Addr(ip),
+                                    Err(_) => Exclude::Mac(t.to_owned()),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                });
                 let cfg = sensr_scan::config::Config {
                     enabled: true,
                     auto_scan_new: false,
                     pace: sensr_scan::config::Pace::Gentle,
                     history: 10,
                     max_range: 4096,
-                    exclude: vec![],
+                    exclude,
                     local: vec![],
                     router: vec![],
                 };
-                let checked = sensr_scan::target::parse(&r.target)
-                    .map_err(sensr_scan::proto::Refusal::Invalid)
+                let parsed = sensr_scan::target::parse(&r.target).map_err(Refusal::Invalid);
+                let checked = parsed
+                    .clone()
                     .and_then(|t| sensr_scan::target::check(&t, &cfg, r.public_ok));
                 if let Err(reason) = checked {
                     return Reply::Refused { reason };
+                }
+                if let Ok(sensr_scan::target::Target::One(ip)) = parsed
+                    && r.kind == JobKind::Device
+                    && !r.confirm
+                    && cfg.excludes(ip, r.mac.as_deref())
+                {
+                    return Reply::Refused {
+                        reason: Refusal::Excluded,
+                    };
                 }
                 self.with(|s| {
                     if let Some(q) = s.scan_queue.iter().find(|q| q.target == r.target) {
@@ -222,6 +264,7 @@ impl MockBackend {
                         job_id,
                         kind: r.kind,
                         target: r.target.clone(),
+                        mac: r.mac.clone(),
                     });
                     Reply::Started { job_id }
                 })
@@ -246,6 +289,7 @@ impl MockBackend {
                         job_id,
                         kind: JobKind::Range,
                         target: SCAN_RUNNING.to_owned(),
+                        mac: None,
                         alive: Some(12),
                         address_n: 3,
                         address_total: 12,

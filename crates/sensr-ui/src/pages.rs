@@ -1511,11 +1511,16 @@ pub fn portscan_body(
                         <input type="checkbox" name="public_ok" value="on"/>
                         " Scan addresses outside the local networks"
                     </label>
+                    <label class="check">
+                        <input type="checkbox" name="include_excluded" value="on"/>
+                        " Include excluded devices (Never scanned)"
+                    </label>
                     <div class="filter-actions">
                         <button type="submit" class="btn btn-primary">"Scan"</button>
                     </div>
                 </form>
                 {message}
+                {scan_anyway(q, None)}
             </section>
         }
     });
@@ -2460,6 +2465,28 @@ fn override_dialog(
     .into_any()
 }
 
+/// Scan anyway, after Scan now on a device of the exclude list was refused (see
+/// [`crate::portscan::PortscanQuery::confirm_excluded`]): the same scan, confirmed. On the
+/// host page (`host`: the device's MAC) it comes back there.
+fn scan_anyway(q: &crate::portscan::PortscanQuery, host: Option<&str>) -> Option<AnyView> {
+    let (target, mac) = q.confirm_excluded()?;
+    let mac = host.map(str::to_owned).or(mac);
+    let back = host.map(|_| view! { <input type="hidden" name="back" value="host"/> });
+    let mac = mac.map(|m| view! { <input type="hidden" name="mac" value=m/> });
+    Some(
+        view! {
+            <form method="post" action="/ui/fn/portscan_submit" class="scan-anyway">
+                <input type="hidden" name="target" value=target.clone()/>
+                {mac}
+                <input type="hidden" name="confirm" value="on"/>
+                {back}
+                <button type="submit" class="btn btn-sm" aria-label=format!("Scan {target} anyway")>"Scan anyway"</button>
+            </form>
+        }
+        .into_any(),
+    )
+}
+
 /// The host page's Ports section (`#ports`): every port of the latest scan with what it
 /// said, Scan now, and the scan history, newest first. Device text is rendered as text.
 fn ports_card(d: &crate::portscan::HostPortsDetail, q: &crate::portscan::PortscanQuery) -> AnyView {
@@ -2494,6 +2521,9 @@ fn ports_card(d: &crate::portscan::HostPortsDetail, q: &crate::portscan::Portsca
             view! { <p class="notice" role="status">{m}</p> }.into_any()
         }
     });
+    let anyway = (d.can_scan && !d.scanning)
+        .then(|| scan_anyway(q, Some(&d.mac)))
+        .flatten();
     let table = if d.ports.is_empty() {
         let msg = if d.history.is_empty() {
             "Not scanned yet."
@@ -2558,6 +2588,7 @@ fn ports_card(d: &crate::portscan::HostPortsDetail, q: &crate::portscan::Portsca
         <section class="card hp-wide" id="ports" aria-labelledby="hp-ports">
             <h2 id="hp-ports">"Ports"</h2>
             {message}
+            {anyway}
             {scan}
             {table}
             {history}

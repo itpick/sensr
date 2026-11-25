@@ -1174,7 +1174,10 @@ async fn portscan_start_and_cancel() {
     assert_eq!(st, 409, "{body}");
     assert_eq!(body["reason"], "public");
     assert!(
-        body["error"].as_str().unwrap().contains("not local"),
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("outside the local networks"),
         "{body}"
     );
     let (st, body) = post("/api/v1/portscan/start", start_body("10.0.0.0/8")).await;

@@ -58,7 +58,7 @@ impl Ports {
 /// Live progress of the running job, read by `status`.
 #[derive(Debug, Default)]
 pub struct Progress {
-    current: Mutex<Option<(u64, JobKind, String)>>,
+    current: Mutex<Option<(u64, JobKind, String, Option<String>)>>,
     /// Alive hosts plus one; 0 while discovery runs.
     alive: AtomicU32,
     address_n: AtomicU32,
@@ -72,7 +72,8 @@ pub struct Progress {
 impl Progress {
     /// A job starts.
     pub fn begin(&self, job: &Job) {
-        *self.current.lock().expect("progress lock") = Some((job.id, job.kind, job.target.clone()));
+        *self.current.lock().expect("progress lock") =
+            Some((job.id, job.kind, job.target.clone(), job.mac.clone()));
         for a in [
             &self.alive,
             &self.address_n,
@@ -104,11 +105,12 @@ impl Progress {
     #[must_use]
     pub fn view(&self) -> Option<JobProgress> {
         let cur = self.current.lock().expect("progress lock");
-        let (job_id, kind, target) = cur.as_ref()?;
+        let (job_id, kind, target, mac) = cur.as_ref()?;
         Some(JobProgress {
             job_id: *job_id,
             kind: *kind,
             target: target.clone(),
+            mac: mac.clone(),
             alive: self.alive.load(Ordering::Relaxed).checked_sub(1),
             address_n: self.address_n.load(Ordering::Relaxed),
             address_total: self.address_total.load(Ordering::Relaxed),

@@ -39,9 +39,11 @@ pub struct StartReq {
     pub mac: Option<String>,
     /// Allow non-local targets.
     pub public_ok: bool,
-    /// The person confirmed a large range.
+    /// A device scan: the person confirmed scanning a device on the exclude
+    /// list (Scan now asks first). Ignored for automatic scans.
     pub confirm: bool,
-    /// Scan even if the target is on the exclude list.
+    /// A range scan: scan the range's excluded devices too (otherwise they
+    /// are skipped and listed in the job).
     pub include_excluded: bool,
 }
 
@@ -109,11 +111,15 @@ pub enum Refusal {
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Public => f.write_str("the target is not local; confirm to scan it anyway"),
+            Self::Public => f.write_str(
+                "the target is outside the local networks; allow public targets to scan it anyway",
+            ),
             Self::TooLarge { addresses, max } => {
                 write!(f, "{addresses} addresses is more than the {max} allowed")
             }
-            Self::Excluded => f.write_str("the target is on the exclude list"),
+            Self::Excluded => {
+                f.write_str("the device is on the exclude list; confirm to scan it anyway")
+            }
             Self::Invalid(why) => write!(f, "the target is not valid: {why}"),
             Self::Disabled => f.write_str("port scanning is disabled"),
         }
@@ -138,6 +144,10 @@ pub struct JobProgress {
     pub kind: JobKind,
     /// The target as given.
     pub target: String,
+    /// The device's MAC, for a device job that has one (so a device found at
+    /// a new address is still known to be scanning).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
     /// Live hosts found (`None` until host discovery finishes).
     pub alive: Option<u32>,
     /// Address being scanned (1-based).
@@ -159,6 +169,10 @@ pub struct QueuedJob {
     pub kind: JobKind,
     /// The target as given.
     pub target: String,
+    /// The device's MAC, for a device job that has one (so a device found at
+    /// a new address is still known to be scanning).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
 }
 
 #[cfg(test)]
@@ -216,7 +230,9 @@ mod tests {
             .to_string(),
             "8192 addresses is more than the 4096 allowed"
         );
-        assert!(Refusal::Public.to_string().contains("not local"));
+        assert!(Refusal::Public.to_string().contains("allow public targets"));
+        assert!(!Refusal::Public.to_string().contains("confirm"));
+        assert!(Refusal::Excluded.to_string().contains("confirm"));
         assert!(Refusal::Invalid("x".into()).to_string().ends_with(": x"));
     }
 
@@ -242,6 +258,7 @@ mod tests {
                     job_id: 2,
                     kind: JobKind::Range,
                     target: "192.168.1.0/24".into(),
+                    mac: None,
                     alive: None,
                     address_n: 3,
                     address_total: 254,
@@ -252,6 +269,7 @@ mod tests {
                     job_id: 3,
                     kind: JobKind::Device,
                     target: "192.168.1.9".into(),
+                    mac: Some("aa:bb:cc:dd:ee:ff".into()),
                 }],
             }),
         ] {

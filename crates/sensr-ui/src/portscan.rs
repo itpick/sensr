@@ -174,6 +174,8 @@ pub struct PortscanQuery {
     /// [`Refusal::TooLarge`]'s numbers.
     pub addresses: Option<u64>,
     pub max: Option<u32>,
+    /// The device's MAC, with an `excluded` refusal (only kept when it is one).
+    pub mac: Option<String>,
     /// This job was cancelled.
     pub cancelled: Option<u64>,
     /// `not_running`, `forbidden` or another failure.
@@ -193,6 +195,13 @@ impl PortscanQuery {
             refused: get("refused"),
             addresses: get("addresses").and_then(|v| v.parse().ok()),
             max: get("max").and_then(|v| v.parse().ok()),
+            mac: get("mac")
+                .map(|m| m.trim().to_ascii_lowercase())
+                .filter(|m| {
+                    m.split(':').count() == 6
+                        && m.split(':')
+                            .all(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_hexdigit()))
+                }),
             cancelled: get("cancelled").and_then(|v| v.parse().ok()),
             error: get("error"),
         }
@@ -212,12 +221,23 @@ impl PortscanQuery {
         }
         if let Some(code) = &self.refused {
             let r = match code.as_str() {
-                "public" => Refusal::Public,
+                "public" => {
+                    return Some((
+                        true,
+                        "Not scanned: the target is outside the local networks. Tick \"Scan addresses outside the local networks\" to scan it anyway.".to_owned(),
+                    ));
+                }
+                "excluded" => {
+                    return Some((
+                        true,
+                        "Not scanned: the device is on the exclude list (Never scanned)."
+                            .to_owned(),
+                    ));
+                }
                 "too_large" => Refusal::TooLarge {
                     addresses: self.addresses.unwrap_or(0),
                     max: self.max.unwrap_or(0),
                 },
-                "excluded" => Refusal::Excluded,
                 "disabled" => Refusal::Disabled,
                 _ => Refusal::Invalid("check the address, network or range".to_owned()),
             };
@@ -233,6 +253,19 @@ impl PortscanQuery {
         }
         self.cancelled
             .map(|id| (false, format!("Scan job {id} cancelled.")))
+    }
+}
+
+impl PortscanQuery {
+    /// The device to offer Scan anyway for: an exclude-list refusal of one address
+    /// (`(target, mac)`).
+    pub fn confirm_excluded(&self) -> Option<(String, Option<String>)> {
+        let one = matches!(
+            sensr_scan::target::parse(&self.target),
+            Ok(sensr_scan::target::Target::One(_))
+        );
+        (self.refused.as_deref() == Some("excluded") && one)
+            .then(|| (self.target.clone(), self.mac.clone()))
     }
 }
 
@@ -341,19 +374,42 @@ pub fn host_ports(scan: &ScanView, changes: &Changes) -> HostPorts {
     }
 }
 
-/// Whether the daemon is scanning `ipv4` (a device job running or queued for it).
-pub fn scanning(status: Option<&StatusView>, ipv4: Option<&str>) -> bool {
-    let (Some(s), Some(ip)) = (status, ipv4) else {
+/// The Hosts card's view of a device whose latest scan is `latest`: a failed one (the
+/// device did not answer) keeps showing the ports of `last_complete` (with its changes),
+/// marked "no response", rather than nothing.
+pub fn host_ports_latest(
+    latest: &ScanView,
+    last_complete: Option<(&ScanView, &Changes)>,
+) -> HostPorts {
+    match last_complete {
+        Some((done, changes)) if latest.status == sensr_scan::types::ScanStatus::Failed => {
+            let mut h = host_ports(done, changes);
+            h.status = latest.status.as_str().to_owned();
+            h.scanned_at = Some(latest.finished);
+            h
+        }
+        _ => host_ports(latest, &Changes::default()),
+    }
+}
+
+/// Whether the daemon is scanning a device (a device job running or queued for it): by
+/// its MAC, or by its address `ipv4` (a job queued while it had another address still
+/// counts through the MAC).
+pub fn scanning(status: Option<&StatusView>, ipv4: Option<&str>, mac: Option<&str>) -> bool {
+    let Some(s) = status else {
         return false;
     };
-    let running = s
-        .running
+    let ours = |kind: JobKind, target: &str, job_mac: Option<&str>| {
+        kind == JobKind::Device
+            && (ipv4 == Some(target)
+                || matches!((mac, job_mac), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b)))
+    };
+    s.running
         .as_ref()
-        .is_some_and(|r| r.kind == JobKind::Device && r.target == ip);
-    running
+        .is_some_and(|r| ours(r.kind, &r.target, r.mac.as_deref()))
         || s.queue
             .iter()
-            .any(|q| q.kind == JobKind::Device && q.target == ip)
+            .any(|q| ours(q.kind, &q.target, q.mac.as_deref()))
 }
 
 #[cfg(feature = "ssr")]
@@ -468,8 +524,24 @@ mod server {
         let mut out = Latest::new();
         for mac in macs {
             if let Some(scan) = s.latest_for_mac(mac).map_err(msg)? {
-                let changes = s.changes(scan.id).map_err(msg)?;
-                out.insert(mac.clone(), host_ports(&scan, &changes));
+                let hp = if scan.status == sensr_scan::types::ScanStatus::Failed {
+                    let done = s
+                        .history(mac, 50)
+                        .map_err(msg)?
+                        .into_iter()
+                        .find(|h| h.status == sensr_scan::types::ScanStatus::Complete);
+                    match done {
+                        Some(d) => {
+                            let changes = s.changes(d.id).map_err(msg)?;
+                            host_ports_latest(&scan, Some((&d, &changes)))
+                        }
+                        None => host_ports_latest(&scan, None),
+                    }
+                } else {
+                    let changes = s.changes(scan.id).map_err(msg)?;
+                    host_ports(&scan, &changes)
+                };
+                out.insert(mac.clone(), hp);
             }
         }
         Ok(out)
@@ -492,7 +564,7 @@ mod server {
                 continue;
             };
             let mut p = latest.get(&mac).cloned().unwrap_or_default();
-            p.scanning = scanning(status, h.ipv4.as_deref());
+            p.scanning = scanning(status, h.ipv4.as_deref(), Some(&mac));
             h.ports = Some(p);
         }
     }
@@ -642,6 +714,29 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_scan_keeps_the_last_complete_ports() {
+        let mut ok = scan(
+            vec![row(Proto::Tcp, 22, PortState::Open, Ident::default())],
+            ScanStatus::Complete,
+        );
+        ok.finished = 1_795_000_000;
+        let mut failed = scan(vec![], ScanStatus::Failed);
+        failed.id = 2;
+        let h = host_ports_latest(&failed, Some((&ok, &Changes::default())));
+        assert_eq!(h.open.len(), 1);
+        assert_eq!(h.open[0].port, 22);
+        assert_eq!(h.status_note(), Some("no response"));
+        assert_eq!(h.scanned_at, Some(failed.finished));
+        // never complete: nothing to show but the note
+        let h = host_ports_latest(&failed, None);
+        assert!(h.open.is_empty());
+        assert_eq!(h.status_note(), Some("no response"));
+        // a complete latest scan is itself
+        let h = host_ports_latest(&ok, None);
+        assert_eq!(h.status_note(), None);
+    }
+
+    #[test]
     fn host_ports_shows_eight_and_moves_new_ports_to_changes() {
         let mut ports: Vec<PortRow> = (1..=11)
             .map(|p| row(Proto::Tcp, 100 - p, PortState::Open, Ident::default()))
@@ -681,19 +776,40 @@ mod tests {
                     job_id: 1,
                     kind: JobKind::Device,
                     target: "192.168.1.5".into(),
+                    mac: None,
                 },
                 QueuedJob {
                     job_id: 2,
                     kind: JobKind::Range,
                     target: "192.168.1.6".into(),
+                    mac: None,
+                },
+                // queued at the address the device had then
+                QueuedJob {
+                    job_id: 3,
+                    kind: JobKind::Device,
+                    target: "192.168.1.7".into(),
+                    mac: Some("aa:bb:cc:dd:ee:ff".into()),
                 },
             ],
         };
-        assert!(scanning(Some(&s), Some("192.168.1.5")));
-        assert!(!scanning(Some(&s), Some("192.168.1.6")));
-        assert!(!scanning(None, Some("192.168.1.5")));
-        assert!(!scanning(Some(&s), None));
-        assert_eq!(jobs_key(Some(&s)), [1, 2]);
+        assert!(scanning(Some(&s), Some("192.168.1.5"), None));
+        assert!(!scanning(Some(&s), Some("192.168.1.6"), None));
+        assert!(!scanning(None, Some("192.168.1.5"), None));
+        assert!(!scanning(Some(&s), None, None));
+        // the device has a new address: still its job, by MAC
+        assert!(scanning(
+            Some(&s),
+            Some("192.168.1.30"),
+            Some("AA:BB:CC:DD:EE:FF")
+        ));
+        assert!(scanning(Some(&s), None, Some("aa:bb:cc:dd:ee:ff")));
+        assert!(!scanning(
+            Some(&s),
+            Some("192.168.1.30"),
+            Some("aa:bb:cc:dd:ee:00")
+        ));
+        assert_eq!(jobs_key(Some(&s)), [1, 2, 3]);
     }
 
     #[test]
@@ -702,6 +818,7 @@ mod tests {
             job_id: 1,
             kind: JobKind::Range,
             target: "192.168.1.0/24".into(),
+            mac: None,
             alive: None,
             address_n: 0,
             address_total: 254,

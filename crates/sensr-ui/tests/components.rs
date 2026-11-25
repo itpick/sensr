@@ -2693,7 +2693,10 @@ fn portscan_actions_enforce_the_rules() {
     let r = as_user(&b, portscan_start("8.8.8.8".into(), None, false)).unwrap();
     assert_eq!(
         r,
-        ScanStart::Refused("the target is not local; confirm to scan it anyway".into())
+        ScanStart::Refused(
+            "the target is outside the local networks; allow public targets to scan it anyway"
+                .into()
+        )
     );
     let r = as_user(&b, portscan_start("8.8.8.8".into(), None, true)).unwrap();
     assert!(matches!(r, ScanStart::Started(_)));
@@ -2802,6 +2805,7 @@ fn host_page_ports_section() {
     let p = host_page_from(m, BENCH_PI, "today", None);
     let mut q = host_query("today");
     q.scan.refused = Some("excluded".into());
+    q.scan.target = "192.168.1.112".into();
     let doc = render_host_page(p, q);
     let alert = doc
         .select(&sel("section#ports [role=alert]"))
@@ -2809,8 +2813,151 @@ fn host_page_ports_section() {
         .unwrap();
     assert_eq!(
         text(alert),
-        "Not scanned: the target is on the exclude list."
+        "Not scanned: the device is on the exclude list (Never scanned)."
     );
+    // ... and Scan anyway, back to the host page with confirm
+    let form = doc
+        .select(&sel("section#ports form[action='/ui/fn/portscan_submit']"))
+        .find(|f| {
+            f.select(&sel("input[name=confirm][value=on]"))
+                .next()
+                .is_some()
+        })
+        .expect("a confirm form");
+    let hidden = |n: &str| {
+        form.select(&sel(&format!("input[type=hidden][name={n}]")))
+            .next()
+            .and_then(|i| i.value().attr("value"))
+            .map(str::to_owned)
+    };
+    assert_eq!(hidden("back").as_deref(), Some("host"));
+    assert_eq!(hidden("mac").as_deref(), Some(BENCH_PI));
+    assert_eq!(hidden("target").as_deref(), Some("192.168.1.112"));
+    assert!(
+        form.select(&sel("button"))
+            .any(|b| text(b) == "Scan anyway")
+    );
+}
+
+/// The mock excludes old-router (by MAC) from scanning.
+const OLD_ROUTER: &str = "00:14:78:38:a5:fc";
+
+#[test]
+fn an_excluded_device_is_scanned_only_when_confirmed() {
+    use sensr_ui::actions::{ScanStart, portscan_start, portscan_submit};
+    use sensr_ui::portscan::PortscanQuery;
+    // Scan now on the Port Scanner page: refused, with what Scan anyway needs
+    let (_d, m) = scan_mock();
+    let loc = form_post_location(m, || {
+        portscan_submit(
+            "192.168.72.2".into(),
+            Some(OLD_ROUTER.into()),
+            None,
+            None,
+            None,
+            None,
+        )
+    });
+    assert_eq!(
+        loc,
+        "/ui/portscan?refused=excluded&mac=00%3A14%3A78%3A38%3Aa5%3Afc&target=192.168.72.2"
+    );
+    let pairs = [
+        ("refused", "excluded"),
+        ("mac", OLD_ROUTER),
+        ("target", "192.168.72.2"),
+    ];
+    let q = PortscanQuery::from_query(|k| pairs.iter().find(|p| p.0 == k).map(|p| p.1.to_owned()));
+    assert_eq!(q.mac.as_deref(), Some(OLD_ROUTER));
+    let (_d, m) = scan_mock();
+    let b: sensr_ui::api::BackendHandle = std::sync::Arc::new(m);
+    let p = as_user(&b, sensr_ui::actions::portscan_page()).unwrap();
+    let doc = render(|| sensr_ui::pages::portscan_body(p, &q));
+    let form = doc
+        .select(&sel("form[action='/ui/fn/portscan_submit']"))
+        .find(|f| {
+            f.select(&sel("input[name=confirm][value=on]"))
+                .next()
+                .is_some()
+        })
+        .expect("a confirm form");
+    assert!(
+        form.select(&sel("button"))
+            .any(|b| text(b) == "Scan anyway")
+    );
+    assert!(
+        form.select(&sel("input[type=hidden][name=mac]"))
+            .any(|i| i.value().attr("value") == Some(OLD_ROUTER))
+    );
+    assert!(form.select(&sel("input[name=back]")).next().is_none());
+    assert_all_labelled(&doc, "port scanner page with a confirm form");
+    // a MAC that is not one is dropped
+    let q = PortscanQuery::from_query(|k| (k == "mac").then(|| "<b>x</b>".to_owned()));
+    assert_eq!(q.mac, None);
+
+    // Scan anyway: confirmed
+    let (_d, m) = scan_mock();
+    let loc = form_post_location(m, || {
+        portscan_submit(
+            "192.168.72.2".into(),
+            Some(OLD_ROUTER.into()),
+            None,
+            Some("on".into()),
+            None,
+            None,
+        )
+    });
+    assert!(loc.starts_with("/ui/portscan?started="), "{loc}");
+
+    // Scan now on the Hosts card (an island, no confirm there) says where to confirm
+    let (_d, m) = scan_mock();
+    let b: sensr_ui::api::BackendHandle = std::sync::Arc::new(m);
+    let r = as_user(
+        &b,
+        portscan_start("192.168.72.2".into(), Some(OLD_ROUTER.into()), false),
+    )
+    .unwrap();
+    assert!(
+        matches!(&r, ScanStart::Refused(t) if t.contains("host page")),
+        "{r:?}"
+    );
+}
+
+#[test]
+fn new_scan_can_include_excluded_devices() {
+    use sensr_ui::actions::portscan_submit;
+    let (_d, m) = scan_mock();
+    let b: sensr_ui::api::BackendHandle = std::sync::Arc::new(m);
+    let p = as_user(&b, sensr_ui::actions::portscan_page()).unwrap();
+    let q = sensr_ui::portscan::PortscanQuery::default();
+    let doc = render(|| sensr_ui::pages::portscan_body(p, &q));
+    let tick = doc
+        .select(&sel(
+            "form.scan-form input[type=checkbox][name=include_excluded]",
+        ))
+        .next()
+        .expect("an include excluded devices tick");
+    assert_eq!(tick.value().attr("value"), Some("on"));
+    // the tick reaches the daemon
+    let (_d, m) = scan_mock();
+    let log = m.scan_requests();
+    form_post_location(m, || {
+        portscan_submit(
+            "192.168.72.0/28".into(),
+            None,
+            None,
+            None,
+            Some("on".into()),
+            None,
+        )
+    });
+    let r = log
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("a start request");
+    assert!(r.include_excluded && !r.confirm, "{r:?}");
 }
 
 #[test]
@@ -2889,7 +3036,7 @@ fn portscan_forms_redirect_with_codes_only() {
     let post = |m, target: &str, public: bool| {
         let t = target.to_owned();
         form_post_location(m, move || {
-            portscan_submit(t, None, public.then(|| "on".to_owned()), None)
+            portscan_submit(t, None, public.then(|| "on".to_owned()), None, None, None)
         })
     };
     let (_d, m) = scan_mock();
@@ -2943,6 +3090,8 @@ fn portscan_forms_redirect_with_codes_only() {
             "192.168.1.112".into(),
             Some(BENCH_PI.to_uppercase()),
             None,
+            None,
+            None,
             Some("host".into()),
         )
     });
@@ -2964,7 +3113,7 @@ fn portscan_forms_redirect_with_codes_only() {
         q(&[("refused", "public"), ("target", "8.8.8.8")]).message(),
         Some((
             true,
-            "Not scanned: the target is not local; confirm to scan it anyway.".into()
+            "Not scanned: the target is outside the local networks. Tick \"Scan addresses outside the local networks\" to scan it anyway.".into()
         ))
     );
     assert_eq!(

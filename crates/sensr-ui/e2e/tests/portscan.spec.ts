@@ -49,7 +49,7 @@ test.describe("port scanner", () => {
     const target = form.getByLabel("Address, network or range");
     await target.fill("8.8.8.8");
     await form.getByRole("button", { name: "Scan", exact: true }).click();
-    await expect(form.getByRole("alert")).toHaveText("Not scanned: the target is not local; confirm to scan it anyway.");
+    await expect(form.getByRole("alert")).toHaveText('Not scanned: the target is outside the local networks. Tick "Scan addresses outside the local networks" to scan it anyway.');
     await target.fill("192.168.1.0/24");
     await form.getByRole("button", { name: "Scan", exact: true }).click();
     await expect(form.getByRole("status")).toContainText("Scan of 192.168.1.0/24 queued");

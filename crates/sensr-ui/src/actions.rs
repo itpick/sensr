@@ -250,11 +250,14 @@ mod imp {
     }
 
     /// Asks the daemon to scan `target` (see [`super::portscan_start`]): the job id, or
-    /// why it refused.
+    /// why it refused. `confirm` scans a device on the exclude list anyway;
+    /// `include_excluded` scans a range's excluded devices too.
     pub async fn start_scan(
         target: &str,
         mac: Option<String>,
         public_ok: bool,
+        confirm: bool,
+        include_excluded: bool,
     ) -> Result<Result<u64, sensr_scan::proto::Refusal>, ServerFnError> {
         use sensr_scan::proto::{JobKind, Refusal, Reply, Request, StartReq};
         use sensr_scan::target::Target;
@@ -281,8 +284,8 @@ mod imp {
             auto: false,
             mac: mac.filter(|_| kind == JobKind::Device),
             public_ok,
-            confirm: false,
-            include_excluded: false,
+            confirm: confirm && kind == JobKind::Device,
+            include_excluded: include_excluded && kind == JobKind::Range,
         });
         match b.portscan(req).await {
             Ok(Reply::Started { job_id }) => Ok(Ok(job_id)),
@@ -994,7 +997,8 @@ pub async fn host_page(
         };
         match detail {
             Ok(mut d) => {
-                d.scanning = crate::portscan::scanning(status.as_ref(), host.ipv4.as_deref());
+                d.scanning =
+                    crate::portscan::scanning(status.as_ref(), host.ipv4.as_deref(), Some(&mac));
                 d.can_scan = imp::may_scan(&b) && host.ipv4.is_some();
                 d.ipv4.clone_from(&host.ipv4);
                 d.mac = mac;
@@ -1409,49 +1413,76 @@ fn is_mac(s: &str) -> bool {
 
 /// Queues a port scan of `target` (an address, a CIDR or a range `a.b.c.d-e`; an address
 /// is a device scan, with the device's `mac` when known). `public_ok` allows targets
-/// outside the local networks. A refusal comes back as its text; a daemon that cannot be
-/// reached is an error saying so. Needs the port scanner's start privilege and a caller
-/// who may change things, as the API.
+/// outside the local networks. A refusal comes back as its text (a device on the exclude
+/// list is pointed to its host page, where Scan now asks to confirm); a daemon that
+/// cannot be reached is an error saying so. Needs the port scanner's start privilege and
+/// a caller who may change things, as the API.
 #[server(prefix = "/ui/fn", input = Json)]
 pub async fn portscan_start(
     target: String,
     mac: Option<String>,
     public_ok: bool,
 ) -> Result<ScanStart, ServerFnError> {
-    Ok(match imp::start_scan(&target, mac, public_ok).await? {
-        Ok(id) => ScanStart::Started(id),
-        Err(r) => ScanStart::Refused(r.to_string()),
-    })
+    use sensr_scan::proto::Refusal;
+    Ok(
+        match imp::start_scan(&target, mac, public_ok, false, false).await? {
+            Ok(id) => ScanStart::Started(id),
+            Err(Refusal::Excluded) => ScanStart::Refused(
+                "the device is on the exclude list; Scan now on its host page asks to scan it anyway"
+                    .to_owned(),
+            ),
+            Err(r) => ScanStart::Refused(r.to_string()),
+        },
+    )
 }
 
 /// The New scan and Scan now forms (plain form posts): like [`portscan_start`], then back
 /// to `/ui/portscan`, or with `back=host` to the device's host page (`#ports`), with the
 /// outcome as codes (see [`crate::portscan::PortscanQuery`]; on the host page each key
-/// is prefixed `scan_`). The Location is rebuilt from parsed values only.
+/// is prefixed `scan_`). The Location is rebuilt from parsed values only. `confirm`
+/// (Scan anyway, after an exclude-list refusal, which comes back with the device's MAC)
+/// scans an excluded device; `include_excluded` (New scan's tick) a range's excluded
+/// devices.
 #[server(prefix = "/ui/fn", endpoint = "portscan_submit")]
 pub async fn portscan_submit(
     target: String,
     mac: Option<String>,
     public_ok: Option<String>,
+    confirm: Option<String>,
+    include_excluded: Option<String>,
     back: Option<String>,
 ) -> Result<(), ServerFnError> {
     let mac = mac
         .map(|m| m.trim().to_ascii_lowercase())
         .filter(|m| !m.is_empty());
     let host = back.as_deref() == Some("host");
-    let mut pairs: Vec<(&str, String)> =
-        match imp::start_scan(&target, mac.clone(), public_ok.is_some()).await {
-            Ok(Ok(id)) => vec![("started", id.to_string())],
-            Ok(Err(r)) => crate::portscan::refusal_pairs(&r),
-            Err(e) if server_message(&e) == crate::portscan::NOT_RUNNING => {
-                vec![("error", "not_running".to_owned())]
+    let started = imp::start_scan(
+        &target,
+        mac.clone(),
+        public_ok.is_some(),
+        confirm.is_some(),
+        include_excluded.is_some(),
+    )
+    .await;
+    let mut pairs: Vec<(&str, String)> = match started {
+        Ok(Ok(id)) => vec![("started", id.to_string())],
+        Ok(Err(r @ sensr_scan::proto::Refusal::Excluded)) => {
+            let mut p = crate::portscan::refusal_pairs(&r);
+            if let Some(m) = mac.as_ref().filter(|m| is_mac(m)) {
+                p.push(("mac", m.clone()));
             }
-            Err(e) if imp::may_scan(&imp::backend()?) => {
-                tracing::info!("scan not started: {}", server_message(&e));
-                vec![("error", "failed".to_owned())]
-            }
-            Err(_) => vec![("error", "forbidden".to_owned())],
-        };
+            p
+        }
+        Ok(Err(r)) => crate::portscan::refusal_pairs(&r),
+        Err(e) if server_message(&e) == crate::portscan::NOT_RUNNING => {
+            vec![("error", "not_running".to_owned())]
+        }
+        Err(e) if imp::may_scan(&imp::backend()?) => {
+            tracing::info!("scan not started: {}", server_message(&e));
+            vec![("error", "failed".to_owned())]
+        }
+        Err(_) => vec![("error", "forbidden".to_owned())],
+    };
     let t = target.trim();
     if t.len() <= 100 && sensr_scan::target::parse(t).is_ok() {
         pairs.push(("target", t.to_owned()));

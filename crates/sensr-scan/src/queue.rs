@@ -74,6 +74,7 @@ impl Job {
             job_id: self.id,
             kind: self.kind,
             target: self.target.clone(),
+            mac: self.mac.clone(),
         }
     }
 }
