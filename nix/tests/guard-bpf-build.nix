@@ -1,15 +1,18 @@
-# checks.<system>.guard-bpf-build: the core pack builds, every object is
-# there with the expected LSM sections, the manifest and default rules are
+# checks.<system>.guard-bpf-build: the core pack builds, its one linked
+# object carries every expected LSM section and exactly one copy of each
+# map (so the programs share them), the manifest and default rules are
 # valid JSON, and the never-block list behaves (a host C test of the same
 # neverblock.h the programs include).
 #
-# The objects are only inspected, never loaded: there is no kernel in the
+# The object is only inspected, never loaded: there is no kernel in the
 # build sandbox (so no `bpftool prog loadall`, and bpftool is not even an
-# input here). Loading and attaching is the loader's VM test.
+# input here). Loading and attaching is the loader's VM test
+# (nix/tests/guard-load.nix).
 { pkgs, guardBpf ? pkgs.sensr-guard-bpf }:
 let
+  inherit (pkgs) lib;
   pack = "${guardBpf}/share/sensr-guard/packs/core";
-  # object -> the section (program) names it must carry
+  # the sections (programs) the linked object must carry, by source
   sections = {
     exec = [ "lsm.s/bprm_check_security" "lsm/task_alloc" ];
     connect = [ "lsm/socket_connect" ];
@@ -19,20 +22,13 @@ let
     module = [ "lsm.s/kernel_read_file" "lsm/kernel_load_data" ];
     bpf = [ "lsm/bpf" ];
   };
-  checkObject =
-    obj: secs:
-    ''
-      o=${pack}/${obj}.bpf.o
-      [ -f "$o" ] || { echo "missing $o"; exit 1; }
-      llvm-objdump -h "$o" > ${obj}.sections
-      for s in ${pkgs.lib.concatStringsSep " " secs} .maps license .BTF; do
-        # exact name: the section column of `llvm-objdump -h`
-        if ! awk -v s="$s" '$2 == s { found = 1 } END { exit !found }' ${obj}.sections; then
-          echo "${obj}.bpf.o: no section $s"; cat ${obj}.sections; exit 1
-        fi
-      done
-      echo "${obj}.bpf.o: ${pkgs.lib.concatStringsSep " " secs}"
-    '';
+  allSections = lib.concatLists (lib.attrValues sections) ++ [ ".maps" "license" ".BTF" ];
+  # the contract's maps (bpf/guard/README.md) plus the internal scratch map
+  maps = [
+    "rules_meta" "exe_prefix_lpm" "path_prefix_lpm" "net4_lpm" "net6_lpm"
+    "port_rules" "unit_rules" "uid_rules" "hits" "config" "events"
+    "ringbuf_dropped" "task_exe" "scratch"
+  ];
 in
 pkgs.runCommand "guard-bpf-build"
   {
@@ -50,17 +46,38 @@ pkgs.runCommand "guard-bpf-build"
       -o neverblock_test ${guardBpf.src}/neverblock_test.c
     ./neverblock_test
 
-    # every object, with every expected section
-    ${pkgs.lib.concatStrings (pkgs.lib.mapAttrsToList checkObject sections)}
+    # one object: core.bpf.o
+    o=${pack}/${guardBpf.object}
+    [ -f "$o" ] || { echo "missing $o"; exit 1; }
     n=$(ls ${pack}/*.bpf.o | wc -l)
-    [ "$n" -eq ${toString (builtins.length (builtins.attrNames sections))} ] \
-      || { echo "expected ${toString (builtins.length (builtins.attrNames sections))} objects, found $n"; exit 1; }
+    [ "$n" -eq 1 ] || { echo "expected 1 object, found $n"; ls ${pack}; exit 1; }
 
-    # the manifest names exactly those objects
+    # every expected section (exact name: the section column of -h)
+    llvm-objdump -h "$o" > sections
+    for s in ${lib.concatStringsSep " " allSections}; do
+      if ! awk -v s="$s" '$2 == s { found = 1 } END { exit !found }' sections; then
+        echo "${guardBpf.object}: no section $s"; cat sections; exit 1
+      fi
+    done
+    echo "${guardBpf.object}: ${lib.concatStringsSep " " allSections}"
+
+    # each map exactly once, in .maps: the programs share it
+    llvm-objdump -t "$o" > symbols
+    for m in ${lib.concatStringsSep " " maps}; do
+      c=$(awk -v m="$m" '$NF == m && /[[:space:]]\.maps[[:space:]]/ { c++ } END { print c + 0 }' symbols)
+      [ "$c" -eq 1 ] || { echo "map $m: $c definitions in .maps"; grep -w "$m" symbols; exit 1; }
+    done
+    echo "maps shared: ${lib.concatStringsSep " " maps}"
+
+    # a 24-byte BTF header (the derivation's note on aya)
+    llvm-objcopy --dump-section .BTF=btf "$o" copy.o
+    hdr_len=$(od -A n -t u4 -j 4 -N 4 btf | tr -d ' ')
+    [ "$hdr_len" = 24 ] || { echo "BTF hdr_len $hdr_len, want 24"; exit 1; }
+
+    # the manifest names exactly that object
     jq -e '.name == "core" and .min_sensr == "0.0.0" and (.version | type == "string")' \
       ${pack}/manifest.json
-    jq -e --argjson want '${builtins.toJSON (map (o: "${o}.bpf.o") (builtins.attrNames sections))}' \
-      '(.programs | sort) == ($want | sort)' ${pack}/manifest.json
+    jq -e '.programs == ["${guardBpf.object}"]' ${pack}/manifest.json
 
     # the default rules: alert everywhere except the shipped-disabled block
     jq -e 'type == "array" and length > 0

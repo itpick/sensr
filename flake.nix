@@ -165,6 +165,9 @@
             inherit pkgs;
             sensrModules = testModules;
           };
+          # The runtime guard's loader on a BPF-LSM kernel (the same checks
+          # run by hand on aarch64 with nix/tests/guard-load.sh).
+          guard-load = import ./nix/tests/guard-load.nix { inherit pkgs; };
           agent-api = import ./nix/tests/agent-api.nix {
             inherit pkgs;
             sensrModules = testModules;

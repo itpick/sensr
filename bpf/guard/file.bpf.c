@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* file: writes to protected paths (hook `file_write`): opens for writing,
  * unlinks, and renames (either side). */
+#define GUARD_OBJ file
 #include "common.h"
 
-char LICENSE[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") GUARD_SHARED = "GPL";
 
 SEC("lsm.s/file_open")
 int BPF_PROG(guard_file_open, struct file *file, int ret)

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* connect: outbound connections (hook `connect`), IPv4 and IPv6. */
+#define GUARD_OBJ connect
 #include "common.h"
 
-char LICENSE[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") GUARD_SHARED = "GPL";
 
 /* Copy the address and port of an AF_INET/AF_INET6 sockaddr into the event;
  * returns the family, or 0 for anything else. */

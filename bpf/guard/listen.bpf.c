@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* listen: new listening ports (hook `listen`). TCP is seen at listen(), with
  * the bound address; other inet sockets (UDP) at bind() to a non-zero port. */
+#define GUARD_OBJ listen
 #include "common.h"
 
-char LICENSE[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") GUARD_SHARED = "GPL";
 
 SEC("lsm/socket_bind")
 int BPF_PROG(guard_bind, struct socket *sock, struct sockaddr *address, int addrlen, int ret)

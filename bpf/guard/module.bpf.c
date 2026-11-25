@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* module: kernel module loads (hook `module`), from a file (finit_module)
  * or from memory (init_module). */
+#define GUARD_OBJ module
 #include "common.h"
 
-char LICENSE[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") GUARD_SHARED = "GPL";
 
 SEC("lsm.s/kernel_read_file")
 int BPF_PROG(guard_module_file, struct file *file, enum kernel_read_file_id id, bool contents,

@@ -53,6 +53,25 @@
 #define GUARD_SOCK_STREAM 1
 #define GUARD_FMODE_WRITE 0x2
 
+/*
+ * Every object defines the maps and LICENSE. The pack links all objects
+ * into one (`bpftool gen object core.bpf.o ...`), so the programs share
+ * one instance of each map; weak definitions let the linker merge the
+ * identical copies instead of refusing them.
+ *
+ * guard_pick is not shared that way: the linker would keep every weak
+ * copy's code but only one symbol, and loaders (aya) refuse code without
+ * a symbol. Each object names its own copy guard_pick_<GUARD_OBJ>, which
+ * the object defines before including this file.
+ */
+#define GUARD_SHARED __attribute__((weak))
+#ifndef GUARD_OBJ
+#error "define GUARD_OBJ (the object's name) before including common.h"
+#endif
+#define GUARD_CAT2(a, b) a##b
+#define GUARD_CAT(a, b) GUARD_CAT2(a, b)
+#define guard_pick GUARD_CAT(guard_pick_, GUARD_OBJ)
+
 /* Hook numbers: the order of sensr_guard::rule::Hook. */
 enum guard_hook {
 	GUARD_HOOK_EXEC = 0,
@@ -149,7 +168,7 @@ struct {
 	__uint(max_entries, GUARD_MAX_RULES);
 	__type(key, __u32);
 	__type(value, struct guard_rule_meta);
-} rules_meta SEC(".maps");
+} rules_meta SEC(".maps") GUARD_SHARED;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
@@ -157,7 +176,7 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, struct guard_path_key);
 	__type(value, struct guard_rule_set);
-} exe_prefix_lpm SEC(".maps");
+} exe_prefix_lpm SEC(".maps") GUARD_SHARED;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
@@ -165,7 +184,7 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, struct guard_path_key);
 	__type(value, struct guard_rule_set);
-} path_prefix_lpm SEC(".maps");
+} path_prefix_lpm SEC(".maps") GUARD_SHARED;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
@@ -173,7 +192,7 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, struct guard_net4_key);
 	__type(value, struct guard_rule_set);
-} net4_lpm SEC(".maps");
+} net4_lpm SEC(".maps") GUARD_SHARED;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
@@ -181,47 +200,47 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, struct guard_net6_key);
 	__type(value, struct guard_rule_set);
-} net6_lpm SEC(".maps");
+} net6_lpm SEC(".maps") GUARD_SHARED;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, GUARD_MAX_PORT_KEYS);
 	__type(key, struct guard_port_key);
 	__type(value, struct guard_rule_set);
-} port_rules SEC(".maps");
+} port_rules SEC(".maps") GUARD_SHARED;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, GUARD_MAX_UNIT_KEYS);
 	__type(key, struct guard_unit_key);
 	__type(value, struct guard_rule_set);
-} unit_rules SEC(".maps");
+} unit_rules SEC(".maps") GUARD_SHARED;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, GUARD_MAX_UID_KEYS);
 	__type(key, struct guard_uid_key);
 	__type(value, struct guard_rule_set);
-} uid_rules SEC(".maps");
+} uid_rules SEC(".maps") GUARD_SHARED;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, GUARD_MAX_RULES);
 	__type(key, __u32);
 	__type(value, __u64);
-} hits SEC(".maps");
+} hits SEC(".maps") GUARD_SHARED;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, __u32);
 	__type(value, struct guard_config);
-} config SEC(".maps");
+} config SEC(".maps") GUARD_SHARED;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, GUARD_RINGBUF_BYTES);
-} events SEC(".maps");
+} events SEC(".maps") GUARD_SHARED;
 
 /* Events the ring buffer had no room for (per CPU; userspace sums). */
 struct {
@@ -229,7 +248,7 @@ struct {
 	__uint(max_entries, 1);
 	__type(key, __u32);
 	__type(value, __u64);
-} ringbuf_dropped SEC(".maps");
+} ringbuf_dropped SEC(".maps") GUARD_SHARED;
 
 /* The task's executable, set at exec and inherited at fork (task_alloc in
  * exec.bpf.c). Userspace may seed tasks that predate the load (pidfd key). */
@@ -238,7 +257,7 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
 	__type(value, struct guard_path_key);
-} task_exe SEC(".maps");
+} task_exe SEC(".maps") GUARD_SHARED;
 
 /* ---- per-object working memory (not part of the contract) ---- */
 
@@ -262,7 +281,7 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
 	__type(value, struct guard_scratch);
-} scratch SEC(".maps");
+} scratch SEC(".maps") GUARD_SHARED;
 
 /* ---- helpers ---- */
 
@@ -397,7 +416,8 @@ static __always_inline int begin(struct guard_scratch *s, struct task_struct *ta
 /*
  * The lowest enabled rule of `hook` in `acc`, a block rule before any alert
  * rule: returns slot | action << 16, or -1. A global function, so the
- * verifier checks its bounded walk (16 words of 64 bits) once per object.
+ * verifier checks its bounded walk (16 words of 64 bits) once per object
+ * (named guard_pick_<object>, see GUARD_OBJ).
  */
 __noinline int guard_pick(const struct guard_rule_set *acc, __u32 hook)
 {

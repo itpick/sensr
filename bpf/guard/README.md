@@ -4,8 +4,12 @@ C BPF LSM programs, compiled by `nix/packages/sensr-guard-bpf.nix` (clang
 `-target bpf`, `vmlinux.h` from the image kernel's BTF) into
 
 ```
-$out/share/sensr-guard/packs/core/{manifest.json,rules.json,*.bpf.o}
+$out/share/sensr-guard/packs/core/{manifest.json,rules.json,core.bpf.o}
 ```
+
+Each source below compiles to its own object, and the build links them
+all into `core.bpf.o` with `bpftool gen object`. The manifest's `programs`
+lists that one object.
 
 `common.h` is the map contract; `crates/sensr-guard` mirrors its structs
 with `#[repr(C)]`. This file is the same contract in prose. The rule
@@ -13,7 +17,7 @@ compiler and the loader must follow it exactly. Change both sides together.
 
 ## Objects and programs
 
-| Object | Section | Hook |
+| Source object | Section | Hook |
 |---|---|---|
 | exec.bpf.o | `lsm.s/bprm_check_security` | `exec`. It also caches the new exe in `task_exe`. |
 | | `lsm/task_alloc` | No hook. It copies the parent's `task_exe` to each new task. |
@@ -34,12 +38,18 @@ pattern the spike proved; it needs no kfuncs. Built against 7.3.4's BTF,
 every program passed the verifier on a live 7.2 aarch64 kernel, and each
 one blocked and reported as described below.
 
-**Shared maps.** Every object declares the same maps. The loader creates
-each map in the table below once and gives it to every object by name, for
-example with libbpf `bpf_map__reuse_fd` or an aya map override. `task_exe`
-in particular must be shared: exec.bpf.o fills it and the others read it.
-`scratch` is per object and internal. The loader creates it but never
-reads or writes it.
+**Shared maps.** Every source object declares the same maps, as weak
+symbols (`GUARD_SHARED` in common.h). The link merges them, so
+`core.bpf.o` holds one instance of each map, and every program uses it.
+The loader loads that one object and creates each map once, with no
+pinning. `task_exe` in particular must be shared: exec fills it and the
+others read it. `scratch` is also merged, and it is internal: the loader
+creates it but never reads or writes it.
+
+`guard_pick` is a global (non-static) function. Each source names its
+copy `guard_pick_<GUARD_OBJ>`, so the link keeps every copy with its own
+symbol. A weak copy would leave code with no symbol behind, which aya
+refuses to load.
 
 C struct tags carry a `guard_` prefix (`struct guard_event`,
 `struct guard_rule_set`, ...), because the kernel's own types in

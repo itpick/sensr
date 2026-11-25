@@ -2,9 +2,10 @@
 /* exec: process launches (hook `exec`). The target is the program being
  * started; the process match uses the program that calls exec. Also keeps
  * task_exe current: set here at exec, copied to every new task at fork. */
+#define GUARD_OBJ exec
 #include "common.h"
 
-char LICENSE[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") GUARD_SHARED = "GPL";
 
 SEC("lsm.s/bprm_check_security")
 int BPF_PROG(guard_exec, struct linux_binprm *bprm, int ret)

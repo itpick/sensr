@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* creds: privilege changes by setuid (hook `setuid`). The target is the new
  * effective uid. */
+#define GUARD_OBJ creds
 #include "common.h"
 
-char LICENSE[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") GUARD_SHARED = "GPL";
 
 SEC("lsm/task_fix_setuid")
 int BPF_PROG(guard_setuid, struct cred *new, const struct cred *old, int flags, int ret)

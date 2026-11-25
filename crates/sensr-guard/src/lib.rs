@@ -5,6 +5,8 @@
 
 pub mod compile;
 pub mod config;
+#[cfg(feature = "daemon")]
+pub mod loader;
 pub mod maps;
 pub mod proto;
 pub mod rule;

@@ -11,16 +11,30 @@ repository.workspace = true
 default = []
 # SQLite event store (later tasks add its dependencies).
 store = []
-# The loader and daemon (later tasks add its dependencies).
-daemon = []
+# The loader and daemon. The BPF side (aya) is Linux-only; elsewhere the
+# feature builds the platform-neutral parts (the apply plan).
+daemon = ["dep:aya", "dep:object", "dep:serde_json"]
 
 [dependencies]
 ipnet.workspace = true
 serde.workspace = true
+serde_json = { workspace = true, optional = true }
 thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { workspace = true, optional = true }
+object = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
+
+# Test tool for the loader's VM test (nix/tests/guard-load.nix) and live
+# runs: loads a pack, applies rules on command, and exits on `quit`.
+[[bin]]
+name = "guard-load-probe"
+path = "src/bin/guard-load-probe.rs"
+required-features = ["daemon"]
+test = false
 
 [lints]
 workspace = true

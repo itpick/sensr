@@ -2,9 +2,10 @@
 /* bpf: BPF program loads and link creation by any process but sensr-guard
  * (hook `bpf`). sensr-guard (config.guard_tgid) is never reported or
  * blocked. The target names the command. */
+#define GUARD_OBJ bpf
 #include "common.h"
 
-char LICENSE[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") GUARD_SHARED = "GPL";
 
 SEC("lsm/bpf")
 int BPF_PROG(guard_bpf, int cmd, union bpf_attr *attr, unsigned int size, bool kernel,
