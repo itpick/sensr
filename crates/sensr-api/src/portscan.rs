@@ -38,14 +38,16 @@ pub fn use_paths(dir: PathBuf, socket: PathBuf) -> bool {
     PATHS.set((dir, socket)).is_ok()
 }
 
-fn dir() -> PathBuf {
+/// The database directory (the test hook's, else `SENSR_SCAN_DIR`, else the default).
+pub(crate) fn dir() -> PathBuf {
     if let Some((d, _)) = PATHS.get() {
         return d.clone();
     }
     std::env::var_os("SENSR_SCAN_DIR").map_or_else(|| PathBuf::from(DB_DIR), PathBuf::from)
 }
 
-fn socket() -> PathBuf {
+/// The control socket (the test hook's, else `SENSR_SCAN_SOCKET`, else the default).
+pub(crate) fn socket() -> PathBuf {
     if let Some((_, s)) = PATHS.get() {
         return s.clone();
     }

@@ -3177,6 +3177,102 @@ impl GridModel for IdsUserRule {
     }
 }
 
+// ---------------------------------------------------------------- Services › Port Scanner
+
+/// Scan speeds.
+pub const SCAN_PACES: &[(&str, &str)] = &[
+    ("gentle", "Gentle: at most 200 connections a second"),
+    ("normal", "Normal"),
+    ("fast", "Fast"),
+];
+
+/// Services › Port Scanner settings (`portscan`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PortscanSettings {
+    /// Allow scanning.
+    pub enabled: bool,
+    /// Scan each device once when it first appears.
+    pub auto_scan_new: bool,
+    /// `gentle`, `normal` or `fast`.
+    pub pace: String,
+    /// Scans kept per device.
+    pub history: Option<u32>,
+    /// Largest range one scan may cover.
+    pub max_range: Option<u32>,
+}
+
+impl FormModel for PortscanSettings {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enabled", K::Checkbox)
+                .help("Allow port scans. Nothing is scanned unless someone asks, or a new device appears with automatic scans on."),
+            F::new("auto_scan_new", "Scan new devices", K::Checkbox)
+                .help("Scan each device once, the first time it joins the network."),
+            F::new("pace", "Pace", K::Select(SCAN_PACES))
+                .help("Gentle suits small or fragile networks: one device at a time, at most 64 connections in flight."),
+            F::new("history", "Scans kept", K::Number { min: 1, max: 100 })
+                .help("Complete scans kept per device. Leave empty for 10."),
+            F::new("max_range", "Largest range", K::Number { min: 1, max: 65_536 })
+                .help("Most addresses one scan request may cover. Leave empty for 4096."),
+        ];
+        FIELDS
+    }
+}
+
+/// A device that is never scanned (`portscan.exclude`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PortscanExclude {
+    /// Object key.
+    pub uuid: String,
+    /// Enabled.
+    pub enabled: bool,
+    /// A MAC or an IP address.
+    pub target: String,
+    /// Why.
+    pub description: String,
+}
+
+impl FormModel for PortscanExclude {
+    fn fields() -> &'static [F] {
+        const FIELDS: &[F] = &[
+            F::new("enabled", "Enabled", K::Checkbox),
+            F::new("target", "Device", K::Text)
+                .required()
+                .help("A MAC address (aa:bb:cc:dd:ee:ff) or an IP address."),
+            F::new("description", "Description", K::Text),
+        ];
+        FIELDS
+    }
+
+    fn validate(&self) -> Vec<FieldError> {
+        let t = self.target.trim();
+        let mac = t.split(':').count() == 6
+            && t.split(':')
+                .all(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_hexdigit()));
+        if t.is_empty() || mac || t.parse::<std::net::IpAddr>().is_ok() {
+            Vec::new()
+        } else {
+            vec![FieldError::new(
+                "target",
+                "Please enter a MAC address or an IP address.",
+            )]
+        }
+    }
+}
+
+impl GridModel for PortscanExclude {
+    fn columns() -> &'static [Column] {
+        const C: &[Column] = &[
+            Column::bool("enabled", "Enabled"),
+            Column::text("target", "Device"),
+            Column::text("description", "Description"),
+        ];
+        C
+    }
+}
+
 // ---------------------------------------------------------------- registries
 
 /// Serializable stand-in for a settings form's model type.
@@ -3210,6 +3306,8 @@ pub enum FormId {
     OidcSettings,
     /// [`SamlSettings`].
     SamlSettings,
+    /// [`PortscanSettings`].
+    PortscanSettings,
 }
 
 /// Serializable stand-in for a grid's row type.
@@ -3271,6 +3369,8 @@ pub enum GridId {
     OidcProviders,
     /// System › Access › SAML.
     SamlProviders,
+    /// Services › Port Scanner (never scanned).
+    PortscanExcludes,
 }
 
 fn sanitize(scope: &Option<String>, default: &str) -> String {
@@ -3300,6 +3400,7 @@ impl FormId {
             Self::IdsSettings => IdsSettings::fields(),
             Self::OidcSettings => OidcSettings::fields(),
             Self::SamlSettings => SamlSettings::fields(),
+            Self::PortscanSettings => PortscanSettings::fields(),
         }
     }
 
@@ -3323,6 +3424,7 @@ impl FormId {
             Self::IdsSettings => go::<IdsSettings>(),
             Self::OidcSettings => go::<OidcSettings>(),
             Self::SamlSettings => go::<SamlSettings>(),
+            Self::PortscanSettings => go::<PortscanSettings>(),
         }
     }
 
@@ -3358,6 +3460,7 @@ impl FormId {
             Self::IdsSettings => go::<IdsSettings>(base, inputs),
             Self::OidcSettings => go::<OidcSettings>(base, inputs),
             Self::SamlSettings => go::<SamlSettings>(base, inputs),
+            Self::PortscanSettings => go::<PortscanSettings>(base, inputs),
         }
     }
 
@@ -3407,6 +3510,7 @@ impl GridId {
             Self::UserGroups => GridMeta::of::<UserGroup>(),
             Self::OidcProviders => GridMeta::of::<OidcProvider>(),
             Self::SamlProviders => GridMeta::of::<SamlProvider>(),
+            Self::PortscanExcludes => GridMeta::of::<PortscanExclude>(),
         }
     }
 
@@ -3445,6 +3549,7 @@ impl GridId {
             Self::UserGroups => go::<UserGroup>(base, inputs),
             Self::OidcProviders => go::<OidcProvider>(base, inputs),
             Self::SamlProviders => go::<SamlProvider>(base, inputs),
+            Self::PortscanExcludes => go::<PortscanExclude>(base, inputs),
         }
     }
 
@@ -3517,7 +3622,7 @@ impl GridId {
 
 impl FormId {
     /// Every form, in menu order.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::OidcSettings,
         Self::SamlSettings,
         Self::SystemGeneral,
@@ -3525,6 +3630,7 @@ impl FormId {
         Self::SourceNatMode,
         Self::DhcpSettings,
         Self::IdsSettings,
+        Self::PortscanSettings,
         Self::UnboundGeneral,
         Self::UnboundAdvanced,
         Self::UnboundServeExpired,
@@ -3551,6 +3657,7 @@ impl FormId {
             Self::IdsSettings => "/ui/ids",
             Self::OidcSettings => "/ui/system/oidc",
             Self::SamlSettings => "/ui/system/saml",
+            Self::PortscanSettings => "/ui/portscan",
         }
     }
 
@@ -3562,7 +3669,7 @@ impl FormId {
 
 impl GridId {
     /// Every grid, in menu order (grids sharing a page in the order the page shows them).
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::Gateways,
         Self::GatewayGroups,
         Self::StaticRoutes,
@@ -3587,6 +3694,7 @@ impl GridId {
         Self::StaticMaps,
         Self::IdsSuppressions,
         Self::IdsUserRules,
+        Self::PortscanExcludes,
         Self::HostOverrides,
         Self::AccessLists,
         Self::Blocklists,
@@ -3623,6 +3731,7 @@ impl GridId {
             Self::UserGroups => "/ui/system/group",
             Self::OidcProviders => "/ui/system/oidc",
             Self::SamlProviders => "/ui/system/saml",
+            Self::PortscanExcludes => "/ui/portscan",
         }
     }
 
@@ -3666,6 +3775,7 @@ impl GridId {
             Self::UserGroups => "User groups",
             Self::OidcProviders => "OpenID Connect",
             Self::SamlProviders => "SAML",
+            Self::PortscanExcludes => "Never scanned",
         }
     }
 }
@@ -3724,7 +3834,7 @@ macro_rules! kinds {
 kinds! {
     forms: SystemGeneral, Interface, SourceNatMode, DhcpSettings, UnboundGeneral, UnboundAdvanced,
         UnboundServeExpired, UnboundLogging, UnboundCache, UnboundAclDefault, UnboundForwarding,
-        IdsSettings, OidcSettings, SamlSettings;
+        IdsSettings, OidcSettings, SamlSettings, PortscanSettings;
     grids: Interface => Assignments, "interface",
         Alias => Aliases, "alias",
         FilterRule => FilterRules, "rule",
@@ -3752,7 +3862,8 @@ kinds! {
         User => Users, "user",
         UserGroup => UserGroups, "group",
         OidcProvider => OidcProviders, "provider",
-        SamlProvider => SamlProviders, "provider"
+        SamlProvider => SamlProviders, "provider",
+        PortscanExclude => PortscanExcludes, "device"
 }
 
 #[cfg(test)]
@@ -3810,6 +3921,7 @@ mod tests {
             GridId::Loopbacks,
             GridId::VirtualIps,
             GridId::FirewallGroups,
+            GridId::PortscanExcludes,
             GridId::Users,
             GridId::UserGroups,
         ] {

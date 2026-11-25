@@ -34,6 +34,10 @@ struct State {
     clock: Box<dyn Fn() -> u64 + Send>,
     /// Host keys dropped with Forget.
     forgotten: std::collections::HashSet<String>,
+    /// Port scans queued through [`Backend::portscan`] (the mock never runs them).
+    scan_queue: Vec<sensr_scan::proto::QueuedJob>,
+    /// Job ids cancelled through [`Backend::portscan`].
+    scans_cancelled: std::collections::HashSet<u64>,
 }
 
 impl State {
@@ -104,6 +108,10 @@ pub struct MockBackend {
     privileges: Option<Vec<String>>,
     /// The dnstap feed reads as stale (lookups only, no minutes).
     stale_feed: bool,
+    /// Where the port scan database is (see [`seed_scans`]).
+    scan_dir: Option<std::path::PathBuf>,
+    /// The port scanner's socket cannot be reached.
+    scanner_down: bool,
 }
 
 impl Default for MockBackend {
@@ -156,11 +164,100 @@ impl MockBackend {
                 next_token: 1,
                 clock,
                 forgotten: Default::default(),
+                scan_queue: Vec::new(),
+                scans_cancelled: Default::default(),
             }),
             users: vec![("root".into(), "sensr".into())],
             insight_dir: None,
             privileges: None,
             stale_feed: false,
+            scan_dir: None,
+            scanner_down: false,
+        }
+    }
+
+    /// Reads port scans from `dir` instead of the daemon's directory.
+    #[must_use]
+    pub fn with_scan_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.scan_dir = Some(dir.into());
+        self
+    }
+
+    /// The port scanner's control socket cannot be reached.
+    #[must_use]
+    pub fn with_scanner_down(mut self) -> Self {
+        self.scanner_down = true;
+        self
+    }
+
+    /// The daemon's answer: refusals as sensr-scan gives them (public targets, bad or
+    /// too large ones), jobs queued in memory, and the seeded database's running range
+    /// job reported running with fixed progress.
+    fn scan_reply(&self, req: sensr_scan::proto::Request) -> sensr_scan::proto::Reply {
+        use sensr_scan::proto::{JobKind, JobProgress, QueuedJob, Reply, Request, StatusView};
+        match req {
+            Request::Start(r) => {
+                let cfg = sensr_scan::config::Config {
+                    enabled: true,
+                    auto_scan_new: false,
+                    pace: sensr_scan::config::Pace::Gentle,
+                    history: 10,
+                    max_range: 4096,
+                    exclude: vec![],
+                    local: vec![],
+                    router: vec![],
+                };
+                let checked = sensr_scan::target::parse(&r.target)
+                    .map_err(sensr_scan::proto::Refusal::Invalid)
+                    .and_then(|t| sensr_scan::target::check(&t, &cfg, r.public_ok));
+                if let Err(reason) = checked {
+                    return Reply::Refused { reason };
+                }
+                self.with(|s| {
+                    if let Some(q) = s.scan_queue.iter().find(|q| q.target == r.target) {
+                        return Reply::Started { job_id: q.job_id };
+                    }
+                    let job_id = 1_000 + s.scan_queue.len() as u64 + s.scans_cancelled.len() as u64;
+                    s.scan_queue.push(QueuedJob {
+                        job_id,
+                        kind: r.kind,
+                        target: r.target.clone(),
+                    });
+                    Reply::Started { job_id }
+                })
+            }
+            Request::Cancel { job_id } => self.with(|s| {
+                s.scan_queue.retain(|q| q.job_id != job_id);
+                s.scans_cancelled.insert(job_id);
+                Reply::Ok
+            }),
+            Request::Status => {
+                let running = self
+                    .scan_dir
+                    .as_ref()
+                    .map(|d| d.join(sensr_scan::config::DB))
+                    .filter(|p| p.exists())
+                    .and_then(|p| sensr_scan::store::Store::open_ro(&p).ok())
+                    .and_then(|st| st.jobs(JobKind::Range, 50).ok())
+                    .and_then(|jobs| jobs.into_iter().find(|j| j.status == "running"))
+                    .map(|j| u64::try_from(j.id).unwrap_or(0))
+                    .filter(|id| self.with(|s| !s.scans_cancelled.contains(id)))
+                    .map(|job_id| JobProgress {
+                        job_id,
+                        kind: JobKind::Range,
+                        target: SCAN_RUNNING.to_owned(),
+                        alive: Some(12),
+                        address_n: 3,
+                        address_total: 12,
+                        tcp_done: 41_200,
+                        udp_done: 310,
+                    });
+                Reply::Status(StatusView {
+                    running,
+                    queue: self.with(|s| s.scan_queue.clone()),
+                })
+            }
+            Request::Known { .. } => Reply::Ok,
         }
     }
 
@@ -706,6 +803,25 @@ impl Backend for MockBackend {
     }
     fn dhcp_leases(&self) -> BoxFuture<'_, ApiResult<Vec<DhcpLease>>> {
         ready(Ok(simulated_leases()))
+    }
+    fn scan_dir(&self) -> std::path::PathBuf {
+        self.scan_dir.clone().unwrap_or_else(|| {
+            std::env::var_os("SENSR_SCAN_DIR").map_or_else(
+                || std::path::PathBuf::from(sensr_scan::config::DB_DIR),
+                std::path::PathBuf::from,
+            )
+        })
+    }
+    fn portscan(
+        &self,
+        req: sensr_scan::proto::Request,
+    ) -> BoxFuture<'_, ApiResult<sensr_scan::proto::Reply>> {
+        if self.scanner_down {
+            return ready(Err(ApiError::Backend(
+                crate::portscan::NOT_RUNNING.to_owned(),
+            )));
+        }
+        ready(Ok(self.scan_reply(req)))
     }
     fn insight_dir(&self) -> std::path::PathBuf {
         self.insight_dir.clone().unwrap_or_else(|| {
@@ -1741,6 +1857,192 @@ fn simulated_status(doc: &Value, t: u64) -> SystemStatus {
     }
 }
 
+/// The range the seeded database has a scan running of.
+pub const SCAN_RUNNING: &str = "192.168.72.0/24";
+
+/// Writes a small port scan database (`scans.db`) into `dir` through sensr-scan's own
+/// store: device scans finishing at `at` (Unix seconds) and a week earlier for some of
+/// the mock's hosts (nas, bench-pi with a newly opened port, the camera with a partial
+/// scan, the printer that did not answer, device-01 with many ports), a finished range
+/// scan and a running one ([`SCAN_RUNNING`]).
+///
+/// # Errors
+/// Any SQLite error.
+pub fn seed_scans(dir: &std::path::Path, at: i64) -> Result<(), String> {
+    use sensr_scan::proto::JobKind;
+    use sensr_scan::types::{Ident, PortRow, PortState, Proto, ScanStatus};
+    const WEEK: i64 = 7 * 86_400;
+    let path = dir.join(sensr_scan::config::DB);
+    let _ = std::fs::remove_file(&path);
+    let s = sensr_scan::store::Store::open(&path).map_err(|e| e.to_string())?;
+    let port = |proto, port, state, service: &str, ident: Ident| PortRow {
+        proto,
+        port,
+        state,
+        service: Some(service.to_owned()),
+        ident,
+    };
+    let said = |product: Option<&str>, version: Option<&str>, title: Option<&str>| Ident {
+        product: product.map(str::to_owned),
+        version: version.map(str::to_owned),
+        title: title.map(str::to_owned),
+        ..Ident::default()
+    };
+    let open = PortState::Open;
+    // the greeting only: no product, so the line shows no label for it
+    let ssh = |v: &str| {
+        port(
+            Proto::Tcp,
+            22,
+            open,
+            "ssh",
+            Ident {
+                banner: Some(format!("SSH-2.0-OpenSSH_{v}")),
+                ..Ident::default()
+            },
+        )
+    };
+    let nas = vec![
+        ssh("9.6"),
+        port(
+            Proto::Tcp,
+            80,
+            open,
+            "http",
+            said(Some("nginx"), None, Some("Synology")),
+        ),
+        port(Proto::Udp, 53, open, "domain", Ident::default()),
+    ];
+    let pi_then = vec![ssh("9.2p1")];
+    let mut pi_now = pi_then.clone();
+    pi_now.push(port(
+        Proto::Tcp,
+        3389,
+        open,
+        "ms-wbt-server",
+        said(None, None, None),
+    ));
+    let camera = vec![
+        port(
+            Proto::Tcp,
+            554,
+            open,
+            "rtsp",
+            Ident {
+                banner: Some("RTSP/1.0 200 OK".into()),
+                ..Ident::default()
+            },
+        ),
+        port(
+            Proto::Udp,
+            1900,
+            PortState::OpenFiltered,
+            "ssdp",
+            Ident::default(),
+        ),
+    ];
+    let busy: Vec<PortRow> = [21, 22, 23, 25, 53, 80, 110, 139, 143, 443, 445, 8080]
+        .into_iter()
+        .map(|p| port(Proto::Tcp, p, open, "svc", Ident::default()))
+        .collect();
+    type Scan<'a> = (&'a str, &'a str, i64, ScanStatus, &'a [PortRow]);
+    let scans: [Scan<'_>; 7] = [
+        (
+            "52:54:00:aa:bb:01",
+            "192.168.1.20",
+            at - WEEK,
+            ScanStatus::Partial,
+            &nas[..1],
+        ),
+        (
+            "52:54:00:aa:bb:01",
+            "192.168.1.20",
+            at,
+            ScanStatus::Complete,
+            &nas,
+        ),
+        (
+            "b8:27:eb:7d:4e:25",
+            "192.168.1.112",
+            at - WEEK,
+            ScanStatus::Complete,
+            &pi_then,
+        ),
+        (
+            "b8:27:eb:7d:4e:25",
+            "192.168.1.112",
+            at,
+            ScanStatus::Complete,
+            &pi_now,
+        ),
+        (
+            "7c:78:b2:10:9e:41",
+            "192.168.72.40",
+            at,
+            ScanStatus::Partial,
+            &camera,
+        ),
+        (
+            "00:1b:a9:44:02:7c",
+            "192.168.1.30",
+            at,
+            ScanStatus::Failed,
+            &[],
+        ),
+        (
+            "02:00:00:00:00:01",
+            "192.168.1.101",
+            at,
+            ScanStatus::Complete,
+            &busy,
+        ),
+    ];
+    let err = |e: &dyn std::fmt::Display| e.to_string();
+    for (mac, ip, t, status, ports) in scans {
+        let job = s
+            .begin_job(JobKind::Device, ip, Some(mac), false, false)
+            .map_err(|e| err(&e))?;
+        let addr = ip.parse().map_err(|e| err(&e))?;
+        s.write_scan(job, addr, Some(mac), t - 600, t, status, false, ports)
+            .map_err(|e| err(&e))?;
+        let end = if status == ScanStatus::Failed {
+            "failed"
+        } else {
+            "complete"
+        };
+        s.end_job(job, end, &[]).map_err(|e| err(&e))?;
+    }
+    // A finished range scan of addresses outside the inventory, and a running one.
+    let job = s
+        .begin_job(JobKind::Range, "192.168.1.0/24", None, false, false)
+        .map_err(|e| err(&e))?;
+    let printer = [port(
+        Proto::Tcp,
+        80,
+        open,
+        "http",
+        said(None, None, Some("Printer setup")),
+    )];
+    for (ip, ports) in [("192.168.1.50", &printer[..]), ("192.168.1.51", &[][..])] {
+        let addr = ip.parse().map_err(|e| err(&e))?;
+        s.write_scan(
+            job,
+            addr,
+            None,
+            at - 2 * 86_400,
+            at - 2 * 86_400 + 300,
+            ScanStatus::Complete,
+            false,
+            ports,
+        )
+        .map_err(|e| err(&e))?;
+    }
+    s.end_job(job, "complete", &[]).map_err(|e| err(&e))?;
+    s.begin_job(JobKind::Range, SCAN_RUNNING, None, false, false)
+        .map_err(|e| err(&e))?;
+    Ok(())
+}
+
 /// Writes a small traffic database (`flows.db`: hosts, services, remotes and interfaces over
 /// the last year, live interface samples for the last hour) and alert database (`alerts.db`)
 /// into `dir`, through the same store code sensr-insight writes with. Deterministic for a
@@ -2198,6 +2500,12 @@ pub fn seed() -> Value {
                     "allowed_ips": ["10.10.0.3/32"], "keepalive": 25}
             }
         },
+        "portscan": {
+            "exclude": {
+                "5c000000-0000-4000-a000-000000000001": {"target": "00:14:78:38:a5:fc",
+                    "description": "Old router: reboots when scanned"}
+            }
+        },
         "ids": {
             "enabled": true,
             "interfaces": ["wan"],
@@ -2614,6 +2922,7 @@ mod tests {
             GridId::WgPeers,
             GridId::IdsSuppressions,
             GridId::IdsUserRules,
+            GridId::PortscanExcludes,
         ] {
             let scope = g.scope(&None);
             let store = crate::adapt::store(g, &scope, &doc);
@@ -2656,6 +2965,7 @@ mod tests {
             FormId::UnboundAclDefault,
             FormId::UnboundForwarding,
             FormId::IdsSettings,
+            FormId::PortscanSettings,
         ] {
             let scope = f.scope(&None);
             let view = crate::adapt::form_to_view(f, &doc, &scope).unwrap();

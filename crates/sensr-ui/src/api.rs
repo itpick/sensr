@@ -823,6 +823,47 @@ mod server {
                 std::path::PathBuf::from,
             )
         }
+        /// Directory holding sensr-scan's `scans.db`: `SENSR_SCAN_DIR` when set (as for
+        /// sensr-api), else the daemon's default.
+        fn scan_dir(&self) -> std::path::PathBuf {
+            std::env::var_os("SENSR_SCAN_DIR").map_or_else(
+                || std::path::PathBuf::from(sensr_scan::config::DB_DIR),
+                std::path::PathBuf::from,
+            )
+        }
+        /// sensr-scan's control socket: `SENSR_SCAN_SOCKET` when set, else the daemon's
+        /// default.
+        fn scan_socket(&self) -> std::path::PathBuf {
+            std::env::var_os("SENSR_SCAN_SOCKET").map_or_else(
+                || std::path::PathBuf::from(sensr_scan::config::SOCKET),
+                std::path::PathBuf::from,
+            )
+        }
+        /// Sends one request to sensr-scan's control socket ([`Backend::scan_socket`]). A
+        /// socket that cannot be used is [`ApiError::Backend`] with
+        /// [`crate::portscan::NOT_RUNNING`] (the cause is logged). The caller checks the
+        /// port scanner privileges.
+        fn portscan(
+            &self,
+            req: sensr_scan::proto::Request,
+        ) -> BoxFuture<'_, ApiResult<sensr_scan::proto::Reply>> {
+            let sock = self.scan_socket();
+            Box::pin(async move {
+                let run = move || sensr_scan::client::send(&sock, &req);
+                // Off the async threads when there is a runtime (not in the component tests).
+                let r = if tokio::runtime::Handle::try_current().is_ok() {
+                    tokio::task::spawn_blocking(run)
+                        .await
+                        .map_err(|e| ApiError::Backend(e.to_string()))?
+                } else {
+                    run()
+                };
+                r.map_err(|e| {
+                    tracing::warn!(error = %e, "sensr-scan control socket");
+                    ApiError::Backend(crate::portscan::NOT_RUNNING.to_owned())
+                })
+            })
+        }
         /// Run-time state of one subsystem as the agent reports it (`null` when the
         /// subsystem is not running). Parse with [`crate::runtime::parse`].
         fn runtime(

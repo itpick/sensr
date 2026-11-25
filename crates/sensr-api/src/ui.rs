@@ -308,6 +308,14 @@ impl Backend for UiBackend {
         .boxed()
     }
 
+    fn scan_dir(&self) -> std::path::PathBuf {
+        crate::portscan::dir()
+    }
+
+    fn scan_socket(&self) -> std::path::PathBuf {
+        crate::portscan::socket()
+    }
+
     fn may_access(&self, url: &str) -> bool {
         self.state
             .registry

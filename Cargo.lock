@@ -5337,6 +5337,7 @@ dependencies = [
  "scraper",
  "sensr-auth",
  "sensr-flow",
+ "sensr-scan",
  "sensr-schema",
  "serde",
  "serde_json",
