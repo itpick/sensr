@@ -156,7 +156,7 @@ pub struct JobView {
     pub started: i64,
     /// Unix seconds; `None` while running.
     pub finished: Option<i64>,
-    /// `"running"`, `"complete"`, `"cancelled"` or `"failed"`.
+    /// `"queued"`, `"running"`, `"complete"`, `"cancelled"` or `"failed"`.
     pub status: String,
     /// Addresses left out of the job (excluded or not local).
     pub skipped: Vec<IpAddr>,

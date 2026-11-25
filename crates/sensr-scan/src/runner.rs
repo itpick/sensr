@@ -22,6 +22,7 @@ use crate::store::Store;
 use crate::target::{self, Target};
 use crate::types::{Ident, PortRow, PortState, Proto, ScanStatus};
 use crate::udp::udp_order;
+use crate::udp_probes::PROBES;
 
 /// Open TCP ports identified at once (a silent port takes ~4.5 s).
 const IDENT_PARALLEL: usize = 8;
@@ -149,6 +150,8 @@ struct HostScan {
 }
 
 /// Run `job` to the end and record it in `store`; returns the store's job id.
+/// `job.id` must be the job's `queued` row ([`Store::queue_job`]); it is
+/// marked running here.
 ///
 /// - A device job scans the MAC's current IPv4 from `neighbours()` when it
 ///   is local (or `public_ok`), else the job's address. An address that is
@@ -202,8 +205,25 @@ fn device_address(job: &Job, cfg: &Config, neigh: &HashMap<IpAddr, String>) -> O
         .as_deref()
         .and_then(|m| ip_for(m, neigh))
         .map(IpAddr::V4)
-        .filter(|ip| job.public_ok || target::is_local(*ip, &cfg.local));
+        .filter(|ip| job.public_ok || target::is_local(*ip, &cfg.local))
+        .filter(|ip| !cfg.router.contains(ip) && !cfg.excludes(*ip, None));
     Some(current.unwrap_or(given))
+}
+
+/// The job's row in the store: its id is the protocol `job_id` (R5).
+fn store_id(job: &Job) -> i64 {
+    i64::try_from(job.id).unwrap_or(i64::MAX)
+}
+
+/// Whether a UDP result is stored: open ports, and open|filtered only for
+/// ports with a protocol probe (silence after an empty datagram says too
+/// little to keep ~1,000 rows a scan, R6).
+fn keep_udp(port: u16, state: PortState) -> bool {
+    match state {
+        PortState::Open => true,
+        PortState::OpenFiltered => PROBES.iter().any(|p| p.port == port),
+        PortState::Closed | PortState::Filtered => false,
+    }
 }
 
 async fn run_device(
@@ -218,13 +238,8 @@ async fn run_device(
         .mac
         .clone()
         .or_else(|| ip.and_then(|ip| mac_for(ip, neigh)));
-    let id = store.begin_job(
-        job.kind,
-        &job.target,
-        mac.as_deref(),
-        job.auto,
-        job.public_ok,
-    )?;
+    let id = store_id(job);
+    store.start_job(id, mac.as_deref())?;
     let Some(ip) = ip else {
         store.end_job(id, "failed", &[])?;
         return Ok(id);
@@ -283,7 +298,8 @@ async fn run_range(
     ctx: &Ctx<'_>,
     neigh: HashMap<IpAddr, String>,
 ) -> rusqlite::Result<i64> {
-    let id = store.begin_job(job.kind, &job.target, None, job.auto, job.public_ok)?;
+    let id = store_id(job);
+    store.start_job(id, None)?;
     let mut skipped = Vec::new();
     let mut candidates = Vec::new();
     for ip in target::addresses(&job.parsed, &cfg.router) {
@@ -409,7 +425,7 @@ async fn scan_host(ctx: &Ctx<'_>, ip: IpAddr) -> HostScan {
         ports.extend(
             udp.ports
                 .into_iter()
-                .filter(|(_, st, _)| matches!(st, PortState::Open | PortState::OpenFiltered))
+                .filter(|(p, st, _)| keep_udp(*p, *st))
                 .map(|(p, st, id)| row(ctx, Proto::Udp, p, st, id.unwrap_or_default())),
         );
     }
@@ -512,6 +528,31 @@ mod tests {
         assert_eq!(device_address(&j, &cfg(), &neigh), Some(ip("192.168.1.5")));
         let j = job("192.168.1.5", Some("aa:bb:cc:dd:ee:ff"), true);
         assert_eq!(device_address(&j, &cfg(), &neigh), Some(ip("203.0.113.9")));
+    }
+
+    #[test]
+    fn device_does_not_follow_mac_to_an_excluded_or_router_address() {
+        let neigh = HashMap::from([(ip("192.168.1.20"), "aa:bb:cc:dd:ee:ff".to_string())]);
+        let j = job("192.168.1.5", Some("aa:bb:cc:dd:ee:ff"), false);
+        let mut c = cfg();
+        c.exclude = vec![crate::config::Exclude::Addr(ip("192.168.1.20"))];
+        assert_eq!(device_address(&j, &c, &neigh), Some(ip("192.168.1.5")));
+        let mut c = cfg();
+        c.router = vec![ip("192.168.1.20")];
+        assert_eq!(device_address(&j, &c, &neigh), Some(ip("192.168.1.5")));
+    }
+
+    #[test]
+    fn udp_open_filtered_kept_only_for_probed_ports() {
+        let probed = PROBES[0].port;
+        let unprobed = (1..=u16::MAX)
+            .find(|p| PROBES.iter().all(|x| x.port != *p))
+            .unwrap();
+        assert!(keep_udp(probed, PortState::OpenFiltered));
+        assert!(!keep_udp(unprobed, PortState::OpenFiltered));
+        assert!(keep_udp(unprobed, PortState::Open));
+        assert!(!keep_udp(probed, PortState::Closed));
+        assert!(!keep_udp(probed, PortState::Filtered));
     }
 
     #[test]

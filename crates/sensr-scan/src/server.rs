@@ -5,7 +5,9 @@ use std::io;
 use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -22,6 +24,10 @@ use crate::target::{self, Target};
 
 /// Longest request line accepted, in bytes.
 const MAX_LINE: u64 = 1024 * 1024;
+/// Most devices of one `Known` request considered; the rest are ignored.
+pub const MAX_KNOWN: usize = 4096;
+/// A connection that sends nothing for this long is closed.
+pub const IDLE: Duration = Duration::from_secs(60);
 
 type Neighbours = dyn Fn() -> HashMap<IpAddr, String> + Send + Sync;
 
@@ -43,6 +49,7 @@ pub struct Daemon {
     jobs: Mutex<Jobs>,
     progress: Progress,
     wake: Notify,
+    idle: Duration,
 }
 
 impl Daemon {
@@ -65,6 +72,7 @@ impl Daemon {
             }),
             progress: Progress::default(),
             wake: Notify::new(),
+            idle: IDLE,
         })
     }
 
@@ -82,6 +90,13 @@ impl Daemon {
         f: impl Fn() -> HashMap<IpAddr, String> + Send + Sync + 'static,
     ) -> Daemon {
         self.neighbours = Arc::new(f);
+        self
+    }
+
+    /// Test hook: close idle connections after `d` instead of [`IDLE`].
+    #[must_use]
+    pub fn with_idle_timeout(mut self, d: Duration) -> Daemon {
+        self.idle = d;
         self
     }
 
@@ -115,7 +130,8 @@ impl Daemon {
         }
     }
 
-    /// Answer one request.
+    /// Answer one request. Blocks on SQLite: async callers use
+    /// `spawn_blocking`.
     #[must_use]
     pub fn handle(&self, req: Request) -> Reply {
         match req {
@@ -123,7 +139,7 @@ impl Daemon {
             Request::Cancel { job_id } => self.cancel(job_id),
             Request::Status => Reply::Status(self.status()),
             Request::Known { macs } => {
-                for KnownDevice { mac, ipv4 } in macs {
+                for KnownDevice { mac, ipv4 } in capped(macs) {
                     let _ = self.start(&StartReq {
                         target: ipv4.to_string(),
                         kind: JobKind::Device,
@@ -178,7 +194,11 @@ impl Daemon {
             && job.kind == JobKind::Device
         {
             if self.cfg.router.contains(&ip) {
-                return refused(Refusal::Excluded);
+                return if r.auto {
+                    Reply::Ok
+                } else {
+                    refused(Refusal::Excluded)
+                };
             }
             if self.cfg.excludes(ip, job.mac.as_deref()) {
                 if r.auto {
@@ -189,14 +209,50 @@ impl Daemon {
                 }
             }
         }
-        let pushed = self.jobs().queue.push(job);
-        match pushed {
+        match self.enqueue(job) {
             Ok(job_id) => {
                 self.wake.notify_one();
                 Reply::Started { job_id }
             }
             Err(e) => refused(e),
         }
+    }
+
+    /// Queue `job` under its store row (`queued`), whose id is the
+    /// protocol `job_id` (R5). A target already queued or running gets that
+    /// job's id, and a person asking for an automatic job takes it over.
+    fn enqueue(&self, mut job: Job) -> Result<u64, Refusal> {
+        let mut jobs = self.jobs();
+        if let Some(have) = jobs.queue.find(&job) {
+            let (id, was_auto) = (have.id, have.auto);
+            if was_auto && !job.auto {
+                if let Err(e) = self.store().own_job(store_id(id)) {
+                    tracing::warn!(job_id = id, error = %e, "could not mark job as the owner's");
+                }
+                if jobs.running.as_ref().is_some_and(|(r, _)| *r == id) {
+                    return Ok(id);
+                }
+            }
+            return jobs.queue.push(job);
+        }
+        if jobs.queue.is_full() {
+            return Err(Refusal::Invalid("too many scans are queued".to_string()));
+        }
+        let id = self
+            .store()
+            .queue_job(
+                job.kind,
+                &job.target,
+                job.mac.as_deref(),
+                job.auto,
+                job.public_ok,
+            )
+            .map_err(|e| {
+                tracing::error!(error = %e, "could not record a queued job");
+                Refusal::Invalid("the scan could not be recorded".to_string())
+            })?;
+        job.id = u64::try_from(id).unwrap_or(0);
+        jobs.queue.push(job)
     }
 
     fn cancel(&self, id: u64) -> Reply {
@@ -208,23 +264,11 @@ impl Daemon {
             }
             jobs.queue.take(id)
         };
+        // Out of the queue, the worker can no longer start it.
         match taken {
-            Some(job) => {
-                // Recorded, so the device is not queued automatically again.
-                if job.auto {
-                    let store = self.store();
-                    let r = store
-                        .begin_job(
-                            job.kind,
-                            &job.target,
-                            job.mac.as_deref(),
-                            true,
-                            job.public_ok,
-                        )
-                        .and_then(|sid| store.end_job(sid, "cancelled", &[]));
-                    if let Err(e) = r {
-                        tracing::warn!(job_id = id, error = %e, "could not record cancelled job");
-                    }
+            Some(_) => {
+                if let Err(e) = self.store().end_job(store_id(id), "cancelled", &[]) {
+                    tracing::warn!(job_id = id, error = %e, "could not record cancelled job");
                 }
                 Reply::Ok
             }
@@ -236,6 +280,9 @@ impl Daemon {
 
     /// Start the job worker on its own thread (with its own runtime and
     /// database connection): it runs queued jobs one at a time, forever.
+    /// The thread ends only if the database cannot be opened; the binary
+    /// exits then so systemd restarts it. A job that panics is recorded
+    /// `failed` and the worker goes on.
     ///
     /// # Panics
     /// If the thread or its runtime cannot be created.
@@ -248,60 +295,89 @@ impl Daemon {
                     .enable_all()
                     .build()
                     .expect("worker runtime");
-                rt.block_on(me.work());
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&rt, work(me));
             })
             .expect("worker thread")
     }
 
-    async fn work(&self) {
-        let store = match Store::open(&self.db) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "worker cannot open the database");
-                return;
-            }
-        };
-        loop {
-            let next = {
-                let mut jobs = self.jobs();
-                let job = jobs.queue.next();
-                if let Some(j) = &job {
-                    let token = CancellationToken::new();
-                    jobs.running = Some((j.id, token.clone()));
-                    self.progress.begin(j);
-                    Some((j.clone(), token))
-                } else {
-                    None
-                }
-            };
-            let Some((job, token)) = next else {
-                // `notify_one` keeps a permit, so a push since `next` is not lost.
-                self.wake.notified().await;
-                continue;
-            };
-            let id = job.id;
-            tracing::info!(job_id = id, target = %job.target, auto = job.auto, "scan started");
-            let neighbours = Arc::clone(&self.neighbours);
-            let r = run_job(
-                job,
-                &self.cfg,
-                &store,
-                &self.services,
-                &self.ports,
-                &self.progress,
-                token,
-                &*neighbours,
-            )
-            .await;
-            match r {
-                Ok(sid) => tracing::info!(job_id = id, store_id = sid, "scan ended"),
-                Err(e) => tracing::error!(job_id = id, error = %e, "scan could not be recorded"),
-            }
-            let mut jobs = self.jobs();
-            jobs.queue.finish(id);
-            jobs.running = None;
-            self.progress.clear();
+    /// Take the next job and mark it running.
+    fn next_job(&self) -> Option<(Job, CancellationToken)> {
+        let mut jobs = self.jobs();
+        let job = jobs.queue.next()?;
+        let token = CancellationToken::new();
+        jobs.running = Some((job.id, token.clone()));
+        self.progress.begin(&job);
+        Some((job, token))
+    }
+
+    fn job_ended(&self, id: u64) {
+        let mut jobs = self.jobs();
+        jobs.queue.finish(id);
+        jobs.running = None;
+        self.progress.clear();
+    }
+}
+
+fn store_id(id: u64) -> i64 {
+    i64::try_from(id).unwrap_or(i64::MAX)
+}
+
+/// The first [`MAX_KNOWN`] devices.
+fn capped(mut macs: Vec<KnownDevice>) -> Vec<KnownDevice> {
+    if macs.len() > MAX_KNOWN {
+        tracing::warn!(
+            sent = macs.len(),
+            max = MAX_KNOWN,
+            "known-device list too long; the rest ignored"
+        );
+        macs.truncate(MAX_KNOWN);
+    }
+    macs
+}
+
+async fn work(me: Arc<Daemon>) {
+    let store = match Store::open(&me.db) {
+        Ok(s) => Rc::new(s),
+        Err(e) => {
+            tracing::error!(error = %e, "worker cannot open the database");
+            return;
         }
+    };
+    loop {
+        let Some((job, token)) = me.next_job() else {
+            // `notify_one` keeps a permit, so a push since `next` is not lost.
+            me.wake.notified().await;
+            continue;
+        };
+        let id = job.id;
+        tracing::info!(job_id = id, target = %job.target, auto = job.auto, "scan started");
+        // A task of its own, so a panic ends this job only.
+        let (d, st) = (Arc::clone(&me), Rc::clone(&store));
+        let task = tokio::task::spawn_local(async move {
+            run_job(
+                job,
+                &d.cfg,
+                &st,
+                &d.services,
+                &d.ports,
+                &d.progress,
+                token,
+                &*d.neighbours,
+            )
+            .await
+        });
+        match task.await {
+            Ok(Ok(_)) => tracing::info!(job_id = id, "scan ended"),
+            Ok(Err(e)) => tracing::error!(job_id = id, error = %e, "scan could not be recorded"),
+            Err(e) => {
+                tracing::error!(job_id = id, error = %e, "scan crashed; job failed");
+                if let Err(e) = store.end_job(store_id(id), "failed", &[]) {
+                    tracing::error!(job_id = id, error = %e, "could not record failed job");
+                }
+            }
+        }
+        me.job_ended(id);
     }
 }
 
@@ -330,20 +406,25 @@ pub async fn serve(path: &Path, state: Arc<Daemon>) -> io::Result<()> {
         let (s, _) = l.accept().await?;
         let state = Arc::clone(&state);
         tokio::spawn(async move {
-            if let Err(e) = connection(s, &state).await {
+            if let Err(e) = connection(s, state).await {
                 tracing::debug!(error = %e, "control connection ended");
             }
         });
     }
 }
 
-async fn connection(s: UnixStream, state: &Daemon) -> io::Result<()> {
+async fn connection(s: UnixStream, state: Arc<Daemon>) -> io::Result<()> {
     let (r, mut w) = s.into_split();
     let mut r = BufReader::new(r);
     let mut line = String::new();
     loop {
         line.clear();
-        let n = (&mut r).take(MAX_LINE).read_line(&mut line).await?;
+        let mut limited = (&mut r).take(MAX_LINE);
+        let read = limited.read_line(&mut line);
+        let Ok(n) = tokio::time::timeout(state.idle, read).await else {
+            return Ok(());
+        };
+        let n = n?;
         if n == 0 {
             return Ok(());
         }
@@ -356,7 +437,12 @@ async fn connection(s: UnixStream, state: &Daemon) -> io::Result<()> {
             continue;
         } else {
             match serde_json::from_str::<Request>(&line) {
-                Ok(req) => state.handle(req),
+                Ok(req) => {
+                    let st = Arc::clone(&state);
+                    tokio::task::spawn_blocking(move || st.handle(req))
+                        .await
+                        .map_err(io::Error::other)?
+                }
                 Err(e) => Reply::Refused {
                     reason: Refusal::Invalid(format!("bad request: {e}")),
                 },
@@ -368,5 +454,23 @@ async fn connection(s: UnixStream, state: &Daemon) -> io::Result<()> {
         if too_long {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_lists_are_capped() {
+        let dev = |n: usize| KnownDevice {
+            mac: format!("{n}"),
+            ipv4: std::net::Ipv4Addr::LOCALHOST,
+        };
+        let v: Vec<_> = (0..MAX_KNOWN + 5).map(dev).collect();
+        let c = capped(v);
+        assert_eq!(c.len(), MAX_KNOWN);
+        assert_eq!(c.last().unwrap().mac, format!("{}", MAX_KNOWN - 1));
+        assert_eq!(capped(vec![dev(1)]).len(), 1);
     }
 }

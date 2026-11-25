@@ -58,7 +58,10 @@ async fn main() -> anyhow::Result<()> {
         let store = Store::open(&db).with_context(|| format!("opening {}", db.display()))?;
         let stale = store.fail_stale().context("failing stale jobs")?;
         if stale > 0 {
-            tracing::warn!(stale, "jobs left running by a previous run marked failed");
+            tracing::warn!(
+                stale,
+                "jobs left running or queued by a previous run marked failed"
+            );
         }
     }
     let daemon = Arc::new(
@@ -72,18 +75,34 @@ async fn main() -> anyhow::Result<()> {
         loop {
             // The first tick is immediate: prune at startup.
             every.tick().await;
-            if let Err(e) = pruner.prune(now()) {
-                tracing::error!(error = %e, "pruning failed");
+            let p = Arc::clone(&pruner);
+            match tokio::task::spawn_blocking(move || p.prune(now())).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::error!(error = %e, "pruning failed"),
+                Err(e) => tracing::error!(error = %e, "pruning crashed"),
             }
         }
     });
-    daemon.spawn_worker();
+    let worker = daemon.spawn_worker();
+    // The worker thread only ends if it cannot work: exit so systemd
+    // restarts the service.
+    // A plain thread (not spawn_blocking, which would hold up runtime
+    // shutdown) waits on it.
+    let (stopped, worker_stopped) = tokio::sync::oneshot::channel::<()>();
+    std::thread::spawn(move || {
+        let _ = worker.join();
+        let _ = stopped.send(());
+    });
 
     tracing::info!(socket = %args.socket.display(), "sensr-scan serving");
     let socket = args.socket.clone();
     tokio::select! {
         r = serve(&socket, daemon) => r.with_context(|| format!("serving {}", socket.display()))?,
         r = shutdown() => r?,
+        _ = worker_stopped => {
+            let _ = std::fs::remove_file(&args.socket);
+            anyhow::bail!("the scan worker stopped");
+        }
     }
     let _ = std::fs::remove_file(&args.socket);
     Ok(())

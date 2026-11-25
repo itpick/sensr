@@ -66,12 +66,18 @@ mod tests {
         assert!(send(&path, &Request::Status).is_err(), "no socket");
 
         let l = UnixListener::bind(&path).unwrap();
+        // Each fake reads the request first, so the client's write never
+        // races the close (which would be EPIPE rather than the case tested).
+        fn accept_request(l: &UnixListener) -> UnixStream {
+            let (s, _) = l.accept().unwrap();
+            BufReader::new(&s).read_line(&mut String::new()).unwrap();
+            s
+        }
         let t = std::thread::spawn(move || {
             // Closes without a reply.
-            drop(l.accept().unwrap());
+            drop(accept_request(&l));
             // Garbage.
-            let (s, _) = l.accept().unwrap();
-            (&s).write_all(b"nope\n").unwrap();
+            (&accept_request(&l)).write_all(b"nope\n").unwrap();
             // Silent past the timeout.
             let (s, _) = l.accept().unwrap();
             std::thread::sleep(TIMEOUT + Duration::from_millis(500));

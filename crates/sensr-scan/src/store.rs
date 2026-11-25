@@ -260,6 +260,60 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Record a job waiting in the daemon's queue (status `queued`). Its id
+    /// is the protocol `job_id`; [`Store::start_job`] marks it running.
+    /// `started` holds the queue time until then.
+    ///
+    /// # Errors
+    /// Any SQLite error.
+    pub fn queue_job(
+        &self,
+        kind: JobKind,
+        target: &str,
+        mac: Option<&str>,
+        auto: bool,
+        public_ok: bool,
+    ) -> rusqlite::Result<i64> {
+        self.conn.execute(
+            "INSERT INTO jobs (kind, target, mac, requested_by, started, status, public_ok) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6)",
+            params![
+                kind_str(kind),
+                target,
+                mac,
+                if auto { "auto" } else { "owner" },
+                now(),
+                public_ok
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// A queued job starts running now. `mac`, when given, fills in the
+    /// job's MAC if it had none (a device found by address).
+    ///
+    /// # Errors
+    /// Any SQLite error.
+    pub fn start_job(&self, id: i64, mac: Option<&str>) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET started = ?1, status = 'running', mac = COALESCE(mac, ?2) \
+             WHERE id = ?3",
+            params![now(), mac, id],
+        )?;
+        Ok(())
+    }
+
+    /// A person asked for a job queued automatically: it is the owner's now
+    /// (so cancelling it does not stop future automatic scans).
+    ///
+    /// # Errors
+    /// Any SQLite error.
+    pub fn own_job(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn
+            .execute("UPDATE jobs SET requested_by = 'owner' WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
     /// Mark a job finished: `status` is `"complete"`, `"cancelled"` or
     /// `"failed"`; `skipped` lists addresses that were left out.
     ///
@@ -275,15 +329,17 @@ impl Store {
         Ok(())
     }
 
-    /// Mark every job still `running` as `failed`, finished now. The daemon
-    /// calls this at start so a crash does not leave jobs running forever.
+    /// Mark every job still `running` or `queued` as `failed`, finished now.
+    /// The daemon calls this at start: a crash must not leave jobs running
+    /// forever, and its in-memory queue is gone (auto jobs come back through
+    /// `Known`).
     /// Returns how many were changed.
     ///
     /// # Errors
     /// Any SQLite error.
     pub fn fail_stale(&self) -> rusqlite::Result<usize> {
         self.conn.execute(
-            "UPDATE jobs SET status = 'failed', finished = ?1 WHERE status = 'running'",
+            "UPDATE jobs SET status = 'failed', finished = ?1 WHERE status IN ('running', 'queued')",
             [now()],
         )
     }
@@ -1202,12 +1258,41 @@ mod tests {
     }
 
     #[test]
-    fn fail_stale_fails_running_jobs_only() {
+    fn queued_job_starts_then_ends() {
+        let s = mem();
+        let id = s
+            .queue_job(JobKind::Device, "192.168.1.10", None, true, false)
+            .unwrap();
+        let (jv, _) = s.job(id).unwrap().unwrap();
+        assert_eq!(
+            (jv.status.as_str(), jv.finished, jv.mac),
+            ("queued", None, None)
+        );
+        assert_eq!(jv.requested_by, "auto");
+        s.start_job(id, Some(MAC)).unwrap();
+        let (jv, _) = s.job(id).unwrap().unwrap();
+        assert_eq!(jv.status, "running");
+        assert_eq!(jv.mac.as_deref(), Some(MAC));
+        // A MAC already set is kept.
+        s.start_job(id, Some("aa:aa:aa:aa:aa:aa")).unwrap();
+        assert_eq!(s.job(id).unwrap().unwrap().0.mac.as_deref(), Some(MAC));
+        s.own_job(id).unwrap();
+        assert_eq!(s.job(id).unwrap().unwrap().0.requested_by, "owner");
+        s.end_job(id, "complete", &[]).unwrap();
+        assert_eq!(s.job(id).unwrap().unwrap().0.status, "complete");
+    }
+
+    #[test]
+    fn fail_stale_fails_running_and_queued_jobs_only() {
         let s = mem();
         let running = device_job(&s);
+        let queued = s
+            .queue_job(JobKind::Device, "192.168.1.11", None, true, false)
+            .unwrap();
         let done = device_job(&s);
         s.end_job(done, "complete", &[]).unwrap();
-        assert_eq!(s.fail_stale().unwrap(), 1);
+        assert_eq!(s.fail_stale().unwrap(), 2);
+        assert_eq!(s.job(queued).unwrap().unwrap().0.status, "failed");
         let (jv, _) = s.job(running).unwrap().unwrap();
         assert_eq!(jv.status, "failed");
         assert!(jv.finished.is_some());

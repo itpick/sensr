@@ -88,6 +88,9 @@ impl Queue {
     /// back; a manual request for a target with an automatic job waiting
     /// moves that job up as a manual one.
     ///
+    /// A new job keeps its `id` (the daemon passes its store id); id 0 gets
+    /// the next id of the queue's own counter.
+    ///
     /// # Errors
     /// [`Refusal::Invalid`] when [`MAX_QUEUED`] jobs are already waiting.
     pub fn push(&mut self, mut job: Job) -> Result<u64, Refusal> {
@@ -103,13 +106,31 @@ impl Queue {
             }
             return Ok(id);
         }
-        if self.waiting.len() >= MAX_QUEUED {
+        if self.is_full() {
             return Err(Refusal::Invalid("too many scans are queued".to_string()));
         }
-        self.last_id += 1;
-        job.id = self.last_id;
+        if job.id == 0 {
+            self.last_id += 1;
+            job.id = self.last_id;
+        }
+        let id = job.id;
         self.insert(job);
-        Ok(self.last_id)
+        Ok(id)
+    }
+
+    /// The running or waiting job for the same target as `job`.
+    #[must_use]
+    pub fn find(&self, job: &Job) -> Option<&Job> {
+        self.running
+            .iter()
+            .chain(&self.waiting)
+            .find(|j| j.same_target(job))
+    }
+
+    /// Whether [`MAX_QUEUED`] jobs wait.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.waiting.len() >= MAX_QUEUED
     }
 
     fn insert(&mut self, job: Job) {
@@ -275,12 +296,28 @@ mod tests {
     }
 
     #[test]
+    fn given_ids_are_kept_and_find_sees_running_and_waiting() {
+        let mut q = Queue::default();
+        let mut a = job("10.0.0.1", None, false);
+        a.id = 41;
+        let mut b = job("10.0.0.2", None, true);
+        b.id = 42;
+        assert_eq!(q.push(a.clone()).unwrap(), 41);
+        assert_eq!(q.push(b.clone()).unwrap(), 42);
+        assert!(q.find(&job("10.0.0.3", None, false)).is_none());
+        q.next();
+        assert_eq!(q.find(&a).unwrap().id, 41);
+        assert_eq!(q.find(&b).unwrap().id, 42);
+    }
+
+    #[test]
     fn queue_is_bounded() {
         let mut q = Queue::default();
         for n in 0..MAX_QUEUED {
             let ip = std::net::Ipv4Addr::from(0x0a00_0000 + u32::try_from(n).unwrap());
             q.push(job(&ip.to_string(), None, true)).unwrap();
         }
+        assert!(q.is_full());
         assert!(matches!(
             q.push(job("192.168.0.1", None, false)),
             Err(Refusal::Invalid(_))

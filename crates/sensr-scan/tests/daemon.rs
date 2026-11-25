@@ -357,9 +357,14 @@ async fn device_follows_mac() {
         confirm: false,
         include_excluded: false,
     };
-    let job = Job::new(&req).unwrap();
+    let mut job = Job::new(&req).unwrap();
+    // run_job runs a job already queued in the store (R5).
+    let id = store
+        .queue_job(JobKind::Device, &req.target, Some(MAC), false, false)
+        .unwrap();
+    job.id = u64::try_from(id).unwrap();
     let neighbours = || HashMap::from([("127.0.0.1".parse::<IpAddr>().unwrap(), MAC.to_string())]);
-    run_job(
+    let ran = run_job(
         job,
         &cfg(),
         &store,
@@ -371,7 +376,10 @@ async fn device_follows_mac() {
     )
     .await
     .unwrap();
+    assert_eq!(ran, id);
+    assert_eq!(store.job(id).unwrap().unwrap().0.status, "complete");
     let scan = store.latest_for_mac(MAC).unwrap().expect("a scan");
+    assert_eq!(scan.job_id, id);
     assert_eq!(scan.address, "127.0.0.1".parse::<IpAddr>().unwrap());
     assert_eq!(scan.status, ScanStatus::Complete);
     assert!(scan.ports.iter().any(|p| p.port == port));
@@ -458,9 +466,17 @@ async fn cancel_queued_auto_is_recorded() {
 
     let store = Store::open_ro(&h.db).unwrap();
     assert!(store.auto_cancelled(MAC).unwrap());
+    // Both rows (created at enqueue, R5) end cancelled, with no scans.
     let jobs = store.jobs(JobKind::Device, 10).unwrap();
-    assert_eq!(jobs.len(), 1, "only the auto job is recorded: {jobs:?}");
-    assert_eq!(jobs[0].status, "cancelled");
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    for j in &jobs {
+        assert_eq!(j.status, "cancelled");
+        assert_eq!(j.hosts_alive, 0);
+    }
+    assert!(
+        !store.auto_cancelled(mac2).unwrap(),
+        "an owner cancel does not count"
+    );
     // Not re-queued automatically; Scan now still works.
     assert_eq!(
         ask(&h.sock, start("127.0.0.1", Some(MAC), true)).await,
@@ -596,4 +612,149 @@ async fn stale_socket_file_is_replaced() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     status(&sock).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn job_id_is_the_store_row() {
+    let port = ssh_listener();
+    let h = start_daemon(cfg(), ports(vec![port]), false).await;
+    let id = started(ask(&h.sock, start("127.0.0.1", Some(MAC), true)).await);
+    let sid = i64::try_from(id).unwrap();
+    {
+        let store = Store::open_ro(&h.db).unwrap();
+        let (j, scans) = store.job(sid).unwrap().expect("row created at enqueue");
+        assert_eq!(
+            (j.status.as_str(), j.requested_by.as_str()),
+            ("queued", "auto")
+        );
+        assert_eq!(j.mac.as_deref(), Some(MAC));
+        assert!(scans.is_empty());
+    }
+    assert_eq!(status(&h.sock).await.queue[0].job_id, id);
+    // A person asking for the same device takes the auto job over.
+    assert_eq!(
+        started(ask(&h.sock, start("127.0.0.1", Some(MAC), false)).await),
+        id
+    );
+    h.daemon.spawn_worker();
+    wait_idle(&h.sock, Duration::from_secs(20)).await;
+    let store = Store::open_ro(&h.db).unwrap();
+    let (j, scans) = store.job(sid).unwrap().unwrap();
+    assert_eq!(
+        (j.status.as_str(), j.requested_by.as_str()),
+        ("complete", "owner")
+    );
+    assert_eq!(scans.len(), 1);
+    assert_eq!(store.jobs(JobKind::Device, 10).unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn panicking_job_fails_and_worker_goes_on() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let port = ssh_listener();
+    let dir = TempDir::new().unwrap();
+    let sock = dir.path().join("scan.sock");
+    let db = dir.path().join("scans.db");
+    let first = AtomicBool::new(true);
+    let daemon = Arc::new(
+        Daemon::new(cfg(), &db, Services::default())
+            .unwrap()
+            .with_ports(ports(vec![port]))
+            .with_neighbours(move || {
+                assert!(
+                    !first.swap(false, Ordering::SeqCst),
+                    "neighbour source broke"
+                );
+                HashMap::new()
+            }),
+    );
+    daemon.spawn_worker();
+    let (s, d) = (sock.clone(), Arc::clone(&daemon));
+    tokio::spawn(async move { serve(&s, d).await.unwrap() });
+    let t = Instant::now();
+    while UnixStream::connect(&sock).is_err() {
+        assert!(t.elapsed() < Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let crashed = started(ask(&sock, start("127.0.0.1", Some(MAC), false)).await);
+    wait_idle(&sock, Duration::from_secs(10)).await;
+    let store = Store::open_ro(&db).unwrap();
+    let crashed = i64::try_from(crashed).unwrap();
+    assert_eq!(store.job(crashed).unwrap().unwrap().0.status, "failed");
+
+    let mac = "aa:bb:cc:00:00:09";
+    let next = started(ask(&sock, start("127.0.0.1", Some(mac), false)).await);
+    wait_idle(&sock, Duration::from_secs(20)).await;
+    let next = i64::try_from(next).unwrap();
+    assert_eq!(store.job(next).unwrap().unwrap().0.status, "complete");
+    assert_eq!(
+        store.latest_for_mac(mac).unwrap().unwrap().status,
+        ScanStatus::Complete
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_ends_when_the_database_is_gone() {
+    let dir = TempDir::new().unwrap();
+    let sub = dir.path().join("db");
+    std::fs::create_dir(&sub).unwrap();
+    let daemon = Arc::new(Daemon::new(cfg(), &sub.join("scans.db"), Services::default()).unwrap());
+    std::fs::remove_dir_all(&sub).unwrap();
+    let worker = daemon.spawn_worker();
+    let t = Instant::now();
+    while !worker.is_finished() {
+        assert!(t.elapsed() < Duration::from_secs(5), "worker kept running");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    worker.join().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_start_of_the_router_is_ignored() {
+    let mut c = cfg();
+    c.router = vec!["127.0.0.1".parse().unwrap()];
+    let h = start_daemon(c, ports(vec![1]), false).await;
+    assert_eq!(
+        ask(&h.sock, start("127.0.0.1", Some(MAC), true)).await,
+        Reply::Ok
+    );
+    assert_eq!(
+        ask(&h.sock, start("127.0.0.1", Some(MAC), false)).await,
+        Reply::Refused {
+            reason: Refusal::Excluded
+        }
+    );
+    assert!(status(&h.sock).await.queue.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_connections_are_closed() {
+    use std::io::Read;
+    let dir = TempDir::new().unwrap();
+    let sock = dir.path().join("scan.sock");
+    let daemon = Arc::new(
+        Daemon::new(cfg(), &dir.path().join("scans.db"), Services::default())
+            .unwrap()
+            .with_idle_timeout(Duration::from_millis(200)),
+    );
+    let s = sock.clone();
+    tokio::spawn(async move { serve(&s, daemon).await.unwrap() });
+    let t = Instant::now();
+    while UnixStream::connect(&sock).is_err() {
+        assert!(t.elapsed() < Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let closed = tokio::task::spawn_blocking(move || {
+        let mut c = UnixStream::connect(&sock).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let t = Instant::now();
+        let mut b = [0u8; 1];
+        let n = c.read(&mut b).unwrap();
+        (n, t.elapsed())
+    })
+    .await
+    .unwrap();
+    assert_eq!(closed.0, 0, "EOF from the server");
+    assert!(closed.1 < Duration::from_secs(2), "{:?}", closed.1);
 }
