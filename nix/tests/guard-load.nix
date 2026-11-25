@@ -8,7 +8,7 @@
 #     curl to the server works, the hit and the event are counted;
 #   - the rule moving to another slot keeps its hits by rule id;
 #   - with the kill switch on, the same curl goes through (still reported);
-#   - when the probe exits (dropping Loaded), no guard program is left.
+#   - after dropping Loaded (the probe still running), no guard program is left.
 #
 #   guard   the loader, with the BPF LSM (the pack's kernel)
 #   server  HTTP on its own address and on 192.0.2.1

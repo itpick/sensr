@@ -10,19 +10,29 @@
 //! kernel, so its ordering and hit attribution are unit-tested anywhere:
 //!
 //! 1. with the kill switch on, `config` first (nothing blocks meanwhile);
-//! 2. every slot whose rule id changes is disabled and its `hits` zeroed,
-//!    so a count always belongs to the rule id now in that slot;
-//! 3. every new dimension entry is inserted or overwritten;
-//! 4. only then are the stale keys deleted;
-//! 5. the new `rules_meta` is written, which enables the new rules;
-//! 6. `config` last (kill switch off).
+//! 2. every slot that changes is disabled in `rules_meta`: its rule id
+//!    changed (then its `hits` are zeroed too, so a count always belongs to
+//!    the rule id now in that slot), or the same rule now matches something
+//!    else or has another hook, action or enabled flag. Between the
+//!    dimension writes such a rule could match a mix of its old and new
+//!    keys; disabled, it fails open instead;
+//! 3. in a map where the old and new keys together exceed its capacity,
+//!    the stale keys are deleted first (and then every slot is disabled in
+//!    step 2, since any rule may briefly miss entries);
+//! 4. every new dimension entry is inserted or overwritten;
+//! 5. only then are the remaining stale keys deleted;
+//! 6. the new `rules_meta` is written, which enables the new rules;
+//! 7. `config` last (kill switch off).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
 
 use crate::compile::Compiled;
-use crate::maps::{GuardConfig, GuardRuleMeta};
+use crate::maps::{
+    GuardConfig, GuardRuleMeta, MAX_NET_KEYS, MAX_PATH_KEYS, MAX_PORT_KEYS, MAX_UID_KEYS,
+    MAX_UNIT_KEYS,
+};
 
 #[cfg(target_os = "linux")]
 mod kernel;
@@ -53,13 +63,36 @@ pub const DIMENSION_MAPS: [&str; 7] = [
     "uid_rules",
 ];
 
+/// A dimension map's `max_entries` (common.h).
+pub fn capacity(map: &str) -> usize {
+    match map {
+        "exe_prefix_lpm" | "path_prefix_lpm" => MAX_PATH_KEYS,
+        "net4_lpm" | "net6_lpm" => MAX_NET_KEYS,
+        "port_rules" => MAX_PORT_KEYS,
+        "unit_rules" => MAX_UNIT_KEYS,
+        "uid_rules" => MAX_UID_KEYS,
+        _ => 0,
+    }
+}
+
+/// What one slot held after the last apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotState {
+    /// The rule id.
+    pub id: String,
+    /// Its `rules_meta` value.
+    pub meta: [u8; 8],
+    /// What it matches ([`crate::compile::RuleMeta::matches`]).
+    pub matches: Vec<(&'static str, Vec<u8>)>,
+}
+
 /// What the maps hold after the last [`apply`](Loaded::apply), as far as
 /// userspace knows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Applied {
-    /// The rule id in each slot; `None` when unknown (a failed apply), which
-    /// the next apply treats as changed.
-    pub ids: Vec<Option<String>>,
+    /// Each slot; `None` when unknown (a failed apply), which the next
+    /// apply treats as a changed rule id.
+    pub slots: Vec<Option<SlotState>>,
     /// The keys written to each dimension map.
     pub keys: BTreeMap<&'static str, BTreeSet<Vec<u8>>>,
 }
@@ -69,8 +102,14 @@ pub struct Applied {
 pub struct ApplyPlan {
     /// Write `config` before everything else (the kill switch goes on).
     pub config_first: bool,
-    /// Slots to disable and whose hits to zero, before any other write.
-    pub reset_slots: Vec<u32>,
+    /// Slots to disable in `rules_meta` before any dimension write.
+    pub disable_slots: Vec<u32>,
+    /// Slots whose hits to zero (their rule id changed); a subset of
+    /// `disable_slots`.
+    pub zero_hits: Vec<u32>,
+    /// Stale keys deleted before the upserts, in maps that could not hold
+    /// the old and new keys together.
+    pub early_deletes: Vec<(&'static str, Vec<u8>)>,
     /// Dimension entries to insert or overwrite: (map, key, rule set).
     pub upserts: Vec<(&'static str, Vec<u8>, [u8; 128])>,
     /// Stale dimension keys to delete, after every upsert.
@@ -102,13 +141,26 @@ fn dimension_entries(c: &Compiled) -> [Vec<(Vec<u8>, [u8; 128])>; 7] {
     ]
 }
 
+fn slot_states(c: &Compiled) -> Vec<Option<SlotState>> {
+    c.meta
+        .iter()
+        .map(|m| {
+            Some(SlotState {
+                id: m.id.clone(),
+                meta: m.meta.as_bytes(),
+                matches: m.matches.clone(),
+            })
+        })
+        .collect()
+}
+
 /// The slots whose rule id differs between `prev` and `c` (including
 /// slots that only one of them has, and slots `prev` does not know).
-pub fn changed_slots(prev: &[Option<String>], c: &Compiled) -> Vec<u32> {
+pub fn changed_slots(prev: &[Option<SlotState>], c: &Compiled) -> Vec<u32> {
     let n = prev.len().max(c.meta.len());
     (0..n)
         .filter(|&s| {
-            let old = prev.get(s).and_then(|o| o.as_deref());
+            let old = prev.get(s).and_then(|o| o.as_ref()).map(|o| o.id.as_str());
             let new = c.meta.get(s).map(|m| m.id.as_str());
             old.is_none() || old != new
         })
@@ -137,23 +189,63 @@ pub fn disabled_meta(slot: u32) -> [u8; 8] {
 
 /// Plan the writes that take the maps from `prev` to `c`.
 pub fn plan(prev: &Applied, c: &Compiled, kill_switch: bool, guard_tgid: u32) -> ApplyPlan {
+    plan_with(prev, c, kill_switch, guard_tgid, capacity)
+}
+
+/// [`plan`] with the maps' capacities given (tests use small ones).
+pub fn plan_with(
+    prev: &Applied,
+    c: &Compiled,
+    kill_switch: bool,
+    guard_tgid: u32,
+    capacity: impl Fn(&str) -> usize,
+) -> ApplyPlan {
     let entries = dimension_entries(c);
     let mut upserts = Vec::new();
     let mut deletes = Vec::new();
+    let mut early_deletes = Vec::new();
     for (map, new) in DIMENSION_MAPS.iter().zip(entries) {
         let new_keys: BTreeSet<&[u8]> = new.iter().map(|(k, _)| k.as_slice()).collect();
         if let Some(old) = prev.keys.get(map) {
-            deletes.extend(
-                old.iter()
-                    .filter(|k| !new_keys.contains(k.as_slice()))
-                    .map(|k| (*map, k.clone())),
-            );
+            let stale: Vec<_> = old
+                .iter()
+                .filter(|k| !new_keys.contains(k.as_slice()))
+                .map(|k| (*map, k.clone()))
+                .collect();
+            // the map would hold old + new keys between the upserts and
+            // the deletes
+            if new_keys.len() + stale.len() > capacity(map) {
+                early_deletes.extend(stale);
+            } else {
+                deletes.extend(stale);
+            }
         }
         upserts.extend(new.into_iter().map(|(k, v)| (*map, k, v)));
     }
+
+    let zero_hits = changed_slots(&prev.slots, c);
+    let n = prev.slots.len().max(c.meta.len());
+    let disable_slots = if early_deletes.is_empty() {
+        let now = slot_states(c);
+        (0..n)
+            .filter(|&s| {
+                let old = prev.slots.get(s).and_then(|o| o.as_ref());
+                let new = now.get(s).and_then(|o| o.as_ref());
+                old.is_none() || old != new
+            })
+            .map(|s| s as u32)
+            .collect()
+    } else {
+        // deleting first takes entries away that unchanged rules still
+        // use: every rule waits for the final rules_meta write
+        (0..n as u32).collect()
+    };
+
     ApplyPlan {
         config_first: kill_switch,
-        reset_slots: changed_slots(&prev.ids, c),
+        disable_slots,
+        zero_hits,
+        early_deletes,
         upserts,
         deletes,
         meta: c
@@ -175,22 +267,30 @@ impl Applied {
             .map(|(m, e)| (*m, e.into_iter().map(|(k, _)| k).collect()))
             .collect();
         Self {
-            ids: c.meta.iter().map(|m| Some(m.id.clone())).collect(),
+            slots: slot_states(c),
             keys,
         }
     }
 
     /// The state after applying `c` failed part way: any key of either side
-    /// may be present, and no slot's rule id is known.
+    /// may be present, and no slot is known.
     pub fn after_failure(prev: &Self, c: &Compiled) -> Self {
         let mut keys = prev.keys.clone();
         for (m, k) in Self::after(c).keys {
             keys.entry(m).or_default().extend(k);
         }
         Self {
-            ids: vec![None; prev.ids.len().max(c.meta.len())],
+            slots: vec![None; prev.slots.len().max(c.meta.len())],
             keys,
         }
+    }
+
+    /// The rule id of each slot (`None`: unknown).
+    pub fn ids(&self) -> Vec<Option<String>> {
+        self.slots
+            .iter()
+            .map(|s| s.as_ref().map(|s| s.id.clone()))
+            .collect()
     }
 }
 
@@ -242,7 +342,9 @@ mod tests {
         ])
         .unwrap();
         let p = plan(&Applied::default(), &c, false, 42);
-        assert_eq!(p.reset_slots, vec![0, 1]);
+        assert_eq!(p.disable_slots, vec![0, 1]);
+        assert_eq!(p.zero_hits, vec![0, 1]);
+        assert!(p.early_deletes.is_empty());
         assert!(p.deletes.is_empty());
         let total: usize = dimension_entries(&c).iter().map(Vec::len).sum();
         assert_eq!(p.upserts.len(), total);
@@ -306,7 +408,8 @@ mod tests {
             assert!(!now.keys[m].contains(k), "{m} {k:?}");
         }
         // slot 0 keeps "a"; slot 1 lost "b"
-        assert_eq!(p.reset_slots, vec![1]);
+        assert_eq!(p.zero_hits, vec![1]);
+        assert_eq!(p.disable_slots, vec![1]);
         assert_eq!(p.meta.len(), 1);
     }
 
@@ -314,8 +417,8 @@ mod tests {
     fn same_rules_again_change_nothing_but_overwrite() {
         let c = compile(&[net("a", "192.0.2.1/32", &[80], Action::Block)]).unwrap();
         let p = plan(&Applied::after(&c), &c, false, 1);
-        assert!(p.reset_slots.is_empty());
-        assert!(p.deletes.is_empty());
+        assert!(p.disable_slots.is_empty() && p.zero_hits.is_empty());
+        assert!(p.deletes.is_empty() && p.early_deletes.is_empty());
         assert!(!p.upserts.is_empty());
     }
 
@@ -336,7 +439,8 @@ mod tests {
         ])
         .unwrap();
         let p = plan(&Applied::after(&old), &new, false, 1);
-        assert_eq!(p.reset_slots, vec![0, 1, 3]);
+        assert_eq!(p.zero_hits, vec![0, 1, 3]);
+        assert_eq!(p.disable_slots, vec![0, 1, 3]);
     }
 
     #[test]
@@ -347,7 +451,12 @@ mod tests {
         b.enabled = false;
         let new = compile(&[a, b]).unwrap();
         let p = plan(&Applied::after(&old), &new, false, 1);
-        assert!(p.reset_slots.is_empty());
+        assert!(p.zero_hits.is_empty(), "hits kept");
+        assert_eq!(
+            p.disable_slots,
+            vec![1],
+            "disabled before the dimension writes"
+        );
         assert_eq!(p.meta[1].1[6], 0, "slot 1 written as disabled");
     }
 
@@ -361,7 +470,8 @@ mod tests {
         .unwrap();
         let new = compile(&[net("a", "192.0.2.1/32", &[], Action::Alert)]).unwrap();
         let p = plan(&Applied::after(&old), &new, false, 1);
-        assert_eq!(p.reset_slots, vec![1, 2]);
+        assert_eq!(p.zero_hits, vec![1, 2]);
+        assert_eq!(p.disable_slots, vec![1, 2]);
         assert_eq!(disabled_meta(2), [2, 0, 0, 0, 0, 0, 0, 0]);
     }
 
@@ -382,7 +492,8 @@ mod tests {
         let new = compile(&[net("a", "198.51.100.0/24", &[80], Action::Alert)]).unwrap();
         let prev = Applied::after(&old);
         let f = Applied::after_failure(&prev, &new);
-        assert_eq!(f.ids, vec![None]);
+        assert_eq!(f.slots, vec![None]);
+        assert_eq!(f.ids(), vec![None]);
         let a = Applied::after(&old);
         let b = Applied::after(&new);
         for m in DIMENSION_MAPS {
@@ -391,7 +502,8 @@ mod tests {
         }
         // so the next apply of `new` resets slot 0 again and deletes old keys
         let p = plan(&f, &new, false, 1);
-        assert_eq!(p.reset_slots, vec![0]);
+        assert_eq!(p.zero_hits, vec![0]);
+        assert_eq!(p.disable_slots, vec![0]);
         assert!(p.deletes.iter().any(|(m, _)| *m == "port_rules"));
     }
 
@@ -401,5 +513,127 @@ mod tests {
         let per_slot = HashMap::from([(0, 5), (1, 9), (2, 0)]);
         let h = hits_by_id(&ids, &per_slot);
         assert_eq!(h, HashMap::from([("a".into(), 5), ("c".into(), 0)]));
+    }
+
+    /// Run `p` against a model of the kernel maps holding `keys`: every
+    /// write must fit the capacity. Returns the keys at the end.
+    fn simulate(
+        mut keys: BTreeMap<&'static str, BTreeSet<Vec<u8>>>,
+        p: &ApplyPlan,
+        cap: impl Fn(&str) -> usize,
+    ) -> Result<BTreeMap<&'static str, BTreeSet<Vec<u8>>>, String> {
+        for (m, k) in &p.early_deletes {
+            keys.entry(m).or_default().remove(k);
+        }
+        for (m, k, _) in &p.upserts {
+            let set = keys.entry(m).or_default();
+            if !set.contains(k) && set.len() >= cap(m) {
+                return Err(format!("{m} full"));
+            }
+            set.insert(k.clone());
+        }
+        for (m, k) in &p.deletes {
+            keys.entry(m).or_default().remove(k);
+        }
+        Ok(keys)
+    }
+
+    fn port_rules(id: &str, ports: &[u16]) -> Rule {
+        net(id, "192.0.2.0/24", ports, Action::Alert)
+    }
+
+    #[test]
+    fn a_full_map_deletes_stale_keys_first_and_fails_open() {
+        // port_rules holds 4: {1, 2, 3} -> {4, 5, 6} needs 6 if inserted first
+        let cap = |m: &str| if m == "port_rules" { 4 } else { 100 };
+        let old = compile(&[port_rules("a", &[1, 2, 3]), port_rules("b", &[7])]).unwrap();
+        let new = compile(&[port_rules("a", &[4, 5, 6]), port_rules("b", &[7])]).unwrap();
+        let prev = Applied::after(&old);
+        let p = plan_with(&prev, &new, false, 1, cap);
+        let early: Vec<_> = p.early_deletes.iter().map(|(m, k)| (*m, k[0])).collect();
+        assert_eq!(
+            early,
+            vec![("port_rules", 1), ("port_rules", 2), ("port_rules", 3)]
+        );
+        assert!(p.deletes.iter().all(|(m, _)| *m != "port_rules"));
+        // every rule waits for the final rules_meta write, hits are kept
+        assert_eq!(p.disable_slots, vec![0, 1]);
+        assert!(p.zero_hits.is_empty());
+        let end = simulate(prev.keys.clone(), &p, cap).unwrap();
+        assert_eq!(end, Applied::after(&new).keys);
+        // the insert-first order would not fit
+        let mut naive = p.clone();
+        naive
+            .deletes
+            .extend(std::mem::take(&mut naive.early_deletes));
+        assert!(simulate(prev.keys, &naive, cap).is_err());
+    }
+
+    #[test]
+    fn an_apply_after_a_failure_at_capacity_succeeds() {
+        let cap = |m: &str| if m == "port_rules" { 4 } else { 100 };
+        let old = compile(&[port_rules("a", &[1, 2, 3])]).unwrap();
+        let new = compile(&[port_rules("a", &[4, 5, 6])]).unwrap();
+        // the failed apply may have left any of old and new in the map
+        let failed = Applied::after_failure(&Applied::after(&old), &new);
+        assert_eq!(failed.keys["port_rules"].len(), 6);
+        let p = plan_with(&failed, &new, false, 1, cap);
+        assert_eq!(p.early_deletes.len(), 3);
+        assert_eq!(p.disable_slots, vec![0]);
+        assert_eq!(p.zero_hits, vec![0]);
+        // whatever subset of the union is really there, the plan fits
+        let mut there = Applied::after(&old).keys;
+        there
+            .get_mut("port_rules")
+            .unwrap()
+            .insert(4u32.to_le_bytes().to_vec());
+        let end = simulate(there, &p, cap).unwrap();
+        assert_eq!(end, Applied::after(&new).keys);
+    }
+
+    #[test]
+    fn a_rule_that_changes_its_target_is_disabled_meanwhile() {
+        // same id and slot: {10/8:80} -> {192.0.2.1:443}; between the writes
+        // 10/8:443 and 192.0.2.1:80 would match
+        let old = compile(&[net("a", "10.0.0.0/8", &[80], Action::Block)]).unwrap();
+        let new = compile(&[net("a", "192.0.2.1/32", &[443], Action::Block)]).unwrap();
+        let p = plan(&Applied::after(&old), &new, false, 1);
+        assert_eq!(p.disable_slots, vec![0]);
+        assert!(p.zero_hits.is_empty(), "same rule id: hits kept");
+        assert_eq!(p.meta, vec![(0, new.meta[0].meta.as_bytes())]);
+    }
+
+    #[test]
+    fn a_rule_that_changes_its_action_or_process_is_disabled_meanwhile() {
+        let a = net("a", "192.0.2.1/32", &[80], Action::Alert);
+        let mut blocking = a.clone();
+        blocking.action = Action::Block;
+        let mut scoped = a.clone();
+        scoped.process.unit = Some("x.service".into());
+        let old = compile(std::slice::from_ref(&a)).unwrap();
+        for changed in [blocking, scoped] {
+            let new = compile(&[changed]).unwrap();
+            let p = plan(&Applied::after(&old), &new, false, 1);
+            assert_eq!(p.disable_slots, vec![0]);
+            assert!(p.zero_hits.is_empty());
+        }
+    }
+
+    #[test]
+    fn unrelated_changes_leave_other_rules_live() {
+        let a = net("a", "192.0.2.1/32", &[80], Action::Block);
+        let old = compile(std::slice::from_ref(&a)).unwrap();
+        let new = compile(&[a, net("b", "198.51.100.0/24", &[], Action::Alert)]).unwrap();
+        let p = plan(&Applied::after(&old), &new, false, 1);
+        assert_eq!(p.disable_slots, vec![1], "only the new slot");
+    }
+
+    #[test]
+    fn capacities_match_common_h() {
+        for m in DIMENSION_MAPS {
+            assert!(capacity(m) > 0, "{m}");
+        }
+        assert_eq!(capacity("port_rules"), 4096);
+        assert_eq!(capacity("unit_rules"), 1025);
     }
 }

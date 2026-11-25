@@ -9,7 +9,10 @@
 //!   kill switch and this process as guard_tgid; `ok` or `error: ...`
 //! - `hits`: `<rule id> <count>` per applied rule
 //! - `events`: drain the ring buffer, `rule=<slot> hook=<n> blocked=<0|1> port=<p>`
-//! - `quit`: `bye`, then drop the pack (detaching everything) and exit.
+//! - `drop`: drop the pack (`Loaded` and the ring buffer), answer `dropped`,
+//!   and keep running, so the caller can see that dropping detaches
+//!   everything while this process is still alive
+//! - `quit`: `bye`, then exit.
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
@@ -32,6 +35,17 @@ mod linux {
     use sensr_guard::loader::{Loaded, load};
     use sensr_guard::rule::Rule;
 
+    use std::mem::{offset_of, size_of};
+
+    use aya::maps::{MapData, RingBuf};
+    use sensr_guard::maps::GuardEvent;
+
+    /// The pack while it is loaded.
+    struct Pack {
+        loaded: Loaded,
+        ring: RingBuf<MapData>,
+    }
+
     pub fn main() -> ExitCode {
         let args: Vec<String> = std::env::args().collect();
         let [_, pack, dir] = args.as_slice() else {
@@ -47,13 +61,14 @@ mod linux {
         };
         println!("loaded {} programs", loaded.status().len());
         let dir = PathBuf::from(dir);
-        let mut ring = match loaded.ringbuf() {
+        let ring = match loaded.ringbuf() {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("ringbuf: {e}");
                 return ExitCode::FAILURE;
             }
         };
+        let mut pack = Some(Pack { loaded, ring });
         loop {
             let cmd = match std::fs::File::open(dir.join("cmd")) {
                 Ok(f) => f,
@@ -68,7 +83,16 @@ mod linux {
                 if line.is_empty() {
                     continue;
                 }
-                let (reply, quit) = run(&mut loaded, &mut ring, &line);
+                let (reply, quit) = match (line.as_str(), pack.as_mut()) {
+                    ("quit", _) => ("bye\n".to_string(), true),
+                    ("drop", _) => {
+                        // Loaded's Drop detaches the programs
+                        pack = None;
+                        ("dropped\n".to_string(), false)
+                    }
+                    (_, Some(p)) => (run(p, &line), false),
+                    (_, None) => ("error: the pack was dropped\n".to_string(), false),
+                };
                 if let Err(e) = std::fs::OpenOptions::new()
                     .write(true)
                     .open(dir.join("reply"))
@@ -78,19 +102,22 @@ mod linux {
                     return ExitCode::FAILURE;
                 }
                 if quit {
-                    drop(ring);
-                    drop(loaded);
                     return ExitCode::SUCCESS;
                 }
             }
         }
     }
 
-    fn run(
-        loaded: &mut Loaded,
-        ring: &mut aya::maps::RingBuf<aya::maps::MapData>,
-        line: &str,
-    ) -> (String, bool) {
+    fn u32_at(b: &[u8], off: usize) -> u32 {
+        u32::from_le_bytes(b[off..off + 4].try_into().expect("4 bytes"))
+    }
+
+    fn u16_at(b: &[u8], off: usize) -> u16 {
+        u16::from_le_bytes(b[off..off + 2].try_into().expect("2 bytes"))
+    }
+
+    fn run(pack: &mut Pack, line: &str) -> String {
+        let Pack { loaded, ring } = pack;
         let words: Vec<&str> = line.split_whitespace().collect();
         let mut out = String::new();
         match words.as_slice() {
@@ -118,27 +145,33 @@ mod linux {
                     Err(e) => format!("error: {e}\n"),
                 };
             }
-            ["hits"] => {
-                let mut h: Vec<_> = loaded.hits_by_id().into_iter().collect();
-                h.sort();
-                for (id, n) in h {
-                    out += &format!("{id} {n}\n");
+            ["hits"] => match loaded.hits_by_id() {
+                Ok(h) => {
+                    let mut h: Vec<_> = h.into_iter().collect();
+                    h.sort();
+                    for (id, n) in h {
+                        out += &format!("{id} {n}\n");
+                    }
                 }
-            }
+                Err(e) => out = format!("error: {e}\n"),
+            },
             ["events"] => {
+                // offsets of the #[repr(C)] mirror of struct guard_event
                 while let Some(item) = ring.next() {
                     let b: &[u8] = &item;
-                    if b.len() < 559 {
+                    if b.len() < size_of::<GuardEvent>() {
+                        out += &format!("error: short event of {} bytes\n", b.len());
                         continue;
                     }
-                    let rule = u32::from_le_bytes(b[20..24].try_into().expect("4 bytes"));
-                    let port = u16::from_le_bytes(b[556..558].try_into().expect("2 bytes"));
-                    out += &format!("rule={rule} hook={} blocked={} port={port}\n", b[24], b[26]);
+                    let rule = u32_at(b, offset_of!(GuardEvent, rule_id));
+                    let hook = b[offset_of!(GuardEvent, hook)];
+                    let blocked = b[offset_of!(GuardEvent, blocked)];
+                    let port = u16_at(b, offset_of!(GuardEvent, port));
+                    out += &format!("rule={rule} hook={hook} blocked={blocked} port={port}\n");
                 }
             }
-            ["quit"] => return ("bye\n".into(), true),
             _ => out = format!("error: unknown command {line:?}\n"),
         }
-        (out, false)
+        out
     }
 }

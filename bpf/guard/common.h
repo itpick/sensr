@@ -259,9 +259,18 @@ struct {
 	__type(value, struct guard_path_key);
 } task_exe SEC(".maps") GUARD_SHARED;
 
-/* ---- per-object working memory (not part of the contract) ---- */
+/* ---- working memory (not part of the contract) ---- */
 
-/* Per task, so a preempted program never shares it with another task. */
+/*
+ * One map for every program: the link merges each object's copy (weak), so
+ * a task has one entry whatever hooks it hits. Per task, so a preempted
+ * program never shares it with another task. Sharing it between the
+ * programs is safe because LSM programs on one task don't nest: a program
+ * runs to completion inside its hook, the helpers it calls (bpf_d_path,
+ * map lookups, ringbuf output) enter no LSM hook, and a sleepable program
+ * that sleeps blocks its own task, so no other hook of that task can run
+ * meanwhile. No hook here runs in interrupt context.
+ */
 struct guard_scratch {
 	struct guard_event ev;
 	/* The subject path (lookup key): the first bytes of long_path. */

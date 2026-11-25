@@ -105,6 +105,19 @@ stdenvNoCC.mkDerivation {
     # With no layout data the 24-byte header means the same: drop the two
     # empty fields. type_off and str_off count from the header's end, so
     # they stay. checks.guard-bpf-build asserts hdr_len = 24.
+    #
+    # Upstream (aya-rs/aya; no issue found as of 2026-11-25, to be filed):
+    # aya-obj 0.6.0 src/btf/btf.rs: `Btf::parse` honours `hdr_len` when it
+    # locates the types and strings, but `Btf::to_bytes` serialises only
+    # `size_of::<btf_header>()` (24) bytes of header, copied from the parsed
+    # header, so hdr_len stays 32. The output has 8 fewer header bytes than
+    # it claims, and BPF_BTF_LOAD fails with EINVAL. Fix there: write
+    # hdr_len = 24 when the extra header fields are zero, or keep the
+    # original header bytes. Once fixed, this step can go.
+    #
+    # od -t u4 reads host-order words. The BTF is the BPF target's byte
+    # order, and the host is that target (x86_64 or aarch64, both little
+    # endian; common.h refuses big-endian BPF targets), so they agree.
     llvm-objcopy --dump-section .BTF=btf ${object} copy.o
     hdr_len=$(od -A n -t u4 -j 4 -N 4 btf | tr -d ' ')
     if [ "$hdr_len" = 32 ]; then

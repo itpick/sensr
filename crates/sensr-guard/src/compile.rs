@@ -77,6 +77,12 @@ pub struct RuleMeta {
     pub id: String,
     /// The `rules_meta[slot]` value; `meta.id` is the slot.
     pub meta: GuardRuleMeta,
+    /// The rule's own dimension keys (map name, key bytes), before LPM
+    /// values are made cumulative: what it matches, in normalised form.
+    /// Equal for two compiles of an equivalent rule, so the loader can tell
+    /// a rule that kept its slot but changed what it matches. Disabled
+    /// rules have their keys here too.
+    pub matches: Vec<(&'static str, Vec<u8>)>,
 }
 
 impl Compiled {
@@ -283,6 +289,44 @@ struct Builder {
 }
 
 impl Builder {
+    /// Every key, as (map, bytes), in map then key order.
+    fn keys(&self) -> Vec<(&'static str, Vec<u8>)> {
+        fn raw<K, const N: usize>(
+            map: &'static str,
+            m: &BTreeMap<K, RuleSet>,
+            f: impl Fn(&K) -> [u8; N],
+        ) -> impl Iterator<Item = (&'static str, Vec<u8>)> {
+            m.keys()
+                .map(move |k| (map, f(k).to_vec()))
+                .collect::<Vec<_>>()
+                .into_iter()
+        }
+        raw("exe_prefix_lpm", &self.exe, PathKey::as_bytes)
+            .chain(raw("path_prefix_lpm", &self.path, PathKey::as_bytes))
+            .chain(raw("net4_lpm", &self.net4, Net4Key::as_bytes))
+            .chain(raw("net6_lpm", &self.net6, Net6Key::as_bytes))
+            .chain(raw("port_rules", &self.ports, PortKey::as_bytes))
+            .chain(raw("unit_rules", &self.units, UnitKey::as_bytes))
+            .chain(raw("uid_rules", &self.uids, UidKey::as_bytes))
+            .collect()
+    }
+
+    /// Add every entry of `other` (a single rule's keys).
+    fn merge(&mut self, other: Builder) {
+        fn into<K: Ord>(dst: &mut BTreeMap<K, RuleSet>, src: BTreeMap<K, RuleSet>) {
+            for (k, s) in src {
+                dst.entry(k).or_default().union_with(&s);
+            }
+        }
+        into(&mut self.exe, other.exe);
+        into(&mut self.path, other.path);
+        into(&mut self.net4, other.net4);
+        into(&mut self.net6, other.net6);
+        into(&mut self.ports, other.ports);
+        into(&mut self.units, other.units);
+        into(&mut self.uids, other.uids);
+    }
+
     fn add_net(&mut self, cidr: &IpNet, slot: u32) {
         match cidr.trunc() {
             IpNet::V4(n) => add(
@@ -363,7 +407,9 @@ pub fn compile(rules: &[Rule]) -> Result<Compiled, CompileError> {
     let mut seen = std::collections::HashSet::new();
     for (i, r) in rules.iter().enumerate() {
         let slot = i as u32;
-        let b = if r.enabled { &mut live } else { &mut dead };
+        // this rule's keys alone; merged into live or dead below
+        let mut own = Builder::default();
+        let b = &mut own;
         if !seen.insert(r.id.as_str()) {
             return Err(CompileError::DuplicateId(r.id.clone()));
         }
@@ -383,6 +429,7 @@ pub fn compile(rules: &[Rule]) -> Result<Compiled, CompileError> {
                 enabled: u8::from(r.enabled),
                 _pad: 0,
             },
+            matches: Vec::new(),
         });
         // exe dimension
         match &r.process.exe_prefix {
@@ -437,6 +484,12 @@ pub fn compile(rules: &[Rule]) -> Result<Compiled, CompileError> {
                 }
                 add(&mut b.uids, UidKey { uid: *u }, slot);
             }
+        }
+        meta[i].matches = own.keys();
+        if r.enabled {
+            live.merge(own);
+        } else {
+            dead.merge(own);
         }
     }
     check_cap("exe_prefix_lpm", live.exe.len(), MAX_PATH_KEYS)?;
@@ -843,8 +896,16 @@ mod tests {
         a.action = Action::Alert;
         let b = rule("b", Hook::Bpf, Target::Any);
         let c = compile(&[a, b]).unwrap();
+        let without_matches: Vec<RuleMeta> = c
+            .meta
+            .iter()
+            .map(|m| RuleMeta {
+                matches: Vec::new(),
+                ..m.clone()
+            })
+            .collect();
         assert_eq!(
-            c.meta,
+            without_matches,
             vec![
                 RuleMeta {
                     id: "a".into(),
@@ -854,7 +915,8 @@ mod tests {
                         action: 0,
                         enabled: 1,
                         _pad: 0
-                    }
+                    },
+                    matches: Vec::new(),
                 },
                 RuleMeta {
                     id: "b".into(),
@@ -864,10 +926,39 @@ mod tests {
                         action: 1,
                         enabled: 1,
                         _pad: 0
-                    }
+                    },
+                    matches: Vec::new(),
                 },
             ]
         );
+    }
+
+    #[test]
+    fn matches_tells_target_and_process_changes_apart() {
+        let a = rule("a", Hook::Exec, Target::Any);
+        let mut b = a.clone();
+        b.target = Target::PathPrefix("/tmp".into());
+        let mut c = a.clone();
+        c.process.unit = Some("x.service".into());
+        let m = |r: &Rule| {
+            compile(std::slice::from_ref(r)).unwrap().meta[0]
+                .matches
+                .clone()
+        };
+        assert_eq!(m(&a), m(&a.clone()));
+        assert_ne!(m(&a), m(&b));
+        assert_ne!(m(&a), m(&c));
+        // normalised: equivalent spellings match the same
+        let mut d = b.clone();
+        d.target = Target::PathPrefix("/tmp//".into());
+        assert_eq!(m(&b), m(&d));
+        // the rule's own keys only: /tmp's two path keys, the wildcards
+        let keys = m(&b);
+        assert_eq!(
+            keys.iter().filter(|(k, _)| *k == "path_prefix_lpm").count(),
+            2
+        );
+        assert!(keys.contains(&("exe_prefix_lpm", PathKey::wildcard().as_bytes().to_vec())));
     }
 
     #[test]

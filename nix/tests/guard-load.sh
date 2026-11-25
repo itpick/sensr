@@ -113,10 +113,20 @@ events=$(ask events); echo "$events"
 grep -q 'rule=1 hook=1 blocked=0 port=80' <<<"$events" || fail "no unblocked event"
 pass "kill switch: curl 192.0.2.1 is not EPERM ($r), still reported"
 
-# 5. dropping Loaded detaches everything
+# 5. dropping Loaded detaches everything, with the probe still running
+# (so it is Drop, not the process exit, that detaches). Sleepable programs
+# may take a moment to go (RCU tasks trace), so the check retries for 2 s.
+[ "$(ask drop)" = dropped ] || fail "drop"
+kill -0 "$pid" 2>/dev/null || fail "probe exited on drop"
+left=1
+for _ in $(seq 20); do
+  left=$(bpftool prog show | grep -c 'name guard_' || true)
+  [ "$left" -eq 0 ] && break
+  sleep 0.1
+done
+[ "$left" -eq 0 ] || { bpftool prog show | grep 'name guard_'; fail "$left guard programs left after drop"; }
+kill -0 "$pid" 2>/dev/null || fail "probe gone before the check"
+pass "after dropping Loaded (probe alive), bpftool shows no guard programs"
 [ "$(ask quit)" = bye ] || fail "quit"
 wait "$pid" || fail "probe exit status $?"
-left=$(bpftool prog show | grep -c 'name guard_' || true)
-[ "$left" -eq 0 ] || { bpftool prog show | grep 'name guard_'; fail "$left guard programs left"; }
-pass "after exit, bpftool shows no guard programs"
 echo "guard-load: all checks passed"

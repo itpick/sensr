@@ -71,8 +71,11 @@ pub enum LoadError {
     RingBufTaken,
 }
 
-/// Why an apply did not finish. The maps are then in an unknown mix of the
-/// old and new rules; the next apply rewrites every slot.
+/// Why a map access failed. After a failed apply the maps hold an unknown
+/// mix of the old and new rules; the next apply rewrites every slot (and
+/// deletes stale keys first wherever old and new would not fit together).
+/// The counter reads ([`Loaded::hits`], ...) report their failures with it
+/// too.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
     /// A map update or delete failed.
@@ -401,11 +404,18 @@ impl Loaded {
         if p.config_first {
             self.set_config(&p.config)?;
         }
-        for &slot in &p.reset_slots {
+        for &slot in &p.disable_slots {
             if (slot as usize) < MAX_RULES {
                 self.set_meta(slot, &disabled_meta(slot))?;
+            }
+        }
+        for &slot in &p.zero_hits {
+            if (slot as usize) < MAX_RULES {
                 self.zero_hits(slot)?;
             }
+        }
+        for (map, k) in &p.early_deletes {
+            self.delete(map, k)?;
         }
         for (map, k, v) in &p.upserts {
             self.upsert(map, k, v)?;
@@ -420,8 +430,10 @@ impl Loaded {
     }
 
     /// Replace the maps' contents with `c`, set the kill switch and
-    /// sensr-guard's own pid. New entries go in before stale ones go out,
-    /// and every slot whose rule id changes has its hits zeroed.
+    /// sensr-guard's own pid, in the order [`super::plan`] gives: changed
+    /// rules are disabled while the dimension maps change, new entries go
+    /// in before stale ones go out (unless a map lacks room for both), and
+    /// every slot whose rule id changes has its hits zeroed.
     pub fn apply(
         &mut self,
         c: &Compiled,
@@ -452,34 +464,36 @@ impl Loaded {
     }
 
     /// Hits per slot of the applied rules (summed over the CPUs).
-    pub fn hits(&self) -> HashMap<u32, u64> {
-        let mut out = HashMap::new();
-        let Some(map) = self.ebpf.map("hits") else {
-            return out;
-        };
-        let Ok(a) = PerCpuArray::<&MapData, u64>::try_from(map) else {
-            return out;
-        };
-        for slot in 0..self.applied.ids.len().min(MAX_RULES) as u32 {
-            if let Ok(v) = a.get(&slot, 0) {
-                out.insert(slot, v.iter().sum());
-            }
-        }
-        out
+    pub fn hits(&self) -> Result<HashMap<u32, u64>, ApplyError> {
+        let map = "hits";
+        let a = PerCpuArray::<&MapData, u64>::try_from(
+            self.ebpf.map(map).ok_or(ApplyError::Missing(map))?,
+        )
+        .map_err(|source| ApplyError::Map { map, source })?;
+        (0..self.applied.slots.len().min(MAX_RULES) as u32)
+            .map(|slot| {
+                a.get(&slot, 0)
+                    .map(|v| (slot, v.iter().sum()))
+                    .map_err(|source| ApplyError::Map { map, source })
+            })
+            .collect()
     }
 
     /// Hits per rule id of the applied rules.
-    pub fn hits_by_id(&self) -> HashMap<String, u64> {
-        hits_by_id(&self.applied.ids, &self.hits())
+    pub fn hits_by_id(&self) -> Result<HashMap<String, u64>, ApplyError> {
+        Ok(hits_by_id(&self.applied.ids(), &self.hits()?))
     }
 
     /// Events the ring buffer had no room for (summed over the CPUs).
-    pub fn ringbuf_dropped(&self) -> u64 {
-        self.ebpf
-            .map("ringbuf_dropped")
-            .and_then(|m| PerCpuArray::<&MapData, u64>::try_from(m).ok())
-            .and_then(|a| a.get(&0, 0).ok())
-            .map_or(0, |v| v.iter().sum())
+    pub fn ringbuf_dropped(&self) -> Result<u64, ApplyError> {
+        let map = "ringbuf_dropped";
+        let a = PerCpuArray::<&MapData, u64>::try_from(
+            self.ebpf.map(map).ok_or(ApplyError::Missing(map))?,
+        )
+        .map_err(|source| ApplyError::Map { map, source })?;
+        a.get(&0, 0)
+            .map(|v| v.iter().sum())
+            .map_err(|source| ApplyError::Map { map, source })
     }
 }
 
