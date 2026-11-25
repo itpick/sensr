@@ -15,6 +15,8 @@ pub mod types;
 
 #[cfg(feature = "daemon")]
 pub mod pace;
+#[cfg(feature = "store")]
+pub mod store;
 #[cfg(feature = "daemon")]
 pub mod tcp;
 #[cfg(feature = "daemon")]

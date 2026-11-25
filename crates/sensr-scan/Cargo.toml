@@ -10,7 +10,7 @@ repository.workspace = true
 [features]
 default = []
 # SQLite storage of scan results.
-store = ["dep:rusqlite"]
+store = ["dep:rusqlite", "dep:serde_json"]
 # The scan daemon (TLS probing, sockets, CLI).
 daemon = [
   "store",
@@ -33,6 +33,7 @@ ipnet.workspace = true
 rusqlite = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 serde.workspace = true
+serde_json = { workspace = true, optional = true }
 socket2 = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
@@ -44,6 +45,7 @@ x509-parser = { workspace = true, optional = true }
 [dev-dependencies]
 rcgen.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
