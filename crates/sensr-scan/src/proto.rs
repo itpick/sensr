@@ -106,6 +106,20 @@ pub enum Refusal {
     Disabled,
 }
 
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Public => f.write_str("the target is not local; confirm to scan it anyway"),
+            Self::TooLarge { addresses, max } => {
+                write!(f, "{addresses} addresses is more than the {max} allowed")
+            }
+            Self::Excluded => f.write_str("the target is on the exclude list"),
+            Self::Invalid(why) => write!(f, "the target is not valid: {why}"),
+            Self::Disabled => f.write_str("port scanning is disabled"),
+        }
+    }
+}
+
 /// Daemon state for the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusView {
@@ -190,6 +204,20 @@ mod tests {
             serde_json::to_string(&Request::Status).unwrap(),
             r#"{"op":"status"}"#
         );
+    }
+
+    #[test]
+    fn refusals_read_as_sentences() {
+        assert_eq!(
+            Refusal::TooLarge {
+                addresses: 8192,
+                max: 4096
+            }
+            .to_string(),
+            "8192 addresses is more than the 4096 allowed"
+        );
+        assert!(Refusal::Public.to_string().contains("not local"));
+        assert!(Refusal::Invalid("x".into()).to_string().ends_with(": x"));
     }
 
     #[test]

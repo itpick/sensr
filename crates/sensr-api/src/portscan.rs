@@ -6,17 +6,18 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use axum::Json;
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::{Extension, Json};
 use sensr_scan::client;
 use sensr_scan::config::{DB, DB_DIR, SOCKET};
-use sensr_scan::proto::{JobKind, Refusal, Reply, Request, StartReq};
+use sensr_scan::proto::{JobKind, Reply, Request, StartReq};
 use sensr_scan::store::Store;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::auth::Caller;
 use crate::error::ApiError;
 
 type ApiResult = Result<Json<Value>, ApiError>;
@@ -29,9 +30,9 @@ const HISTORY: u32 = 10;
 
 static PATHS: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
 
-/// Point the API at another database directory and control socket, for tests
-/// (which cannot set the environment). Only the first call has any effect;
-/// returns whether it did.
+/// Test hook: point the API at another database directory and control socket
+/// (tests cannot set the environment: `unsafe_code` is forbidden). Only the
+/// first call has any effect; returns whether it did. Not for production use.
 #[doc(hidden)]
 pub fn use_paths(dir: PathBuf, socket: PathBuf) -> bool {
     PATHS.set((dir, socket)).is_ok()
@@ -56,7 +57,8 @@ fn bad(msg: impl Into<String>) -> ApiError {
 }
 
 fn internal(e: impl std::fmt::Display) -> ApiError {
-    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    tracing::error!(error = %e, "port scanner API failure");
+    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
 }
 
 async fn blocking<T, F>(f: F) -> Result<T, ApiError>
@@ -90,6 +92,19 @@ fn mac(s: &str) -> Result<String, ApiError> {
     }
 }
 
+/// Writes change the router's behaviour: a read-only principal (holding
+/// `user-config-readonly`) may not make them. Other writes are refused by the
+/// agent; these go straight to the daemon, so they are checked here.
+fn writable(caller: &Caller) -> Result<(), ApiError> {
+    if caller.principal().readonly {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            format!("{} may not change the configuration", caller.info.user),
+        ));
+    }
+    Ok(())
+}
+
 /// Ask the daemon; an unreachable socket is 503, not a server fault.
 async fn ask(req: Request) -> Result<Reply, ApiError> {
     let sock = socket();
@@ -98,25 +113,31 @@ async fn ask(req: Request) -> Result<Reply, ApiError> {
         .map_err(internal)?;
     r.map_err(|e| {
         use std::io::ErrorKind::{ConnectionRefused, NotFound, PermissionDenied};
-        if matches!(e.kind(), NotFound | ConnectionRefused | PermissionDenied) {
-            ApiError::new(
+        match e.kind() {
+            NotFound | ConnectionRefused => ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "the port scanner is not running",
-            )
-        } else {
-            tracing::error!(error = %e, "sensr-scan control socket failure");
-            ApiError::new(
-                StatusCode::BAD_GATEWAY,
-                format!("the port scanner did not answer: {e}"),
-            )
+            ),
+            PermissionDenied => {
+                tracing::error!(error = %e, "sensr-scan socket: permission denied");
+                ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the API may not use the port scanner socket (permissions)",
+                )
+            }
+            _ => {
+                tracing::error!(error = %e, "sensr-scan control socket failure");
+                ApiError::new(StatusCode::BAD_GATEWAY, "the port scanner did not answer")
+            }
         }
     })
 }
 
 fn unexpected(r: &Reply) -> ApiError {
+    tracing::error!(reply = ?r, "unexpected reply from sensr-scan");
     ApiError::new(
         StatusCode::BAD_GATEWAY,
-        format!("unexpected reply from the port scanner: {r:?}"),
+        "unexpected reply from the port scanner",
     )
 }
 
@@ -213,21 +234,13 @@ pub struct StartBody {
     include_excluded: bool,
 }
 
-fn describe(r: &Refusal) -> String {
-    match r {
-        Refusal::Public => "the target is not local; confirm to scan it anyway".into(),
-        Refusal::TooLarge { addresses, max } => {
-            format!("{addresses} addresses is more than the {max} allowed")
-        }
-        Refusal::Excluded => "the target is on the exclude list".into(),
-        Refusal::Invalid(why) => format!("the target is not valid: {why}"),
-        Refusal::Disabled => "port scanning is disabled".into(),
-    }
-}
-
 /// `POST /api/v1/portscan/start`: queue a scan. A refusal is 409 with its
 /// reason.
-pub async fn start(Json(b): Json<StartBody>) -> Result<Response, ApiError> {
+pub async fn start(
+    Extension(caller): Extension<Caller>,
+    Json(b): Json<StartBody>,
+) -> Result<Response, ApiError> {
+    writable(&caller)?;
     let mac = b.mac.as_deref().map(mac).transpose()?;
     let req = Request::Start(StartReq {
         target: b.target,
@@ -242,7 +255,7 @@ pub async fn start(Json(b): Json<StartBody>) -> Result<Response, ApiError> {
         Reply::Started { job_id } => Json(json!({ "job_id": job_id })).into_response(),
         Reply::Refused { reason } => (
             StatusCode::CONFLICT,
-            Json(json!({ "error": describe(&reason), "reason": reason })),
+            Json(json!({ "error": reason.to_string(), "reason": reason })),
         )
             .into_response(),
         other => return Err(unexpected(&other)),
@@ -257,7 +270,8 @@ pub struct CancelBody {
 }
 
 /// `POST /api/v1/portscan/cancel`: stop a running or queued job.
-pub async fn cancel(Json(b): Json<CancelBody>) -> ApiResult {
+pub async fn cancel(Extension(caller): Extension<Caller>, Json(b): Json<CancelBody>) -> ApiResult {
+    writable(&caller)?;
     match ask(Request::Cancel { job_id: b.job_id }).await? {
         Reply::Ok => Ok(Json(json!({}))),
         other => Err(unexpected(&other)),
@@ -303,7 +317,18 @@ mod tests {
         let e = status().await.unwrap_err();
         assert_eq!(e.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(e.message, "the port scanner is not running");
-        let e = cancel(Json(CancelBody { job_id: 1 })).await.unwrap_err();
+        let caller = Caller {
+            info: sensr_ipc::AuthInfo {
+                user: "u".into(),
+                uid: 0,
+                groups: vec![],
+                privileges: vec![],
+            },
+            via: sensr_ipc::AuthMethod::Password,
+        };
+        let e = cancel(Extension(caller), Json(CancelBody { job_id: 1 }))
+            .await
+            .unwrap_err();
         assert_eq!(e.status, StatusCode::SERVICE_UNAVAILABLE);
     }
 

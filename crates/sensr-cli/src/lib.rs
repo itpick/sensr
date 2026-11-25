@@ -137,9 +137,9 @@ pub struct ScanArgs {
 pub enum ScanCmd {
     /// What is running and queued.
     Status,
-    /// The newest results for a device (MAC or address), or one job (its id).
+    /// The newest results for a device (MAC address), or one job (its id).
     Show {
-        /// A MAC address, an IP address or a job id.
+        /// A MAC address or a job id.
         what: String,
     },
 }
@@ -571,10 +571,14 @@ fn scan_send(
     req: &sensr_scan::proto::Request,
 ) -> anyhow::Result<sensr_scan::proto::Reply> {
     sensr_scan::client::send(socket, req).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound
-        | std::io::ErrorKind::ConnectionRefused
-        | std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(
-            "the port scanner is not running ({}: {e})",
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+            anyhow::anyhow!(
+                "the port scanner is not running ({}: {e})",
+                socket.display()
+            )
+        }
+        std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(
+            "permission denied on the port scanner socket {} (are you in group sensr?)",
             socket.display()
         ),
         _ => anyhow::anyhow!("the port scanner did not answer: {e}"),
@@ -623,7 +627,7 @@ fn scan(args: &ScanArgs, out: &mut dyn Write) -> anyhow::Result<()> {
                     writeln!(out, "{}", serde_json::json!({ "job_id": job_id }))?;
                 }
                 Reply::Started { job_id } => writeln!(out, "{job_id}")?,
-                Reply::Refused { reason } => bail!("scan refused: {reason:?}"),
+                Reply::Refused { reason } => bail!("scan refused: {reason}"),
                 other => bail!("unexpected reply from sensr-scan: {other:?}"),
             }
         }
@@ -657,8 +661,14 @@ fn scan_line(out: &mut dyn Write, s: &sensr_scan::types::ScanView) -> anyhow::Re
 /// `sensr scan show`: read the result database.
 fn scan_show(args: &ScanArgs, what: &str, out: &mut dyn Write) -> anyhow::Result<()> {
     let path = args.db_dir.join(sensr_scan::config::DB);
-    let store = sensr_scan::store::Store::open_ro(&path)
-        .with_context(|| format!("opening {} (has the scanner run yet?)", path.display()))?;
+    let store = sensr_scan::store::Store::open_ro(&path).map_err(|e| {
+        let hint = if path.exists() {
+            "permission denied? the scan database is readable by group sensr"
+        } else {
+            "has the scanner run yet?"
+        };
+        anyhow::anyhow!("opening {} ({hint}): {e}", path.display())
+    })?;
     if let Ok(id) = what.parse::<i64>() {
         let Some((job, scans)) = store.job(id)? else {
             bail!("no scan job {id}");

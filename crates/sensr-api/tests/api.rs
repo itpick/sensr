@@ -73,6 +73,11 @@ async fn start() -> Fx {
             json!(["page-diagnostics-networkinsight"]),
         ),
         (8, "scanviewers", json!(["page-services-portscan"])),
+        (
+            9,
+            "scanreaders",
+            json!(["page-services-portscan", "user-config-readonly"]),
+        ),
     ] {
         edits.push((
             format!("system.groups.{}", uuid(100 + n)),
@@ -88,6 +93,7 @@ async fn start() -> Fx {
         (6, "activity", "pw", "activityviewers"),
         (7, "insightonly", "pw", "insightviewers"),
         (8, "scanner", "pw", "scanviewers"),
+        (9, "scanreader", "pw", "scanreaders"),
     ] {
         let mut user = json!({"name": name, "uid": if n == 1 { 0 } else { 2000 + n },
             "password_hash": hash_password(password).unwrap(), "groups": [group]});
@@ -1219,4 +1225,27 @@ async fn portscan_needs_its_privilege() {
             .0,
         200
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn portscan_read_only_users_can_read_but_not_start_or_cancel() {
+    scan_fixture();
+    let fx = start().await;
+    let who = pw("scanreader", "pw");
+    let (st, body) = http(&fx, "GET", "/api/v1/portscan/status", Some(&who), None).await;
+    assert_eq!(st, 200, "{body}");
+    for (p, b) in [
+        (
+            "/api/v1/portscan/start",
+            json!({"target": "192.168.1.61", "kind": "device"}),
+        ),
+        ("/api/v1/portscan/cancel", json!({"job_id": 5})),
+    ] {
+        let (st, body) = http(&fx, "POST", p, Some(&who), Some(b)).await;
+        assert_eq!(st, 403, "{p}: {body}");
+        assert!(
+            body["message"].as_str().unwrap().contains("scanreader"),
+            "{body}"
+        );
+    }
 }
