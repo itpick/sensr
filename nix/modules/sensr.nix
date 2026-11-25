@@ -585,21 +585,15 @@ in
     # and the Pi 5's built-in port (macb) when its transmit queue stalls.
     # The script and its reasons: nix/modules/nic-recover.sh (tests:
     # nix/modules/nic-recover-test.sh).
-    systemd.services.sensr-nic-recover = {
-      description = "Prevent and recover Ethernet adapter wedges (USB adapters, Pi 5 macb)";
-      # Everything the script calls besides the three store paths below. A
-      # missing tool fails quietly in a timer unit: `awk` was not here, and
-      # the macb RX ring was never raised (2026-11-23).
-      path = [
-        pkgs.coreutils
-        pkgs.findutils
-        pkgs.gnugrep
-        pkgs.gnused
-        pkgs.gawk
-      ];
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = pkgs.writeShellScript "sensr-nic-recover" (
+    #
+    # One tick every 5 s, from a long-running loop rather than a timer. On
+    # 2026-11-25 the WAN (macb) stalled for 36 s and the 30 s timer bounced
+    # it only after 40 s; at 5 s a lasting stall (two rising ticks) is cured
+    # in about 10-15 s. A 5 s timer would log "Starting/Finished" twice every
+    # 5 s to the SD card; the loop logs only what the script says.
+    systemd.services.sensr-nic-recover =
+      let
+        tick = pkgs.writeShellScript "sensr-nic-recover" (
           builtins.replaceStrings
             [ "@ethtool@" "@ip@" "@systemctl@" ]
             [
@@ -609,19 +603,37 @@ in
             ]
             (builtins.readFile ./nic-recover.sh)
         );
+      in
+      {
+        description = "Prevent and recover Ethernet adapter wedges (USB adapters, Pi 5 macb)";
+        wantedBy = [ "multi-user.target" ];
+        # Everything the script calls besides the three store paths above. A
+        # missing tool fails quietly: `awk` was not here, and the macb RX ring
+        # was never raised (2026-11-23).
+        path = [
+          pkgs.coreutils
+          pkgs.findutils
+          pkgs.gnugrep
+          pkgs.gnused
+          pkgs.gawk
+        ];
+        serviceConfig = {
+          Type = "simple";
+          # The first tick waits as the timer's OnBootSec did, so a booting
+          # system's adapters settle first; a restart of the unit later on
+          # starts ticking right away.
+          ExecStart = pkgs.writeShellScript "sensr-nic-recover-loop" ''
+            up=$(cut -d. -f1 /proc/uptime)
+            [ "$up" -lt 90 ] && sleep $((90 - up))
+            while :; do
+              ${tick}
+              sleep 5
+            done
+          '';
+          Restart = "always";
+          RestartSec = 5;
+        };
       };
-    };
-
-    systemd.timers.sensr-nic-recover = {
-      description = "Check for wedged Ethernet adapters";
-      wantedBy = [ "timers.target" ];
-      timerConfig = {
-        OnBootSec = "90s";
-        OnUnitActiveSec = "30s";
-        AccuracySec = "5s";
-        Unit = "sensr-nic-recover.service";
-      };
-    };
 
     systemd.targets.sensr-net = {
       description = "sensr has applied interfaces, addresses and routes";
