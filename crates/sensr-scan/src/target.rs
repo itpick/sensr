@@ -125,13 +125,14 @@ pub fn count(t: &Target) -> u64 {
     }
 }
 
-/// Built-in local blocks: private, shared (CGNAT) and link-local IPv4,
-/// unique-local and link-local IPv6.
-const LOCAL_BLOCKS: [&str; 7] = [
+/// Built-in local blocks: private and link-local IPv4, unique-local and
+/// link-local IPv6 (the spec's RFC 1918 / ULA / link-local). Shared space
+/// (CGNAT, 100.64.0.0/10) is the ISP's, not ours: it is local only when it
+/// is one of the configured `local` nets.
+const LOCAL_BLOCKS: [&str; 6] = [
     "10.0.0.0/8",
     "172.16.0.0/12",
     "192.168.0.0/16",
-    "100.64.0.0/10",
     "169.254.0.0/16",
     "fc00::/7",
     "fe80::/10",
@@ -146,8 +147,7 @@ fn shared_block(a: IpAddr, b: IpAddr, local: &[IpNet]) -> bool {
     builtin || local.iter().any(|n| n.contains(&a) && n.contains(&b))
 }
 
-/// Whether `ip` is on a local network: private, shared (CGNAT) or link-local
-/// space, unique-local IPv6, or one of the configured `local` nets.
+/// Whether `ip` is on a local network: private or link-local space, unique-local IPv6, or one of the configured `local` nets.
 #[must_use]
 pub fn is_local(ip: IpAddr, local: &[IpNet]) -> bool {
     shared_block(ip, ip, local)
@@ -302,10 +302,9 @@ mod tests {
     }
 
     #[test]
-    fn local_and_cgnat_are_fine() {
+    fn local_is_fine() {
         for s in [
             "192.168.1.5",
-            "100.64.1.1",
             "10.1.2.3",
             "172.16.0.9",
             "fd00::1",
@@ -314,6 +313,17 @@ mod tests {
             assert_eq!(check(&parse(s).unwrap(), &cfg(), false), Ok(()), "{s}");
         }
         assert!(!is_local(ip("100.128.0.1"), &[]));
+    }
+
+    #[test]
+    fn cgnat_is_public_unless_configured() {
+        assert_eq!(
+            check(&parse("100.64.1.1").unwrap(), &cfg(), false),
+            Err(Refusal::Public)
+        );
+        let mut c = cfg();
+        c.local = vec!["100.64.0.0/10".parse().unwrap()];
+        assert_eq!(check(&parse("100.64.1.1").unwrap(), &c, false), Ok(()));
         assert!(!is_local(ip("2001:db8::1"), &[]));
     }
 

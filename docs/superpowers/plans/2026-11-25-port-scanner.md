@@ -31,7 +31,7 @@
 - Public targets are refused unless `public_ok`. "Local" means:
   - internal interfaces' subnets;
   - WireGuard networks;
-  - RFC 1918, `100.64.0.0/10`, ULA `fc00::/7`, link-local.
+  - RFC 1918, ULA `fc00::/7`, link-local (not CGNAT `100.64.0.0/10`: the ISP's space, local only when configured; ruling R10).
 - Defaults:
   - `enabled = true`, `auto_scan_new = true`;
   - `pace = gentle` (≤ 200 TCP connects/s, ≤ 64 in flight per target, one target at a time);
