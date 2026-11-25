@@ -5281,6 +5281,7 @@ dependencies = [
  "socket2",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tracing-subscriber",
 ]
 

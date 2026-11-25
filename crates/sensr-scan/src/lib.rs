@@ -11,3 +11,8 @@ pub mod ports;
 pub mod proto;
 pub mod target;
 pub mod types;
+
+#[cfg(feature = "daemon")]
+pub mod pace;
+#[cfg(feature = "daemon")]
+pub mod tcp;
