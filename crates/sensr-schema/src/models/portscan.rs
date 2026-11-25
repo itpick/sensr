@@ -19,10 +19,10 @@ use crate::validation::{FieldPath, Validations, ValidatorKind};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanPace {
-    /// Quiet: for small or fragile networks.
-    Gentle,
-    /// The default.
+    /// Quiet, at most 200 connection attempts a second: the default.
     #[default]
+    Gentle,
+    /// Faster, for networks that can take it.
     Normal,
     /// As fast as is polite.
     Fast,
@@ -80,7 +80,7 @@ pub struct Portscan {
     /// Scan a device automatically the first time it appears.
     #[serde(default = "yes")]
     pub auto_scan_new: bool,
-    /// How hard to scan.
+    /// How hard to scan (default gentle).
     #[serde(default)]
     pub pace: ScanPace,
     /// Scan results kept per target (1-100).
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(p, Portscan::default());
         assert!(p.is_default());
         assert!(p.enabled && p.auto_scan_new);
-        assert_eq!(p.pace, ScanPace::Normal);
+        assert_eq!(p.pace, ScanPace::Gentle);
         assert_eq!((p.history, p.max_range), (10, 4096));
         assert!(p.exclude.is_empty());
     }

@@ -40,9 +40,9 @@ pub struct Config {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Pace {
-    /// Quiet: for small or fragile networks.
+    /// Quiet: for small or fragile networks. What the router ships with.
     Gentle,
-    /// The default.
+    /// Faster, for networks that can take it.
     Normal,
     /// As fast as is polite.
     Fast,

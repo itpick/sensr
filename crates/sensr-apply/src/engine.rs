@@ -494,7 +494,7 @@ impl Engine {
         plan.files.insert(
             conf.clone(),
             FileSpec {
-                contents: serde_json::to_vec_pretty(&cfg).unwrap_or_default(),
+                contents: serde_json::to_vec_pretty(&cfg).expect("a plain config serialises"),
                 mode: 0o644,
             },
         );
