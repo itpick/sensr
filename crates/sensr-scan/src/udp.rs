@@ -10,7 +10,8 @@
 //! scan's pace, so hosts do not start dropping ICMP replies; the cap covers
 //! retries too.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -18,7 +19,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
-use tokio::task::JoinSet;
+use tokio::task::{self, JoinSet};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -42,6 +43,9 @@ const GRACE: Duration = Duration::from_millis(250);
 /// Most replies read per port.
 const MAX_REPLIES: usize = 8;
 const BUF: usize = 16 * 1024;
+
+/// One port's outcome.
+type PortResult = (u16, PortState, Option<Ident>);
 
 /// Result of a UDP scan of one host.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -86,36 +90,59 @@ pub async fn scan_udp_ports(
     cancel: &CancellationToken,
     progress: &AtomicU32,
 ) -> UdpResult {
+    scan_with(ip, ports, pacer, cancel, progress, |addr, cap| async move {
+        probe(addr, &cap).await
+    })
+    .await
+}
+
+/// [`scan_udp_ports`] with the per-port probe supplied (tests inject one
+/// that panics).
+async fn scan_with<P, F>(
+    ip: IpAddr,
+    ports: &[u16],
+    pacer: &Pacer,
+    cancel: &CancellationToken,
+    progress: &AtomicU32,
+    probe: P,
+) -> UdpResult
+where
+    P: Fn(SocketAddr, Arc<Pacer>) -> F,
+    F: Future<Output = (PortState, Option<Ident>)> + Send + 'static,
+{
     let cap = Arc::new(Pacer::new(PaceLimits {
         connects_per_sec: UDP_PORTS_PER_SEC,
         in_flight: UDP_IN_FLIGHT,
     }));
     let mut seen = HashSet::new();
     let mut res = UdpResult::default();
-    let mut set: JoinSet<(u16, PortState, Option<Ident>)> = JoinSet::new();
+    let mut set: JoinSet<PortResult> = JoinSet::new();
+    // Which port each task probes, so a panicked task is still reported.
+    let mut owner: HashMap<task::Id, u16> = HashMap::new();
 
     for &port in ports.iter().filter(|p| seen.insert(**p)) {
         let permit: PacerPermit = tokio::select! {
             () = cancel.cancelled() => break,
             p = pacer.permit() => p,
         };
-        let cap = Arc::clone(&cap);
-        set.spawn(async move {
-            let (st, id) = probe(SocketAddr::new(ip, port), &cap).await;
+        let fut = probe(SocketAddr::new(ip, port), Arc::clone(&cap));
+        let h = set.spawn(async move {
+            let (st, id) = fut.await;
             drop(permit);
             (port, st, id)
         });
-        while let Some(joined) = set.try_join_next() {
-            absorb(&mut res, joined, progress);
+        owner.insert(h.id(), port);
+        while let Some(joined) = set.try_join_next_with_id() {
+            absorb(&mut res, joined, &mut owner, progress);
         }
     }
     loop {
         let joined = tokio::select! {
             () = cancel.cancelled() => { set.abort_all(); break; }
-            j = set.join_next() => j,
+            j = set.join_next_with_id() => j,
         };
         match joined {
-            Some(j) => absorb(&mut res, j, progress),
+            Some(j) => absorb(&mut res, j, &mut owner, progress),
             None => break,
         }
     }
@@ -123,12 +150,29 @@ pub async fn scan_udp_ports(
     res
 }
 
+/// Fold one finished task into the result. A probe that panicked is logged
+/// and recorded as `Filtered` so every started port is accounted for; an
+/// aborted one (cancel) is not counted.
 fn absorb(
     res: &mut UdpResult,
-    joined: Result<(u16, PortState, Option<Ident>), tokio::task::JoinError>,
+    joined: Result<(task::Id, PortResult), task::JoinError>,
+    owner: &mut HashMap<task::Id, u16>,
     progress: &AtomicU32,
 ) {
-    let Ok(p) = joined else { return };
+    let p = match joined {
+        Ok((tid, p)) => {
+            owner.remove(&tid);
+            p
+        }
+        Err(e) if e.is_cancelled() => return,
+        Err(e) => {
+            let Some(port) = owner.remove(&e.id()) else {
+                return;
+            };
+            tracing::warn!(port, error = %e, "udp probe task failed; port recorded as filtered");
+            (port, PortState::Filtered, None)
+        }
+    };
     res.done += 1;
     progress.fetch_add(1, Ordering::Relaxed);
     res.ports.push(p);
@@ -239,6 +283,38 @@ mod tests {
         assert_eq!(
             a,
             Some(id(Some("Chromecast"), Some("TV"), Some("services")))
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_panicked_probe_is_filtered_and_counted() {
+        let pacer = Pacer::new(PaceLimits {
+            connects_per_sec: 100_000,
+            in_flight: 64,
+        });
+        let progress = AtomicU32::new(0);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let r = scan_with(
+            ip,
+            &[1001, 1002, 1003],
+            &pacer,
+            &CancellationToken::new(),
+            &progress,
+            |addr, _cap| async move {
+                assert_ne!(addr.port(), 1002, "probe blew up");
+                (PortState::Open, None)
+            },
+        )
+        .await;
+        assert_eq!(r.done, 3);
+        assert_eq!(progress.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            r.ports,
+            vec![
+                (1001, PortState::Open, None),
+                (1002, PortState::Filtered, None),
+                (1003, PortState::Open, None),
+            ]
         );
     }
 

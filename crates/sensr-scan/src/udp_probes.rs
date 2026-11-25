@@ -389,9 +389,11 @@ fn googlecast_parse(b: &[u8]) -> Option<Ident> {
         .filter(|r| r.rtype == 12 && r.name.eq_ignore_ascii_case(SVC))
         .find_map(|r| dns_name(b, r.at).map(|n| n.0));
     let cast_txt = |r: &&Rr<'_>| {
+        // Compare bytes: the lossy-decoded name may hold multi-byte chars.
+        let n = r.name.as_bytes();
         r.rtype == 16
-            && r.name.len() > SVC.len()
-            && r.name[r.name.len() - SVC.len()..].eq_ignore_ascii_case(SVC)
+            && n.len() > SVC.len()
+            && n[n.len() - SVC.len()..].eq_ignore_ascii_case(SVC.as_bytes())
     };
     let txt = m.rrs.iter().find(cast_txt);
     if instance.is_none() && txt.is_none() {
@@ -706,6 +708,8 @@ fn dhcp_payload() -> Vec<u8> {
     v[..4].copy_from_slice(&[1, 1, 6, 0]);
     v[4..8].copy_from_slice(&XID.to_be_bytes());
     v[28..34].copy_from_slice(&[0x02, 0, 0, 0, 0, 1]); // locally administered
+    // RFC 2131 §4.4.3 wants ciaddr = the client's own address; the payload is
+    // built without knowing our source address, so ciaddr stays 0.0.0.0.
     v[236..240].copy_from_slice(&[0x63, 0x82, 0x53, 0x63]);
     v.extend([53, 1, 8, 55, 4, 1, 3, 6, 15, 255]);
     v
@@ -2227,6 +2231,51 @@ mod tests {
             (i.title, i.version),
             (s("core-router"), s("7.16.1 (stable)"))
         );
+    }
+
+    #[test]
+    fn udp_googlecast_bad_utf8_before_suffix() {
+        // Lossy decoding turns 0xff into a 3-byte char straddling the offset
+        // where the service suffix would start; this used to panic.
+        let b = fixture("mdns-googlecast-badutf8");
+        assert_eq!((probe("googlecast").parse)(&b), None);
+        for p in PROBES {
+            let _ = (p.parse)(&b);
+        }
+    }
+
+    #[test]
+    fn udp_parsers_survive_non_ascii_in_names() {
+        // Replace every name byte of the DNS-family fixtures with 0xff, and
+        // every pair with a 2-byte char, keeping the label lengths intact.
+        for fx in [
+            "dns-version-bind",
+            "mdns-services",
+            "mdns-googlecast",
+            "llmnr-response",
+            "nbns-nbstat",
+        ] {
+            let msg = fixture(fx);
+            for i in 0..msg.len() {
+                let c = msg[i];
+                if !(c.is_ascii_alphanumeric() || c == b'_' || c == b'-') {
+                    continue;
+                }
+                let mut a = msg.clone();
+                a[i] = 0xff;
+                let mut variants = vec![a];
+                if i + 1 < msg.len() && msg[i + 1].is_ascii_alphanumeric() {
+                    let mut e = msg.clone();
+                    e[i..i + 2].copy_from_slice("é".as_bytes());
+                    variants.push(e);
+                }
+                for v in &variants {
+                    for p in PROBES {
+                        let _ = (p.parse)(v);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
