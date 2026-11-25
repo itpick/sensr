@@ -49,14 +49,15 @@ pub const TEXT_MAX: usize = 256;
 
 /// Captured bytes to display text: invalid UTF-8 replaced, whitespace
 /// controls (tab, CR, LF, ...) turned into spaces, other control characters
-/// dropped, runs of spaces collapsed, trimmed, and cut to [`TEXT_MAX`] bytes
-/// on a character boundary.
+/// dropped, runs of spaces and of U+FFFD collapsed to one, trimmed, and cut to
+/// [`TEXT_MAX`] bytes on a character boundary.
 #[must_use]
 pub fn sanitize(b: &[u8]) -> String {
     let mut out = String::new();
     for c in String::from_utf8_lossy(b).chars() {
         let c = if c.is_whitespace() { ' ' } else { c };
-        if c.is_control() || (c == ' ' && (out.is_empty() || out.ends_with(' '))) {
+        let repeat = (c == ' ' || c == char::REPLACEMENT_CHARACTER) && out.ends_with(c);
+        if c.is_control() || repeat || (c == ' ' && out.is_empty()) {
             continue;
         }
         if out.len() + c.len_utf8() > TEXT_MAX {
@@ -78,6 +79,7 @@ mod tests {
     fn sanitize_drops_controls_and_collapses_space() {
         assert_eq!(sanitize(b"  a\x00b\r\n\tc \x1b[0m "), "ab c [0m");
         assert_eq!(sanitize(b"\xff ok"), "\u{fffd} ok");
+        assert_eq!(sanitize(b"\xff\xfe\xff ok \xff"), "\u{fffd} ok \u{fffd}");
         assert_eq!(sanitize(b""), "");
     }
 

@@ -5274,6 +5274,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ipnet",
+ "rcgen",
  "rusqlite",
  "rustls",
  "serde",
@@ -5284,6 +5285,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "x509-parser",
 ]
 
 [[package]]
