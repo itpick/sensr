@@ -55,10 +55,13 @@ impl Ports {
     }
 }
 
+/// The running job: id, kind, target, MAC.
+type Current = (u64, JobKind, String, Option<String>);
+
 /// Live progress of the running job, read by `status`.
 #[derive(Debug, Default)]
 pub struct Progress {
-    current: Mutex<Option<(u64, JobKind, String, Option<String>)>>,
+    current: Mutex<Option<Current>>,
     /// Alive hosts plus one; 0 while discovery runs.
     alive: AtomicU32,
     address_n: AtomicU32,
