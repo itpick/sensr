@@ -101,6 +101,8 @@ pkgs.testers.runNixOSTest {
       # closed ports answer (RST, port unreachable) instead of timing out
       networking.firewall.enable = false;
       virtualisation.memorySize = 768;
+      # unbound binds 0.0.0.0:53, which systemd-resolved's stub listener holds
+      services.resolved.enable = false;
       # The link stays down until the test script raises it: the automatic
       # scan starts as soon as the router sees the lease, so the services
       # have to be listening before that.
