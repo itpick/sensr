@@ -25,12 +25,16 @@ ask() { echo "$1" > "$work/cmd"; cat "$work/reply"; }
 
 "$probe" "$pack" "$work" > "$work/log" 2>&1 &
 pid=$!
-for _ in $(seq 60); do
-  grep -q '^loaded' "$work/log" && break
+# The verifier walks ~180k instructions per program: seconds on KVM, minutes
+# under emulation (GUARD_LOAD_TIMEOUT, in seconds).
+timeout_s=${GUARD_LOAD_TIMEOUT:-600}
+start=$SECONDS
+while ! grep -q '^loaded' "$work/log"; do
   kill -0 "$pid" 2>/dev/null || { cat "$work/log"; fail "probe exited"; }
+  [ $((SECONDS - start)) -lt "$timeout_s" ] || { cat "$work/log"; fail "probe did not load in $timeout_s s"; }
   sleep 0.5
 done
-grep -q '^loaded' "$work/log" || { cat "$work/log"; fail "probe did not load"; }
+echo "probe loaded in $((SECONDS - start)) s"
 
 # 1. every program is attached
 status=$(ask status)
