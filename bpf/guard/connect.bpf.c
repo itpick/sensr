@@ -35,12 +35,15 @@ static __always_inline __u8 read_sockaddr(struct guard_scratch *s, struct sockad
 }
 
 SEC("lsm/socket_connect")
-int BPF_PROG(guard_connect, struct socket *sock, struct sockaddr *address, int addrlen)
+int BPF_PROG(guard_connect, struct socket *sock, struct sockaddr *address, int addrlen, int ret)
 {
 	struct task_struct *task = bpf_get_current_task_btf();
 	struct guard_scratch *s;
 	__u16 port = 0;
 	__u8 family;
+
+	if (ret)
+		return ret; /* an earlier LSM already denied it */
 
 	s = scratch_get(task);
 	if (!s || !begin(s, task, GUARD_HOOK_CONNECT))
@@ -48,5 +51,5 @@ int BPF_PROG(guard_connect, struct socket *sock, struct sockaddr *address, int a
 	family = read_sockaddr(s, address, addrlen, &port);
 	if (!family || !and_target_net(s, family, port))
 		return 0;
-	return finish(s, GUARD_HOOK_CONNECT, NULL);
+	return finish(s, GUARD_HOOK_CONNECT);
 }

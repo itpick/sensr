@@ -6,11 +6,14 @@
 char LICENSE[] SEC("license") = "GPL";
 
 SEC("lsm/socket_bind")
-int BPF_PROG(guard_bind, struct socket *sock, struct sockaddr *address, int addrlen)
+int BPF_PROG(guard_bind, struct socket *sock, struct sockaddr *address, int addrlen, int ret)
 {
 	struct task_struct *task = bpf_get_current_task_btf();
 	struct guard_scratch *s;
 	__u16 family = 0, port = 0;
+
+	if (ret)
+		return ret; /* an earlier LSM already denied it */
 
 	/* Stream sockets are reported by guard_listen. */
 	if (BPF_CORE_READ(sock, type) == GUARD_SOCK_STREAM)
@@ -43,16 +46,20 @@ int BPF_PROG(guard_bind, struct socket *sock, struct sockaddr *address, int addr
 	/* Port 0: an ephemeral (client) port, not a listening one. */
 	if (!port || !and_target_net(s, (__u8)family, port))
 		return 0;
-	return finish(s, GUARD_HOOK_LISTEN, NULL);
+	return finish(s, GUARD_HOOK_LISTEN);
 }
 
 SEC("lsm/socket_listen")
-int BPF_PROG(guard_listen, struct socket *sock, int backlog)
+int BPF_PROG(guard_listen, struct socket *sock, int backlog, int ret)
 {
 	struct task_struct *task = bpf_get_current_task_btf();
-	struct sock *sk = BPF_CORE_READ(sock, sk);
+	struct sock *sk;
 	struct guard_scratch *s;
 	__u16 family, port;
+
+	if (ret)
+		return ret; /* an earlier LSM already denied it */
+	sk = BPF_CORE_READ(sock, sk);
 
 	if (!sk)
 		return 0;
@@ -75,5 +82,5 @@ int BPF_PROG(guard_listen, struct socket *sock, int backlog)
 	}
 	if (!and_target_net(s, (__u8)family, port))
 		return 0;
-	return finish(s, GUARD_HOOK_LISTEN, NULL);
+	return finish(s, GUARD_HOOK_LISTEN);
 }

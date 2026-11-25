@@ -38,6 +38,9 @@
 #define GUARD_MAX_UNIT_KEYS 1025
 #define GUARD_MAX_UID_KEYS 1025
 #define GUARD_RINGBUF_BYTES (1 << 20)
+/* d_path works in a PATH_MAX buffer; keys and events keep the first 255
+ * bytes of a longer path (see long_to_target). */
+#define GUARD_PATH_MAX 4096
 
 /* Wildcard keys of the hash maps ("any" in that dimension). */
 #define GUARD_PORT_ANY 0x10000u
@@ -220,6 +223,14 @@ struct {
 	__uint(max_entries, GUARD_RINGBUF_BYTES);
 } events SEC(".maps");
 
+/* Events the ring buffer had no room for (per CPU; userspace sums). */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} ringbuf_dropped SEC(".maps");
+
 /* The task's executable, set at exec and inherited at fork (task_alloc in
  * exec.bpf.c). Userspace may seed tasks that predate the load (pidfd key). */
 struct {
@@ -234,10 +245,11 @@ struct {
 /* Per task, so a preempted program never shares it with another task. */
 struct guard_scratch {
 	struct guard_event ev;
-	/* The subject path (lookup key). spill gives room for the masked
-	 * writes that append a file name to a directory path. */
+	/* The subject path (lookup key): the first bytes of long_path. */
 	struct guard_path_key target;
-	char spill[GUARD_PATH_LEN];
+	/* d_path output; the extra GUARD_PATH_LEN gives room for the masked
+	 * write that appends a file name to a directory path. */
+	char long_path[GUARD_PATH_MAX + GUARD_PATH_LEN];
 	struct guard_unit_key any_unit; /* never written: the all-zero wildcard */
 	struct guard_path_key exe_none; /* zero-length key: the wildcard entry */
 	struct guard_rule_set acc;
@@ -417,27 +429,19 @@ __noinline int guard_pick(const struct guard_rule_set *acc, __u32 hook)
 }
 
 /*
- * After every dimension has been ANDed into acc: pick the rule, count it,
- * emit the event and return the LSM verdict, -EPERM only for a block rule
- * with the kill switch off and the task outside the never-block units.
- * *matched (if given) says whether a rule was found.
+ * Count the picked rule `r` (from guard_pick, >= 0), emit its event and
+ * return the LSM verdict: -EPERM only for a block rule with the kill switch
+ * off and the task outside the never-block units. `target` is copied into
+ * the event (NULL: ev->target is already set).
  */
-static __always_inline int finish(struct guard_scratch *s, __u8 hook, int *matched)
+static __always_inline int emit(struct guard_scratch *s, int r, const char *target)
 {
 	struct guard_event *ev = &s->ev;
 	struct guard_config *cfg;
-	__u32 zero = 0, slot;
-	__u8 action;
+	__u32 zero = 0, slot = r & 0xffff;
+	__u8 action = r >> 16;
 	__u64 *h;
 	int verdict = 0;
-	int r = guard_pick(&s->acc, hook);
-
-	if (matched)
-		*matched = r >= 0;
-	if (r < 0)
-		return 0;
-	slot = r & 0xffff;
-	action = r >> 16;
 
 	h = bpf_map_lookup_elem(&hits, &slot);
 	if (h)
@@ -452,18 +456,52 @@ static __always_inline int finish(struct guard_scratch *s, __u8 hook, int *match
 			verdict = -GUARD_EPERM;
 	}
 	ev->blocked = verdict != 0;
-	path_copy(ev->target, s->target.path);
-	bpf_ringbuf_output(&events, ev, sizeof(*ev), 0);
+	if (target)
+		path_copy(ev->target, target);
+	if (bpf_ringbuf_output(&events, ev, sizeof(*ev), 0)) {
+		h = bpf_map_lookup_elem(&ringbuf_dropped, &zero);
+		if (h)
+			*h += 1;
+	}
 	return verdict;
 }
 
-/* Set s->target from a d_path result (`len` counts the NUL). */
-static __always_inline int target_from_len(struct guard_scratch *s, long len)
+/* After every dimension has been ANDed into acc: pick, count, emit. */
+static __always_inline int finish(struct guard_scratch *s, __u8 hook)
 {
-	if (len <= 0 || len > GUARD_PATH_LEN)
+	int r = guard_pick(&s->acc, hook);
+
+	if (r < 0)
 		return 0;
-	s->target.prefixlen = len * 8;
+	return emit(s, r, s->target.path);
+}
+
+/*
+ * s->target from long_path holding a d_path result of `len` bytes (with
+ * its NUL). A path of up to 255 characters keeps its NUL in the key
+ * (prefixlen 8 * len); a longer one is cut to its first 255 bytes with
+ * no NUL (prefixlen 8 * 255), so it can match prefix entries only.
+ */
+static __always_inline int long_to_target(struct guard_scratch *s, long len)
+{
+	if (len <= 0)
+		return 0;
+	path_copy(s->target.path, s->long_path);
+	if (len > GUARD_PATH_LEN) {
+		s->target.path[GUARD_PATH_LEN - 1] = 0; /* for the event only */
+		s->target.prefixlen = (GUARD_PATH_LEN - 1) * 8;
+	} else {
+		s->target.prefixlen = len * 8;
+	}
 	return 1;
+}
+
+/* s->target = d_path(path), cut as long_to_target says. */
+static __always_inline int target_d_path(struct guard_scratch *s, struct path *path)
+{
+	long len = bpf_d_path(path, s->long_path, GUARD_PATH_MAX);
+
+	return long_to_target(s, len);
 }
 
 /* acc &= path_prefix_lpm(s->target) */
@@ -495,6 +533,20 @@ static __always_inline int and_target_net(struct guard_scratch *s, __u8 family, 
 	int ok;
 
 	no_target_path(s);
+	/* An IPv4-mapped IPv6 address (::ffff:a.b.c.d) is that IPv4 address:
+	 * looked up in net4_lpm and reported as AF_INET. */
+	if (family == GUARD_AF_INET6) {
+		__u32 w0, w1, w2;
+
+		__builtin_memcpy(&w0, &ev->addr[0], 4);
+		__builtin_memcpy(&w1, &ev->addr[4], 4);
+		__builtin_memcpy(&w2, &ev->addr[8], 4);
+		if (w0 == 0 && w1 == 0 && w2 == 0xffff0000u) { /* LE load of 00 00 ff ff */
+			__builtin_memcpy(&ev->addr[0], &ev->addr[12], 4);
+			__builtin_memset(&ev->addr[4], 0, 12);
+			family = GUARD_AF_INET;
+		}
+	}
 	ev->family = family;
 	ev->port = port;
 	if (family == GUARD_AF_INET) {
@@ -514,32 +566,31 @@ static __always_inline int and_target_net(struct guard_scratch *s, __u8 family, 
 }
 
 /*
- * s->target = d_path(dir) + "/" + name: the path of a directory entry.
- * The masked offsets keep every write inside target.path + spill; a path
- * longer than GUARD_PATH_LEN is cut (and matches as a prefix only).
+ * s->target = d_path(dir) + "/" + name: the path of a directory entry,
+ * built in long_path (the masked offsets keep every write inside it) and
+ * cut as long_to_target says.
  */
 static __always_inline int target_dir_entry(struct guard_scratch *s, const struct path *dir,
 					    struct dentry *dentry)
 {
 	const unsigned char *name = BPF_CORE_READ(dentry, d_name.name);
-	long len = bpf_d_path((struct path *)dir, s->target.path, GUARD_PATH_LEN);
+	long len = bpf_d_path((struct path *)dir, s->long_path, GUARD_PATH_MAX);
 	long pos, n;
 
-	if (len <= 0 || len > GUARD_PATH_LEN)
+	if (len <= 0)
 		return 0;
 	pos = len - 1; /* the NUL */
 	if (pos > 1) { /* not "/" */
-		s->target.path[pos & (GUARD_PATH_LEN - 1)] = '/';
+		s->long_path[pos & (GUARD_PATH_MAX - 1)] = '/';
 		pos++;
 	}
-	if (pos >= GUARD_PATH_LEN)
-		return target_from_len(s, GUARD_PATH_LEN);
-	n = bpf_probe_read_kernel_str(&s->target.path[pos & (GUARD_PATH_LEN - 1)],
+	if (pos >= GUARD_PATH_MAX)
+		return long_to_target(s, GUARD_PATH_MAX);
+	n = bpf_probe_read_kernel_str(&s->long_path[pos & (GUARD_PATH_MAX - 1)],
 				      GUARD_PATH_LEN, name);
 	if (n <= 0)
 		return 0;
-	len = pos + n;
-	return target_from_len(s, len > GUARD_PATH_LEN ? GUARD_PATH_LEN : len);
+	return long_to_target(s, pos + n);
 }
 
 /* Write `v` in decimal as the event's target (the uid a setuid gives). */

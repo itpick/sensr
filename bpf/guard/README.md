@@ -22,7 +22,7 @@ compiler and the loader must follow it exactly. Change both sides together.
 | | `lsm/socket_listen` | `listen` for TCP, with the bound address |
 | file.bpf.o | `lsm.s/file_open` | `file_write` (opens with `FMODE_WRITE`) |
 | | `lsm.s/path_unlink` | `file_write` |
-| | `lsm.s/path_rename` | `file_write`. It checks the old path first, then the new path. |
+| | `lsm.s/path_rename` | `file_write`. It checks both paths; the stronger match wins. |
 | creds.bpf.o | `lsm/task_fix_setuid` | `setuid`, only when uid or euid changes. The target is the new euid. |
 | module.bpf.o | `lsm.s/kernel_read_file` | `module` (`READING_MODULE`, `READING_MODULE_COMPRESSED`). The target is the module file. |
 | | `lsm/kernel_load_data` | `module` (`LOADING_MODULE`). There is no path. |
@@ -70,6 +70,7 @@ order. Ports are host order.
 | `hits` | PERCPU_ARRAY | `u32 slot` | `u64` | 1024 |
 | `config` | ARRAY | `u32 0` | `struct guard_config { u8 kill_switch; u32 guard_tgid; }` (8 B, `guard_tgid` at offset 4) | 1 |
 | `events` | RINGBUF | | `struct guard_event` records | 1 MiB |
+| `ringbuf_dropped` | PERCPU_ARRAY | `u32 0` | `u64`: events the ring buffer had no room for (sum the CPUs) | 1 |
 | `task_exe` | TASK_STORAGE | (task) | `struct guard_path_key`: the exe path and `prefixlen = 8 * (strlen + 1)` | |
 
 The LPM maps use `BPF_F_NO_PREALLOC`, as LPM tries require.
@@ -97,8 +98,10 @@ strings to slots.
 | `u8 family` | 558 | 2 (AF_INET), 10 (AF_INET6), or 0 |
 | `char unit[64]` | 559 | leaf cgroup name (the systemd unit) |
 
-Strings are NUL-terminated. A path cut at 256 bytes may have no NUL, so
-read at most the field's size. Bytes after the NUL are unspecified.
+Strings are NUL-terminated within their field (a path longer than 255
+bytes is cut to its first 255). Bytes after the NUL are unspecified.
+An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is reported as
+`family = 2` with the IPv4 address in `addr[0..4]`.
 
 ## How a program matches (the compiler must produce exactly this)
 
@@ -123,8 +126,15 @@ Each rule is a slot. Each program looks up one `rule_set` per
 - **unit**: `unit_rules[leaf name] | unit_rules[all-zero name]`.
 - **path**: `path_prefix_lpm` looked up with the subject path, also with
   `prefixlen = 8 * (strlen + 1)`.
+- **long paths**: `bpf_d_path` runs into a PATH_MAX buffer. A path longer
+  than 255 bytes becomes a key of its first 255 bytes with no NUL
+  (`prefixlen = 8 * 255`). So it matches prefix entries, never exact ones.
+  The same cut applies to `task_exe` and to the event's `exe`/`target`.
 - **net**: `net4_lpm` with `prefixlen = 32`, or `net6_lpm` with
-  `prefixlen = 128`.
+  `prefixlen = 128`. An IPv4-mapped IPv6 address is looked up in
+  `net4_lpm` as its IPv4 address. So an IPv4 rule also covers
+  `::ffff:a.b.c.d` on an AF_INET6 socket, and the compiler need not add
+  mapped entries to `net6_lpm`.
 - **port**: `port_rules[port] | port_rules[0x10000]`.
 - **uid**: `uid_rules[new euid] | uid_rules[0xffffffff]`.
 
@@ -194,9 +204,46 @@ On a match:
   - `config[0]` exists and `kill_switch == 0`;
   - the task's leaf cgroup name is not in `neverblock.h`.
 
-With no `config` entry, nothing blocks (fail open). For `path_rename`,
-the old path is tried first and the new path only if the old one matched
-no rule. Only one event is emitted.
+With no `config` entry, nothing blocks (fail open).
+
+`path_rename` picks a rule for the old path and for the new path, each with
+the walk above. The stronger one is used: block beats alert, and on a tie
+the old path wins. Only one event is emitted, with that side's path as the
+target. So moving a file into a blocked directory is blocked even when the
+source directory only has an alert rule.
+
+Every program first passes through a verdict that an earlier LSM already
+returned (`ret != 0`), without looking at any rules.
+
+If the ring buffer is full, the event is lost and `ringbuf_dropped[0]`
+(this CPU's slot) is incremented. The hit and the verdict are unaffected.
+
+## Filtering left to userspace
+
+- **"A kernel module loads after boot completed"** (`core-module-load`).
+  The programs report every module load. sensr-guard ignores module events
+  until `boot-complete.target` is reached.
+
+## Known limits
+
+- **Not hooked**: `path_link`, `path_truncate`, `path_mkdir`, `path_mknod`
+  and `path_symlink`, and `chmod`/`chown`. A hard link, a truncate through
+  `truncate(2)`, or a new directory under a protected path is not seen.
+  Opening a file for writing, with `O_TRUNC` or `O_CREAT`, is seen.
+- **listen on an unbound socket**: `socket_listen` reads the port before
+  the kernel autobinds, so `listen()` without `bind()` is seen as port 0.
+  Only port-wildcard rules then match.
+- **setuid**: `task_fix_setuid` covers uid and euid changes (setuid,
+  setreuid, setresuid, setfsuid). Gaining privileges through file
+  capabilities, or `setgid`, is not covered. The target is the new euid.
+- **Scripts**: the exe cache is set at `bprm_check_security`. A script
+  runs that hook twice, once for the script and once for its interpreter.
+  The interpreter's pass sees the script as the calling exe, and the cache
+  ends up holding the interpreter.
+- **Per-task working memory**: each task that hits a hook gets a `scratch`
+  entry of about 6 KiB (TASK_STORAGE, freed when the task exits).
+- **Paths longer than PATH_MAX** (4096): `bpf_d_path` fails, so nothing
+  matches. At exec, the cache is then set to "unknown", not the old exe.
 
 ## Never-block (neverblock.h)
 
@@ -213,8 +260,8 @@ is its host test, which `checks.<system>.guard-bpf-build` runs.
 
 ## The exe cache
 
-- **At exec**: `task_exe` is set when the exec is allowed. A denied exec
-  keeps the old exe.
+- **At exec**: `task_exe` is set when the exec is allowed, cut to 255
+  bytes if the path is longer. A denied exec keeps the old exe.
 - **At fork or thread creation**: `lsm/task_alloc` copies `task_exe` to the
   new task.
 - **Tasks that predate the load**: they have no entry, so only

@@ -73,7 +73,10 @@ def config(obj, kill=0, tgid=0):
     upd(obj, "config", struct.pack("<I", 0), struct.pack("<BxxxI", kill, tgid))
 
 def hits(obj, slot):
-    r = sh("bpftool", "-j", "map", "lookup", "pinned", f"{FS}/{obj}_m/hits", "key", *hx(struct.pack("<I", slot)))
+    return sum_percpu(obj, "hits", slot)
+
+def sum_percpu(obj, m, slot):
+    r = sh("bpftool", "-j", "map", "lookup", "pinned", f"{FS}/{obj}_m/{m}", "key", *hx(struct.pack("<I", slot)))
     j = json.loads(r.stdout)
     vals = j.get("values") or j.get("formatted", {}).get("values")
     tot = 0
@@ -249,6 +252,33 @@ print("ok")
 """
     rc, out = in_cg("gt-a.scope", code6)
     check("connect: IPv6 block", out == "eperm", out)
+    # IPv4-mapped IPv6 is the IPv4 address: net4_lpm, reported as AF_INET
+    upd(o, "net4_lpm", struct.pack("<I", 32) + socket.inet_aton("1.2.3.4"), rs(3))
+    r.drain()
+    rc, out = in_cg("gt-a.scope", code6.replace("2001:db8::1", "::ffff:1.2.3.4"))
+    evs = r.drain()
+    check("connect: ::ffff:1.2.3.4 from an AF_INET6 socket hits the 1.2.3.4/32 block",
+          out == "eperm" and len(evs) == 1 and evs[0]["family"] == 2
+          and evs[0]["addr"] == socket.inet_aton("1.2.3.4") + b"\0" * 12, f"{out} {evs}")
+    rc, out = in_cg("gt-a.scope", code6.replace("2001:db8::1", "::ffff:1.2.3.5"))
+    check("connect: ::ffff:1.2.3.5 not denied", out != "eperm", out)
+    # ring buffer overflow is counted in ringbuf_dropped
+    r.drain()
+    rc, out = in_cg("gt-a.scope", """
+import socket
+n = 0
+for i in range(3000):
+    s = socket.socket(); s.setblocking(False)
+    try: s.connect(("1.2.3.4", 443))
+    except PermissionError: n += 1
+    except OSError: pass
+    s.close()
+print(n)
+""")
+    dropped = sum_percpu(o, "ringbuf_dropped", 0)
+    evs = r.drain()
+    check("connect: ring buffer overflow counted in ringbuf_dropped",
+          out == "3000" and dropped > 0 and len(evs) + dropped == 3000, f"{out} events={len(evs)} dropped={dropped}")
     unload(o)
 
 def t_exec():
@@ -302,6 +332,22 @@ except PermissionError: print('eperm')
     check("exec: exact exe /usr/bin/dash does not match python", out == "ran", out)
     rc, out = in_cg("gt-a.scope", "import os; os.execv('/usr/bin/dash', ['sh', '-c', '/tmp/gt/true && echo ran || echo denied'])")
     check("exec: exact exe /usr/bin/dash matches dash (fork inherits exe)", "denied" in out, out)
+    # a program under a path longer than 255 bytes: cut to 255, still a /tmp/gt/ prefix match
+    rule(o, 5, H_EXEC, ALERT)
+    upd(o, "exe_prefix_lpm", pathkey("/usr/bin/dash", prefix=False), rs())
+    upd(o, "exe_prefix_lpm", ANYPATH, rs(5))
+    upd(o, "exe_prefix_lpm", pathkey("/usr/bin/"), rs(5))  # cumulative: still covers python
+    longdir = "/tmp/gt/" + "/".join(["d" * 60] * 5)
+    os.makedirs(longdir, exist_ok=True)
+    sh("cp", "/usr/bin/dash", longdir + "/dash")
+    r.drain()
+    rc, out = in_cg("gt-a.scope", f"import os; os.execv('{longdir}/dash', ['sh', '-c', '/tmp/gt/true && echo ran'])")
+    evs = [e for e in r.drain() if e["hook"] == H_EXEC]
+    check("exec: a >255-byte /tmp path triggers the /tmp/gt/ exec rule (target cut to 255)",
+          out == "ran" and len(evs) == 2 and evs[0]["target"] == (longdir + "/dash")[:255], f"{out} {evs[:1]}")
+    if len(evs) == 2:
+        check("exec: the long exe is cached (cut to 255) for the next exec",
+              evs[1]["exe"] == (longdir + "/dash")[:255] and evs[1]["target"] == "/tmp/gt/true", str(evs[1]))
     unload(o)
 
 def t_file():
@@ -339,6 +385,36 @@ print(t(lambda: open('/etc/gtprot/f').read()),
     check("file: event targets", tg == ["/etc/gtprot/f", "/etc/gtprot/new"], str(tg))
     rc, out = in_cg("sensr-update-check.service", code)
     check("file: sensr-update* prefix never blocked", out.split()[1] == "ok", out)
+    # a write under a >255-byte path below the blocked prefix
+    longdir = "/etc/gtprot/" + "/".join(["d" * 60] * 5)
+    os.makedirs(longdir, exist_ok=True)  # mkdir is not hooked
+    rc, out = in_cg("gt-a.scope", f"""
+try: open('{longdir}/f', 'w').write('y'); print('ok')
+except PermissionError: print('eperm')
+""")
+    check("file: write under a >255-byte path below a blocked prefix is denied", out == "eperm", out)
+    # rename: alert on the source side, block on the destination -> blocked
+    rule(o, 8, H_FILE, ALERT)
+    wildcards(o, [7, 8])
+    upd(o, "path_prefix_lpm", pathkey("/tmp/"), rs(8))
+    open("/tmp/gtsrc2", "w").write("s")
+    r.drain()
+    rc, out = in_cg("gt-a.scope", """
+import os
+try: os.rename('/tmp/gtsrc2', '/etc/gtprot/new2'); print('ok')
+except PermissionError: print('eperm')
+""")
+    evs = r.drain()
+    check("file: rename from an alert dir into a blocked dir is denied (one event, the block)",
+          out == "eperm" and len(evs) == 1 and evs[0]["rule"] == 7 and evs[0]["blocked"]
+          and evs[0]["target"] == "/etc/gtprot/new2", f"{out} {evs}")
+    rc, out = in_cg("gt-a.scope", """
+import os
+os.rename('/tmp/gtsrc2', '/tmp/gtsrc3'); print('ok')
+""")
+    evs = r.drain()
+    check("file: rename within the alert dir: allowed, alert event for the old path",
+          out == "ok" and len(evs) == 1 and evs[0]["rule"] == 8 and evs[0]["target"] == "/tmp/gtsrc2", f"{out} {evs}")
     unload(o)
     sh("rm", "-rf", "/etc/gtprot", "/etc/gtprotx")
 
@@ -399,6 +475,19 @@ print(t(lambda: tcp(8081)), t(lambda: tcp(8083)), t(lambda: udp(8082)), t(lambda
     if evs:
         e = [e for e in evs if e["port"] == 8081][0]
         check("listen: tcp event carries bound address", e["addr"][:4] == socket.inet_aton("127.0.0.1") and e["family"] == 2, str(e))
+    # v4-mapped: only the IPv4 any-address rule is left
+    upd(o, "net6_lpm", struct.pack("<I", 0) + b"\0" * 16, rs())
+    rc, out = in_cg("gt-a.scope", """
+import socket
+def t(a):
+    s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+    try: s.bind((a, 8082)); return 'ok'
+    except PermissionError: return 'eperm'
+print(t('::ffff:127.0.0.1'), t('::1'))
+""")
+    evs = r.drain()
+    check("listen: bind to ::ffff:127.0.0.1 hits the IPv4 rule, ::1 does not",
+          out == "eperm ok" and len(evs) == 1 and evs[0]["family"] == 2, f"{out} {evs}")
     unload(o)
 
 def t_bpf():
