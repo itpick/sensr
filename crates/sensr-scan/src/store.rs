@@ -8,7 +8,9 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Row, Transaction, TransactionBehavior, params,
+};
 
 use crate::proto::JobKind;
 use crate::types::{
@@ -32,7 +34,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished INTEGER,
     status TEXT NOT NULL,
     public_ok INTEGER NOT NULL,
-    skipped TEXT NOT NULL DEFAULT '[]'
+    skipped TEXT NOT NULL DEFAULT '[]',
+    mac TEXT
 );
 CREATE TABLE IF NOT EXISTS scans (
     id INTEGER PRIMARY KEY,
@@ -56,17 +59,19 @@ CREATE TABLE IF NOT EXISTS ports (
     tls_subject TEXT,
     tls_issuer TEXT,
     tls_not_after INTEGER,
-    banner TEXT
+    banner TEXT,
+    tls_sans TEXT
 );
 CREATE INDEX IF NOT EXISTS scans_mac ON scans(mac);
 CREATE INDEX IF NOT EXISTS scans_address ON scans(address);
+CREATE INDEX IF NOT EXISTS jobs_mac ON jobs(mac);
 CREATE INDEX IF NOT EXISTS scans_job ON scans(job_id);
 CREATE INDEX IF NOT EXISTS ports_scan ON ports(scan_id);
 ";
 
 const SCAN_COLS: &str = "id, job_id, address, mac, started, finished, status, all_open";
 const PORT_COLS: &str = "proto, port, state, service, product, version, title, \
-                         tls_subject, tls_issuer, tls_not_after, banner";
+                         tls_subject, tls_issuer, tls_not_after, banner, tls_sans";
 
 /// The results database.
 pub struct Store {
@@ -134,9 +139,14 @@ fn port_from_row(r: &Row<'_>) -> rusqlite::Result<PortRow> {
     let subject: Option<String> = r.get(7)?;
     let issuer: Option<String> = r.get(8)?;
     let not_after: Option<i64> = r.get(9)?;
+    let sans: Option<String> = r.get(11)?;
+    let sans = match sans {
+        Some(j) => serde_json::from_str::<Vec<String>>(&j).map_err(|e| bad(11, e))?,
+        None => Vec::new(),
+    };
     let tls = (subject.is_some() || issuer.is_some()).then(|| TlsInfo {
         subject: subject.unwrap_or_default(),
-        sans: Vec::new(),
+        sans,
         issuer: issuer.unwrap_or_default(),
         not_after: not_after.unwrap_or_default(),
     });
@@ -182,11 +192,12 @@ fn job_from_row(r: &Row<'_>) -> rusqlite::Result<JobView> {
         status: r.get(6)?,
         skipped: serde_json::from_str::<Vec<IpAddr>>(&skipped).map_err(|e| bad(7, e))?,
         hosts_alive: r.get(8)?,
+        mac: r.get(9)?,
     })
 }
 
 const JOB_SELECT: &str = "SELECT id, kind, target, requested_by, started, finished, status, \
-    skipped, (SELECT count(*) FROM scans WHERE scans.job_id = jobs.id) FROM jobs";
+    skipped, (SELECT count(*) FROM scans WHERE scans.job_id = jobs.id), mac FROM jobs";
 
 impl Store {
     /// Open (creating if needed) the database for writing.
@@ -198,7 +209,17 @@ impl Store {
         conn.busy_timeout(BUSY)?;
         conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
         conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                std::io::Error::other(format!(
+                    "database schema version {version} is newer than supported {SCHEMA_VERSION}"
+                )),
+            )));
+        }
+        if version == 0 {
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         Ok(Store { conn })
     }
 
@@ -207,10 +228,7 @@ impl Store {
     /// # Errors
     /// Any SQLite error, including a missing file.
     pub fn open_ro(path: &Path) -> rusqlite::Result<Store> {
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-        )?;
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(BUSY)?;
         Ok(Store { conn })
     }
@@ -223,15 +241,17 @@ impl Store {
         &self,
         kind: JobKind,
         target: &str,
+        mac: Option<&str>,
         auto: bool,
         public_ok: bool,
     ) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "INSERT INTO jobs (kind, target, requested_by, started, status, public_ok) \
-             VALUES (?1, ?2, ?3, ?4, 'running', ?5)",
+            "INSERT INTO jobs (kind, target, mac, requested_by, started, status, public_ok) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
             params![
                 kind_str(kind),
                 target,
+                mac,
                 if auto { "auto" } else { "owner" },
                 now(),
                 public_ok
@@ -255,6 +275,19 @@ impl Store {
         Ok(())
     }
 
+    /// Mark every job still `running` as `failed`, finished now. The daemon
+    /// calls this at start so a crash does not leave jobs running forever.
+    /// Returns how many were changed.
+    ///
+    /// # Errors
+    /// Any SQLite error.
+    pub fn fail_stale(&self) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE jobs SET status = 'failed', finished = ?1 WHERE status = 'running'",
+            [now()],
+        )
+    }
+
     /// Store one address's scan and its ports in one transaction.
     ///
     /// # Errors
@@ -271,7 +304,7 @@ impl Store {
         all_open: bool,
         ports: &[PortRow],
     ) -> rusqlite::Result<i64> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO scans (job_id, address, mac, started, finished, status, all_open) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -289,10 +322,14 @@ impl Store {
         {
             let mut ins = tx.prepare(&format!(
                 "INSERT INTO ports (scan_id, {PORT_COLS}) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
             ))?;
             for p in ports {
                 let tls = p.ident.tls.as_ref();
+                let sans = tls
+                    .map(|t| serde_json::to_string(&t.sans))
+                    .transpose()
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
                 ins.execute(params![
                     id,
                     proto_str(p.proto),
@@ -306,6 +343,7 @@ impl Store {
                     tls.map(|t| t.issuer.as_str()),
                     tls.map(|t| t.not_after),
                     p.ident.banner,
+                    sans,
                 ])?;
             }
         }
@@ -360,8 +398,8 @@ impl Store {
         )
     }
 
-    /// Whether the owner cancelled an auto-started job for this device (its
-    /// scans carry the MAC, or it targeted the MAC directly).
+    /// Whether the owner cancelled an auto-started job for this device
+    /// (`jobs.mac`), even before any scan was written.
     ///
     /// # Errors
     /// Any SQLite error.
@@ -369,8 +407,7 @@ impl Store {
         self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.requested_by = 'auto' \
                AND j.status = 'cancelled' \
-               AND (j.target = ?1 OR EXISTS(SELECT 1 FROM scans s \
-                    WHERE s.job_id = j.id AND s.mac = ?1)))",
+               AND j.mac = ?1)",
             [mac],
             |r| r.get(0),
         )
@@ -479,7 +516,8 @@ impl Store {
     /// Drop old results, in one transaction. For each device (MAC, or address
     /// when there is no MAC) keep the newest `history` (at least 1) complete
     /// scans and anything newer than the oldest of them. A device with no
-    /// complete scan keeps its newest `history` scans. Range jobs finished
+    /// complete scan keeps its newest `history` scans. Finished device jobs with
+    /// no scans left are deleted, except auto jobs the owner cancelled. Range jobs finished
     /// more than 90 days before `now` are deleted with their scans, except
     /// scans kept by a MAC's history, which keep their job row too.
     ///
@@ -488,7 +526,7 @@ impl Store {
     pub fn prune(&self, history: u16, now: i64) -> rusqlite::Result<()> {
         use std::collections::{HashMap, HashSet};
         let keep_n = usize::from(history.max(1));
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
 
         // (id, started, complete) per device, newest first.
         let mut groups: HashMap<String, Vec<(i64, i64, bool)>> = HashMap::new();
@@ -565,6 +603,14 @@ impl Store {
                 [job],
             )?;
         }
+        // Finished device jobs left with no scans (never an auto job the owner
+        // cancelled: `auto_cancelled` reads that row).
+        tx.execute(
+            "DELETE FROM jobs WHERE kind = 'device' AND finished IS NOT NULL \
+             AND NOT (requested_by = 'auto' AND status = 'cancelled') \
+             AND NOT EXISTS(SELECT 1 FROM scans WHERE scans.job_id = jobs.id)",
+            [],
+        )?;
         tx.commit()
     }
 }
@@ -614,7 +660,7 @@ mod tests {
     }
 
     fn device_job(s: &Store) -> i64 {
-        s.begin_job(JobKind::Device, "192.168.1.10", false, false)
+        s.begin_job(JobKind::Device, "192.168.1.10", None, false, false)
             .unwrap()
     }
 
@@ -829,7 +875,7 @@ mod tests {
         let s = mem();
         let now = 1_000 * DAY;
         let old = s
-            .begin_job(JobKind::Range, "192.168.1.0/24", false, false)
+            .begin_job(JobKind::Range, "192.168.1.0/24", None, false, false)
             .unwrap();
         s.end_job(old, "complete", &[]).unwrap();
         s.conn
@@ -893,7 +939,7 @@ mod tests {
         }
         // A fresh range job is untouched.
         let fresh = s
-            .begin_job(JobKind::Range, "10.0.0.0/24", false, false)
+            .begin_job(JobKind::Range, "10.0.0.0/24", None, false, false)
             .unwrap();
         s.end_job(fresh, "complete", &[]).unwrap();
 
@@ -908,7 +954,16 @@ mod tests {
         assert!(ids.contains(&fresh));
         let (_, scans) = s.job(old).unwrap().unwrap();
         assert_eq!(scans.iter().map(|v| v.id).collect::<Vec<_>>(), vec![kept]);
-        let _ = (gone, nomac);
+        for id in [gone, nomac] {
+            let n: i64 = s
+                .conn
+                .query_row("SELECT count(*) FROM scans WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(n, 0, "scan {id} should be gone");
+        }
+        assert_eq!(count(&s, "ports"), 1);
 
         // With history 1, MAC A's scan is still its newest, so the job stays;
         // once A has a newer scan the job disappears entirely.
@@ -933,7 +988,9 @@ mod tests {
     fn auto_cancelled_only_for_auto_and_cancelled() {
         let s = mem();
         let mk = |auto: bool, status: &str, mac: &str| {
-            let j = s.begin_job(JobKind::Device, "x", auto, false).unwrap();
+            let j = s
+                .begin_job(JobKind::Device, "x", Some(mac), auto, false)
+                .unwrap();
             s.write_scan(
                 j,
                 ip("10.0.0.1"),
@@ -1032,7 +1089,7 @@ mod tests {
     fn jobs_views_and_history() {
         let s = mem();
         let j = s
-            .begin_job(JobKind::Range, "10.0.0.0/30", true, true)
+            .begin_job(JobKind::Range, "10.0.0.0/30", None, true, true)
             .unwrap();
         let d = device_job(&s);
         s.write_scan(
@@ -1113,6 +1170,80 @@ mod tests {
         w.conn.execute_batch("COMMIT").unwrap();
         assert!(!ro.has_complete(MAC).unwrap());
         assert!(ro.conn.execute("DELETE FROM scans", []).is_err());
+    }
+
+    #[test]
+    fn auto_cancelled_without_any_scan_and_job_mac_in_view() {
+        let s = mem();
+        let j = s
+            .begin_job(JobKind::Device, "192.168.1.10", Some(MAC), true, false)
+            .unwrap();
+        s.end_job(j, "cancelled", &[]).unwrap();
+        assert!(s.auto_cancelled(MAC).unwrap());
+        assert_eq!(s.job(j).unwrap().unwrap().0.mac.as_deref(), Some(MAC));
+        // Pruning must not forget it.
+        s.prune(2, now()).unwrap();
+        assert!(s.auto_cancelled(MAC).unwrap());
+    }
+
+    #[test]
+    fn tls_sans_round_trip() {
+        let s = mem();
+        let j = device_job(&s);
+        let mut p = open(443, None);
+        p.ident.tls = Some(TlsInfo {
+            subject: "CN=a".into(),
+            sans: vec!["a.lan".into(), "10.0.0.1".into()],
+            issuer: "CN=b".into(),
+            not_after: 7,
+        });
+        put(&s, j, Some(MAC), 1, ScanStatus::Complete, &[p.clone()]);
+        assert_eq!(s.latest_for_mac(MAC).unwrap().unwrap().ports, vec![p]);
+    }
+
+    #[test]
+    fn fail_stale_fails_running_jobs_only() {
+        let s = mem();
+        let running = device_job(&s);
+        let done = device_job(&s);
+        s.end_job(done, "complete", &[]).unwrap();
+        assert_eq!(s.fail_stale().unwrap(), 1);
+        let (jv, _) = s.job(running).unwrap().unwrap();
+        assert_eq!(jv.status, "failed");
+        assert!(jv.finished.is_some());
+        assert_eq!(s.job(done).unwrap().unwrap().0.status, "complete");
+        assert_eq!(s.fail_stale().unwrap(), 0);
+    }
+
+    #[test]
+    fn prune_deletes_finished_empty_device_jobs_only() {
+        let s = mem();
+        let empty = device_job(&s);
+        s.end_job(empty, "complete", &[]).unwrap();
+        let running = device_job(&s);
+        let with_scan = device_job(&s);
+        put(&s, with_scan, Some(MAC), 1, ScanStatus::Complete, &[]);
+        s.end_job(with_scan, "complete", &[]).unwrap();
+        s.prune(2, now()).unwrap();
+        assert!(s.job(empty).unwrap().is_none());
+        assert!(s.job(running).unwrap().is_some());
+        assert!(s.job(with_scan).unwrap().is_some());
+    }
+
+    #[test]
+    fn open_refuses_newer_schema_and_keeps_existing_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scan.db");
+        drop(Store::open(&path).unwrap());
+        let c = Connection::open(&path).unwrap();
+        c.pragma_update(None, "user_version", 99).unwrap();
+        drop(c);
+        assert!(Store::open(&path).is_err());
+        let c = Connection::open(&path).unwrap();
+        let v: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 99, "version is not overwritten");
     }
 
     #[test]

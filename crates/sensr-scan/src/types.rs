@@ -162,6 +162,8 @@ pub struct JobView {
     pub skipped: Vec<IpAddr>,
     /// Addresses that were alive and scanned.
     pub hosts_alive: u32,
+    /// The device's MAC, for device jobs.
+    pub mac: Option<String>,
 }
 
 /// Open ports that differ from the previous complete scan.
