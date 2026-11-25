@@ -407,6 +407,10 @@ in
     boot.kernel.sysctl = {
       "net.ipv4.ip_forward" = mkDefault 1;
       "net.ipv6.conf.all.forwarding" = mkDefault 1;
+      # sensr-scan's host discovery pings from an unprivileged ICMP socket
+      # (no CAP_NET_RAW). systemd's 50-default.conf sets this too; it is set
+      # here so discovery does not hang on that file being shipped.
+      "net.ipv4.ping_group_range" = mkDefault "0 2147483647";
     };
     # Loaded up front: the agent runs with ProtectKernelModules.
     boot.kernelModules = [

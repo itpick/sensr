@@ -270,6 +270,8 @@ pkgs.testers.runNixOSTest {
         assert bounding == "", f"bounding set {bounding!r}"
         router.succeed(f"grep -q '^CapBnd:\\s*0000000000000000$' /proc/{pid}/status")
         router.succeed(f"grep -q '^CapEff:\\s*0000000000000000$' /proc/{pid}/status")
+        # unprivileged ping sockets for discovery
+        router.succeed("sysctl -n net.ipv4.ping_group_range | grep -Eq '^0\\s+2147483647$'")
 
     with subtest("(f) no failed units"):
         for m in (router, target):
