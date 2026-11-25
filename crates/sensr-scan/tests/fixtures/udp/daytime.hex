@@ -1,0 +1,5 @@
+# daytime: a daytime string
+# Source: written by the sensr authors from RFC 867.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+54 75 65 20 4e 6f 76 20 32 35 20 31 30 3a 32 30
+3a 33 30 20 32 30 32 36 0d 0a

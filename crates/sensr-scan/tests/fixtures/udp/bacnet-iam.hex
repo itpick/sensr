@@ -1,0 +1,5 @@
+# bacnet-iam: I-Am from device instance 1234
+# Source: written by the sensr authors from ASHRAE 135 Annex J and clause 16.10 (I-Am).
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+81 0a 00 14 01 00 10 00 c4 02 00 04 d2 22 05 c4
+91 00 21 0f

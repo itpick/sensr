@@ -1,0 +1,9 @@
+# mdns-googlecast-badutf8: TXT owner 'inst.\xffgooglecast._tcp.local': invalid UTF-8 just before the service suffix
+# Source: written by the sensr authors from RFC 6762 §6.7 (regression input).
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+00 00 84 00 00 01 00 01 00 00 00 00 0b 5f 67 6f
+6f 67 6c 65 63 61 73 74 04 5f 74 63 70 05 6c 6f
+63 61 6c 00 00 0c 00 01 04 69 6e 73 74 0b ff 67
+6f 6f 67 6c 65 63 61 73 74 04 5f 74 63 70 05 6c
+6f 63 61 6c 00 00 10 00 01 00 00 00 78 00 0e 0d
+6d 64 3d 43 68 72 6f 6d 65 63 61 73 74

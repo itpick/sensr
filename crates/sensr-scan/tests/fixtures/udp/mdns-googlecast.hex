@@ -1,0 +1,16 @@
+# mdns-googlecast: PTR + TXT for a Chromecast named 'Living Room TV'
+# Source: written by the sensr authors from RFC 6762 §6.7 and RFC 6763 §6.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+00 00 84 00 00 01 00 01 00 00 00 01 0b 5f 67 6f
+6f 67 6c 65 63 61 73 74 04 5f 74 63 70 05 6c 6f
+63 61 6c 00 00 0c 00 01 c0 0c 00 0c 00 01 00 00
+00 78 00 2a 11 43 68 72 6f 6d 65 63 61 73 74 2d
+31 61 32 62 33 63 0b 5f 67 6f 6f 67 6c 65 63 61
+73 74 04 5f 74 63 70 05 6c 6f 63 61 6c 00 11 43
+68 72 6f 6d 65 63 61 73 74 2d 31 61 32 62 33 63
+0b 5f 67 6f 6f 67 6c 65 63 61 73 74 04 5f 74 63
+70 05 6c 6f 63 61 6c 00 00 10 80 01 00 00 11 94
+00 30 09 69 64 3d 31 61 32 62 33 63 0d 6d 64 3d
+43 68 72 6f 6d 65 63 61 73 74 11 66 6e 3d 4c 69
+76 69 6e 67 20 52 6f 6f 6d 20 54 56 05 76 65 3d
+30 35

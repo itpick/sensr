@@ -243,6 +243,100 @@ mod imp {
         cur
     }
 
+    /// The caller may start and cancel port scans: the API's start privilege, and not
+    /// read-only (the API refuses read-only principals the same way).
+    pub fn may_scan(b: &BackendHandle) -> bool {
+        b.may_access("/api/v1/portscan/start") && !b.read_only()
+    }
+
+    /// Asks the daemon to scan `target` (see [`super::portscan_start`]): the job id, or
+    /// why it refused. `confirm` scans a device on the exclude list anyway;
+    /// `include_excluded` scans a range's excluded devices too.
+    pub async fn start_scan(
+        target: &str,
+        mac: Option<String>,
+        public_ok: bool,
+        confirm: bool,
+        include_excluded: bool,
+    ) -> Result<Result<u64, sensr_scan::proto::Refusal>, ServerFnError> {
+        use sensr_scan::proto::{JobKind, Refusal, Reply, Request, StartReq};
+        use sensr_scan::target::Target;
+        let b = backend()?;
+        if !may_scan(&b) {
+            return Err(ServerFnError::new("You may not start port scans."));
+        }
+        let mac = match mac.map(|m| m.trim().to_ascii_lowercase()) {
+            Some(m) if !super::is_mac(&m) => return Err(ServerFnError::new("Not a MAC address.")),
+            m => m,
+        };
+        let target = target.trim().to_owned();
+        if target.len() > 100 {
+            return Ok(Err(Refusal::Invalid("the target is too long".into())));
+        }
+        let kind = match sensr_scan::target::parse(&target) {
+            Ok(Target::One(_)) => JobKind::Device,
+            Ok(_) => JobKind::Range,
+            Err(why) => return Ok(Err(Refusal::Invalid(why))),
+        };
+        let req = Request::Start(StartReq {
+            target,
+            kind,
+            auto: false,
+            mac: mac.filter(|_| kind == JobKind::Device),
+            public_ok,
+            confirm: confirm && kind == JobKind::Device,
+            include_excluded: include_excluded && kind == JobKind::Range,
+        });
+        match b.portscan(req).await {
+            Ok(Reply::Started { job_id }) => Ok(Ok(job_id)),
+            Ok(Reply::Refused { reason }) => Ok(Err(reason)),
+            Ok(other) => {
+                tracing::error!(reply = ?other, "unexpected reply from sensr-scan");
+                Err(ServerFnError::new("unexpected reply from the port scanner"))
+            }
+            Err(_) => Err(ServerFnError::new(crate::portscan::NOT_RUNNING)),
+        }
+    }
+
+    /// The daemon's queue, or [`crate::portscan::NOT_RUNNING`].
+    pub async fn scan_status(
+        b: &BackendHandle,
+    ) -> Result<sensr_scan::proto::StatusView, ServerFnError> {
+        use sensr_scan::proto::{Reply, Request};
+        match b.portscan(Request::Status).await {
+            Ok(Reply::Status(v)) => Ok(v),
+            Ok(other) => {
+                tracing::error!(reply = ?other, "unexpected reply from sensr-scan");
+                Err(ServerFnError::new("unexpected reply from the port scanner"))
+            }
+            Err(_) => Err(ServerFnError::new(crate::portscan::NOT_RUNNING)),
+        }
+    }
+
+    /// Fills `ports` on the hosts with a MAC from the scan database (cached, see
+    /// [`crate::portscan::latest`]) and the daemon's queue.
+    pub async fn merge_ports(b: &BackendHandle, hosts: &mut [crate::runtime::HostRow]) {
+        let status = scan_status(b).await.ok();
+        let jobs = crate::portscan::jobs_key(status.as_ref());
+        let mut macs: Vec<String> = hosts
+            .iter()
+            .filter(|h| !h.key.starts_with("id:"))
+            .filter_map(|h| h.mac.as_deref().map(str::to_ascii_lowercase))
+            .collect();
+        macs.sort();
+        macs.dedup();
+        let dir = b.scan_dir();
+        let now = now();
+        let read = move || crate::portscan::latest(&dir, &macs, &jobs, now);
+        // Off the async threads when there is a runtime (there is not in the component tests).
+        let latest = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::spawn_blocking(read).await.unwrap_or_default()
+        } else {
+            read()
+        };
+        crate::portscan::apply(hosts, &latest, status.as_ref());
+    }
+
     /// Seconds since the Unix epoch.
     pub fn now() -> i64 {
         std::time::SystemTime::now()
@@ -656,6 +750,8 @@ pub struct HostCard {
     pub networks: Vec<(String, String)>,
     /// Why same-network blocking (the ARP interceptor) is off, when it failed.
     pub arp_error: Option<String>,
+    /// The caller may start port scans (Scan now).
+    pub can_scan: bool,
 }
 
 impl HostCard {
@@ -728,6 +824,10 @@ pub async fn hosts() -> Result<Option<HostCard>, ServerFnError> {
             crate::insight::apply_mix(&mut list.hosts, &mix);
         }
     }
+    // Each device's latest port scan, for callers who may read port scans (cached too).
+    if b.may_access("/api/v1/portscan/jobs") {
+        imp::merge_ports(&b, &mut list.hosts).await;
+    }
     let networks: std::collections::BTreeMap<String, String> = list
         .hosts
         .iter()
@@ -742,6 +842,7 @@ pub async fn hosts() -> Result<Option<HostCard>, ServerFnError> {
         })
         .collect();
     Ok(Some(HostCard {
+        can_scan: imp::may_scan(&b),
         read_only: b.read_only(),
         networks: networks.into_iter().collect(),
         arp_error: list.intercept.as_ref().and_then(|i| i.error.clone()),
@@ -765,6 +866,8 @@ pub struct HostPageData {
     pub can_edit: bool,
     /// The override editor, open for one looked-up name.
     pub draft: Option<OverrideDraft>,
+    /// Its port scans, when the caller may read them and it has a MAC.
+    pub ports: Option<crate::portscan::HostPortsDetail>,
 }
 
 /// The service override editor's starting values for a looked-up name.
@@ -873,6 +976,36 @@ pub async fn host_page(
                 existing: false,
             },
         });
+    }
+    if let Some(mac) = host
+        .mac
+        .as_deref()
+        .filter(|_| !host.key.starts_with("id:") && b.may_access("/api/v1/portscan/jobs"))
+        .map(str::to_ascii_lowercase)
+    {
+        let status = imp::scan_status(&b).await.ok();
+        let dir = b.scan_dir();
+        let m = mac.clone();
+        let read = move || crate::portscan::detail(&dir, &m);
+        let detail = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::spawn_blocking(read)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r)
+        } else {
+            read()
+        };
+        match detail {
+            Ok(mut d) => {
+                d.scanning =
+                    crate::portscan::scanning(status.as_ref(), host.ipv4.as_deref(), Some(&mac));
+                d.can_scan = imp::may_scan(&b) && host.ipv4.is_some();
+                d.ipv4.clone_from(&host.ipv4);
+                d.mac = mac;
+                out.ports = Some(d);
+            }
+            Err(e) => tracing::warn!("port scans of {mac}: {e}"),
+        }
     }
     out.host = host;
     Ok(out)
@@ -1266,6 +1399,208 @@ pub async fn insight_data(
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?
     .map_err(ServerFnError::new)
+}
+
+pub use crate::portscan::{PortscanView, ScanStart};
+
+#[cfg(feature = "ssr")]
+/// Whether `s` is a MAC as the scanner keeps them: six hex pairs, colon separated.
+fn is_mac(s: &str) -> bool {
+    s.split(':').count() == 6
+        && s.split(':')
+            .all(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Queues a port scan of `target` (an address, a CIDR or a range `a.b.c.d-e`; an address
+/// is a device scan, with the device's `mac` when known). `public_ok` allows targets
+/// outside the local networks. A refusal comes back as its text (a device on the exclude
+/// list is pointed to its host page, where Scan now asks to confirm); a daemon that
+/// cannot be reached is an error saying so. Needs the port scanner's start privilege and
+/// a caller who may change things, as the API.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn portscan_start(
+    target: String,
+    mac: Option<String>,
+    public_ok: bool,
+) -> Result<ScanStart, ServerFnError> {
+    use sensr_scan::proto::Refusal;
+    Ok(
+        match imp::start_scan(&target, mac, public_ok, false, false).await? {
+            Ok(id) => ScanStart::Started(id),
+            Err(Refusal::Excluded) => ScanStart::Refused(
+                "the device is on the exclude list; Scan now on its host page asks to scan it anyway"
+                    .to_owned(),
+            ),
+            Err(r) => ScanStart::Refused(r.to_string()),
+        },
+    )
+}
+
+/// The New scan and Scan now forms (plain form posts): like [`portscan_start`], then back
+/// to `/ui/portscan`, or with `back=host` to the device's host page (`#ports`), with the
+/// outcome as codes (see [`crate::portscan::PortscanQuery`]; on the host page each key
+/// is prefixed `scan_`). The Location is rebuilt from parsed values only. `confirm`
+/// (Scan anyway, after an exclude-list refusal, which comes back with the device's MAC)
+/// scans an excluded device; `include_excluded` (New scan's tick) a range's excluded
+/// devices.
+#[server(prefix = "/ui/fn", endpoint = "portscan_submit")]
+pub async fn portscan_submit(
+    target: String,
+    mac: Option<String>,
+    public_ok: Option<String>,
+    confirm: Option<String>,
+    include_excluded: Option<String>,
+    back: Option<String>,
+) -> Result<(), ServerFnError> {
+    let mac = mac
+        .map(|m| m.trim().to_ascii_lowercase())
+        .filter(|m| !m.is_empty());
+    let host = back.as_deref() == Some("host");
+    let started = imp::start_scan(
+        &target,
+        mac.clone(),
+        public_ok.is_some(),
+        confirm.is_some(),
+        include_excluded.is_some(),
+    )
+    .await;
+    let mut pairs: Vec<(&str, String)> = match started {
+        Ok(Ok(id)) => vec![("started", id.to_string())],
+        Ok(Err(r @ sensr_scan::proto::Refusal::Excluded)) => {
+            let mut p = crate::portscan::refusal_pairs(&r);
+            if let Some(m) = mac.as_ref().filter(|m| is_mac(m)) {
+                p.push(("mac", m.clone()));
+            }
+            p
+        }
+        Ok(Err(r)) => crate::portscan::refusal_pairs(&r),
+        Err(e) if server_message(&e) == crate::portscan::NOT_RUNNING => {
+            vec![("error", "not_running".to_owned())]
+        }
+        Err(e) if imp::may_scan(&imp::backend()?) => {
+            tracing::info!("scan not started: {}", server_message(&e));
+            vec![("error", "failed".to_owned())]
+        }
+        Err(_) => vec![("error", "forbidden".to_owned())],
+    };
+    let t = target.trim();
+    if t.len() <= 100 && sensr_scan::target::parse(t).is_ok() {
+        pairs.push(("target", t.to_owned()));
+    }
+    let query = |prefix: &str| {
+        pairs
+            .iter()
+            .map(|(k, v)| format!("{prefix}{k}={}", crate::pages::url_encode(v)))
+            .collect::<Vec<_>>()
+            .join("&")
+    };
+    match mac.filter(|m| host && is_mac(m)) {
+        Some(m) => leptos_axum::redirect(&format!("/ui/hosts/{m}?{}#ports", query("scan_"))),
+        None => leptos_axum::redirect(&format!("/ui/portscan?{}", query(""))),
+    }
+    Ok(())
+}
+
+/// The Port Scanner page's Cancel buttons (plain form posts), then back to the page.
+#[server(prefix = "/ui/fn", endpoint = "portscan_cancel_form")]
+pub async fn portscan_cancel_form(job_id: u64) -> Result<(), ServerFnError> {
+    let to = |q: String| leptos_axum::redirect(&format!("/ui/portscan?{q}"));
+    match portscan_cancel(job_id).await {
+        Ok(()) => to(format!("cancelled={job_id}")),
+        Err(e) if server_message(&e) == crate::portscan::NOT_RUNNING => {
+            to("error=not_running".into());
+        }
+        Err(e) if imp::may_scan(&imp::backend()?) => {
+            tracing::info!("cancel refused: {}", server_message(&e));
+            to("error=failed".into());
+        }
+        Err(_) => to("error=forbidden".into()),
+    }
+    Ok(())
+}
+
+/// Stops a running or queued port scan (store job id). Same rules as
+/// [`portscan_start`].
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn portscan_cancel(job_id: u64) -> Result<(), ServerFnError> {
+    use sensr_scan::proto::{Reply, Request};
+    let b = imp::backend()?;
+    if !imp::may_scan(&b) {
+        return Err(ServerFnError::new("You may not cancel port scans."));
+    }
+    match b.portscan(Request::Cancel { job_id }).await {
+        Ok(Reply::Ok) => Ok(()),
+        Ok(Reply::Refused { reason }) => Err(ServerFnError::new(reason.to_string())),
+        Ok(other) => {
+            tracing::error!(reply = ?other, "unexpected reply from sensr-scan");
+            Err(ServerFnError::new("unexpected reply from the port scanner"))
+        }
+        Err(_) => Err(ServerFnError::new(crate::portscan::NOT_RUNNING)),
+    }
+}
+
+/// What the port scanner is running and has queued.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn portscan_status() -> Result<sensr_scan::proto::StatusView, ServerFnError> {
+    let b = imp::backend()?;
+    if !b.may_access("/api/v1/portscan/status") {
+        return Err(ServerFnError::new("You may not view port scans."));
+    }
+    imp::scan_status(&b).await
+}
+
+/// Services › Port Scanner: the queue, every inventory device's latest scan and the range
+/// scans.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn portscan_page() -> Result<PortscanView, ServerFnError> {
+    let b = imp::backend()?;
+    if !b.may_access("/api/v1/portscan/jobs") {
+        return Err(ServerFnError::new("You may not view port scans."));
+    }
+    let mut page = PortscanView {
+        can_scan: imp::may_scan(&b),
+        ..PortscanView::default()
+    };
+    match imp::scan_status(&b).await {
+        Ok(s) => page.jobs = crate::portscan::QueueRow::of(&s),
+        Err(e) => page.note = Some(server_message(&e)),
+    }
+    if b.may_access("/api/v1/hosts") {
+        let mut list: crate::runtime::HostList = crate::runtime::parse(
+            b.runtime(RuntimeSection::Hosts)
+                .await
+                .unwrap_or(serde_json::Value::Null),
+        );
+        imp::merge_ports(&b, &mut list.hosts).await;
+        page.devices = list
+            .hosts
+            .into_iter()
+            .filter_map(|h| {
+                Some(crate::portscan::DeviceRow {
+                    ports: h.ports.clone()?,
+                    name: h.label(),
+                    mac: h.mac.clone()?,
+                    ipv4: h.ipv4.clone(),
+                    key: h.key,
+                })
+            })
+            .collect();
+    }
+    let dir = b.scan_dir();
+    let read = move || crate::portscan::ranges(&dir);
+    let ranges = if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::spawn_blocking(read)
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r)
+    } else {
+        read()
+    };
+    match ranges {
+        Ok(r) => page.ranges = r,
+        Err(e) => tracing::warn!("range scans: {e}"),
+    }
+    Ok(page)
 }
 
 /// Services › Intrusion Detection › Alerts: one page, newest first. `text` is a signature id

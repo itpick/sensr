@@ -1,0 +1,7 @@
+# a2s-info: info: name 'LAN Party', game 'Counter-Strike', map de_dust2
+# Source: written by the sensr authors from the Valve 'Server queries' A2S_INFO layout.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+ff ff ff ff 49 11 4c 41 4e 20 50 61 72 74 79 00
+64 65 5f 64 75 73 74 32 00 63 73 67 6f 00 43 6f
+75 6e 74 65 72 2d 53 74 72 69 6b 65 00 da 02 03
+10 00 64 6c 00 01 31 2e 33 38 2e 30 2e 31 00

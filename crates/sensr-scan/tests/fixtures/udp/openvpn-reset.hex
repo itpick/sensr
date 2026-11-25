@@ -1,0 +1,5 @@
+# openvpn-reset: P_CONTROL_HARD_RESET_SERVER_V2
+# Source: written by the sensr authors from the OpenVPN wire protocol (opcode/key-id byte, session id, ack array).
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+40 09 08 07 06 05 04 03 02 01 73 65 6e 73 72 6f
+76 70 00 00 00 00 00 00 00 00 00

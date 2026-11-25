@@ -72,6 +72,12 @@ async fn start() -> Fx {
             "insightviewers",
             json!(["page-diagnostics-networkinsight"]),
         ),
+        (8, "scanviewers", json!(["page-services-portscan"])),
+        (
+            9,
+            "scanreaders",
+            json!(["page-services-portscan", "user-config-readonly"]),
+        ),
     ] {
         edits.push((
             format!("system.groups.{}", uuid(100 + n)),
@@ -86,6 +92,8 @@ async fn start() -> Fx {
         (5, "hostreader", "pw", "hostreaders"),
         (6, "activity", "pw", "activityviewers"),
         (7, "insightonly", "pw", "insightviewers"),
+        (8, "scanner", "pw", "scanviewers"),
+        (9, "scanreader", "pw", "scanreaders"),
     ] {
         let mut user = json!({"name": name, "uid": if n == 1 { 0 } else { 2000 + n },
             "password_hash": hash_password(password).unwrap(), "groups": [group]});
@@ -990,4 +998,257 @@ async fn ui_backend_set_service_override() {
             .await,
         Err(ApiError::Unauthorized)
     ));
+}
+
+/// Scan results and a fake `sensr-scan` socket shared by the port scanner
+/// tests (the API reads its paths from one process-wide setting).
+fn scan_fixture() {
+    use sensr_scan::proto::{Refusal, Reply, Request, StatusView};
+    use sensr_scan::store::Store;
+    use sensr_scan::types::{Ident, PortRow, PortState, Proto, ScanStatus};
+    use std::io::{BufRead, BufReader, Write};
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let store = Store::open(&dir.join(sensr_scan::config::DB)).unwrap();
+        let ports = |ps: &[u16]| -> Vec<PortRow> {
+            ps.iter()
+                .map(|&port| PortRow {
+                    proto: Proto::Tcp,
+                    port,
+                    state: PortState::Open,
+                    service: None,
+                    ident: Ident::default(),
+                })
+                .collect()
+        };
+        let mac = "aa:bb:cc:00:00:09";
+        let j1 = store
+            .begin_job(
+                sensr_scan::proto::JobKind::Device,
+                "192.168.1.61",
+                Some(mac),
+                false,
+                false,
+            )
+            .unwrap();
+        store
+            .write_scan(
+                j1,
+                "192.168.1.61".parse().unwrap(),
+                Some(mac),
+                10,
+                20,
+                ScanStatus::Complete,
+                false,
+                &ports(&[80]),
+            )
+            .unwrap();
+        store.end_job(j1, "complete", &[]).unwrap();
+        let j2 = store
+            .begin_job(
+                sensr_scan::proto::JobKind::Device,
+                "192.168.1.61",
+                Some(mac),
+                false,
+                false,
+            )
+            .unwrap();
+        store
+            .write_scan(
+                j2,
+                "192.168.1.61".parse().unwrap(),
+                Some(mac),
+                30,
+                40,
+                ScanStatus::Complete,
+                false,
+                &ports(&[22, 80]),
+            )
+            .unwrap();
+        store.end_job(j2, "complete", &[]).unwrap();
+        let sock = dir.join("scan.sock");
+        let l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                let mut line = String::new();
+                BufReader::new(&s).read_line(&mut line).unwrap();
+                let reply = match serde_json::from_str::<Request>(&line).unwrap() {
+                    Request::Start(r) if r.auto => Reply::Refused {
+                        reason: Refusal::Invalid("auto must be false".into()),
+                    },
+                    Request::Start(r) if r.target == "8.8.8.8" => Reply::Refused {
+                        reason: Refusal::Public,
+                    },
+                    Request::Start(r) if r.target == "10.0.0.0/8" => Reply::Refused {
+                        reason: Refusal::TooLarge {
+                            addresses: 16_777_216,
+                            max: 4096,
+                        },
+                    },
+                    Request::Start(_) => Reply::Started { job_id: 7 },
+                    Request::Cancel { job_id: 5 } => Reply::Ok,
+                    Request::Status => Reply::Status(StatusView {
+                        running: None,
+                        queue: vec![],
+                    }),
+                    other => panic!("unexpected {other:?}"),
+                };
+                let mut out = serde_json::to_vec(&reply).unwrap();
+                out.push(b'\n');
+                (&s).write_all(&out).unwrap();
+            }
+        });
+        assert!(sensr_api::portscan::use_paths(dir, sock));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn portscan_reads_results() {
+    scan_fixture();
+    let fx = start().await;
+    let who = pw("scanner", "pw");
+    let get = |path: &'static str| http(&fx, "GET", path, Some(&who), None);
+
+    let (st, body) = get("/api/v1/portscan/hosts/AA:BB:CC:00:00:09").await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["latest"]["ports"][0]["port"], 22);
+    assert_eq!(body["changes"]["opened"], json!([["tcp", 22]]));
+    assert_eq!(body["history"].as_array().unwrap().len(), 2);
+
+    let (st, body) = get("/api/v1/portscan/hosts/aa:bb:cc:00:00:99").await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body["latest"].is_null() && body["changes"].is_null());
+    assert!(body["history"].as_array().unwrap().is_empty());
+    assert_eq!(get("/api/v1/portscan/hosts/not-a-mac").await.0, 400);
+
+    let (st, body) = get("/api/v1/portscan/jobs?kind=device").await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body.as_array().unwrap().len(), 2);
+    let (_, body) = get("/api/v1/portscan/jobs?kind=device&limit=1").await;
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert!(
+        get("/api/v1/portscan/jobs?kind=range")
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(get("/api/v1/portscan/jobs?kind=nope").await.0, 400);
+    assert_eq!(
+        get("/api/v1/portscan/jobs?kind=device&limit=0").await.0,
+        400
+    );
+    assert_eq!(get("/api/v1/portscan/jobs").await.0, 400);
+
+    let (st, body) = get("/api/v1/portscan/jobs/2").await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["job"]["id"], 2);
+    assert_eq!(body["scans"][0]["ports"][0]["port"], 22);
+    assert_eq!(get("/api/v1/portscan/jobs/999").await.0, 404);
+
+    let (st, body) = get("/api/v1/portscan/status").await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body["queue"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn portscan_start_and_cancel() {
+    scan_fixture();
+    let fx = start().await;
+    let who = pw("scanner", "pw");
+    let post = |path: &'static str, body: Value| http(&fx, "POST", path, Some(&who), Some(body));
+    let start_body =
+        |target: &str| json!({"target": target, "kind": "device", "mac": "AA:BB:CC:00:00:09"});
+
+    let (st, body) = post("/api/v1/portscan/start", start_body("192.168.1.61")).await;
+    assert_eq!((st, &body), (200, &json!({"job_id": 7})));
+    // `auto` is the daemon's own; a client cannot set it
+    let mut b = start_body("192.168.1.61");
+    b["auto"] = json!(true);
+    let (st, body) = post("/api/v1/portscan/start", b).await;
+    assert_eq!((st, &body), (200, &json!({"job_id": 7})));
+
+    let (st, body) = post("/api/v1/portscan/start", start_body("8.8.8.8")).await;
+    assert_eq!(st, 409, "{body}");
+    assert_eq!(body["reason"], "public");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("outside the local networks"),
+        "{body}"
+    );
+    let (st, body) = post("/api/v1/portscan/start", start_body("10.0.0.0/8")).await;
+    assert_eq!(st, 409, "{body}");
+    assert_eq!(body["reason"]["too_large"]["max"], 4096);
+
+    assert_eq!(
+        post("/api/v1/portscan/start", json!({"kind": "device"}))
+            .await
+            .0,
+        422
+    );
+    let mut b = start_body("192.168.1.61");
+    b["mac"] = json!("junk");
+    assert_eq!(post("/api/v1/portscan/start", b).await.0, 400);
+
+    let (st, body) = post("/api/v1/portscan/cancel", json!({"job_id": 5})).await;
+    assert_eq!((st, &body), (200, &json!({})));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn portscan_needs_its_privilege() {
+    scan_fixture();
+    let fx = start().await;
+    for who in [pw("watcher", "pw"), pw("insightonly", "pw")] {
+        for (m, p, b) in [
+            ("GET", "/api/v1/portscan/status", None),
+            ("GET", "/api/v1/portscan/jobs?kind=device", None),
+            ("GET", "/api/v1/portscan/hosts/aa:bb:cc:00:00:09", None),
+            (
+                "POST",
+                "/api/v1/portscan/start",
+                Some(json!({"target": "192.168.1.61", "kind": "device"})),
+            ),
+            (
+                "POST",
+                "/api/v1/portscan/cancel",
+                Some(json!({"job_id": 5})),
+            ),
+        ] {
+            assert_eq!(http(&fx, m, p, Some(&who), b).await.0, 403, "{m} {p}");
+        }
+    }
+    let admin = pw("admin", "adminpw");
+    assert_eq!(
+        http(&fx, "GET", "/api/v1/portscan/status", Some(&admin), None)
+            .await
+            .0,
+        200
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn portscan_read_only_users_can_read_but_not_start_or_cancel() {
+    scan_fixture();
+    let fx = start().await;
+    let who = pw("scanreader", "pw");
+    let (st, body) = http(&fx, "GET", "/api/v1/portscan/status", Some(&who), None).await;
+    assert_eq!(st, 200, "{body}");
+    for (p, b) in [
+        (
+            "/api/v1/portscan/start",
+            json!({"target": "192.168.1.61", "kind": "device"}),
+        ),
+        ("/api/v1/portscan/cancel", json!({"job_id": 5})),
+    ] {
+        let (st, body) = http(&fx, "POST", p, Some(&who), Some(b)).await;
+        assert_eq!(st, 403, "{p}: {body}");
+        assert!(
+            body["message"].as_str().unwrap().contains("scanreader"),
+            "{body}"
+        );
+    }
 }

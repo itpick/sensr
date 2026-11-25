@@ -251,6 +251,18 @@ impl SliceApplier {
                 crate::hosts::HostStore::new(state.join("hosts.json")),
                 Arc::new(host_sources(Arc::new(SystemRunner))),
             );
+            // automatic first-join port scans: new devices go to sensr-scan
+            // (which decides whether to scan); weak, so the notifier thread
+            // does not keep the collector alive
+            let known_hosts = Arc::downgrade(&hosts);
+            hosts.set_scan_notify(crate::scan_notify::SocketNotify::system(Arc::new(
+                move || {
+                    known_hosts
+                        .upgrade()
+                        .map(|h| h.scan_candidates())
+                        .unwrap_or_default()
+                },
+            )));
             let interceptor = crate::arp_intercept::Interceptor::system();
             interceptor.start();
             let runner: Arc<dyn Runner> = Arc::new(SystemRunner);

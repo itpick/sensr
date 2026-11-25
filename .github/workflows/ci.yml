@@ -16,6 +16,9 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # the workspace build leaves sensr-scan's daemon feature off
+      - run: cargo clippy -p sensr-scan --all-features --all-targets -- -D warnings
+      - run: cargo test -p sensr-scan --all-features
 
   nft-goldens:
     # every nft JSON golden must load into a real kernel (nft -c: check, no commit)

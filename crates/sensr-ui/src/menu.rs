@@ -182,6 +182,7 @@ const SERVICES: &[Node] = &[n("Services").kids(&[
     n("IDS")
         .label("Intrusion Detection")
         .kids(&[n("Administration").order(10).url("/ui/ids")]),
+    n("Portscan").label("Port Scanner").url("/ui/portscan"),
     n("Unbound").label("Unbound DNS").kids(&[
         n("General").order(10).url("/ui/unbound/general"),
         n("Overrides").order(20).url("/ui/unbound/overrides"),
@@ -498,6 +499,7 @@ mod tests {
             "/ui/firewall/source_nat",
             "/ui/firewall/d_nat",
             "/ui/ids",
+            "/ui/portscan",
             "/ui/unbound/overview",
             "/ui/unbound/general",
             "/ui/unbound/overrides",

@@ -224,6 +224,7 @@ pub fn store(grid: GridId, scope: &str, doc: &Value) -> Store {
         GridId::VirtualIps => Store::Map("virtual_ips.vips".into()),
         GridId::FirewallGroups => Store::Map("firewall.groups".into()),
         GridId::FirewallIsolation => Store::Map("firewall.isolation".into()),
+        GridId::PortscanExcludes => Store::Map("portscan.exclude".into()),
         GridId::Users => Store::Map("system.users".into()),
         GridId::UserGroups => Store::Map("system.groups".into()),
         GridId::OidcProviders => Store::Map("system.oidc.providers".into()),
@@ -612,6 +613,11 @@ pub fn to_view(grid: GridId, doc: &Value, item: &Value) -> Value {
                 "description": s(item, "description"),
             })
         }
+        GridId::PortscanExcludes => json!({
+            "enabled": b(item, "enabled", true),
+            "target": s(item, "target"),
+            "description": s(item, "description"),
+        }),
         GridId::FirewallIsolation => {
             let (src, _) = endpoint_to_view(get_path(item, "source").unwrap_or(&Value::Null));
             json!({
@@ -1189,6 +1195,12 @@ pub fn from_view(
             put(o, "no_bind", view, "no_bind");
             put_opt(o, "description", view, "description");
         }
+        GridId::PortscanExcludes => {
+            let o = obj(&mut item);
+            put(o, "enabled", view, "enabled");
+            put(o, "target", view, "target");
+            put_opt(o, "description", view, "description");
+        }
         GridId::FirewallIsolation => {
             let base = item.get("source").cloned();
             let source = endpoint_from_view(
@@ -1480,6 +1492,11 @@ pub fn view_path(grid: GridId, schema: &str) -> Option<&'static str> {
             ("no_bind", "no_bind"),
             ("description", "description"),
         ],
+        GridId::PortscanExcludes => &[
+            ("enabled", "enabled"),
+            ("target", "target"),
+            ("description", "description"),
+        ],
         GridId::FirewallIsolation => &[
             ("enabled", "enabled"),
             ("interface", "interface"),
@@ -1644,6 +1661,24 @@ pub fn form_to_view(form: FormId, doc: &Value, scope: &str) -> Option<Value> {
                 "retention_days": get_path(&ids, "logging.retention_days").cloned().unwrap_or(Value::Null),
             })
         }
+        FormId::PortscanSettings => {
+            // The schema leaves defaults out of the document: parse the section to see them.
+            let raw = get_path(doc, "portscan")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let ps =
+                serde_json::from_value::<sensr_schema::models::portscan::Portscan>(raw.clone())
+                    .ok()
+                    .and_then(|p| serde_json::to_value(p).ok())
+                    .unwrap_or(raw);
+            json!({
+                "enabled": b(&ps, "enabled", true),
+                "auto_scan_new": b(&ps, "auto_scan_new", true),
+                "pace": or_default(s(&ps, "pace"), "gentle"),
+                "history": get_path(&ps, "history").cloned().unwrap_or(Value::Null),
+                "max_range": get_path(&ps, "max_range").cloned().unwrap_or(Value::Null),
+            })
+        }
         _ => return None,
     })
 }
@@ -1773,6 +1808,15 @@ pub fn form_from_view(
             put_list(dns, "listen_interfaces", view, "interfaces");
             Ok(vec!["dns"])
         }
+        FormId::PortscanSettings => {
+            let ps = obj(root.entry("portscan").or_insert_with(|| json!({})));
+            for k in ["enabled", "auto_scan_new", "pace"] {
+                put(ps, k, view, k);
+            }
+            put_opt(ps, "history", view, "history");
+            put_opt(ps, "max_range", view, "max_range");
+            Ok(vec!["portscan"])
+        }
         FormId::IdsSettings => {
             let ids = obj(root.entry("ids").or_insert_with(|| json!({})));
             for k in [
@@ -1898,6 +1942,13 @@ pub fn form_view_path(form: FormId, schema: &str) -> Option<&'static str> {
             ("ids.updates.hour", "update_hour"),
             ("ids.updates.minute", "update_minute"),
             ("ids.logging.retention_days", "retention_days"),
+        ],
+        FormId::PortscanSettings => &[
+            ("portscan.enabled", "enabled"),
+            ("portscan.auto_scan_new", "auto_scan_new"),
+            ("portscan.pace", "pace"),
+            ("portscan.history", "history"),
+            ("portscan.max_range", "max_range"),
         ],
         FormId::OidcSettings => &[("system.oidc.enabled", "enabled")],
         FormId::SamlSettings => &[("system.saml.enabled", "enabled")],

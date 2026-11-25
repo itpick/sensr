@@ -292,6 +292,19 @@ ul.plain { list-style: none; padding: 0; margin: 8px 0; }
 .host-label-editor { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 0; }
 .host-label-editor input { width: 10em; }
 .host-label-editor select { width: auto; }
+/* the port scanner's line under a host's name (and its device table): open ports in the
+   text colour, open|filtered UDP greyed, what each said in the tooltip */
+.host-ports { margin: 2px 0 0; line-height: 20px; }
+.port-chip { color: var(--fg); white-space: nowrap; }
+.port-chip[title] { cursor: help; }
+.port-chip.port-of { color: var(--muted); font-style: italic; }
+.port-change { color: var(--fg); font-weight: 600; white-space: nowrap; }
+.host-ports .btn-sm { min-height: 20px; padding: 0 8px; font-size: 12px; }
+.range-results { margin: 0; padding-left: 1.2em; }
+.scan-history { margin: 0; padding-left: 1.4em; }
+.scan-form { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.scan-form label.check { display: flex; gap: 6px; align-items: center; }
+.ports td.said { overflow-wrap: anywhere; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; }

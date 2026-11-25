@@ -2101,6 +2101,8 @@ pub fn HostsCard(
     let busy = RwSignal::new(None::<String>);
     // The last Mode or label change's refusal; kept across refreshes (which clear `error`).
     let mode_error = RwSignal::new(None::<String>);
+    // The last Scan now's refusal, likewise.
+    let scan_error = RwSignal::new(None::<String>);
     // The label editor: the MAC it is open for and its unsaved (type, maker), which a
     // re-render of the row puts back.
     let labels = LabelEditor {
@@ -2173,6 +2175,43 @@ pub fn HostsCard(
             }
             busy.set(None);
         });
+    };
+
+    let scan_now = move |h: crate::runtime::HostRow| {
+        let (Some(ip), Some(mac)) = (h.ipv4.clone(), h.mac.clone()) else {
+            return;
+        };
+        busy.set(Some(h.key.clone()));
+        spawn_local(async move {
+            scan_error.set(start_result(portscan_start(ip, Some(mac), false).await).err());
+            match hosts().await {
+                Ok(c) => card.set(c),
+                Err(e) => error.set(Some(format!("Could not read the hosts: {e}"))),
+            }
+            busy.set(None);
+        });
+    };
+
+    // The muted line under the name: the latest port scan, and Scan now.
+    let ports_line = move |h: &crate::runtime::HostRow, can_scan: bool| {
+        let p = h.ports.as_ref()?;
+        let can = can_scan && h.ipv4.is_some() && !p.scanning;
+        if p.is_empty() && !can {
+            return None;
+        }
+        let mut items = ports_items(p, &h.key);
+        if can {
+            let (k, host) = (h.key.clone(), h.clone());
+            items.push(
+                view! {
+                    <button type="button" class="btn btn-sm" aria-label=format!("Scan now: {}", h.label())
+                        disabled=move || busy.get().as_deref() == Some(k.as_str())
+                        on:click=move |_| scan_now(host.clone())>"Scan now"</button>
+                }
+                .into_any(),
+            );
+        }
+        Some(view! { <p class="host-ports muted small">{dotted(items)}</p> })
     };
 
     let set_mode = move |mac: String, mode: String, select: NodeRef<leptos::html::Select>| {
@@ -2286,7 +2325,7 @@ pub fn HostsCard(
         .into_any()
     };
 
-    let row = move |h: &crate::runtime::HostRow, now: u64, read_only: bool| {
+    let row = move |h: &crate::runtime::HostRow, now: u64, read_only: bool, can_scan: bool| {
         let key = h.key.clone();
         let actions = if read_only {
             ().into_any()
@@ -2327,7 +2366,8 @@ pub fn HostsCard(
         view! {
             <tr class:dimmed=!h.online style=mix title=mix_title>
                 <td><a class="host-link" href=crate::runtime::host_href(&h.key)>{h.label()}</a>
-                    {mix_text.map(|t| view! { <span class="sr-only">{format!(". {t}")}</span> })}</td>
+                    {mix_text.map(|t| view! { <span class="sr-only">{format!(". {t}")}</span> })}
+                    {ports_line(h, can_scan)}</td>
                 {mac_cell(h, read_only)}
                 <td class="num">{h.ipv4.clone().unwrap_or_default()}
                     {h.ipv6.first().map(|v6| view! { <br/><span class="muted">{v6.clone()}</span> })}</td>
@@ -2357,7 +2397,7 @@ pub fn HostsCard(
             let (rows, m) = network.with(|n| search.with(|q| c.visible(n, q, all)));
             let rows = rows
                 .into_iter()
-                .map(|h| row(h, c.list.now, c.read_only))
+                .map(|h| row(h, c.list.now, c.read_only, c.can_scan))
                 .collect_view();
             Some(
                 view! {
@@ -2440,11 +2480,67 @@ pub fn HostsCard(
                 {body}
                 {footer}
                 {move || mode_error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
+                {move || scan_error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
                 {move || error.get().map(|e| view! { <p class="field-error" role="alert">{e}</p> })}
             </section>
         })}
     }
     .into_any()
+}
+
+/// `Ok` when a scan was queued, else the refusal or error to show.
+fn start_result(r: Result<ScanStart, ServerFnError>) -> Result<u64, String> {
+    match r {
+        Ok(ScanStart::Started(id)) => Ok(id),
+        Ok(ScanStart::Refused(why)) => Err(format!("Not scanned: {why}.")),
+        Err(e) => Err(server_message(&e)),
+    }
+}
+
+/// `items` with ` · ` between them.
+pub fn dotted(items: Vec<AnyView>) -> impl IntoView {
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| view! { {(i > 0).then_some(" · ")}{v} })
+        .collect_view()
+}
+
+/// One port: its text (`80 http "Synology"`), greyed for open|filtered, with what it said
+/// as the tooltip. Device text is text and attribute values only.
+pub fn chip_view(c: &crate::runtime::PortChip) -> AnyView {
+    let tip = (!c.tip.is_empty()).then(|| c.tip.clone());
+    view! { <span class="port-chip" class:port-of=c.open_filtered title=tip>{c.text()}</span> }
+        .into_any()
+}
+
+/// A device's latest scan as line items: its open ports, `+N more` (to the host page of
+/// `key`), the changes, `scanning…` or the scan date (UTC; the full time in the tooltip),
+/// and `partial scan` / `no response`.
+pub fn ports_items(p: &crate::runtime::HostPorts, key: &str) -> Vec<AnyView> {
+    let mut items: Vec<AnyView> = p.open.iter().map(chip_view).collect();
+    if p.more > 0 {
+        let href = format!("{}#ports", crate::runtime::host_href(key));
+        items.push(view! { <a href=href>{format!("+{} more", p.more)}</a> }.into_any());
+    }
+    for ch in &p.changes {
+        items.push(view! { <span class="port-change">{ch.clone()}</span> }.into_any());
+    }
+    if p.scanning {
+        items.push(view! { <span class="port-scanning">"scanning…"</span> }.into_any());
+    } else {
+        if let Some(t) = p.scanned_at {
+            let full = crate::runtime::fmt_time(u64::try_from(t).unwrap_or(0));
+            items.push(
+                view! { <span class="port-date" title=full>{format!("scanned {}", crate::runtime::fmt_day(t))}</span> }
+                    .into_any(),
+            );
+        }
+        if let Some(n) = p.status_note() {
+            items.push(view! { <span class="port-note">{n}</span> }.into_any());
+        }
+    }
+    items
 }
 
 /// The key to the Hosts card's row shading: every category's colour.
@@ -2715,6 +2811,62 @@ pub fn diff_class(kind: DiffKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::runtime::{HostLabelView, HostRow};
+
+    /// Device text reaches the ports line only as escaped text; the line reads as the card
+    /// shows it.
+    #[test]
+    fn ports_line_escapes_device_text() {
+        use crate::runtime::{HostPorts, PortChip};
+        use sensr_scan::types::Proto;
+        const BAD: &str = r#"<img src=x onerror=alert(1)>"&'"#;
+        let p = HostPorts {
+            open: vec![PortChip {
+                proto: Proto::Udp,
+                port: 53,
+                service: Some(BAD.into()),
+                label: Some(BAD.into()),
+                tip: BAD.into(),
+                open_filtered: true,
+            }],
+            more: 2,
+            changes: vec![BAD.into()],
+            scanned_at: Some(1_795_608_000),
+            status: "failed".into(),
+            scanning: false,
+        };
+        let render = |p: &HostPorts| {
+            let owner = Owner::new();
+            owner.with(|| view! { <p>{dotted(ports_items(p, "id:<x>"))}</p> }.to_html())
+        };
+        let html = render(&p);
+        assert!(!html.contains("<img") && !html.contains(BAD), "{html}");
+        // service and label in the chip text, its title, the change
+        assert_eq!(
+            html.matches("&lt;img src=x onerror=alert(1)&gt;").count(),
+            4,
+            "{html}"
+        );
+        assert!(html.contains("port-chip port-of"), "{html}");
+        assert!(
+            html.contains(r#"href="/ui/hosts/id:%3Cx%3E#ports""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"title="2026-11-25 12:00:00 UTC""#),
+            "{html}"
+        );
+        let text: String = html
+            .split('<')
+            .filter_map(|t| t.split_once('>').map(|x| x.1))
+            .collect();
+        assert!(text.contains(" · +2 more · "), "{text}");
+        assert!(text.ends_with("scanned Nov 25 · no response"), "{text}");
+        let scanning = HostPorts {
+            scanning: true,
+            ..p
+        };
+        assert!(render(&scanning).contains("scanning…"));
+    }
 
     /// Hostile maker, reasons and names reach the cell's markup only escaped.
     #[test]

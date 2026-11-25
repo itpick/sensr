@@ -1,0 +1,6 @@
+# stun-binding: Binding success response, SOFTWARE 'coturn-4.6.2'
+# Source: written by the sensr authors from RFC 8489 §5 and §14.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+01 01 00 1c 21 12 a4 42 73 65 6e 73 72 2d 73 74
+75 6e 30 31 00 20 00 08 00 01 12 34 00 00 00 00
+80 22 00 0c 63 6f 74 75 72 6e 2d 34 2e 36 2e 32

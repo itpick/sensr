@@ -1,0 +1,9 @@
+# mssql-browser: instance SQLEXPRESS on SQLBOX, version 15.0.2000.5
+# Source: written by the sensr authors from [MC-SQLR] §2.2.5 SVR_RESP.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+05 57 00 53 65 72 76 65 72 4e 61 6d 65 3b 53 51
+4c 42 4f 58 3b 49 6e 73 74 61 6e 63 65 4e 61 6d
+65 3b 53 51 4c 45 58 50 52 45 53 53 3b 49 73 43
+6c 75 73 74 65 72 65 64 3b 4e 6f 3b 56 65 72 73
+69 6f 6e 3b 31 35 2e 30 2e 32 30 30 30 2e 35 3b
+74 63 70 3b 31 34 33 33 3b 3b

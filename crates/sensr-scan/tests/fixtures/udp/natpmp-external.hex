@@ -1,0 +1,4 @@
+# natpmp-external: result 0, external address 203.0.113.7
+# Source: written by the sensr authors from RFC 6886 §3.2.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+00 80 00 00 00 00 13 88 cb 00 71 07

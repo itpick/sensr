@@ -1,0 +1,7 @@
+# l2tp-sccrp: SCCRP, host 'lns-1', vendor 'xl2tpd'
+# Source: written by the sensr authors from RFC 2661 §3.1 and §4.4.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+c8 02 00 3b 00 01 00 00 00 00 00 01 80 08 00 00
+00 00 00 02 80 08 00 00 00 02 01 00 80 0b 00 00
+00 07 6c 6e 73 2d 31 00 0c 00 00 00 08 78 6c 32
+74 70 64 80 08 00 00 00 09 00 05

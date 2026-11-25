@@ -139,6 +139,16 @@ fn changed_sections_tracks_edits() {
 }
 
 #[test]
+fn portscan_only_change_is_a_section() {
+    let a = Document::factory();
+    let mut b = a.clone();
+    b.portscan.enabled = false;
+    assert_eq!(a.changed_sections(&b), [Section::Portscan]);
+    assert_eq!(Section::Portscan.key(), "portscan");
+    assert!(Section::ALL.contains(&Section::Portscan));
+}
+
+#[test]
 fn hosts_only_change_is_a_section() {
     let a = Document::factory();
     let mut b = a.clone();
