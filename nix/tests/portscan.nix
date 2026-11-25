@@ -181,8 +181,11 @@ pkgs.testers.runNixOSTest {
     with subtest("API access and the scanner at pace fast"):
         users = json.loads(router.succeed("sensr config get system.users --json"))
         root_id = next(k for k, u in users.items() if u.get("name") == "root")
+        # The fixture's root has a TOTP seed, so the import turns two-factor on
+        # and Basic auth with the password alone is refused (401): off here.
         router.succeed(
             f"sensr config set system.users.{root_id}.password_hash {shlex.quote(ROOT_HASH)}"
+            f" && sensr config set --json system.users.{root_id}.otp_enabled false"
             " && sensr config set --json portscan '{\"pace\": \"fast\"}'"
             " && sensr config commit -m 'portscan test: API password, pace fast'"
         )
@@ -190,7 +193,18 @@ pkgs.testers.runNixOSTest {
         print(router.succeed("cat /run/sensr/portscan/portscan.json"))
         router.wait_for_unit("sensr-scan.service")
         router.wait_until_succeeds("test -S /run/sensr-scan/scan.sock", timeout=60)
-        router.wait_until_succeeds(f"curl -skf -u root:opnsense {API}/api/v1/portscan/status >/dev/null", timeout=60)
+        try:
+            router.wait_until_succeeds(f"curl -skf -u root:opnsense {API}/api/v1/status >/dev/null", timeout=60)
+            router.wait_until_succeeds(f"curl -skf -u root:opnsense {API}/api/v1/portscan/status >/dev/null", timeout=60)
+        except Exception:
+            # what the API said, and why (auth, or the scanner's socket)
+            print(router.execute(
+                f"curl -sk -w '\\nHTTP %{{http_code}}\\n' -u root:opnsense {API}/api/v1/status;"
+                f" curl -sk -w '\\nHTTP %{{http_code}}\\n' -u root:opnsense {API}/api/v1/portscan/status;"
+                " ls -la /run/sensr-scan; id sensr-api;"
+                " journalctl -b -u sensr-api -u sensr-scan --no-pager | tail -n 40"
+            )[1])
+            raise
 
     target.start()
     for unit in ("sshd.service", "nginx.service", "unbound.service", "snmpd.service"):
