@@ -4,7 +4,7 @@
 //!
 //! Test hooks: [`Daemon::with_ports`] replaces the full 65,535-port TCP order
 //! and the UDP list with a few ports, and [`Daemon::with_neighbours`] /
-//! `run_job`'s `neighbours` argument replace `/proc/net/arp`. Loopback is not
+//! `run_job`'s `neighbours` argument replace the kernel's table. Loopback is not
 //! local (R4), so every config here lists `127.0.0.0/8` in `local`.
 
 use std::collections::HashMap;
@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use sensr_scan::client::send;
 use sensr_scan::config::{Config, Exclude, Pace};
+use sensr_scan::discover::{Neighbour, Neighbours};
 use sensr_scan::ports::Services;
 use sensr_scan::proto::{JobKind, KnownDevice, Refusal, Reply, Request, StartReq, StatusView};
 use sensr_scan::queue::Job;
@@ -363,7 +364,12 @@ async fn device_follows_mac() {
         .queue_job(JobKind::Device, &req.target, Some(MAC), false, false)
         .unwrap();
     job.id = u64::try_from(id).unwrap();
-    let neighbours = || HashMap::from([("127.0.0.1".parse::<IpAddr>().unwrap(), MAC.to_string())]);
+    let neighbours = || {
+        HashMap::from([(
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
+            Neighbour::reachable(MAC),
+        )])
+    };
     let ran = run_job(
         job,
         &cfg(),
@@ -383,6 +389,173 @@ async fn device_follows_mac() {
     assert_eq!(scan.address, "127.0.0.1".parse::<IpAddr>().unwrap());
     assert_eq!(scan.status, ScanStatus::Complete);
     assert!(scan.ports.iter().any(|p| p.port == port));
+}
+
+/// Run one job straight through [`run_job`] with `neighbours`; the store
+/// and the job's id.
+async fn run_direct(
+    cfg: &Config,
+    req: StartReq,
+    tcp: Vec<u16>,
+    neighbours: &dyn Fn() -> Neighbours,
+) -> (TempDir, Store, i64) {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(&dir.path().join("scans.db")).unwrap();
+    let mut job = Job::new(&req).unwrap();
+    let id = store
+        .queue_job(req.kind, &req.target, req.mac.as_deref(), req.auto, false)
+        .unwrap();
+    job.id = u64::try_from(id).unwrap();
+    run_job(
+        job,
+        cfg,
+        &store,
+        &Services::default(),
+        &ports(tcp),
+        &Progress::default(),
+        CancellationToken::new(),
+        neighbours,
+    )
+    .await
+    .unwrap();
+    (dir, store, id)
+}
+
+fn device_req(target: &str, mac: Option<&str>) -> StartReq {
+    StartReq {
+        target: target.into(),
+        kind: JobKind::Device,
+        auto: false,
+        mac: mac.map(Into::into),
+        public_ok: false,
+        confirm: false,
+        include_excluded: false,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_neighbour_that_never_answers_fails() {
+    // The kernel keeps STALE entries for departed devices: that alone is
+    // not life, so the scan fails instead of timing out every port and
+    // ending complete with nothing open.
+    let mac = "aa:bb:cc:00:00:31";
+    let neighbours = || HashMap::from([("192.0.2.1".parse().unwrap(), Neighbour::stale(mac))]);
+    let (_d, store, id) = run_direct(
+        &cfg(),
+        device_req("192.0.2.1", Some(mac)),
+        vec![22],
+        &neighbours,
+    )
+    .await;
+    assert_eq!(store.job(id).unwrap().unwrap().0.status, "failed");
+    let scan = store.latest_for_mac(mac).unwrap().expect("a scan");
+    assert_eq!(scan.status, ScanStatus::Failed);
+    assert!(scan.ports.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_address_held_by_another_device_fails() {
+    let port = ssh_listener();
+    let other = "aa:bb:cc:00:00:32";
+    let neighbours =
+        || HashMap::from([("127.0.0.1".parse().unwrap(), Neighbour::reachable(other))]);
+    let (_d, store, id) = run_direct(
+        &cfg(),
+        device_req("127.0.0.1", Some(MAC)),
+        vec![port],
+        &neighbours,
+    )
+    .await;
+    assert_eq!(store.job(id).unwrap().unwrap().0.status, "failed");
+    let scan = store.latest_for_mac(MAC).unwrap().expect("a scan");
+    assert_eq!(scan.status, ScanStatus::Failed);
+    assert!(scan.ports.is_empty(), "{:?}", scan.ports);
+    assert!(store.latest_for_mac(other).unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_excluded_by_the_mac_found_is_skipped_unless_confirmed() {
+    let port = ssh_listener();
+    let excl = "aa:bb:cc:00:00:33";
+    let mut c = cfg();
+    c.exclude = vec![Exclude::Mac(excl.into())];
+    let neighbours = || HashMap::from([("127.0.0.1".parse().unwrap(), Neighbour::reachable(excl))]);
+    let (_d, store, id) =
+        run_direct(&c, device_req("127.0.0.1", None), vec![port], &neighbours).await;
+    let (job, scans) = store.job(id).unwrap().unwrap();
+    assert_eq!(job.status, "failed");
+    assert_eq!(job.skipped, vec!["127.0.0.1".parse::<IpAddr>().unwrap()]);
+    assert!(scans.is_empty());
+
+    let mut req = device_req("127.0.0.1", None);
+    req.confirm = true;
+    let (_d, store, id) = run_direct(&c, req, vec![port], &neighbours).await;
+    let (job, scans) = store.job(id).unwrap().unwrap();
+    assert_eq!(job.status, "complete");
+    assert_eq!(job.mac.as_deref(), Some(excl));
+    assert_eq!(scans[0].mac.as_deref(), Some(excl));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_that_leaves_mid_scan_is_not_complete() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let mac = "aa:bb:cc:00:00:35";
+    // Confirmed for the job's first two reads (its address, the liveness
+    // check), gone when it is checked again after the TCP sweep.
+    let reads = AtomicU32::new(0);
+    let neighbours = || {
+        if reads.fetch_add(1, Ordering::SeqCst) < 2 {
+            HashMap::from([("192.0.2.1".parse().unwrap(), Neighbour::reachable(mac))])
+        } else {
+            HashMap::new()
+        }
+    };
+    let (_d, store, id) = run_direct(
+        &cfg(),
+        device_req("192.0.2.1", Some(mac)),
+        vec![22],
+        &neighbours,
+    )
+    .await;
+    assert_eq!(store.job(id).unwrap().unwrap().0.status, "failed");
+    let scan = store.latest_for_mac(mac).unwrap().expect("a scan");
+    assert_eq!(scan.status, ScanStatus::Failed);
+    assert!(!store.has_complete(mac).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_range_reads_neighbours_learned_after_it_started() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let port = ssh_listener();
+    let excl = "aa:bb:cc:00:00:34";
+    let mut c = cfg();
+    c.exclude = vec![Exclude::Mac(excl.into())];
+    // Empty at job start; both devices appear once discovery has probed.
+    let first = AtomicBool::new(true);
+    let neighbours = || {
+        if first.swap(false, Ordering::SeqCst) {
+            return HashMap::new();
+        }
+        HashMap::from([
+            ("127.0.0.1".parse().unwrap(), Neighbour::reachable(MAC)),
+            ("127.0.0.2".parse().unwrap(), Neighbour::reachable(excl)),
+        ])
+    };
+    let req = StartReq {
+        target: "127.0.0.1-2".into(),
+        kind: JobKind::Range,
+        auto: false,
+        mac: None,
+        public_ok: false,
+        confirm: false,
+        include_excluded: false,
+    };
+    let (_d, store, id) = run_direct(&c, req, vec![port], &neighbours).await;
+    let (job, scans) = store.job(id).unwrap().unwrap();
+    assert_eq!(job.status, "complete");
+    assert_eq!(job.skipped, vec!["127.0.0.2".parse::<IpAddr>().unwrap()]);
+    assert_eq!(scans.len(), 1, "{scans:?}");
+    assert_eq!(scans[0].mac.as_deref(), Some(MAC));
 }
 
 // ---- beyond the brief's list ----

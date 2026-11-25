@@ -26,6 +26,9 @@ pub struct Job {
     pub public_ok: bool,
     /// Scan excluded addresses of a range anyway.
     pub include_excluded: bool,
+    /// The owner confirmed scanning an excluded device (checked again when
+    /// the job runs, against the MAC found at the address then).
+    pub confirm: bool,
 }
 
 impl Job {
@@ -50,6 +53,7 @@ impl Job {
             auto: req.auto,
             public_ok: req.public_ok,
             include_excluded: req.include_excluded,
+            confirm: req.confirm && !req.auto,
         })
     }
 
@@ -102,6 +106,7 @@ impl Queue {
             if self.waiting[i].auto && !job.auto {
                 let mut w = self.waiting.remove(i);
                 w.auto = false;
+                w.confirm |= job.confirm;
                 self.insert(w);
             }
             return Ok(id);

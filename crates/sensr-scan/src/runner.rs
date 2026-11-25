@@ -12,7 +12,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
-use crate::discover::{alive, ip_for, mac_for};
+use crate::discover::{Life, Neighbours, SETTLE, ip_for, live_hosts, mac_for};
 use crate::ident::identify;
 use crate::pace::Pacer;
 use crate::ports::{Services, tcp_order};
@@ -28,8 +28,6 @@ use crate::udp_probes::PROBES;
 const IDENT_PARALLEL: usize = 8;
 /// Ports identified when a host answers on every port.
 const IDENT_ALL_OPEN: usize = 50;
-/// Range addresses checked for life at once.
-const DISCOVER_PARALLEL: usize = 32;
 
 /// The ports a scan probes.
 ///
@@ -120,12 +118,10 @@ impl Progress {
     }
 }
 
-/// Production neighbour source: `/proc/net/arp`, empty if unreadable.
+/// Production neighbour source (see [`crate::discover::system_neighbours`]).
 #[must_use]
-pub fn proc_neighbours() -> HashMap<IpAddr, String> {
-    std::fs::read_to_string("/proc/net/arp")
-        .map(|t| crate::discover::neighbours(&t))
-        .unwrap_or_default()
+pub fn proc_neighbours() -> Neighbours {
+    crate::discover::system_neighbours()
 }
 
 fn now() -> i64 {
@@ -140,6 +136,7 @@ struct Ctx<'a> {
     progress: &'a Progress,
     cancel: &'a CancellationToken,
     pacer: Pacer,
+    neighbours: &'a dyn Fn() -> Neighbours,
 }
 
 /// What scanning one live address found.
@@ -149,27 +146,46 @@ struct HostScan {
     ports: Vec<PortRow>,
 }
 
+impl HostScan {
+    fn empty(status: ScanStatus) -> HostScan {
+        HostScan {
+            status,
+            all_open: false,
+            ports: Vec::new(),
+        }
+    }
+}
+
 /// Run `job` to the end and record it in `store`; returns the store's job id.
 /// `job.id` must be the job's `queued` row ([`Store::queue_job`]); it is
 /// marked running here.
 ///
 /// - A device job scans the MAC's current IPv4 from `neighbours()` when it
-///   is local (or `public_ok`), else the job's address. An address that is
-///   not alive is recorded `Failed` with no ports and the job `failed`.
-/// - A range job checks every address of the target for life (skipping
-///   excluded ones unless `include_excluded`, recorded in `jobs.skipped`),
-///   then scans each live one, with its MAC from the neighbour table. The
+///   is local (or `public_ok`), else the job's address. The address is
+///   probed for life first ([`live_hosts`]: an answer, or a neighbour entry
+///   the kernel confirms after the probe; a bare entry is not enough), and
+///   the MAC found there is checked: a different device at the address, or
+///   no life, is recorded `Failed` with no ports and the job `failed`. A
+///   device excluded by the MAC found there is skipped unless confirmed
+///   (job `failed`, the address in `jobs.skipped`).
+/// - A range job skips excluded addresses (by address, or by any MAC the
+///   neighbour table has for them) unless `include_excluded`, checks the
+///   rest for life, then scans each live one, re-reading the neighbour
+///   table first: its MAC is the one found then, and an address now held by
+///   an excluded MAC is skipped. Skips are recorded in `jobs.skipped`. The
 ///   job ends `complete`.
-/// - A scan is TCP, identification of the open TCP ports (the first 50 when
-///   the host answers on every port), then UDP. Cancelling writes the
-///   address being scanned as `Partial` with what was found, and the job as
-///   `cancelled`.
+/// - A scan is TCP, a check that the host is still there (gone: `Partial`
+///   if any port answered, else `Failed`, and the job `failed`),
+///   identification of the open TCP ports (the first 50 when the host
+///   answers on every port), then UDP. Cancelling writes the address being
+///   scanned as `Partial` with what was found, and the job as `cancelled`.
 ///
 /// `neighbours` is injectable for tests; the daemon passes
 /// [`proc_neighbours`].
 ///
 /// # Errors
-/// A store error; the job may then be left `running` (failed at next start).
+/// A store error; the job may then be left `running` (the worker marks it
+/// failed).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_job(
     job: Job,
@@ -179,7 +195,7 @@ pub async fn run_job(
     ports: &Ports,
     progress: &Progress,
     cancel: CancellationToken,
-    neighbours: &dyn Fn() -> HashMap<IpAddr, String>,
+    neighbours: &dyn Fn() -> Neighbours,
 ) -> rusqlite::Result<i64> {
     let ctx = Ctx {
         services,
@@ -187,16 +203,16 @@ pub async fn run_job(
         progress,
         cancel: &cancel,
         pacer: Pacer::new(cfg.pace.limits()),
+        neighbours,
     };
-    let neigh = neighbours();
     match job.kind {
-        JobKind::Device => run_device(&job, cfg, store, &ctx, &neigh).await,
-        JobKind::Range => run_range(&job, cfg, store, &ctx, neigh).await,
+        JobKind::Device => run_device(&job, cfg, store, &ctx).await,
+        JobKind::Range => run_range(&job, cfg, store, &ctx).await,
     }
 }
 
 /// The address a device job scans.
-fn device_address(job: &Job, cfg: &Config, neigh: &HashMap<IpAddr, String>) -> Option<IpAddr> {
+fn device_address(job: &Job, cfg: &Config, neigh: &Neighbours) -> Option<IpAddr> {
     let Target::One(given) = job.parsed else {
         return None;
     };
@@ -226,55 +242,68 @@ fn keep_udp(port: u16, state: PortState) -> bool {
     }
 }
 
+/// Is `ip` alive, with the MAC found there? `None` if cancelled.
+async fn check(ctx: &Ctx<'_>, ip: IpAddr) -> Option<Option<Life>> {
+    let live = live_hosts(&[ip], ctx.neighbours, ctx.cancel, SETTLE).await?;
+    Some(live.into_iter().next().map(|(_, l)| l))
+}
+
+/// Whether the MAC found at the address rules out the expected device.
+fn other_device(expected: Option<&str>, found: Option<&str>) -> bool {
+    matches!((expected, found), (Some(e), Some(f)) if !e.eq_ignore_ascii_case(f))
+}
+
+/// How the job ends after its last address.
+fn job_end(ctx: &Ctx<'_>, status: ScanStatus) -> &'static str {
+    if ctx.cancel.is_cancelled() {
+        "cancelled"
+    } else if status == ScanStatus::Complete {
+        "complete"
+    } else {
+        "failed"
+    }
+}
+
 async fn run_device(
     job: &Job,
     cfg: &Config,
     store: &Store,
     ctx: &Ctx<'_>,
-    neigh: &HashMap<IpAddr, String>,
 ) -> rusqlite::Result<i64> {
-    let ip = device_address(job, cfg, neigh);
-    let mac = job
-        .mac
-        .clone()
-        .or_else(|| ip.and_then(|ip| mac_for(ip, neigh)));
+    let neigh = (ctx.neighbours)();
+    let ip = device_address(job, cfg, &neigh);
     let id = store_id(job);
-    store.start_job(id, mac.as_deref())?;
+    store.start_job(id, job.mac.as_deref())?;
     let Some(ip) = ip else {
         store.end_job(id, "failed", &[])?;
         return Ok(id);
     };
     ctx.progress.address(1, 1);
     let started = now();
-    let up = tokio::select! {
-        () = ctx.cancel.cancelled() => None,
-        up = alive(ip, neigh) => Some(up),
-    };
-    let (scan, end) = match up {
-        None => (
-            HostScan {
-                status: ScanStatus::Partial,
-                all_open: false,
-                ports: Vec::new(),
-            },
-            "cancelled",
-        ),
-        Some(false) => (
-            HostScan {
-                status: ScanStatus::Failed,
-                all_open: false,
-                ports: Vec::new(),
-            },
-            "failed",
-        ),
-        Some(true) => {
-            let s = scan_host(ctx, ip).await;
-            let end = if s.status == ScanStatus::Partial {
-                "cancelled"
-            } else {
-                "complete"
-            };
-            (s, end)
+    let mut mac = job.mac.clone();
+    let scan = match check(ctx, ip).await {
+        None => HostScan::empty(ScanStatus::Partial),
+        Some(None) => HostScan::empty(ScanStatus::Failed),
+        Some(Some(life)) if other_device(job.mac.as_deref(), life.mac.as_deref()) => {
+            tracing::warn!(
+                %ip,
+                expected = job.mac.as_deref().unwrap_or(""),
+                found = life.mac.as_deref().unwrap_or(""),
+                "device not at this address; not scanned"
+            );
+            HostScan::empty(ScanStatus::Failed)
+        }
+        Some(Some(life)) => {
+            if !job.confirm && cfg.excludes(ip, life.mac.as_deref()) {
+                tracing::info!(%ip, mac = life.mac.as_deref().unwrap_or(""), "excluded device; not scanned");
+                store.end_job(id, "failed", &[ip])?;
+                return Ok(id);
+            }
+            if mac.is_none() {
+                mac.clone_from(&life.mac);
+                store.start_job(id, mac.as_deref())?;
+            }
+            scan_host(ctx, ip, &life).await
         }
     };
     store.write_scan(
@@ -287,24 +316,20 @@ async fn run_device(
         scan.all_open,
         &scan.ports,
     )?;
-    store.end_job(id, end, &[])?;
+    store.end_job(id, job_end(ctx, scan.status), &[])?;
     Ok(id)
 }
 
-async fn run_range(
-    job: &Job,
-    cfg: &Config,
-    store: &Store,
-    ctx: &Ctx<'_>,
-    neigh: HashMap<IpAddr, String>,
-) -> rusqlite::Result<i64> {
+async fn run_range(job: &Job, cfg: &Config, store: &Store, ctx: &Ctx<'_>) -> rusqlite::Result<i64> {
     let id = store_id(job);
     store.start_job(id, None)?;
+    let neigh = (ctx.neighbours)();
+    let excluded = |ip: IpAddr, mac: Option<&str>| !job.include_excluded && cfg.excludes(ip, mac);
     let mut skipped = Vec::new();
     let mut candidates = Vec::new();
     for ip in target::addresses(&job.parsed, &cfg.router) {
-        let mac = mac_for(ip, &neigh);
-        if !job.include_excluded && cfg.excludes(ip, mac.as_deref()) {
+        // Any entry, confirmed or not: a fragile device is not probed.
+        if excluded(ip, mac_for(ip, &neigh).as_deref()) {
             skipped.push(ip);
         } else {
             candidates.push(ip);
@@ -313,66 +338,42 @@ async fn run_range(
     ctx.progress
         .address(0, u32::try_from(candidates.len()).unwrap_or(u32::MAX));
 
-    let neigh = Arc::new(neigh);
-    let Some(live) = discover(&candidates, &neigh, ctx.cancel).await else {
+    let Some(live) = live_hosts(&candidates, ctx.neighbours, ctx.cancel, SETTLE).await else {
         store.end_job(id, "cancelled", &skipped)?;
         return Ok(id);
     };
     let total = u32::try_from(live.len()).unwrap_or(u32::MAX);
     ctx.progress.alive(total);
-    for (n, ip) in live.into_iter().enumerate() {
+    for (n, (ip, life)) in live.into_iter().enumerate() {
         ctx.progress
             .address(u32::try_from(n + 1).unwrap_or(u32::MAX), total);
+        // The table now, not at job start: devices found since, and an
+        // address that changed hands.
+        let mac = mac_for(ip, &(ctx.neighbours)()).or(life.mac.clone());
+        if excluded(ip, mac.as_deref()) {
+            skipped.push(ip);
+            continue;
+        }
+        let life = Life { mac, ..life };
         let started = now();
-        let scan = scan_host(ctx, ip).await;
+        let scan = scan_host(ctx, ip, &life).await;
         store.write_scan(
             id,
             ip,
-            mac_for(ip, &neigh).as_deref(),
+            life.mac.as_deref(),
             started,
             now(),
             scan.status,
             scan.all_open,
             &scan.ports,
         )?;
-        if scan.status == ScanStatus::Partial {
+        if ctx.cancel.is_cancelled() {
             store.end_job(id, "cancelled", &skipped)?;
             return Ok(id);
         }
     }
     store.end_job(id, "complete", &skipped)?;
     Ok(id)
-}
-
-/// The live addresses of `candidates`, in order; `None` if cancelled.
-async fn discover(
-    candidates: &[IpAddr],
-    neigh: &Arc<HashMap<IpAddr, String>>,
-    cancel: &CancellationToken,
-) -> Option<Vec<IpAddr>> {
-    let slots = Arc::new(Semaphore::new(DISCOVER_PARALLEL));
-    let mut set = JoinSet::new();
-    for &ip in candidates {
-        let (slots, neigh) = (Arc::clone(&slots), Arc::clone(neigh));
-        set.spawn(async move {
-            let _slot = slots.acquire_owned().await.ok()?;
-            alive(ip, &neigh).await.then_some(ip)
-        });
-    }
-    let mut live = Vec::new();
-    loop {
-        let next = tokio::select! {
-            () = cancel.cancelled() => { set.abort_all(); return None; }
-            n = set.join_next() => n,
-        };
-        match next {
-            Some(Ok(Some(ip))) => live.push(ip),
-            Some(_) => {}
-            None => break,
-        }
-    }
-    live.sort_unstable();
-    Some(live)
 }
 
 fn row(ctx: &Ctx<'_>, proto: Proto, port: u16, state: PortState, ident: Ident) -> PortRow {
@@ -385,17 +386,55 @@ fn row(ctx: &Ctx<'_>, proto: Proto, port: u16, state: PortState, ident: Ident) -
     }
 }
 
-/// TCP, identification, UDP on one live address.
-async fn scan_host(ctx: &Ctx<'_>, ip: IpAddr) -> HostScan {
+/// The status of a host found gone after the TCP sweep: what answered
+/// before it left is kept as `Partial`; nothing at all is `Failed`.
+fn gone_status(tcp: &crate::tcp::TcpResult) -> ScanStatus {
+    if tcp.replied > 0 {
+        ScanStatus::Partial
+    } else {
+        ScanStatus::Failed
+    }
+}
+
+/// TCP, a check the host is still there, identification, UDP on one live
+/// address (`life`: its MAC and discovery round trip).
+async fn scan_host(ctx: &Ctx<'_>, ip: IpAddr, life: &Life) -> HostScan {
     let tcp = crate::tcp::scan_tcp(
         ip,
         &ctx.ports.tcp,
         &ctx.pacer,
         ctx.cancel,
         &ctx.progress.tcp_done,
-        None,
+        life.rtt,
     )
     .await;
+    let open_rows = |idents: &mut HashMap<u16, Ident>| -> Vec<PortRow> {
+        tcp.open
+            .iter()
+            .map(|&p| {
+                let ident = idents.remove(&p).unwrap_or_default();
+                row(ctx, Proto::Tcp, p, PortState::Open, ident)
+            })
+            .collect()
+    };
+    if !ctx.cancel.is_cancelled() {
+        // A device that left (or whose address changed hands) mid-scan
+        // must not be recorded as complete with nothing open.
+        let still = check(ctx, ip).await;
+        let gone = match &still {
+            None => false,
+            Some(None) => true,
+            Some(Some(now)) => other_device(life.mac.as_deref(), now.mac.as_deref()),
+        };
+        if gone {
+            tracing::warn!(%ip, unreachable = tcp.unreachable, "host gone during the scan");
+            return HostScan {
+                status: gone_status(&tcp),
+                all_open: tcp.all_open,
+                ports: open_rows(&mut HashMap::new()),
+            };
+        }
+    }
     let mut idents = if ctx.cancel.is_cancelled() {
         HashMap::new()
     } else {
@@ -406,14 +445,7 @@ async fn scan_host(ctx: &Ctx<'_>, ip: IpAddr) -> HostScan {
         };
         identify_all(ctx, ip, &tcp.open[..n.min(tcp.open.len())]).await
     };
-    let mut ports: Vec<PortRow> = tcp
-        .open
-        .iter()
-        .map(|&p| {
-            let ident = idents.remove(&p).unwrap_or_default();
-            row(ctx, Proto::Tcp, p, PortState::Open, ident)
-        })
-        .collect();
+    let mut ports = open_rows(&mut idents);
     if !ctx.cancel.is_cancelled() {
         let udp = crate::udp::scan_udp_ports(
             ip,
@@ -480,6 +512,7 @@ async fn identify_all(ctx: &Ctx<'_>, ip: IpAddr, ports: &[u16]) -> HashMap<u16, 
 mod tests {
     use super::*;
     use crate::config::Pace;
+    use crate::discover::Neighbour;
     use crate::proto::StartReq;
 
     fn cfg() -> Config {
@@ -514,7 +547,10 @@ mod tests {
 
     #[test]
     fn device_follows_mac_to_a_local_address() {
-        let neigh = HashMap::from([(ip("192.168.1.20"), "aa:bb:cc:dd:ee:ff".to_string())]);
+        let neigh = HashMap::from([(
+            ip("192.168.1.20"),
+            Neighbour::reachable("aa:bb:cc:dd:ee:ff"),
+        )]);
         let j = job("192.168.1.5", Some("AA:BB:CC:DD:EE:FF"), false);
         assert_eq!(device_address(&j, &cfg(), &neigh), Some(ip("192.168.1.20")));
         // Unknown MAC: the given address.
@@ -524,7 +560,7 @@ mod tests {
 
     #[test]
     fn device_does_not_follow_mac_off_the_local_network() {
-        let neigh = HashMap::from([(ip("203.0.113.9"), "aa:bb:cc:dd:ee:ff".to_string())]);
+        let neigh = HashMap::from([(ip("203.0.113.9"), Neighbour::reachable("aa:bb:cc:dd:ee:ff"))]);
         let j = job("192.168.1.5", Some("aa:bb:cc:dd:ee:ff"), false);
         assert_eq!(device_address(&j, &cfg(), &neigh), Some(ip("192.168.1.5")));
         let j = job("192.168.1.5", Some("aa:bb:cc:dd:ee:ff"), true);
@@ -533,7 +569,10 @@ mod tests {
 
     #[test]
     fn device_does_not_follow_mac_to_an_excluded_or_router_address() {
-        let neigh = HashMap::from([(ip("192.168.1.20"), "aa:bb:cc:dd:ee:ff".to_string())]);
+        let neigh = HashMap::from([(
+            ip("192.168.1.20"),
+            Neighbour::reachable("aa:bb:cc:dd:ee:ff"),
+        )]);
         let j = job("192.168.1.5", Some("aa:bb:cc:dd:ee:ff"), false);
         let mut c = cfg();
         c.exclude = vec![crate::config::Exclude::Addr(ip("192.168.1.20"))];
@@ -541,6 +580,29 @@ mod tests {
         let mut c = cfg();
         c.router = vec![ip("192.168.1.20")];
         assert_eq!(device_address(&j, &c, &neigh), Some(ip("192.168.1.5")));
+    }
+
+    #[test]
+    fn a_different_mac_at_the_address_is_another_device() {
+        assert!(other_device(
+            Some("aa:bb:cc:dd:ee:ff"),
+            Some("11:22:33:44:55:66")
+        ));
+        assert!(!other_device(
+            Some("AA:BB:CC:DD:EE:FF"),
+            Some("aa:bb:cc:dd:ee:ff")
+        ));
+        // Off-link (no MAC found) or no MAC expected: nothing to compare.
+        assert!(!other_device(Some("aa:bb:cc:dd:ee:ff"), None));
+        assert!(!other_device(None, Some("aa:bb:cc:dd:ee:ff")));
+    }
+
+    #[test]
+    fn a_host_gone_mid_scan_is_partial_only_if_something_answered() {
+        let mut t = crate::tcp::TcpResult::default();
+        assert_eq!(gone_status(&t), ScanStatus::Failed);
+        t.replied = 1;
+        assert_eq!(gone_status(&t), ScanStatus::Partial);
     }
 
     #[test]

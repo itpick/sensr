@@ -1,8 +1,6 @@
 //! The daemon's shared state, its job worker and the control socket.
 
-use std::collections::HashMap;
 use std::io;
-use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -15,6 +13,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
+use crate::discover::Neighbours;
 use crate::ports::Services;
 use crate::proto::{JobKind, KnownDevice, Refusal, Reply, Request, StartReq, StatusView};
 use crate::queue::{Job, Queue};
@@ -29,7 +28,7 @@ pub const MAX_KNOWN: usize = 4096;
 /// A connection that sends nothing for this long is closed.
 pub const IDLE: Duration = Duration::from_secs(60);
 
-type Neighbours = dyn Fn() -> HashMap<IpAddr, String> + Send + Sync;
+type NeighbourFn = dyn Fn() -> Neighbours + Send + Sync;
 
 struct Jobs {
     queue: Queue,
@@ -45,7 +44,7 @@ pub struct Daemon {
     store: Mutex<Store>,
     services: Arc<Services>,
     ports: Ports,
-    neighbours: Arc<Neighbours>,
+    neighbours: Arc<NeighbourFn>,
     jobs: Mutex<Jobs>,
     progress: Progress,
     wake: Notify,
@@ -54,7 +53,7 @@ pub struct Daemon {
 
 impl Daemon {
     /// A daemon writing to the database at `db`, scanning [`Ports::full`]
-    /// with neighbours from `/proc/net/arp`.
+    /// with neighbours from the kernel ([`proc_neighbours`]).
     ///
     /// # Errors
     /// The database could not be opened.
@@ -83,12 +82,9 @@ impl Daemon {
         self
     }
 
-    /// Test hook: read neighbours from `f` instead of `/proc/net/arp`.
+    /// Test hook: read neighbours from `f` instead of the kernel.
     #[must_use]
-    pub fn with_neighbours(
-        mut self,
-        f: impl Fn() -> HashMap<IpAddr, String> + Send + Sync + 'static,
-    ) -> Daemon {
+    pub fn with_neighbours(mut self, f: impl Fn() -> Neighbours + Send + Sync + 'static) -> Daemon {
         self.neighbours = Arc::new(f);
         self
     }
