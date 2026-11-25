@@ -59,6 +59,18 @@ test.describe("port scanner", () => {
     await expect(queued).toHaveCount(0);
   });
 
+  test("Scan now on an excluded device asks first, Scan anyway queues it", async ({ page }) => {
+    await login(page);
+    await cancelQueued(page, "192.168.72.2");
+    const devices = page.getByRole("table", { name: "Device scans" });
+    await devices.getByRole("button", { name: "Scan now: old-router" }).click();
+    const form = page.getByRole("region", { name: "New scan" });
+    await expect(form.getByRole("alert")).toHaveText("Not scanned: the device is on the exclude list (Never scanned).");
+    await form.getByRole("button", { name: "Scan 192.168.72.2 anyway" }).click();
+    await expect(form.getByRole("status")).toContainText("Scan of 192.168.72.2 queued");
+    await cancelQueued(page, "192.168.72.2");
+  });
+
   test("a device's ports are on its host page, with Scan now", async ({ page }) => {
     await login(page);
     await cancelQueued(page, "192.168.1.20");
