@@ -28,6 +28,11 @@ pub struct TcpResult {
     pub open: Vec<u16>,
     /// Ports that never answered.
     pub filtered: u32,
+    /// Of those, ports whose connect failed with host/network unreachable
+    /// (the host may have left).
+    pub unreachable: u32,
+    /// Ports that answered (open or closed).
+    pub replied: u32,
     /// More than 1,000 ports were open; the scan stopped recording.
     pub all_open: bool,
     /// Ports probed to completion.
@@ -60,7 +65,31 @@ struct Rtt {
     samples: Mutex<Vec<Duration>>,
 }
 
+/// How one port's probe ended.
+#[derive(Debug, Clone, Copy)]
+struct Outcome {
+    state: PortState,
+    unreachable: bool,
+}
+
+impl Outcome {
+    fn of(state: PortState) -> Outcome {
+        Outcome {
+            state,
+            unreachable: false,
+        }
+    }
+}
+
 impl Rtt {
+    /// Seeded with the discovery round trip, when known, so a host that
+    /// drops every port is not probed at the 2 s ceiling.
+    fn new(seed: Option<Duration>) -> Rtt {
+        Rtt {
+            samples: Mutex::new(seed.into_iter().collect()),
+        }
+    }
+
     fn timeout(&self) -> Duration {
         let s = self.samples.lock().expect("rtt lock");
         if s.is_empty() {
@@ -79,33 +108,50 @@ impl Rtt {
     }
 }
 
-async fn probe<C: Connector>(c: &C, addr: SocketAddr, rtt: &Rtt) -> PortState {
-    for _ in 0..2 {
+/// Connect, with one retry after a timeout. The retry takes its own rate
+/// token, so retries count against the pace.
+async fn probe<C: Connector>(c: &C, addr: SocketAddr, rtt: &Rtt, pacer: &Pacer) -> Outcome {
+    for attempt in 0..2 {
+        if attempt > 0 {
+            pacer.tick().await;
+        }
         let t = rtt.timeout();
         let started = tokio::time::Instant::now();
         match c.connect(addr, t).await {
             Ok(()) => {
                 rtt.record(started.elapsed());
-                return PortState::Open;
+                return Outcome::of(PortState::Open);
             }
             Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
                 rtt.record(started.elapsed());
-                return PortState::Closed;
+                return Outcome::of(PortState::Closed);
             }
             Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
-            Err(_) => return PortState::Filtered,
+            Err(e) => {
+                return Outcome {
+                    state: PortState::Filtered,
+                    unreachable: matches!(
+                        e.kind(),
+                        io::ErrorKind::HostUnreachable
+                            | io::ErrorKind::NetworkUnreachable
+                            | io::ErrorKind::NetworkDown
+                    ),
+                };
+            }
         }
     }
-    PortState::Filtered
+    Outcome::of(PortState::Filtered)
 }
 
-/// Scan `ports` on `ip` with real sockets.
+/// Scan `ports` on `ip` with real sockets. `rtt_seed` is the round trip
+/// measured by discovery, if any: the first timeouts are based on it.
 pub async fn scan_tcp(
     ip: IpAddr,
     ports: &[u16],
     pacer: &Pacer,
     cancel: &CancellationToken,
     progress: &AtomicU32,
+    rtt_seed: Option<Duration>,
 ) -> TcpResult {
     scan_tcp_with(
         &Arc::new(TokioConnector),
@@ -114,6 +160,7 @@ pub async fn scan_tcp(
         pacer,
         cancel,
         progress,
+        rtt_seed,
     )
     .await
 }
@@ -126,21 +173,20 @@ pub async fn scan_tcp_with<C: Connector + Send + 'static>(
     pacer: &Pacer,
     cancel: &CancellationToken,
     progress: &AtomicU32,
+    rtt_seed: Option<Duration>,
 ) -> TcpResult {
-    let rtt = Arc::new(Rtt {
-        samples: Mutex::new(Vec::new()),
-    });
+    let rtt = Arc::new(Rtt::new(rtt_seed));
     let mut res = TcpResult::default();
-    let mut set: JoinSet<(u16, PortState)> = JoinSet::new();
+    let mut set: JoinSet<(u16, Outcome)> = JoinSet::new();
 
     'outer: for &port in ports {
         let permit: PacerPermit = tokio::select! {
             () = cancel.cancelled() => break,
             p = pacer.permit() => p,
         };
-        let (c, rtt) = (Arc::clone(connector), Arc::clone(&rtt));
+        let (c, rtt, pacer) = (Arc::clone(connector), Arc::clone(&rtt), pacer.clone());
         set.spawn(async move {
-            let st = probe(&*c, SocketAddr::new(ip, port), &rtt).await;
+            let st = probe(&*c, SocketAddr::new(ip, port), &rtt, &pacer).await;
             drop(permit);
             (port, st)
         });
@@ -175,24 +221,40 @@ pub async fn scan_tcp_with<C: Connector + Send + 'static>(
 }
 
 /// Fold one finished probe into the result; true once recording must stop.
+/// A probe that panicked is logged and counted as `Filtered` (as for UDP);
+/// an aborted one (cancel, cap reached) is not counted.
 fn absorb(
     res: &mut TcpResult,
-    joined: Result<(u16, PortState), tokio::task::JoinError>,
+    joined: Result<(u16, Outcome), tokio::task::JoinError>,
     progress: &AtomicU32,
 ) -> bool {
-    let Ok((port, st)) = joined else { return false };
+    let (port, out) = match joined {
+        Ok(j) => j,
+        Err(e) if e.is_cancelled() => return false,
+        Err(e) => {
+            tracing::warn!(error = %e, "tcp probe task failed; port counted as filtered");
+            (0, Outcome::of(PortState::Filtered))
+        }
+    };
     res.done += 1;
     progress.fetch_add(1, Ordering::Relaxed);
-    match st {
+    match out.state {
         PortState::Open => {
+            res.replied += 1;
             if res.open.len() >= MAX_OPEN {
                 res.all_open = true;
                 return true;
             }
             res.open.push(port);
         }
-        PortState::Filtered => res.filtered += 1,
-        PortState::Closed | PortState::OpenFiltered => {}
+        PortState::Filtered => {
+            res.filtered += 1;
+            if out.unreachable {
+                res.unreachable += 1;
+            }
+        }
+        PortState::Closed => res.replied += 1,
+        PortState::OpenFiltered => {}
     }
     false
 }

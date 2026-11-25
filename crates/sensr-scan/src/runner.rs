@@ -393,6 +393,7 @@ async fn scan_host(ctx: &Ctx<'_>, ip: IpAddr) -> HostScan {
         &ctx.pacer,
         ctx.cancel,
         &ctx.progress.tcp_done,
+        None,
     )
     .await;
     let mut idents = if ctx.cancel.is_cancelled() {

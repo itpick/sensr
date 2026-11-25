@@ -9,11 +9,14 @@ use tokio::time::Instant;
 use crate::config::PaceLimits;
 
 /// Hands out permits no faster than the configured rate and never more than
-/// `in_flight` at once. A permit is held for the life of one probe.
-#[derive(Debug)]
+/// `in_flight` at once. A permit is held for the life of one probe; a probe
+/// that sends again (a retry) takes another rate token with [`Pacer::tick`].
+///
+/// Clones share the same rate and slots.
+#[derive(Debug, Clone)]
 pub struct Pacer {
     interval: Duration,
-    next: Mutex<Instant>,
+    next: Arc<Mutex<Instant>>,
     slots: Arc<Semaphore>,
 }
 
@@ -30,7 +33,7 @@ impl Pacer {
         let rate = l.connects_per_sec.max(1);
         Pacer {
             interval: Duration::from_secs(1) / rate,
-            next: Mutex::new(Instant::now()),
+            next: Arc::new(Mutex::new(Instant::now())),
             slots: Arc::new(Semaphore::new(usize::from(l.in_flight.max(1)))),
         }
     }
@@ -43,6 +46,13 @@ impl Pacer {
             .acquire_owned()
             .await
             .expect("pacer semaphore is never closed");
+        self.tick().await;
+        PacerPermit { _slot: slot }
+    }
+
+    /// Wait for the next start time only (no slot): for a probe that holds
+    /// a permit and sends again.
+    pub async fn tick(&self) {
         let at = {
             let mut next = self.next.lock().await;
             let at = (*next).max(Instant::now());
@@ -50,6 +60,5 @@ impl Pacer {
             at
         };
         tokio::time::sleep_until(at).await;
-        PacerPermit { _slot: slot }
     }
 }
