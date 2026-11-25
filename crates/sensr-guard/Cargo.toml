@@ -1,0 +1,25 @@
+[package]
+name = "sensr-guard"
+description = "Runtime guard: dynamic eBPF packs that watch or block exec, connect, listen, file writes, setuid, module loads and bpf() (shared contract types; the loader is behind the daemon feature)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# SQLite event store (later tasks add its dependencies).
+store = []
+# The loader and daemon (later tasks add its dependencies).
+daemon = []
+
+[dependencies]
+ipnet.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

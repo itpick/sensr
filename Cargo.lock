@@ -5065,6 +5065,7 @@ dependencies = [
  "minijinja",
  "proptest",
  "sensr-flow",
+ "sensr-guard",
  "sensr-rules",
  "sensr-schema",
  "serde",
@@ -5194,6 +5195,15 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "sensr-guard"
+version = "0.0.0"
+dependencies = [
+ "ipnet",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

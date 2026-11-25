@@ -12,6 +12,7 @@ use super::dhcpv6::{Dhcpv6, RouterAdvertisements};
 use super::dns::DnsResolver;
 use super::firewall::{AliasType, Endpoint, FilterRule, Firewall};
 use super::gateways::Gateways;
+use super::guard::Guard;
 use super::hosts::Hosts;
 use super::ids::Ids;
 use super::insight::Insight;
@@ -129,11 +130,13 @@ pub enum Section {
     Insight,
     /// `hosts`.
     Hosts,
+    /// `guard`.
+    Guard,
 }
 
 impl Section {
     /// Every section, in document order.
-    pub const ALL: [Section; 18] = [
+    pub const ALL: [Section; 19] = [
         Self::System,
         Self::Interfaces,
         Self::Firewall,
@@ -152,6 +155,7 @@ impl Section {
         Self::Ids,
         Self::Insight,
         Self::Hosts,
+        Self::Guard,
     ];
 
     /// The section's key in the JSON document.
@@ -175,6 +179,7 @@ impl Section {
             Self::Ids => "ids",
             Self::Insight => "insight",
             Self::Hosts => "hosts",
+            Self::Guard => "guard",
         }
     }
 }
@@ -241,6 +246,9 @@ pub struct Document {
     /// Host labels and the fingerprint switch (omitted while at defaults).
     #[serde(default, skip_serializing_if = "Hosts::is_default")]
     pub hosts: Hosts,
+    /// Runtime guard (omitted while at defaults).
+    #[serde(default, skip_serializing_if = "Guard::is_empty")]
+    pub guard: Guard,
 }
 
 impl Default for Document {
@@ -265,6 +273,7 @@ impl Default for Document {
             ids: Ids::default(),
             insight: Insight::default(),
             hosts: Hosts::default(),
+            guard: Guard::default(),
         }
     }
 }
@@ -387,6 +396,7 @@ impl Document {
         self.ids.validate(self, &root.join("ids"), &mut out);
         self.insight.validate(self, &root.join("insight"), &mut out);
         self.hosts.validate(self, &root.join("hosts"), &mut out);
+        self.guard.validate(self, &root.join("guard"), &mut out);
         out
     }
 
@@ -421,6 +431,7 @@ impl Document {
                 Section::Ids => self.ids != other.ids,
                 Section::Insight => self.insight != other.insight,
                 Section::Hosts => self.hosts != other.hosts,
+                Section::Guard => self.guard != other.guard,
             })
             .collect()
     }

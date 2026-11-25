@@ -29,6 +29,7 @@ sensr-dns = { path = "crates/sensr-dns" }
 sensr-fingerprint = { path = "crates/sensr-fingerprint" }
 sensr-feeds = { path = "crates/sensr-feeds" }
 sensr-flow = { path = "crates/sensr-flow", default-features = false }
+sensr-guard = { path = "crates/sensr-guard", default-features = false }
 
 anyhow = "1.0.104"
 hmac = "0.12.1"
