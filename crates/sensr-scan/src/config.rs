@@ -36,6 +36,18 @@ pub struct Config {
     pub router: Vec<IpAddr>,
 }
 
+impl Config {
+    /// Whether the device at `ip` (with `mac`, if known) is on the exclude
+    /// list. MACs compare case-insensitively.
+    #[must_use]
+    pub fn excludes(&self, ip: IpAddr, mac: Option<&str>) -> bool {
+        self.exclude.iter().any(|e| match e {
+            Exclude::Mac(m) => mac.is_some_and(|x| x.eq_ignore_ascii_case(m)),
+            Exclude::Addr(a) => *a == ip,
+        })
+    }
+}
+
 /// Scan speed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -102,6 +114,28 @@ mod tests {
         );
         assert!(g.connects_per_sec < n.connects_per_sec && n.connects_per_sec < f.connects_per_sec);
         assert!(g.in_flight < n.in_flight && n.in_flight < f.in_flight);
+    }
+
+    #[test]
+    fn excludes_by_address_or_mac() {
+        let cfg = Config {
+            enabled: true,
+            auto_scan_new: true,
+            pace: Pace::Gentle,
+            history: 10,
+            max_range: 4096,
+            exclude: vec![
+                Exclude::Mac("AA:BB:CC:DD:EE:FF".into()),
+                Exclude::Addr("192.168.1.9".parse().unwrap()),
+            ],
+            local: vec![],
+            router: vec![],
+        };
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(cfg.excludes(ip("192.168.1.9"), None));
+        assert!(cfg.excludes(ip("192.168.1.5"), Some("aa:bb:cc:dd:ee:ff")));
+        assert!(!cfg.excludes(ip("192.168.1.5"), Some("aa:bb:cc:dd:ee:00")));
+        assert!(!cfg.excludes(ip("192.168.1.5"), None));
     }
 
     #[test]

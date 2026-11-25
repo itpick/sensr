@@ -11,9 +11,12 @@ repository.workspace = true
 default = []
 # SQLite storage of scan results.
 store = ["dep:rusqlite", "dep:serde_json"]
+# The blocking control-socket client (agent, API).
+client = ["dep:serde_json"]
 # The scan daemon (TLS probing, sockets, CLI).
 daemon = [
   "store",
+  "client",
   "dep:tokio",
   "dep:tokio-util",
   "dep:tokio-rustls",
@@ -60,4 +63,13 @@ required-features = ["daemon"]
 
 [[test]]
 name = "ident"
+required-features = ["daemon"]
+
+[[test]]
+name = "daemon"
+required-features = ["daemon"]
+
+[[bin]]
+name = "sensr-scan"
+path = "src/bin/sensr-scan.rs"
 required-features = ["daemon"]
