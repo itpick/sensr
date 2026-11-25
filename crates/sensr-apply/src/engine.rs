@@ -27,7 +27,8 @@ use crate::appliers::convert::{self, ConvertError, SecretsDir};
 use crate::appliers::interfaces::InterfacesModel;
 use crate::appliers::sysctl::{Sysctl, SysctlApplyError};
 use crate::appliers::{
-    SliceError, SliceModels, emergency, insight, kea, nft, ntp, suricata, timezone, unbound,
+    SliceError, SliceModels, emergency, insight, kea, nft, ntp, portscan, suricata, timezone,
+    unbound,
 };
 use crate::cmd::{Cmd, CmdError, Runner};
 use crate::hooks::{HookLevel, Hooks};
@@ -370,6 +371,7 @@ impl Engine {
             .insert("kernel.hostname".into(), doc.system.hostname.to_string());
         self.plan_ids(doc, rt, &mut plan)?;
         self.plan_insight(doc, &mut plan);
+        self.plan_portscan(doc, &mut plan);
         let secrets = convert::secret_files(doc, &self.opts.secrets)
             .into_iter()
             .map(|(p, c)| (self.rooted(&p), c))
@@ -476,6 +478,28 @@ impl Engine {
         );
         plan.units.insert(
             insight::UNIT.into(),
+            UnitSpec {
+                action: UnitAction::Restart,
+                inputs: [conf].into(),
+            },
+        );
+    }
+
+    /// The port scanner's config (nothing when scanning is switched off).
+    fn plan_portscan(&self, doc: &Document, plan: &mut Plan) {
+        let Some(cfg) = portscan::config(doc) else {
+            return;
+        };
+        let conf = self.staging.live_dir(portscan::DIR).join(portscan::CONFIG);
+        plan.files.insert(
+            conf.clone(),
+            FileSpec {
+                contents: serde_json::to_vec_pretty(&cfg).unwrap_or_default(),
+                mode: 0o644,
+            },
+        );
+        plan.units.insert(
+            portscan::UNIT.into(),
             UnitSpec {
                 action: UnitAction::Restart,
                 inputs: [conf].into(),
@@ -1091,7 +1115,10 @@ impl Engine {
         }
 
         // units a document no longer wants (IDS switched off)
-        for unit in suricata::OWNED_UNITS.iter().chain(&[insight::UNIT]) {
+        for unit in suricata::OWNED_UNITS
+            .iter()
+            .chain(&[insight::UNIT, portscan::UNIT])
+        {
             if applied.plan.units.contains_key(*unit) && !p.plan.units.contains_key(*unit) {
                 self.run(&Cmd::new("systemctl").args(["stop", unit]), &mut report)?;
             }
@@ -1493,6 +1520,28 @@ mod tests {
         )
         .unwrap();
         (e, runner)
+    }
+
+    #[test]
+    fn plan_writes_portscan_json_and_restarts_the_daemon() {
+        let root = tempfile::tempdir().unwrap();
+        let (e, _) = engine(root.path());
+        let mut doc = home_router();
+        let mut plan = Plan::default();
+        e.plan_portscan(&doc, &mut plan);
+        let conf = e.staging.live_dir(portscan::DIR).join(portscan::CONFIG);
+        let f = &plan.files[&conf];
+        assert_eq!(f.mode, 0o644);
+        let cfg: sensr_scan::config::Config = serde_json::from_slice(&f.contents).unwrap();
+        assert!(cfg.enabled && !cfg.local.is_empty());
+        let u = &plan.units[portscan::UNIT];
+        assert_eq!(u.action, UnitAction::Restart);
+        assert!(u.inputs.contains(&conf));
+        // switched off: nothing planned
+        doc.portscan.enabled = false;
+        let mut plan = Plan::default();
+        e.plan_portscan(&doc, &mut plan);
+        assert!(plan.files.is_empty() && plan.units.is_empty());
     }
 
     #[test]

@@ -5066,6 +5066,7 @@ dependencies = [
  "proptest",
  "sensr-flow",
  "sensr-rules",
+ "sensr-scan",
  "sensr-schema",
  "serde",
  "serde_json",
