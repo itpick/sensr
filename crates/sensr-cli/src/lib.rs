@@ -47,6 +47,8 @@ pub enum Command {
     /// Traffic insight (Reporting › Insight) from the local flow database.
     #[command(subcommand)]
     Insight(InsightCmd),
+    /// Port scanner: scan a device or range, see what is running, show results.
+    Scan(ScanArgs),
     /// Import a foreign configuration into the candidate.
     #[command(subcommand)]
     Import(ImportCmd),
@@ -97,6 +99,48 @@ pub enum InsightCmd {
         /// Print JSON.
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// `sensr scan …`: talks to `sensr-scan` directly (its control socket and
+/// result database), like `sensr insight`.
+#[derive(Debug, clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct ScanArgs {
+    /// Address, network (`192.168.1.0/24`) or range (`192.168.1.10-20`) to scan.
+    pub target: Option<String>,
+    /// Allow a target outside the local networks.
+    #[arg(long)]
+    pub public_ok: bool,
+    /// Confirm a large range.
+    #[arg(long)]
+    pub confirm: bool,
+    /// Scan even if the target is on the exclude list.
+    #[arg(long)]
+    pub include_excluded: bool,
+    /// sensr-scan control socket.
+    #[arg(long, env = "SENSR_SCAN_SOCKET", default_value = sensr_scan::config::SOCKET)]
+    pub scan_socket: PathBuf,
+    /// Scan database directory.
+    #[arg(long, env = "SENSR_SCAN_DIR", default_value = sensr_scan::config::DB_DIR)]
+    pub db_dir: PathBuf,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// What else to do.
+    #[command(subcommand)]
+    pub cmd: Option<ScanCmd>,
+}
+
+/// `sensr scan status` and `sensr scan show`.
+#[derive(Debug, Subcommand)]
+pub enum ScanCmd {
+    /// What is running and queued.
+    Status,
+    /// The newest results for a device (MAC or address), or one job (its id).
+    Show {
+        /// A MAC address, an IP address or a job id.
+        what: String,
     },
 }
 
@@ -359,6 +403,10 @@ pub async fn run_with_input(
         insight_hosts(since, *limit, db_dir, *json, out)?;
         return Ok(());
     }
+    if let Command::Scan(args) = &cli.command {
+        scan(args, out)?;
+        return Ok(());
+    }
     let mut c = Client::connect(&cli.socket, principal())
         .await
         .map_err(|e| anyhow::anyhow!(describe(&e)))?;
@@ -390,7 +438,7 @@ pub async fn run_with_input(
             )?;
         }
         // Handled before the agent connection: insight reads the local database.
-        Command::Insight(_) => {}
+        Command::Insight(_) | Command::Scan(_) => {}
         Command::Config(cmd) => config(&mut c, cmd, out).await?,
         Command::Interfaces(cmd) => interfaces(&mut c, cmd, input, out).await?,
         Command::Import(ImportCmd::Opnsense {
@@ -513,6 +561,130 @@ fn insight_hosts(
     } else {
         for r in &rows {
             writeln!(out, "{}  up {}  down {}", r.key, bytes(r.up), bytes(r.down))?;
+        }
+    }
+    Ok(())
+}
+
+fn scan_send(
+    socket: &std::path::Path,
+    req: &sensr_scan::proto::Request,
+) -> anyhow::Result<sensr_scan::proto::Reply> {
+    sensr_scan::client::send(socket, req).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound
+        | std::io::ErrorKind::ConnectionRefused
+        | std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(
+            "the port scanner is not running ({}: {e})",
+            socket.display()
+        ),
+        _ => anyhow::anyhow!("the port scanner did not answer: {e}"),
+    })
+}
+
+/// `sensr scan …`.
+fn scan(args: &ScanArgs, out: &mut dyn Write) -> anyhow::Result<()> {
+    use sensr_scan::proto::{JobKind, Reply, Request, StartReq};
+    use sensr_scan::target::{self, Target};
+    match (&args.cmd, &args.target) {
+        (Some(ScanCmd::Status), _) => match scan_send(&args.scan_socket, &Request::Status)? {
+            Reply::Status(v) if args.json => writeln!(out, "{}", output::json(&v))?,
+            Reply::Status(v) => {
+                match &v.running {
+                    Some(r) => writeln!(
+                        out,
+                        "running: job {} {} (address {}/{}, tcp {} udp {} done)",
+                        r.job_id, r.target, r.address_n, r.address_total, r.tcp_done, r.udp_done
+                    )?,
+                    None => writeln!(out, "idle")?,
+                }
+                for q in &v.queue {
+                    writeln!(out, "queued: job {} {}", q.job_id, q.target)?;
+                }
+            }
+            other => bail!("unexpected reply from sensr-scan: {other:?}"),
+        },
+        (Some(ScanCmd::Show { what }), _) => scan_show(args, what, out)?,
+        (None, Some(t)) => {
+            let kind = match target::parse(t).map_err(|e| anyhow::anyhow!("{t:?}: {e}"))? {
+                Target::One(_) => JobKind::Device,
+                Target::Net(_) | Target::Span(..) => JobKind::Range,
+            };
+            let req = Request::Start(StartReq {
+                target: t.clone(),
+                kind,
+                auto: false,
+                mac: None,
+                public_ok: args.public_ok,
+                confirm: args.confirm,
+                include_excluded: args.include_excluded,
+            });
+            match scan_send(&args.scan_socket, &req)? {
+                Reply::Started { job_id } if args.json => {
+                    writeln!(out, "{}", serde_json::json!({ "job_id": job_id }))?;
+                }
+                Reply::Started { job_id } => writeln!(out, "{job_id}")?,
+                Reply::Refused { reason } => bail!("scan refused: {reason:?}"),
+                other => bail!("unexpected reply from sensr-scan: {other:?}"),
+            }
+        }
+        (None, None) => bail!("give a target to scan, or `status` or `show`"),
+    }
+    Ok(())
+}
+
+fn scan_line(out: &mut dyn Write, s: &sensr_scan::types::ScanView) -> anyhow::Result<()> {
+    writeln!(
+        out,
+        "{} {} {} ({} ports)",
+        s.address,
+        s.mac.as_deref().unwrap_or("-"),
+        s.status.as_str(),
+        s.ports.len()
+    )?;
+    for p in &s.ports {
+        writeln!(
+            out,
+            "  {} {} {:?} {}",
+            serde_json::to_string(&p.proto)?.trim_matches('"'),
+            p.port,
+            p.state,
+            p.service.as_deref().unwrap_or("")
+        )?;
+    }
+    Ok(())
+}
+
+/// `sensr scan show`: read the result database.
+fn scan_show(args: &ScanArgs, what: &str, out: &mut dyn Write) -> anyhow::Result<()> {
+    let path = args.db_dir.join(sensr_scan::config::DB);
+    let store = sensr_scan::store::Store::open_ro(&path)
+        .with_context(|| format!("opening {} (has the scanner run yet?)", path.display()))?;
+    if let Ok(id) = what.parse::<i64>() {
+        let Some((job, scans)) = store.job(id)? else {
+            bail!("no scan job {id}");
+        };
+        if args.json {
+            writeln!(
+                out,
+                "{}",
+                output::json(&serde_json::json!({"job": job, "scans": scans}))
+            )?;
+        } else {
+            writeln!(out, "job {} {} {}", job.id, job.target, job.status)?;
+            for s in &scans {
+                scan_line(out, s)?;
+            }
+        }
+    } else {
+        let key = what.to_ascii_lowercase();
+        let history = store.history(&key, 10)?;
+        if history.is_empty() {
+            bail!("no scans of {what}");
+        }
+        if args.json {
+            writeln!(out, "{}", output::json(&history))?;
+        } else {
+            scan_line(out, &history[0])?;
         }
     }
     Ok(())
@@ -826,6 +998,124 @@ mod tests {
         assert_eq!(window_seconds("5s").unwrap(), 60, "clamped to a minute");
         assert!(window_seconds("7w").is_err());
         assert!(window_seconds("soon").is_err());
+    }
+
+    #[test]
+    fn scan_arguments_parse() {
+        use clap::Parser;
+        let parse = |a: &[&str]| Cli::try_parse_from([&["sensr"], a].concat());
+        let Command::Scan(a) = parse(&["scan", "192.168.1.0/24", "--public-ok"])
+            .unwrap()
+            .command
+        else {
+            panic!("not scan")
+        };
+        assert_eq!(a.target.as_deref(), Some("192.168.1.0/24"));
+        assert!(a.public_ok && !a.confirm && a.cmd.is_none());
+        let Command::Scan(a) = parse(&["scan", "status"]).unwrap().command else {
+            panic!()
+        };
+        assert!(matches!(a.cmd, Some(ScanCmd::Status)) && a.target.is_none());
+        let Command::Scan(a) = parse(&["scan", "show", "7"]).unwrap().command else {
+            panic!()
+        };
+        assert!(matches!(a.cmd, Some(ScanCmd::Show { ref what }) if what == "7"));
+        let Command::Scan(a) = parse(&["scan", "10.0.0.1", "--confirm"]).unwrap().command else {
+            panic!()
+        };
+        assert!(a.confirm);
+    }
+
+    #[test]
+    fn scan_talks_to_the_daemon_and_reads_results() {
+        use sensr_scan::proto::{JobKind, Request};
+        use std::io::BufRead;
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("s.sock");
+        let l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let t = std::thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(&s).read_line(&mut line).unwrap();
+            (&s).write_all(b"{\"op\":\"started\",\"job_id\":7}\n")
+                .unwrap();
+            serde_json::from_str::<Request>(&line).unwrap()
+        });
+        let args = |target: Option<&str>, cmd| ScanArgs {
+            target: target.map(str::to_owned),
+            public_ok: true,
+            confirm: false,
+            include_excluded: false,
+            scan_socket: sock.clone(),
+            db_dir: dir.path().to_owned(),
+            json: false,
+            cmd,
+        };
+        let mut out = Vec::new();
+        scan(&args(Some("192.168.1.0/24"), None), &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "7\n");
+        let Request::Start(r) = t.join().unwrap() else {
+            panic!()
+        };
+        assert_eq!((r.kind, r.public_ok, r.auto), (JobKind::Range, true, false));
+
+        // the daemon is gone now
+        let err = scan(&args(Some("192.168.1.5"), None), &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("not running"), "{err}");
+        assert!(scan(&args(Some("not a target"), None), &mut Vec::new()).is_err());
+
+        // results
+        let store =
+            sensr_scan::store::Store::open(&dir.path().join(sensr_scan::config::DB)).unwrap();
+        let job = store
+            .begin_job(
+                JobKind::Device,
+                "192.168.1.5",
+                Some("aa:bb:cc:00:00:01"),
+                false,
+                false,
+            )
+            .unwrap();
+        store
+            .write_scan(
+                job,
+                "192.168.1.5".parse().unwrap(),
+                Some("aa:bb:cc:00:00:01"),
+                1,
+                2,
+                sensr_scan::types::ScanStatus::Complete,
+                false,
+                &[sensr_scan::types::PortRow {
+                    proto: sensr_scan::types::Proto::Tcp,
+                    port: 22,
+                    state: sensr_scan::types::PortState::Open,
+                    service: Some("ssh".into()),
+                    ident: Default::default(),
+                }],
+            )
+            .unwrap();
+        for what in ["AA:BB:CC:00:00:01", &job.to_string()] {
+            let mut out = Vec::new();
+            scan(
+                &args(
+                    None,
+                    Some(ScanCmd::Show {
+                        what: what.to_owned(),
+                    }),
+                ),
+                &mut out,
+            )
+            .unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("tcp 22 Open ssh"), "{text}");
+        }
+        assert!(
+            scan(
+                &args(None, Some(ScanCmd::Show { what: "999".into() })),
+                &mut Vec::new()
+            )
+            .is_err()
+        );
     }
 
     const HOME_ROUTER: &str = concat!(
