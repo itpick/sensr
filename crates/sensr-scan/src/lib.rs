@@ -7,6 +7,7 @@
 //! features.
 
 pub mod config;
+pub mod discover;
 pub mod ident;
 pub mod ports;
 pub mod proto;
