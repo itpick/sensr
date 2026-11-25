@@ -1,0 +1,11 @@
+//! Port scanner service (Diagnostics › Port Scan).
+//!
+//! Without features only the shared contract is built: [`config`] (what the
+//! agent writes for the daemon), [`proto`] (the JSON-lines protocol on the
+//! daemon's unix socket) and [`target`] (scan target parsing and safety
+//! checks). Storage and the daemon sit behind the `store` and `daemon`
+//! features.
+
+pub mod config;
+pub mod proto;
+pub mod target;

@@ -5267,6 +5267,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "sensr-scan"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ipnet",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tokio",
+ "tokio-rustls",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "sensr-schema"
 version = "0.0.0"
 dependencies = [

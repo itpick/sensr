@@ -1,0 +1,43 @@
+[package]
+name = "sensr-scan"
+description = "Port scanner service (Diagnostics > Port Scan): shared config, wire protocol and target handling, with the scan daemon and storage behind features."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# SQLite storage of scan results.
+store = ["dep:rusqlite"]
+# The scan daemon (TLS probing, sockets, CLI). `dep:x509-parser` joins this
+# list once it is a workspace dependency.
+daemon = [
+  "store",
+  "dep:tokio",
+  "dep:tokio-rustls",
+  "dep:rustls",
+  "dep:socket2",
+  "dep:clap",
+  "dep:tracing-subscriber",
+  "dep:anyhow",
+]
+
+[dependencies]
+anyhow = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+ipnet.workspace = true
+rusqlite = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+serde.workspace = true
+socket2 = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
