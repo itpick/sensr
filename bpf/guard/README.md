@@ -135,6 +135,10 @@ Each rule is a slot. Each program looks up one `rule_set` per
   `net4_lpm` as its IPv4 address. So an IPv4 rule also covers
   `::ffff:a.b.c.d` on an AF_INET6 socket, and the compiler need not add
   mapped entries to `net6_lpm`.
+  A v6 CIDR in a rule matches native IPv6 only: `::/0` does not cover IPv4
+  or mapped addresses, which only IPv4 rules (or an explicit
+  `::ffff:a.b.c.d/>=96` rule, compiled into `net4_lpm`) cover. To match
+  everything, use `Target::Any`.
 - **port**: `port_rules[port] | port_rules[0x10000]`.
 - **uid**: `uid_rules[new euid] | uid_rules[0xffffffff]`.
 

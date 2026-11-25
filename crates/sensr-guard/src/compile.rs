@@ -2,7 +2,6 @@
 //! Pure and deterministic: the same rules give the same entries, sorted by key.
 
 use std::collections::BTreeMap;
-use std::net::Ipv6Addr;
 
 use ipnet::IpNet;
 
@@ -16,8 +15,8 @@ use crate::rule::{Action, Hook, Rule, Target};
 /// Why a rule set could not be compiled.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompileError {
-    /// More enabled rules than slots.
-    #[error("{0} enabled rules, at most {MAX_RULES} fit")]
+    /// More rules than slots.
+    #[error("{0} rules, at most {MAX_RULES} fit")]
     TooMany(usize),
     /// A path prefix whose slash-terminated key does not fit in 255 bytes.
     #[error("rule {rule}: path {path:?} is too long (at most {max} bytes)", max = PATH_LEN - 2)]
@@ -56,7 +55,7 @@ pub enum CompileError {
     /// 0xffffffff is the any-uid key.
     #[error("rule {0}: uid 4294967295 is reserved")]
     ReservedUid(String),
-    /// Two enabled rules share an id.
+    /// Two rules share an id.
     #[error("duplicate rule id {0}")]
     DuplicateId(String),
     /// A map would exceed its capacity.
@@ -78,6 +77,13 @@ pub struct RuleMeta {
     pub id: String,
     /// The `rules_meta[slot]` value; `meta.id` is the slot.
     pub meta: GuardRuleMeta,
+}
+
+impl Compiled {
+    /// The slot of a rule id (disabled rules keep theirs).
+    pub fn slot_of(&self, id: &str) -> Option<u32> {
+        self.meta.iter().position(|m| m.id == id).map(|i| i as u32)
+    }
 }
 
 /// Every map's contents. Entries are sorted by key; LPM values are
@@ -197,7 +203,13 @@ fn add<K: Ord>(m: &mut BTreeMap<K, RuleSet>, k: K, slot: u32) {
 /// A path prefix as its two LPM keys: `"/p/"` and the exact `"/p\0"`
 /// (the root is the single key `"/"`).
 fn path_keys(rule: &str, p: &str) -> Result<Vec<PathKey>, CompileError> {
-    if !p.starts_with('/') || p.contains('\0') {
+    // bpf_d_path is canonical: `.`, `..` and empty components never match.
+    let bad_component = p
+        .trim_end_matches('/')
+        .split('/')
+        .skip(1)
+        .any(|c| matches!(c, "" | "." | ".."));
+    if !p.starts_with('/') || p.contains('\0') || bad_component {
         return Err(CompileError::BadPath {
             rule: rule.into(),
             path: p.into(),
@@ -283,7 +295,9 @@ impl Builder {
             ),
             IpNet::V6(n) => {
                 let plen = u32::from(n.prefix_len());
-                // The BPF side looks mapped addresses up in net4_lpm only.
+                // The BPF side looks mapped addresses up in net4_lpm only, so an
+                // explicit ::ffff:a.b.c.d/>=96 rule is a net4 rule. Any other v6
+                // CIDR (even ::/0) matches native IPv6 only.
                 if let (true, Some(v4)) = (plen >= 96, n.network().to_ipv4_mapped()) {
                     add(
                         &mut self.net4,
@@ -294,16 +308,6 @@ impl Builder {
                         slot,
                     );
                     return;
-                }
-                if n.contains(&Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0, 0)) {
-                    add(
-                        &mut self.net4,
-                        Net4Key {
-                            prefixlen: 0,
-                            addr: [0; 4],
-                        },
-                        slot,
-                    );
                 }
                 add(
                     &mut self.net6,
@@ -345,18 +349,21 @@ fn check_cap(map: &'static str, needed: usize, max: usize) -> Result<(), Compile
     Ok(())
 }
 
-/// Compile the enabled rules. Slot `n` is the n-th enabled rule in input
-/// order. Disabled rules are skipped entirely (and not validated).
+/// Compile the rules. Slot `n` is the n-th rule in input order, enabled or
+/// not, so toggling a rule never renumbers the others. A disabled rule keeps
+/// its slot with `enabled = 0`, contributes no map entries, and is still
+/// validated.
 pub fn compile(rules: &[Rule]) -> Result<Compiled, CompileError> {
-    let enabled: Vec<&Rule> = rules.iter().filter(|r| r.enabled).collect();
-    if enabled.len() > MAX_RULES {
-        return Err(CompileError::TooMany(enabled.len()));
+    if rules.len() > MAX_RULES {
+        return Err(CompileError::TooMany(rules.len()));
     }
-    let mut b = Builder::default();
-    let mut meta = Vec::with_capacity(enabled.len());
+    let mut live = Builder::default();
+    let mut dead = Builder::default();
+    let mut meta = Vec::with_capacity(rules.len());
     let mut seen = std::collections::HashSet::new();
-    for (i, r) in enabled.iter().enumerate() {
+    for (i, r) in rules.iter().enumerate() {
         let slot = i as u32;
+        let b = if r.enabled { &mut live } else { &mut dead };
         if !seen.insert(r.id.as_str()) {
             return Err(CompileError::DuplicateId(r.id.clone()));
         }
@@ -373,7 +380,8 @@ pub fn compile(rules: &[Rule]) -> Result<Compiled, CompileError> {
                 id: slot,
                 hook: hook_number(r.hook),
                 action: action_number(r.action),
-                enabled: 1,
+                enabled: u8::from(r.enabled),
+                _pad: 0,
             },
         });
         // exe dimension
@@ -431,22 +439,22 @@ pub fn compile(rules: &[Rule]) -> Result<Compiled, CompileError> {
             }
         }
     }
-    check_cap("exe_prefix_lpm", b.exe.len(), MAX_PATH_KEYS)?;
-    check_cap("path_prefix_lpm", b.path.len(), MAX_PATH_KEYS)?;
-    check_cap("net4_lpm", b.net4.len(), MAX_NET_KEYS)?;
-    check_cap("net6_lpm", b.net6.len(), MAX_NET_KEYS)?;
-    check_cap("port_rules", b.ports.len(), MAX_PORT_KEYS)?;
-    check_cap("unit_rules", b.units.len(), MAX_UNIT_KEYS)?;
-    check_cap("uid_rules", b.uids.len(), MAX_UID_KEYS)?;
+    check_cap("exe_prefix_lpm", live.exe.len(), MAX_PATH_KEYS)?;
+    check_cap("path_prefix_lpm", live.path.len(), MAX_PATH_KEYS)?;
+    check_cap("net4_lpm", live.net4.len(), MAX_NET_KEYS)?;
+    check_cap("net6_lpm", live.net6.len(), MAX_NET_KEYS)?;
+    check_cap("port_rules", live.ports.len(), MAX_PORT_KEYS)?;
+    check_cap("unit_rules", live.units.len(), MAX_UNIT_KEYS)?;
+    check_cap("uid_rules", live.uids.len(), MAX_UID_KEYS)?;
     Ok(Compiled {
         meta,
-        exe_lpm: cumulative(b.exe),
-        path_lpm: cumulative(b.path),
-        net4: cumulative(b.net4),
-        net6: cumulative(b.net6),
-        ports: sorted(b.ports),
-        units: sorted(b.units),
-        uids: sorted(b.uids),
+        exe_lpm: cumulative(live.exe),
+        path_lpm: cumulative(live.path),
+        net4: cumulative(live.net4),
+        net6: cumulative(live.net6),
+        ports: sorted(live.ports),
+        units: sorted(live.units),
+        uids: sorted(live.uids),
     })
 }
 #[cfg(test)]
@@ -801,19 +809,10 @@ mod tests {
     }
 
     #[test]
-    fn broad_v6_cidr_also_covers_mapped_addresses() {
+    fn broad_v6_cidr_matches_native_v6_only() {
         let c = compile(&[rule("a", Hook::Connect, net("::/0", &[]))]).unwrap();
         assert_eq!(c.net6.len(), 1);
-        assert_eq!(
-            c.net4,
-            vec![(
-                Net4Key {
-                    prefixlen: 0,
-                    addr: [0; 4]
-                },
-                one(0)
-            )]
-        );
+        assert!(c.net4.is_empty());
         let c = compile(&[rule("a", Hook::Connect, net("2001:db8::/32", &[]))]).unwrap();
         assert!(c.net4.is_empty());
     }
@@ -853,7 +852,8 @@ mod tests {
                         id: 0,
                         hook: 0,
                         action: 0,
-                        enabled: 1
+                        enabled: 1,
+                        _pad: 0
                     }
                 },
                 RuleMeta {
@@ -862,7 +862,8 @@ mod tests {
                         id: 1,
                         hook: 6,
                         action: 1,
-                        enabled: 1
+                        enabled: 1,
+                        _pad: 0
                     }
                 },
             ]
@@ -891,15 +892,49 @@ mod tests {
         off.enabled = false;
         let on = rule("on", Hook::FileWrite, pfx("/var"));
         let c = compile(&[off, on]).unwrap();
-        assert_eq!(c.meta.len(), 1);
-        assert_eq!(c.meta[0].id, "on");
-        assert_eq!(c.meta[0].meta.id, 0);
-        assert!(path_hit(&c, "/var/x", 0));
+        assert_eq!(c.meta.len(), 2);
+        assert_eq!(c.meta[0].meta.enabled, 0);
+        assert_eq!(c.meta[1].meta.enabled, 1);
+        assert!(path_hit(&c, "/var/x", 1));
         assert!(!path_hit(&c, "/etc/x", 0));
-        // A disabled rule with a bad target is not even validated.
+        assert!(c.path_lpm.iter().all(|(_, s)| !s.contains(0)));
+        assert!(c.exe_lpm.iter().all(|(_, s)| !s.contains(0)));
+        assert!(c.units.iter().all(|(_, s)| !s.contains(0)));
+    }
+
+    #[test]
+    fn disabled_rules_are_still_validated() {
         let mut bad = rule("bad", Hook::Exec, Target::Uid(1));
         bad.enabled = false;
-        assert_eq!(compile(&[bad]).unwrap(), Compiled::default());
+        assert!(matches!(
+            compile(&[bad]),
+            Err(CompileError::TargetMismatch { .. })
+        ));
+        let mut bad = rule("bad", Hook::Exec, pfx("/a/../b"));
+        bad.enabled = false;
+        assert!(matches!(compile(&[bad]), Err(CompileError::BadPath { .. })));
+    }
+
+    #[test]
+    fn disabling_a_rule_keeps_other_slots() {
+        let mk = |second_on: bool| {
+            let a = rule("a", Hook::FileWrite, pfx("/a"));
+            let mut b = rule("b", Hook::FileWrite, pfx("/b"));
+            b.enabled = second_on;
+            let c = rule("c", Hook::FileWrite, pfx("/c"));
+            compile(&[a, b, c]).unwrap()
+        };
+        let (on, off) = (mk(true), mk(false));
+        for c in [&on, &off] {
+            assert_eq!(c.slot_of("a"), Some(0));
+            assert_eq!(c.slot_of("b"), Some(1));
+            assert_eq!(c.slot_of("c"), Some(2));
+            assert_eq!(c.slot_of("zzz"), None);
+            assert!(path_hit(c, "/c/x", 2));
+        }
+        assert!(path_hit(&on, "/b/x", 1));
+        assert!(!path_hit(&off, "/b/x", 1));
+        assert_eq!(off.meta[1].meta.enabled, 0);
     }
 
     #[test]
@@ -911,10 +946,47 @@ mod tests {
         };
         assert!(compile(&mk(1024)).is_ok());
         assert_eq!(compile(&mk(1025)), Err(CompileError::TooMany(1025)));
-        // Disabled rules do not count.
+        // Disabled rules hold a slot too.
         let mut v = mk(1025);
         v[3].enabled = false;
-        assert!(compile(&v).is_ok());
+        assert_eq!(compile(&v), Err(CompileError::TooMany(1025)));
+    }
+
+    #[test]
+    fn dot_components_rejected() {
+        for p in ["/a/./b", "/a/../b", "/..", "/a//b", "/a/.", "/."] {
+            assert!(
+                matches!(
+                    compile(&[rule("a", Hook::FileWrite, pfx(p))]),
+                    Err(CompileError::BadPath { .. })
+                ),
+                "{p}"
+            );
+        }
+        // Dots inside a name are fine.
+        assert!(compile(&[rule("a", Hook::FileWrite, pfx("/a/.hidden/..x/b.c"))]).is_ok());
+    }
+
+    #[test]
+    fn nested_exe_prefix_cumulative() {
+        let mk = |id: &str, p: Option<&str>| {
+            let mut r = rule(id, Hook::Bpf, Target::Any);
+            r.process.exe_prefix = p.map(Into::into);
+            r
+        };
+        let c = compile(&[
+            mk("any", None),
+            mk("usr", Some("/usr")),
+            mk("bin", Some("/usr/bin")),
+        ])
+        .unwrap();
+        let s = |p: &str| -> Vec<u32> { lpm(&c.exe_lpm, &path_q(p)).unwrap().slots().collect() };
+        assert_eq!(s("/opt/x"), vec![0]);
+        assert_eq!(s("/usr/lib/x"), vec![0, 1]);
+        assert_eq!(s("/usr/bin/ls"), vec![0, 1, 2]);
+        assert_eq!(s("/usr/bin"), vec![0, 1, 2]);
+        assert_eq!(s("/usr/binx"), vec![0, 1]);
+        assert_eq!(s("/usr"), vec![0, 1]);
     }
 
     #[test]
