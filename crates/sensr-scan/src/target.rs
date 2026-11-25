@@ -125,24 +125,32 @@ pub fn count(t: &Target) -> u64 {
     }
 }
 
-/// Whether `ip` is on a local network: loopback, private, shared (CGNAT) or
-/// link-local space, unique-local IPv6, or one of the configured `local` nets.
+/// Built-in local blocks: private, shared (CGNAT) and link-local IPv4,
+/// unique-local and link-local IPv6.
+const LOCAL_BLOCKS: [&str; 7] = [
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+    "169.254.0.0/16",
+    "fc00::/7",
+    "fe80::/10",
+];
+
+/// The local block (built-in or one of `local`) containing both addresses.
+fn shared_block(a: IpAddr, b: IpAddr, local: &[IpNet]) -> bool {
+    let builtin = LOCAL_BLOCKS
+        .iter()
+        .filter_map(|n| n.parse::<IpNet>().ok())
+        .any(|n| n.contains(&a) && n.contains(&b));
+    builtin || local.iter().any(|n| n.contains(&a) && n.contains(&b))
+}
+
+/// Whether `ip` is on a local network: private, shared (CGNAT) or link-local
+/// space, unique-local IPv6, or one of the configured `local` nets.
 #[must_use]
 pub fn is_local(ip: IpAddr, local: &[IpNet]) -> bool {
-    let builtin = match ip {
-        IpAddr::V4(v4) => {
-            let o = v4.octets();
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || (o[0] == 100 && (o[1] & 0xc0) == 64)
-        }
-        IpAddr::V6(v6) => {
-            let seg = v6.segments()[0];
-            v6.is_loopback() || (seg & 0xfe00) == 0xfc00 || (seg & 0xffc0) == 0xfe80
-        }
-    };
-    builtin || local.iter().any(|n| n.contains(&ip))
+    shared_block(ip, ip, local)
 }
 
 /// Whether the target may be scanned: local unless `public_ok`, and no larger
@@ -151,12 +159,16 @@ pub fn is_local(ip: IpAddr, local: &[IpNet]) -> bool {
 /// # Errors
 /// The [`Refusal`] to send back.
 pub fn check(t: &Target, cfg: &Config, public_ok: bool) -> Result<(), Refusal> {
+    // Both ends must lie in the same local block, so a span cannot reach
+    // public space between two local endpoints. For a Net this is sound too:
+    // an aligned CIDR and a block are nested or disjoint, so a block holding
+    // the network and broadcast addresses holds every address between them.
     let ends = match *t {
         Target::One(ip) => (ip, ip),
         Target::Net(n) => (n.network(), n.broadcast()),
         Target::Span(a, b) => (a, b),
     };
-    if !public_ok && !(is_local(ends.0, &cfg.local) && is_local(ends.1, &cfg.local)) {
+    if !public_ok && !shared_block(ends.0, ends.1, &cfg.local) {
         return Err(Refusal::Public);
     }
     let addresses = count(t);
@@ -315,9 +327,35 @@ mod tests {
     }
 
     #[test]
-    fn net_straddling_public_is_refused() {
-        // 192.0.0.0/8 is mostly public; only its ends are tested, and 192.0.0.0 is not private.
-        let t = parse("192.0.0.0/24").unwrap();
-        assert_eq!(check(&t, &cfg(), false), Err(Refusal::Public));
+    fn straddling_targets_are_refused() {
+        // Local endpoints with public space between (172.16/12 .. 192.168/16).
+        for s in [
+            "10.0.0.1-100.64.0.5",
+            "192.168.255.250-192.169.0.5",
+            "172.16.0.1-192.168.0.1",
+        ] {
+            let t = parse(s).unwrap();
+            assert_eq!(check(&t, &cfg(), false), Err(Refusal::Public), "{s}");
+            let mut big = cfg();
+            big.max_range = u32::MAX;
+            assert_eq!(check(&t, &big, true), Ok(()), "{s}");
+        }
+        // A net covering local and public space.
+        assert_eq!(
+            check(&parse("192.168.0.0/15").unwrap(), &cfg(), false),
+            Err(Refusal::Public)
+        );
+    }
+
+    #[test]
+    fn span_inside_one_block_is_fine() {
+        let t = parse("192.168.1.10-192.168.2.20").unwrap();
+        assert_eq!(check(&t, &cfg(), false), Ok(()));
+    }
+
+    #[test]
+    fn loopback_is_not_local() {
+        assert!(!is_local(ip("127.0.0.1"), &[]));
+        assert!(!is_local(ip("::1"), &[]));
     }
 }
