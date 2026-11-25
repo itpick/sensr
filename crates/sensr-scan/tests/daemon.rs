@@ -558,6 +558,135 @@ async fn a_range_reads_neighbours_learned_after_it_started() {
     assert_eq!(scans[0].mac.as_deref(), Some(MAC));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_keeps_partial_and_is_not_an_owner_cancel() {
+    let port = ssh_listener();
+    let mut tcp = vec![port];
+    tcp.extend((40_000..42_000).filter(|p| *p != port));
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("scans.db");
+    let daemon = Arc::new(
+        Daemon::new(cfg(), &db, Services::default())
+            .unwrap()
+            .with_ports(ports(tcp))
+            .with_neighbours(HashMap::new),
+    );
+    let worker = daemon.spawn_worker();
+    let d = Arc::clone(&daemon);
+    let id =
+        tokio::task::spawn_blocking(move || started(d.handle(start("127.0.0.1", Some(MAC), true))))
+            .await
+            .unwrap();
+    let t = Instant::now();
+    while daemon
+        .status()
+        .running
+        .is_none_or(|r| r.job_id != id || r.tcp_done < 20)
+    {
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "scan never got going"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    daemon.stop();
+    let t = Instant::now();
+    while !worker.is_finished() {
+        assert!(t.elapsed() < Duration::from_secs(5), "worker kept running");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let store = Store::open_ro(&db).unwrap();
+    let scan = store.latest_for_mac(MAC).unwrap().expect("a scan");
+    assert_eq!(scan.status, ScanStatus::Partial);
+    assert!(
+        scan.ports.iter().any(|p| p.port == port),
+        "{:?}",
+        scan.ports
+    );
+    let sid = i64::try_from(id).unwrap();
+    assert_eq!(store.job(sid).unwrap().unwrap().0.status, "failed");
+    assert!(!store.auto_cancelled(MAC).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_auto_scan_is_not_requeued_for_a_day() {
+    let h = start_daemon(cfg(), ports(vec![1]), false).await;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    let old = "aa:bb:cc:00:00:41";
+    {
+        let store = Store::open(&h.db).unwrap();
+        for (mac, finished) in [(MAC, now - 60), (old, now - 25 * 3600)] {
+            let j = store
+                .queue_job(JobKind::Device, "127.0.0.1", Some(mac), true, false)
+                .unwrap();
+            store
+                .write_scan(
+                    j,
+                    "127.0.0.1".parse().unwrap(),
+                    Some(mac),
+                    finished - 5,
+                    finished,
+                    ScanStatus::Failed,
+                    false,
+                    &[],
+                )
+                .unwrap();
+            store.end_job(j, "failed", &[]).unwrap();
+        }
+    }
+    assert_eq!(
+        ask(&h.sock, start("127.0.0.1", Some(MAC), true)).await,
+        Reply::Ok
+    );
+    assert!(status(&h.sock).await.queue.is_empty());
+    // A day on, it is tried again; Scan now always works.
+    started(ask(&h.sock, start("127.0.0.1", Some(old), true)).await);
+    started(ask(&h.sock, start("127.0.0.1", Some(MAC), false)).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_whose_result_cannot_be_written_fails() {
+    let port = ssh_listener();
+    let mut tcp = vec![port];
+    tcp.extend((40_000..42_000).filter(|p| *p != port));
+    let h = start_daemon(cfg(), ports(tcp), true).await;
+    let id = started(ask(&h.sock, start("127.0.0.1", Some(MAC), false)).await);
+    let t = Instant::now();
+    while status(&h.sock)
+        .await
+        .running
+        .is_none_or(|r| r.job_id != id || r.tcp_done < 5)
+    {
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "scan never got going"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The scan row can no longer be written.
+    rusqlite::Connection::open(&h.db)
+        .unwrap()
+        .execute_batch("DROP TABLE scans")
+        .unwrap();
+    assert_eq!(
+        ask(&h.sock, Request::Cancel { job_id: id }).await,
+        Reply::Ok
+    );
+    wait_idle(&h.sock, Duration::from_secs(5)).await;
+    let sid = i64::try_from(id).unwrap();
+    let status: String = rusqlite::Connection::open(&h.db)
+        .unwrap()
+        .query_row("SELECT status FROM jobs WHERE id = ?1", [sid], |r| r.get(0))
+        .unwrap();
+    assert_eq!(status, "failed");
+}
+
 // ---- beyond the brief's list ----
 
 #[tokio::test(flavor = "multi_thread")]

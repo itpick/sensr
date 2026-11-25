@@ -329,6 +329,20 @@ impl Store {
         Ok(())
     }
 
+    /// A job cancelled by a shutdown (not by the owner) is `failed`: it does
+    /// not stop future automatic scans. Other statuses are left alone.
+    ///
+    /// # Errors
+    /// Any SQLite error.
+    pub fn interrupt_job(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET status = 'failed', finished = COALESCE(finished, ?1) \
+             WHERE id = ?2 AND status IN ('cancelled', 'running', 'queued')",
+            params![now(), id],
+        )?;
+        Ok(())
+    }
+
     /// Mark every job still `running` or `queued` as `failed`, finished now.
     /// The daemon calls this at start: a crash must not leave jobs running
     /// forever, and its in-memory queue is gone (auto jobs come back through
@@ -465,6 +479,22 @@ impl Store {
                AND j.status = 'cancelled' \
                AND j.mac = ?1)",
             [mac],
+            |r| r.get(0),
+        )
+    }
+
+    /// Whether the device's newest scan from an automatic job is `failed`
+    /// and finished at or after `since` (seconds).
+    ///
+    /// # Errors
+    /// Any SQLite error.
+    pub fn auto_failed_since(&self, mac: &str, since: i64) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT COALESCE((SELECT s.status = 'failed' AND s.finished >= ?2 \
+               FROM scans s JOIN jobs j ON j.id = s.job_id \
+               WHERE s.mac = ?1 AND j.requested_by = 'auto' \
+               ORDER BY s.started DESC, s.id DESC LIMIT 1), 0)",
+            params![mac, since],
             |r| r.get(0),
         )
     }
@@ -1069,6 +1099,58 @@ mod tests {
         assert!(!s.auto_cancelled("m:auto-complete").unwrap());
         assert!(!s.auto_cancelled("m:auto-failed").unwrap());
         assert!(!s.auto_cancelled("m:unknown").unwrap());
+    }
+
+    #[test]
+    fn auto_failed_since_reads_the_newest_auto_scan() {
+        let s = mem();
+        let scan = |auto: bool, mac: &str, started: i64, status: ScanStatus| {
+            let j = s
+                .begin_job(JobKind::Device, "x", Some(mac), auto, false)
+                .unwrap();
+            s.write_scan(
+                j,
+                ip("10.0.0.1"),
+                Some(mac),
+                started,
+                started + 5,
+                status,
+                false,
+                &[],
+            )
+            .unwrap();
+            s.end_job(j, "failed", &[]).unwrap();
+        };
+        scan(true, "m:a", 1000, ScanStatus::Failed);
+        assert!(s.auto_failed_since("m:a", 1000).unwrap());
+        assert!(!s.auto_failed_since("m:a", 1006).unwrap(), "too old");
+        // An owner scan does not count; a newer auto scan that got through
+        // (partial: interrupted) ends the back-off.
+        scan(false, "m:b", 1000, ScanStatus::Failed);
+        assert!(!s.auto_failed_since("m:b", 0).unwrap());
+        scan(true, "m:a", 2000, ScanStatus::Partial);
+        assert!(!s.auto_failed_since("m:a", 0).unwrap());
+        assert!(!s.auto_failed_since("m:none", 0).unwrap());
+    }
+
+    #[test]
+    fn interrupt_job_only_rewrites_unfinished_or_cancelled_jobs() {
+        let s = mem();
+        let j = s
+            .begin_job(JobKind::Device, "x", Some("m"), true, false)
+            .unwrap();
+        s.end_job(j, "cancelled", &[ip("10.0.0.9")]).unwrap();
+        s.interrupt_job(j).unwrap();
+        let (v, _) = s.job(j).unwrap().unwrap();
+        assert_eq!(v.status, "failed");
+        assert_eq!(v.skipped, vec![ip("10.0.0.9")]);
+        assert!(!s.auto_cancelled("m").unwrap());
+        let done = s
+            .begin_job(JobKind::Device, "x", None, true, false)
+            .unwrap();
+        s.end_job(done, "complete", &[]).unwrap();
+        s.interrupt_job(done).unwrap();
+        assert_eq!(s.job(done).unwrap().unwrap().0.status, "complete");
     }
 
     #[test]

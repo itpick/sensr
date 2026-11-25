@@ -69,6 +69,10 @@ required-features = ["daemon"]
 name = "daemon"
 required-features = ["daemon"]
 
+[[test]]
+name = "bin"
+required-features = ["daemon"]
+
 [[bin]]
 name = "sensr-scan"
 path = "src/bin/sensr-scan.rs"

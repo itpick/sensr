@@ -4,8 +4,9 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -27,6 +28,15 @@ const MAX_LINE: u64 = 1024 * 1024;
 pub const MAX_KNOWN: usize = 4096;
 /// A connection that sends nothing for this long is closed.
 pub const IDLE: Duration = Duration::from_secs(60);
+/// A device whose automatic scan failed is not queued automatically again
+/// for this long, in seconds.
+pub const AUTO_RETRY_AFTER: i64 = 24 * 3600;
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
 
 type NeighbourFn = dyn Fn() -> Neighbours + Send + Sync;
 
@@ -49,6 +59,8 @@ pub struct Daemon {
     progress: Progress,
     wake: Notify,
     idle: Duration,
+    /// Set by [`Daemon::stop`]: the worker starts no new job.
+    stopping: AtomicBool,
 }
 
 impl Daemon {
@@ -72,6 +84,7 @@ impl Daemon {
             progress: Progress::default(),
             wake: Notify::new(),
             idle: IDLE,
+            stopping: AtomicBool::new(false),
         })
     }
 
@@ -151,15 +164,39 @@ impl Daemon {
         }
     }
 
-    /// Whether an automatic scan of `mac` is wanted.
+    /// Stop for a shutdown: the running job is cancelled (it writes what it
+    /// found as `Partial`; the worker then marks the job `failed`, so an
+    /// automatic one is not taken for an owner cancel) and the worker
+    /// thread ends instead of starting the next job.
+    pub fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        if let Some((_, token)) = self.jobs().running.as_ref() {
+            token.cancel();
+        }
+        self.wake.notify_one();
+    }
+
+    fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
+    /// Whether an automatic scan of `mac` is wanted: not after a complete
+    /// scan, an owner cancel, or a failed automatic scan in the last
+    /// [`AUTO_RETRY_AFTER`] (an offline device is not re-queued every time
+    /// the agent resends its list).
     fn wants_auto(&self, mac: &str) -> bool {
         if !self.cfg.enabled || !self.cfg.auto_scan_new {
             return false;
         }
         let store = self.store();
-        match (store.has_complete(mac), store.auto_cancelled(mac)) {
-            (Ok(done), Ok(cancelled)) => !done && !cancelled,
-            (Err(e), _) | (_, Err(e)) => {
+        let since = now().saturating_sub(AUTO_RETRY_AFTER);
+        match (
+            store.has_complete(mac),
+            store.auto_cancelled(mac),
+            store.auto_failed_since(mac, since),
+        ) {
+            (Ok(done), Ok(cancelled), Ok(failed)) => !done && !cancelled && !failed,
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
                 tracing::warn!(mac, error = %e, "auto-scan check failed; not queued");
                 false
             }
@@ -341,6 +378,9 @@ async fn work(me: Arc<Daemon>) {
         }
     };
     loop {
+        if me.stopping() {
+            return;
+        }
         let Some((job, token)) = me.next_job() else {
             // `notify_one` keeps a permit, so a push since `next` is not lost.
             me.wake.notified().await;
@@ -365,12 +405,23 @@ async fn work(me: Arc<Daemon>) {
         });
         match task.await {
             Ok(Ok(_)) => tracing::info!(job_id = id, "scan ended"),
-            Ok(Err(e)) => tracing::error!(job_id = id, error = %e, "scan could not be recorded"),
+            Ok(Err(e)) => {
+                tracing::error!(job_id = id, error = %e, "scan could not be recorded; job failed");
+                if let Err(e) = store.end_job(store_id(id), "failed", &[]) {
+                    tracing::error!(job_id = id, error = %e, "could not record failed job");
+                }
+            }
             Err(e) => {
                 tracing::error!(job_id = id, error = %e, "scan crashed; job failed");
                 if let Err(e) = store.end_job(store_id(id), "failed", &[]) {
                     tracing::error!(job_id = id, error = %e, "could not record failed job");
                 }
+            }
+        }
+        if me.stopping() {
+            // Cut short by the shutdown, not by the owner.
+            if let Err(e) = store.interrupt_job(store_id(id)) {
+                tracing::error!(job_id = id, error = %e, "could not record interrupted job");
             }
         }
         me.job_ended(id);

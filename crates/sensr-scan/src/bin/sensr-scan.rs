@@ -14,6 +14,8 @@ use tracing_subscriber::EnvFilter;
 
 /// How often old results are pruned.
 const PRUNE_EVERY: Duration = Duration::from_secs(24 * 3600);
+/// How long a shutdown waits for the running scan to write what it found.
+const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// Port scanner daemon for sensr (Diagnostics > Port Scan).
 #[derive(Debug, Parser)]
@@ -88,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
     // restarts the service.
     // A plain thread (not spawn_blocking, which would hold up runtime
     // shutdown) waits on it.
-    let (stopped, worker_stopped) = tokio::sync::oneshot::channel::<()>();
+    let (stopped, mut worker_stopped) = tokio::sync::oneshot::channel::<()>();
     std::thread::spawn(move || {
         let _ = worker.join();
         let _ = stopped.send(());
@@ -97,9 +99,17 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(socket = %args.socket.display(), "sensr-scan serving");
     let socket = args.socket.clone();
     tokio::select! {
-        r = serve(&socket, daemon) => r.with_context(|| format!("serving {}", socket.display()))?,
-        r = shutdown() => r?,
-        _ = worker_stopped => {
+        r = serve(&socket, Arc::clone(&daemon)) => r.with_context(|| format!("serving {}", socket.display()))?,
+        r = shutdown() => {
+            r?;
+            // Every settings change restarts the unit: let the running
+            // scan keep what it found (Partial) before exiting.
+            daemon.stop();
+            if tokio::time::timeout(STOP_GRACE, &mut worker_stopped).await.is_err() {
+                tracing::warn!("the running scan did not stop in time");
+            }
+        }
+        _ = &mut worker_stopped => {
             let _ = std::fs::remove_file(&args.socket);
             anyhow::bail!("the scan worker stopped");
         }
