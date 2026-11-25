@@ -1,0 +1,5 @@
+# tftp-error: ERROR 1 'File not found'
+# Source: written by the sensr authors from RFC 1350 §5.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+00 05 00 01 46 69 6c 65 20 6e 6f 74 20 66 6f 75
+6e 64 00

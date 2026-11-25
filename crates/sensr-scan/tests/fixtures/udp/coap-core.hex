@@ -1,0 +1,6 @@
+# coap-core: ACK 2.05 Content-Format 40, link-format payload
+# Source: written by the sensr authors from RFC 7252 §3 and RFC 6690.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+60 45 53 43 c1 28 ff 3c 2f 73 65 6e 73 6f 72 73
+2f 74 65 6d 70 3e 3b 72 74 3d 22 74 65 6d 70 65
+72 61 74 75 72 65 22

@@ -1,0 +1,5 @@
+# rpc-prog-mismatch: MSG_ACCEPTED PROG_MISMATCH low 2 high 4
+# Source: written by the sensr authors from RFC 5531 §9.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+73 65 6e 73 00 00 00 01 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 02 00 00 00 02 00 00 00 04

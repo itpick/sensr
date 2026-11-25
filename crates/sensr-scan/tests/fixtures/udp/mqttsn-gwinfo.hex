@@ -1,0 +1,4 @@
+# mqttsn-gwinfo: GWINFO gateway id 7
+# Source: written by the sensr authors from MQTT-SN Protocol Specification v1.2 §5.4.3.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+03 02 07

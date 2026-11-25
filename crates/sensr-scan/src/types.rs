@@ -19,3 +19,91 @@ pub enum PortState {
     Filtered,
     OpenFiltered,
 }
+
+/// What identification learned about an open port. Every text field is
+/// sanitised with [`sanitize`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Ident {
+    /// Software or device, e.g. `"OpenSSH"` or `"Linux nas 6.1"`.
+    pub product: Option<String>,
+    pub version: Option<String>,
+    /// A human name: page title, device or host name.
+    pub title: Option<String>,
+    pub tls: Option<TlsInfo>,
+    /// Other text worth showing, e.g. a banner line or status.
+    pub banner: Option<String>,
+}
+
+/// The certificate a TLS service presented.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TlsInfo {
+    pub subject: String,
+    pub sans: Vec<String>,
+    pub issuer: String,
+    /// Expiry, Unix seconds.
+    pub not_after: i64,
+}
+
+/// Longest text kept in an [`Ident`] field, in bytes.
+pub const TEXT_MAX: usize = 256;
+
+/// Captured bytes to display text: invalid UTF-8 replaced, whitespace
+/// controls (tab, CR, LF, ...) turned into spaces, other control characters
+/// dropped, runs of spaces collapsed, trimmed, and cut to [`TEXT_MAX`] bytes
+/// on a character boundary.
+#[must_use]
+pub fn sanitize(b: &[u8]) -> String {
+    let mut out = String::new();
+    for c in String::from_utf8_lossy(b).chars() {
+        let c = if c.is_whitespace() { ' ' } else { c };
+        if c.is_control() || (c == ' ' && (out.is_empty() || out.ends_with(' '))) {
+            continue;
+        }
+        if out.len() + c.len_utf8() > TEXT_MAX {
+            break;
+        }
+        out.push(c);
+    }
+    while out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_drops_controls_and_collapses_space() {
+        assert_eq!(sanitize(b"  a\x00b\r\n\tc \x1b[0m "), "ab c [0m");
+        assert_eq!(sanitize(b"\xff ok"), "\u{fffd} ok");
+        assert_eq!(sanitize(b""), "");
+    }
+
+    #[test]
+    fn sanitize_caps_on_char_boundary() {
+        let s = "é".repeat(200); // 400 bytes
+        let t = sanitize(s.as_bytes());
+        assert_eq!(t.len(), TEXT_MAX);
+        assert!(t.chars().all(|c| c == 'é'));
+        let t = sanitize(format!("a{s}").as_bytes());
+        assert_eq!(t.len(), TEXT_MAX - 1);
+    }
+
+    #[test]
+    fn ident_serde_round_trip() {
+        let i = Ident {
+            product: Some("p".into()),
+            tls: Some(TlsInfo {
+                subject: "CN=x".into(),
+                sans: vec!["x".into()],
+                issuer: "CN=ca".into(),
+                not_after: 1_700_000_000,
+            }),
+            ..Ident::default()
+        };
+        let j = serde_json::to_string(&i).unwrap();
+        assert_eq!(serde_json::from_str::<Ident>(&j).unwrap(), i);
+    }
+}

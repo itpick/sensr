@@ -47,3 +47,7 @@ workspace = true
 [[test]]
 name = "tcp"
 required-features = ["daemon"]
+
+[[test]]
+name = "udp"
+required-features = ["daemon"]

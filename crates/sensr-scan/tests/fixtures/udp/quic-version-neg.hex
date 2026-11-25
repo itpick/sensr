@@ -1,0 +1,5 @@
+# quic-version-neg: Version Negotiation offering v1, v2, draft-29
+# Source: written by the sensr authors from RFC 9000 §17.2.1 and RFC 9369.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+80 00 00 00 00 00 08 73 65 6e 73 72 71 69 63 00
+00 00 01 6b 33 43 cf ff 00 00 1d

@@ -7,6 +7,7 @@
 //! features.
 
 pub mod config;
+pub mod ident;
 pub mod ports;
 pub mod proto;
 pub mod target;
@@ -16,3 +17,7 @@ pub mod types;
 pub mod pace;
 #[cfg(feature = "daemon")]
 pub mod tcp;
+#[cfg(feature = "daemon")]
+pub mod udp;
+#[cfg(feature = "daemon")]
+pub mod udp_probes;
