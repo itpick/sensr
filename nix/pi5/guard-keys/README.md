@@ -12,8 +12,16 @@ pack ships in the image and is trusted without a signature.
 - The release signing secret key is the GitHub Actions secret
   `GUARD_PACK_KEY`; its public half is added here as a `.pub` file.
 - To rotate, add the new `.pub` first and release, sign with the new key,
-  then remove the old file in a later release. To revoke a key, delete its
-  file and release.
+  then remove the old file in a later release.
+- Revocation: each installed pack keeps its signed archive and signature.
+  The daemon re-verifies them against the key list shipped in the running
+  image every time it resolves a pack, so deleting a key's file and
+  releasing an image makes packs signed only by that key stop loading after
+  the image is deployed. The daemon then falls back to the last good version
+  that still verifies, and then to the built-in pack, and reports why. A
+  revoked key has no effect on a machine until it runs the new image.
+- The same check re-applies `min_sensr` and compares the unpacked files with
+  the signed archive, so a pack edited on disk also falls back.
 - No production key is committed yet. With an empty list no signed pack can
   be installed and only the built-in packs run.
 - Pack archives are `.tar.zst` containing exactly `manifest.json`, one

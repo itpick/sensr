@@ -10,7 +10,6 @@ use aya::maps::{
 use aya::programs::{Program, ProgramError};
 use aya::{Btf, Ebpf, EbpfLoader};
 use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
-use serde::Deserialize;
 
 use super::{Applied, ProgramStatus, disabled_meta, hits_by_id, plan};
 use crate::compile::Compiled;
@@ -33,7 +32,7 @@ pub enum LoadError {
         /// The manifest.
         path: PathBuf,
         /// The error.
-        source: serde_json::Error,
+        source: crate::packs::PackError,
     },
     /// The pack must have exactly one object (its programs are linked
     /// together so they share their maps).
@@ -101,11 +100,6 @@ pub enum ApplyError {
     /// The number of CPUs could not be read.
     #[error("possible CPUs: {0}")]
     Cpus(String),
-}
-
-#[derive(Deserialize)]
-struct Manifest {
-    programs: Vec<String>,
 }
 
 /// A loaded pack. Dropping it detaches every program and frees the maps.
@@ -189,8 +183,8 @@ fn attach(program: &mut Program, hook: &str, btf: &Btf) -> Result<(), String> {
 pub fn load(pack_dir: &Path) -> Result<Loaded, LoadError> {
     let read = |p: PathBuf| std::fs::read(&p).map_err(|source| LoadError::Read { path: p, source });
     let manifest_path = pack_dir.join("manifest.json");
-    let manifest: Manifest =
-        serde_json::from_slice(&read(manifest_path.clone())?).map_err(|source| {
+    let manifest =
+        crate::packs::Manifest::parse(&read(manifest_path.clone())?).map_err(|source| {
             LoadError::Manifest {
                 path: manifest_path,
                 source,
@@ -550,7 +544,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("manifest.json"),
-            r#"{"name": "x", "programs": ["a.bpf.o", "b.bpf.o"]}"#,
+            r#"{"name": "x", "version": "1.0.0", "min_sensr": "0.0.0", "programs": ["a.bpf.o", "b.bpf.o"], "rules": "rules.json"}"#,
         )
         .unwrap();
         let e = load(&dir).unwrap_err();
@@ -560,7 +554,7 @@ mod tests {
             load(&dir).unwrap_err(),
             LoadError::Manifest { .. }
         ));
-        std::fs::write(dir.join("manifest.json"), r#"{"programs": ["a.bpf.o"]}"#).unwrap();
+        std::fs::write(dir.join("manifest.json"), r#"{"name": "x", "version": "1.0.0", "min_sensr": "0.0.0", "programs": ["a.bpf.o"], "rules": "rules.json"}"#).unwrap();
         std::fs::write(dir.join("a.bpf.o"), b"not an elf").unwrap();
         assert!(matches!(load(&dir).unwrap_err(), LoadError::Object { .. }));
         std::fs::remove_dir_all(&dir).unwrap();

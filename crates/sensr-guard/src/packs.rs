@@ -65,6 +65,14 @@ pub enum PackError {
     /// The manifest lists a program the archive does not contain.
     #[error("pack lacks program {0}")]
     MissingProgram(String),
+    /// Installing would replace a newer version.
+    #[error("pack {new} is older than the installed {current}")]
+    Downgrade {
+        /// The installed version.
+        current: Version,
+        /// The offered version.
+        new: Version,
+    },
     /// The archive or manifest is malformed or unsafe.
     #[error("pack is corrupt: {0}")]
     Corrupt(String),
@@ -124,6 +132,9 @@ pub struct PackDir {
     pub path: PathBuf,
     /// Where it came from.
     pub source: PackSource,
+    /// Why a newer choice was passed over (revoked key, too new, damaged
+    /// files), if one was.
+    pub fallback_reason: Option<String>,
 }
 
 /// The result of an install.
@@ -135,74 +146,36 @@ pub struct PackStatus {
     pub version: Version,
     /// Its directory.
     pub dir: PathBuf,
-    /// The version that was current before, kept as the last good.
+    /// The version that was current before, kept as the last good (`None`
+    /// if there was none or the same version was reinstalled).
     pub previous: Option<Version>,
 }
 
-/// The pack directory for `name`: the installed `current` version if it is
-/// intact (manifest parses, matches its directory, objects present),
-/// otherwise the built-in pack. Signatures were checked at install time.
-pub fn resolve(name: &str, builtin_dir: &Path, state_dir: &Path) -> PackDir {
-    if let Some((path, version)) = installed_current(name, state_dir) {
-        return PackDir {
-            path,
-            source: PackSource::Installed(version),
-        };
-    }
-    PackDir {
-        path: builtin_dir.join(name),
-        source: PackSource::Builtin,
-    }
-}
-
-fn pack_root(state_dir: &Path, name: &str) -> PathBuf {
-    state_dir.join("packs").join(name)
-}
-
-fn current_version(root: &Path) -> Option<Version> {
-    let target = std::fs::read_link(root.join("current")).ok()?;
-    // Only a plain sibling directory name is accepted.
-    let mut comps = target.components();
-    match (comps.next(), comps.next()) {
-        (Some(std::path::Component::Normal(n)), None) => Version::parse(n.to_str()?).ok(),
-        _ => None,
-    }
-}
-
-fn installed_current(name: &str, state_dir: &Path) -> Option<(PathBuf, Version)> {
-    let root = pack_root(state_dir, name);
-    let version = current_version(&root)?;
-    let dir = root.join(version.to_string());
-    let manifest = Manifest::parse(&std::fs::read(dir.join(MANIFEST_FILE)).ok()?).ok()?;
-    if manifest.name != name || manifest.version != version {
-        return None;
-    }
-    let objects_ok = manifest.programs.iter().all(|p| dir.join(p).is_file());
-    (objects_ok && dir.join(&manifest.rules).is_file()).then_some((dir, version))
-}
-
 #[cfg(feature = "packs")]
-pub use install::{PublicKey, install, load_keys, verify};
+pub use install::{PublicKey, install, load_keys, resolve, verify};
 
 #[cfg(feature = "packs")]
 mod install {
     use std::collections::BTreeMap;
-    use std::io::Read;
-    use std::path::Path;
+    use std::io::{Read, Write};
+    use std::path::{Path, PathBuf};
 
     pub use minisign_verify::PublicKey;
     use minisign_verify::{Error as SigError, Signature};
     use semver::Version;
 
     use super::{
-        MANIFEST_FILE, Manifest, OBJECT_SUFFIX, PackError, PackStatus, RULES_FILE, Rule, corrupt,
-        current_version, pack_root,
+        MANIFEST_FILE, Manifest, OBJECT_SUFFIX, PackDir, PackError, PackSource, PackStatus,
+        RULES_FILE, Rule, corrupt,
     };
 
-    /// Unpacked archives larger than this are refused.
-    const MAX_UNPACKED: u64 = 256 * 1024 * 1024;
+    /// Archives (packed and unpacked) larger than this are refused.
+    const MAX_UNPACKED: u64 = 16 * 1024 * 1024;
     /// Versions kept on disk: the current one and the last good.
     const KEEP: usize = 2;
+    /// The verified archive and its signature, kept in each version dir.
+    const ARCHIVE_FILE: &str = "pack.tar.zst";
+    const SIG_FILE: &str = "pack.minisig";
 
     /// Load every `*.pub` file in `dir` (one minisign public key each).
     pub fn load_keys(dir: &Path) -> Result<Vec<PublicKey>, PackError> {
@@ -238,9 +211,14 @@ mod install {
         })
     }
 
+    type Files = BTreeMap<String, Vec<u8>>;
+
     /// Unpack the archive into memory, refusing anything but the pack's
     /// regular files at the top level.
-    fn unpack(archive: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, PackError> {
+    fn unpack(archive: &[u8]) -> Result<Files, PackError> {
+        if archive.len() as u64 > MAX_UNPACKED {
+            return Err(corrupt("archive too large"));
+        }
         let dec = zstd::stream::read::Decoder::new(archive)
             .map_err(|e| corrupt(format!("zstd: {e}")))?
             .take(MAX_UNPACKED + 1);
@@ -282,23 +260,8 @@ mod install {
         Ok(files)
     }
 
-    fn random_suffix() -> Result<String, PackError> {
-        let mut b = [0u8; 8];
-        getrandom::fill(&mut b).map_err(|e| std::io::Error::other(e.to_string()))?;
-        Ok(b.iter().map(|x| format!("{x:02x}")).collect())
-    }
-
-    /// Verify and install a pack archive; see the module docs. Nothing on
-    /// disk changes unless every check passes.
-    pub fn install(
-        archive: &[u8],
-        sig: &str,
-        keys: &[PublicKey],
-        state_dir: &Path,
-        current_sensr: &Version,
-    ) -> Result<PackStatus, PackError> {
-        verify(archive, sig, keys)?;
-        let files = unpack(archive)?;
+    /// The manifest-level checks shared by install and resolve.
+    fn check(files: &Files, current_sensr: &Version) -> Result<Manifest, PackError> {
         let manifest = Manifest::parse(
             files
                 .get(MANIFEST_FILE)
@@ -310,61 +273,116 @@ mod install {
                 have: current_sensr.clone(),
             });
         }
-        let objects = files.keys().filter(|n| n.ends_with(OBJECT_SUFFIX)).count();
-        if objects != 1 || manifest.programs.len() != 1 {
-            return Err(corrupt("a pack has exactly one .bpf.o"));
-        }
         for p in &manifest.programs {
             if !files.contains_key(p) || !p.ends_with(OBJECT_SUFFIX) {
                 return Err(PackError::MissingProgram(p.clone()));
             }
         }
-        let rules = files
-            .get(&manifest.rules)
-            .ok_or_else(|| corrupt("manifest names a rules file the archive lacks"))?;
-        serde_json::from_slice::<Vec<Rule>>(rules).map_err(|e| corrupt(format!("rules: {e}")))?;
+        let objects = files.keys().filter(|n| n.ends_with(OBJECT_SUFFIX)).count();
+        if objects != 1 || manifest.programs.len() != 1 {
+            return Err(corrupt("a pack has exactly one .bpf.o"));
+        }
         if manifest.rules != RULES_FILE {
             return Err(corrupt("rules file must be rules.json"));
         }
+        let rules = files
+            .get(RULES_FILE)
+            .ok_or_else(|| corrupt("the archive lacks rules.json"))?;
+        serde_json::from_slice::<Vec<Rule>>(rules).map_err(|e| corrupt(format!("rules: {e}")))?;
+        Ok(manifest)
+    }
 
-        let root = pack_root(state_dir, &manifest.name);
+    fn random_suffix() -> Result<String, PackError> {
+        let mut b = [0u8; 8];
+        getrandom::fill(&mut b).map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+    }
+
+    fn sync_dir(dir: &Path) -> std::io::Result<()> {
+        std::fs::File::open(dir)?.sync_all()
+    }
+
+    fn write_synced(path: &Path, data: &[u8]) -> std::io::Result<()> {
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(data)?;
+        f.sync_all()
+    }
+
+    /// Verify and install a pack archive; see the module docs. Nothing on
+    /// disk changes unless every check passes. A version older than the
+    /// current one is refused unless `allow_downgrade`.
+    pub fn install(
+        archive: &[u8],
+        sig: &str,
+        keys: &[PublicKey],
+        state_dir: &Path,
+        current_sensr: &Version,
+        allow_downgrade: bool,
+    ) -> Result<PackStatus, PackError> {
+        verify(archive, sig, keys)?;
+        let files = unpack(archive)?;
+        let manifest = check(&files, current_sensr)?;
+
+        let root = state_dir.join("packs").join(&manifest.name);
         std::fs::create_dir_all(&root)?;
-        let previous = current_version(&root);
-        let version = manifest.version.to_string();
-        let dest = root.join(&version);
+        let lock = std::fs::File::create(root.join(".lock"))?;
+        lock.lock()?;
 
+        let previous = current_dir(&root);
+        let previous_version = previous.as_ref().map(|(_, v)| v.clone());
+        if let Some(cur) = &previous_version
+            && manifest.version < *cur
+            && !allow_downgrade
+        {
+            return Err(PackError::Downgrade {
+                current: cur.clone(),
+                new: manifest.version,
+            });
+        }
+
+        // A fresh directory per install: reinstalling a version never
+        // touches the directory `current` points at.
+        let version = manifest.version.to_string();
+        let dir_name = if root.join(&version).exists() {
+            format!("{version}~{}", random_suffix()?)
+        } else {
+            version
+        };
+        let dest = root.join(&dir_name);
         let tmp = root.join(format!(".tmp-{}", random_suffix()?));
-        std::fs::create_dir(&tmp)?;
-        let staged = (|| -> Result<(), PackError> {
+        let swapped = (|| -> Result<(), PackError> {
+            std::fs::create_dir(&tmp)?;
             for (name, data) in &files {
-                std::fs::write(tmp.join(name), data)?;
+                write_synced(&tmp.join(name), data)?;
             }
-            // Re-installing the current version replaces it in one rename
-            // of the symlink target below; any other stale copy goes first.
-            if previous.as_ref() != Some(&manifest.version) && dest.exists() {
-                std::fs::remove_dir_all(&dest)?;
-            }
-            if dest.exists() {
-                // Same version as current: stage next to it and swap names.
-                let old = root.join(format!(".old-{}", random_suffix()?));
-                std::fs::rename(&dest, &old)?;
-                std::fs::rename(&tmp, &dest)?;
-                std::fs::remove_dir_all(&old)?;
-            } else {
-                std::fs::rename(&tmp, &dest)?;
-            }
+            write_synced(&tmp.join(ARCHIVE_FILE), archive)?;
+            write_synced(&tmp.join(SIG_FILE), sig.as_bytes())?;
+            sync_dir(&tmp)?;
+            std::fs::rename(&tmp, &dest)?;
+            sync_dir(&root)?;
             let link_tmp = root.join(format!(".link-{}", random_suffix()?));
-            std::os::unix::fs::symlink(&version, &link_tmp)?;
-            std::fs::rename(&link_tmp, root.join("current"))?;
+            std::os::unix::fs::symlink(&dir_name, &link_tmp)?;
+            if let Err(e) = std::fs::rename(&link_tmp, root.join("current")) {
+                let _ = std::fs::remove_file(&link_tmp);
+                return Err(e.into());
+            }
+            sync_dir(&root)?;
             Ok(())
         })();
-        if let Err(e) = staged {
+        if let Err(e) = swapped {
             let _ = std::fs::remove_dir_all(&tmp);
+            // `current` was not moved, so the new directory is unused.
+            let _ = std::fs::remove_dir_all(&dest);
             return Err(e);
         }
 
-        let previous_good = previous.filter(|p| *p != manifest.version);
-        prune(&root, &manifest.version, previous_good.as_ref());
+        let previous_good = previous_version.filter(|p| *p != manifest.version);
+        prune(
+            &root,
+            &dir_name,
+            &manifest.version,
+            previous.map(|(d, _)| d),
+        );
         Ok(PackStatus {
             name: manifest.name,
             version: manifest.version,
@@ -373,39 +391,159 @@ mod install {
         })
     }
 
-    /// Keep the new current and the last good; drop older versions and
-    /// leftovers of interrupted installs. Best effort.
-    fn prune(root: &Path, current: &Version, previous: Option<&Version>) {
-        let Ok(rd) = std::fs::read_dir(root) else {
-            return;
+    /// `current`'s directory name and the version in its manifest.
+    fn current_dir(root: &Path) -> Option<(String, Version)> {
+        let target = std::fs::read_link(root.join("current")).ok()?;
+        let mut comps = target.components();
+        let name = match (comps.next(), comps.next()) {
+            (Some(std::path::Component::Normal(n)), None) => n.to_str()?.to_owned(),
+            _ => return None,
         };
-        let mut versions: Vec<Version> = Vec::new();
-        for e in rd.filter_map(Result::ok) {
-            let name = e.file_name().to_string_lossy().into_owned();
-            match Version::parse(&name) {
-                Ok(v) if e.path().is_dir() => versions.push(v),
-                Ok(_) => {}
-                Err(_) if name.starts_with(".tmp-") || name.starts_with(".old-") => {
-                    let _ = std::fs::remove_dir_all(e.path());
+        let m = Manifest::parse(&std::fs::read(root.join(&name).join(MANIFEST_FILE)).ok()?).ok()?;
+        Some((name, m.version))
+    }
+
+    /// Version directories (not dot-files) with the version their manifest
+    /// states, newest first.
+    fn version_dirs(root: &Path) -> Vec<(String, Version)> {
+        let Ok(rd) = std::fs::read_dir(root) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, Version)> = rd
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter_map(|e| {
+                let name = e.file_name().to_str()?.to_owned();
+                if name.starts_with('.') {
+                    return None;
                 }
-                Err(_) => {}
+                let m = Manifest::parse(&std::fs::read(e.path().join(MANIFEST_FILE)).ok()?).ok()?;
+                Some((name, m.version))
+            })
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+        out
+    }
+
+    /// Keep the new current and the last good; drop the rest and the
+    /// leftovers of interrupted installs. Best effort; the caller holds the
+    /// lock.
+    fn prune(root: &Path, current: &str, version: &Version, previous_dir: Option<String>) {
+        if let Ok(rd) = std::fs::read_dir(root) {
+            for e in rd.filter_map(Result::ok) {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with(".tmp-") {
+                    let _ = std::fs::remove_dir_all(e.path());
+                } else if name.starts_with(".link-") {
+                    let _ = std::fs::remove_file(e.path());
+                }
             }
         }
-        versions.sort();
-        versions.reverse();
-        let mut keep = vec![current.clone()];
-        if let Some(p) = previous.filter(|p| **p != *current) {
-            keep.push(p.clone());
+        let dirs = version_dirs(root);
+        let mut keep = vec![current.to_owned()];
+        // The last good: the directory that was current, unless it is the
+        // same version (a reinstall), then the newest other version.
+        let last_good = previous_dir
+            .filter(|d| dirs.iter().any(|(n, v)| n == d && v != version))
+            .or_else(|| {
+                dirs.iter()
+                    .find(|(_, v)| v != version)
+                    .map(|(n, _)| n.clone())
+            });
+        keep.extend(last_good);
+        debug_assert!(keep.len() <= KEEP);
+        for (name, _) in dirs {
+            if !keep.contains(&name) {
+                let _ = std::fs::remove_dir_all(root.join(name));
+            }
         }
-        for v in versions {
-            if keep.contains(&v) {
+    }
+
+    /// Re-check an installed version directory against the current key
+    /// list and running sensr: the stored archive must verify, the manifest
+    /// must fit this sensr, and the unpacked files must be byte-identical
+    /// to the archive's.
+    fn check_dir(
+        dir: &Path,
+        name: &str,
+        keys: &[PublicKey],
+        current_sensr: &Version,
+    ) -> Result<Version, PackError> {
+        let limit = MAX_UNPACKED + 1;
+        let mut archive = Vec::new();
+        std::fs::File::open(dir.join(ARCHIVE_FILE))?
+            .take(limit)
+            .read_to_end(&mut archive)?;
+        let sig = std::fs::read_to_string(dir.join(SIG_FILE))?;
+        verify(&archive, &sig, keys)?;
+        let files = unpack(&archive)?;
+        let manifest = check(&files, current_sensr)?;
+        if manifest.name != name {
+            return Err(corrupt("pack name does not match its directory"));
+        }
+        for (file, data) in &files {
+            let on_disk = std::fs::read(dir.join(file))?;
+            if on_disk != *data {
+                return Err(corrupt(format!("{file} differs from the signed archive")));
+            }
+        }
+        for e in std::fs::read_dir(dir)? {
+            let n = e?.file_name().to_string_lossy().into_owned();
+            if !files.contains_key(&n) && n != ARCHIVE_FILE && n != SIG_FILE {
+                return Err(corrupt(format!("unexpected file {n} on disk")));
+            }
+        }
+        Ok(manifest.version)
+    }
+
+    /// The pack directory for `name`: the installed `current` version if its
+    /// stored archive still verifies against `keys` (so a revoked key stops
+    /// it), it still fits `current_sensr`, and its files are intact; else
+    /// the last good version that does; else the built-in pack. The reason
+    /// a better choice was passed over is in `fallback_reason`.
+    pub fn resolve(
+        name: &str,
+        builtin_dir: &Path,
+        state_dir: &Path,
+        keys: &[PublicKey],
+        current_sensr: &Version,
+    ) -> PackDir {
+        let root = state_dir.join("packs").join(name);
+        let current = std::fs::read_link(root.join("current"))
+            .ok()
+            .and_then(|t| t.to_str().map(str::to_owned));
+        let mut candidates: Vec<String> = current.iter().cloned().collect();
+        candidates.extend(
+            version_dirs(&root)
+                .into_iter()
+                .map(|(n, _)| n)
+                .filter(|n| Some(n) != current.as_ref()),
+        );
+        let mut reason = None;
+        for dir_name in candidates {
+            // A dir name from the link must be one plain component.
+            if dir_name.contains('/') || dir_name.starts_with('.') {
+                reason.get_or_insert_with(|| format!("bad current link {dir_name}"));
                 continue;
             }
-            if keep.len() < KEEP {
-                keep.push(v);
-            } else {
-                let _ = std::fs::remove_dir_all(root.join(v.to_string()));
+            let dir: PathBuf = root.join(&dir_name);
+            match check_dir(&dir, name, keys, current_sensr) {
+                Ok(version) => {
+                    return PackDir {
+                        path: dir,
+                        source: PackSource::Installed(version),
+                        fallback_reason: reason,
+                    };
+                }
+                Err(e) => {
+                    reason.get_or_insert_with(|| format!("installed pack {dir_name}: {e}"));
+                }
             }
+        }
+        PackDir {
+            path: builtin_dir.join(name),
+            source: PackSource::Builtin,
+            fallback_reason: reason,
         }
     }
 }
@@ -479,9 +617,23 @@ mod tests {
     fn good_signature_installs() {
         let (k, st) = (keys(), tempfile::tempdir().unwrap());
         let a = pack("1.0.0", "0.1.0");
-        let s = install(&a, &sign(&k, &a), &[k.public], st.path(), &v("0.2.0")).unwrap();
+        let s = install(
+            &a,
+            &sign(&k, &a),
+            std::slice::from_ref(&k.public),
+            st.path(),
+            &v("0.2.0"),
+            false,
+        )
+        .unwrap();
         assert_eq!(s.version, v("1.0.0"));
-        let r = resolve("extra", Path::new("/nonexistent"), st.path());
+        let r = resolve(
+            "extra",
+            Path::new("/nonexistent"),
+            st.path(),
+            std::slice::from_ref(&k.public),
+            &v("0.2.0"),
+        );
         assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
         assert!(r.path.join("extra.bpf.o").is_file());
         let m = Manifest::parse(&std::fs::read(r.path.join("manifest.json")).unwrap()).unwrap();
@@ -492,7 +644,15 @@ mod tests {
     fn wrong_key_refused() {
         let (k, other, st) = (keys(), keys(), tempfile::tempdir().unwrap());
         let a = pack("1.0.0", "0.1.0");
-        let e = install(&a, &sign(&k, &a), &[other.public], st.path(), &v("1.0.0")).unwrap_err();
+        let e = install(
+            &a,
+            &sign(&k, &a),
+            &[other.public],
+            st.path(),
+            &v("1.0.0"),
+            false,
+        )
+        .unwrap_err();
         assert!(matches!(e, PackError::UnknownKey), "{e:?}");
         assert!(!st.path().join("packs").exists());
     }
@@ -503,7 +663,15 @@ mod tests {
         let mut a = pack("1.0.0", "0.1.0");
         let s = sign(&k, &a);
         *a.last_mut().unwrap() ^= 1;
-        let e = install(&a, &s, &[k.public], st.path(), &v("1.0.0")).unwrap_err();
+        let e = install(
+            &a,
+            &s,
+            std::slice::from_ref(&k.public),
+            st.path(),
+            &v("1.0.0"),
+            false,
+        )
+        .unwrap_err();
         assert!(matches!(e, PackError::BadSignature), "{e:?}");
     }
 
@@ -512,11 +680,11 @@ mod tests {
         let (k, st) = (keys(), tempfile::tempdir().unwrap());
         let ks = [k.public.clone()];
         let a = pack("1.0.0", "0.1.0");
-        install(&a, &sign(&k, &a), &ks, st.path(), &v("0.2.0")).unwrap();
+        install(&a, &sign(&k, &a), &ks, st.path(), &v("0.2.0"), false).unwrap();
         let b = pack("2.0.0", "9.0.0");
-        let e = install(&b, &sign(&k, &b), &ks, st.path(), &v("0.2.0")).unwrap_err();
+        let e = install(&b, &sign(&k, &b), &ks, st.path(), &v("0.2.0"), false).unwrap_err();
         assert!(matches!(e, PackError::TooNew { .. }), "{e:?}");
-        let r = resolve("extra", Path::new("/x"), st.path());
+        let r = resolve("extra", Path::new("/x"), st.path(), &ks, &v("0.2.0"));
         assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
         assert!(!st.path().join("packs/extra/2.0.0").exists());
     }
@@ -530,7 +698,15 @@ mod tests {
             ("extra.bpf.o", b"x"),
             ("rules.json", RULES.as_bytes()),
         ]);
-        let e = install(&a, &sign(&k, &a), &[k.public], st.path(), &v("1.0.0")).unwrap_err();
+        let e = install(
+            &a,
+            &sign(&k, &a),
+            std::slice::from_ref(&k.public),
+            st.path(),
+            &v("1.0.0"),
+            false,
+        )
+        .unwrap_err();
         assert!(
             matches!(e, PackError::MissingProgram(ref p) if p == "gone.bpf.o"),
             "{e:?}"
@@ -540,12 +716,13 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_builtin() {
         let st = tempfile::tempdir().unwrap();
-        let r = resolve("core", Path::new("/b"), st.path());
+        let r = resolve("core", Path::new("/b"), st.path(), &[], &v("1.0.0"));
         assert_eq!(
             r,
             PackDir {
                 path: PathBuf::from("/b/core"),
-                source: PackSource::Builtin
+                source: PackSource::Builtin,
+                fallback_reason: None
             }
         );
     }
@@ -554,10 +731,25 @@ mod tests {
     fn resolve_ignores_a_damaged_current() {
         let (k, st) = (keys(), tempfile::tempdir().unwrap());
         let a = pack("1.0.0", "0.1.0");
-        let s = install(&a, &sign(&k, &a), &[k.public], st.path(), &v("1.0.0")).unwrap();
+        let s = install(
+            &a,
+            &sign(&k, &a),
+            std::slice::from_ref(&k.public),
+            st.path(),
+            &v("1.0.0"),
+            false,
+        )
+        .unwrap();
         std::fs::remove_file(s.dir.join("extra.bpf.o")).unwrap();
         assert_eq!(
-            resolve("extra", Path::new("/b"), st.path()).source,
+            resolve(
+                "extra",
+                Path::new("/b"),
+                st.path(),
+                std::slice::from_ref(&k.public),
+                &v("1.0.0")
+            )
+            .source,
             PackSource::Builtin
         );
     }
@@ -581,6 +773,7 @@ mod tests {
                 std::slice::from_ref(&k.public),
                 st.path(),
                 &v("1.0.0"),
+                false,
             )
             .unwrap_err();
             assert!(matches!(e, PackError::Corrupt(_)), "{e:?}");
@@ -604,6 +797,7 @@ mod tests {
                 std::slice::from_ref(&k.public),
                 st.path(),
                 &v("1.0.0"),
+                false,
             )
             .unwrap_err();
             assert!(matches!(e, PackError::Corrupt(_)), "{name}: {e:?}");
@@ -622,6 +816,7 @@ mod tests {
             std::slice::from_ref(&k.public),
             st.path(),
             &v("1.0.0"),
+            false,
         )
         .unwrap_err();
         assert!(matches!(e, PackError::Corrupt(_)), "{e:?}");
@@ -634,7 +829,7 @@ mod tests {
         let ks = [k.public.clone()];
         for ver in ["1.0.0", "1.1.0", "1.2.0"] {
             let a = pack(ver, "0.1.0");
-            let s = install(&a, &sign(&k, &a), &ks, st.path(), &v("1.0.0")).unwrap();
+            let s = install(&a, &sign(&k, &a), &ks, st.path(), &v("1.0.0"), false).unwrap();
             assert_eq!(s.version, v(ver));
         }
         let root = st.path().join("packs/extra");
@@ -646,11 +841,22 @@ mod tests {
         );
         // Reinstalling the current version is fine and keeps the last good.
         let a = pack("1.2.0", "0.1.0");
-        let s = install(&a, &sign(&k, &a), &ks, st.path(), &v("1.0.0")).unwrap();
+        let s = install(&a, &sign(&k, &a), &ks, st.path(), &v("1.0.0"), false).unwrap();
         assert_eq!(s.previous, None, "nothing was replaced");
         assert!(root.join("1.1.0").is_dir());
-        let leftovers = std::fs::read_dir(&root).unwrap().count();
-        assert_eq!(leftovers, 3, "1.1.0, 1.2.0, current");
+        let mut names: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != ".lock")
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 3, "{names:?}");
+        let cur = std::fs::read_link(root.join("current")).unwrap();
+        assert!(cur.to_str().unwrap().starts_with("1.2.0~"), "{cur:?}");
+        assert!(
+            root.join(&cur).join("extra.bpf.o").is_file(),
+            "current never dangles"
+        );
     }
 
     #[test]
@@ -663,5 +869,183 @@ mod tests {
         .unwrap();
         std::fs::write(d.path().join("notes.txt"), "ignored").unwrap();
         assert_eq!(load_keys(d.path()).unwrap().len(), 1);
+    }
+
+    fn installed(k: &Keys, st: &Path, ver: &str, min: &str) -> PackStatus {
+        let a = pack(ver, min);
+        install(
+            &a,
+            &sign(k, &a),
+            std::slice::from_ref(&k.public),
+            st,
+            &v("1.0.0"),
+            false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn revoked_key_falls_back_to_last_good_then_builtin() {
+        let (k1, k2, st) = (keys(), keys(), tempfile::tempdir().unwrap());
+        installed(&k1, st.path(), "1.0.0", "0.1.0");
+        installed(&k2, st.path(), "1.1.0", "0.1.0");
+        let both = [k1.public.clone(), k2.public.clone()];
+        let r = resolve("extra", Path::new("/b"), st.path(), &both, &v("1.0.0"));
+        assert_eq!(r.source, PackSource::Installed(v("1.1.0")));
+        assert_eq!(r.fallback_reason, None);
+        // k2 revoked: back to the 1.0.0 signed by k1.
+        let r = resolve(
+            "extra",
+            Path::new("/b"),
+            st.path(),
+            std::slice::from_ref(&k1.public),
+            &v("1.0.0"),
+        );
+        assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
+        assert!(r.fallback_reason.is_some());
+        // Both revoked: built-in.
+        let r = resolve("extra", Path::new("/b"), st.path(), &[], &v("1.0.0"));
+        assert_eq!(r.source, PackSource::Builtin);
+        assert!(r.fallback_reason.unwrap().contains("not trusted"));
+    }
+
+    #[test]
+    fn min_sensr_above_the_running_version_falls_back() {
+        let (k, st) = (keys(), tempfile::tempdir().unwrap());
+        installed(&k, st.path(), "1.0.0", "0.1.0");
+        installed(&k, st.path(), "1.1.0", "0.5.0");
+        let ks = [k.public];
+        let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("0.2.0"));
+        assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
+        assert!(r.fallback_reason.unwrap().contains("needs sensr"));
+        let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("0.0.1"));
+        assert_eq!(r.source, PackSource::Builtin);
+    }
+
+    #[test]
+    fn modified_or_truncated_object_on_disk_falls_back() {
+        let (k, st) = (keys(), tempfile::tempdir().unwrap());
+        installed(&k, st.path(), "1.0.0", "0.1.0");
+        let s = installed(&k, st.path(), "1.1.0", "0.1.0");
+        let ks = [k.public];
+        for bad in [&b"evil"[..], &b""[..]] {
+            std::fs::write(s.dir.join("extra.bpf.o"), bad).unwrap();
+            let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("1.0.0"));
+            assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
+            assert!(r.fallback_reason.unwrap().contains("differs"));
+        }
+        // An extra object dropped next to the pack is refused too.
+        std::fs::write(s.dir.join("extra.bpf.o"), b"\x7fELF").unwrap();
+        std::fs::write(s.dir.join("more.bpf.o"), b"x").unwrap();
+        let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("1.0.0"));
+        assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
+    }
+
+    #[test]
+    fn failed_install_keeps_current() {
+        let (k, st) = (keys(), tempfile::tempdir().unwrap());
+        installed(&k, st.path(), "1.0.0", "0.1.0");
+        let m = manifest("1.1.0", "0.1.0", &["gone.bpf.o"]);
+        let a = archive(&[
+            ("manifest.json", m.as_bytes()),
+            ("extra.bpf.o", b"x"),
+            ("rules.json", RULES.as_bytes()),
+        ]);
+        let e = install(
+            &a,
+            &sign(&k, &a),
+            std::slice::from_ref(&k.public),
+            st.path(),
+            &v("1.0.0"),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(e, PackError::MissingProgram(_)));
+        let r = resolve(
+            "extra",
+            Path::new("/b"),
+            st.path(),
+            std::slice::from_ref(&k.public),
+            &v("1.0.0"),
+        );
+        assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
+    }
+
+    #[test]
+    fn downgrades_need_allow_downgrade() {
+        let (k, st) = (keys(), tempfile::tempdir().unwrap());
+        let ks = [k.public.clone()];
+        installed(&k, st.path(), "1.1.0", "0.1.0");
+        let a = pack("1.0.0", "0.1.0");
+        let sg = sign(&k, &a);
+        let e = install(&a, &sg, &ks, st.path(), &v("1.0.0"), false).unwrap_err();
+        assert!(matches!(e, PackError::Downgrade { .. }), "{e:?}");
+        let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("1.0.0"));
+        assert_eq!(r.source, PackSource::Installed(v("1.1.0")));
+        let s = install(&a, &sg, &ks, st.path(), &v("1.0.0"), true).unwrap();
+        assert_eq!(s.version, v("1.0.0"));
+        assert_eq!(s.previous, Some(v("1.1.0")));
+        let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("1.0.0"));
+        assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
+    }
+
+    #[test]
+    fn oversized_archives_and_leftovers() {
+        let (k, st) = (keys(), tempfile::tempdir().unwrap());
+        let big = vec![0u8; 17 * 1024 * 1024];
+        let a = archive(&[("manifest.json", b"{}"), ("extra.bpf.o", &big)]);
+        let e = install(
+            &a,
+            &sign(&k, &a),
+            std::slice::from_ref(&k.public),
+            st.path(),
+            &v("1.0.0"),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(e, PackError::Corrupt(_)), "{e:?}");
+        // Interrupted-install leftovers are pruned by the next install.
+        installed(&k, st.path(), "1.0.0", "0.1.0");
+        let root = st.path().join("packs/extra");
+        std::fs::create_dir(root.join(".tmp-dead")).unwrap();
+        std::os::unix::fs::symlink("1.0.0", root.join(".link-dead")).unwrap();
+        installed(&k, st.path(), "1.1.0", "0.1.0");
+        assert!(!root.join(".tmp-dead").exists());
+        assert!(std::fs::symlink_metadata(root.join(".link-dead")).is_err());
+    }
+
+    #[test]
+    fn concurrent_installs_serialize() {
+        let (k, st) = (keys(), tempfile::tempdir().unwrap());
+        let ks = [k.public.clone()];
+        let jobs: Vec<_> = ["1.0.0", "1.1.0", "1.2.0", "1.3.0"]
+            .iter()
+            .map(|ver| {
+                let a = pack(ver, "0.1.0");
+                let sg = sign(&k, &a);
+                (a, sg)
+            })
+            .collect();
+        std::thread::scope(|sc| {
+            for (a, sg) in &jobs {
+                let (ks, d) = (&ks, st.path());
+                sc.spawn(move || {
+                    install(a, sg, ks, d, &v("1.0.0"), true).unwrap();
+                });
+            }
+        });
+        let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("1.0.0"));
+        assert!(matches!(r.source, PackSource::Installed(_)), "{r:?}");
+        let dirs = std::fs::read_dir(st.path().join("packs/extra"))
+            .unwrap()
+            .filter(|e| {
+                !e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with('.')
+            })
+            .count();
+        assert_eq!(dirs, 3, "two versions + current");
     }
 }
