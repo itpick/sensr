@@ -23,8 +23,8 @@
   bpftools,
   linuxPackages_latest,
   kernel ? linuxPackages_latest.kernel,
-  # The pack version (sensr's version).
-  version ? "0.0.0",
+  # The pack's own version (bpf/guard/VERSION).
+  version ? lib.fileContents (src + "/VERSION"),
   # bpf/guard
   src,
 }:

@@ -1,5 +1,11 @@
 //! The control socket: JSON lines ([`crate::proto`]), one request per line,
 //! one reply per request, like sensr-scan's.
+//!
+//! The socket is 0660 for group sensr, so anyone in the group may ask for
+//! the status. Requests that change something (reload, kill switch, pack
+//! check) are taken only from the uids in the trusted list (root and
+//! sensr-api, which authenticates and authorises the owner), checked with
+//! the peer's credentials (SO_PEERCRED).
 
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -22,15 +28,40 @@ pub const IDLE: Duration = Duration::from_secs(60);
 pub struct Shared<B: Backend> {
     daemon: Mutex<Daemon<B>>,
     fetcher: Box<dyn Fetcher>,
+    trusted: Vec<u32>,
+}
+
+/// Whether a peer with `uid` (`None`: unknown) may make `req`: status from
+/// anyone who can reach the socket, everything else from `trusted` only.
+pub fn authorize(req: &Request, uid: Option<u32>, trusted: &[u32]) -> Result<(), String> {
+    if matches!(req, Request::Status) {
+        return Ok(());
+    }
+    match uid {
+        Some(u) if trusted.contains(&u) => Ok(()),
+        Some(u) => Err(format!(
+            "uid {u} is not allowed to change the guard (only root and sensr-api are)"
+        )),
+        None => Err("the peer's credentials are unknown: not allowed to change the guard".into()),
+    }
 }
 
 impl<B: Backend> Shared<B> {
-    /// Share `daemon`, fetching packs with `fetcher`.
+    /// Share `daemon`, fetching packs with `fetcher`. Only root may change
+    /// anything until [`Self::with_trusted`] says otherwise.
     pub fn new(daemon: Daemon<B>, fetcher: Box<dyn Fetcher>) -> Self {
         Self {
             daemon: Mutex::new(daemon),
             fetcher,
+            trusted: vec![0],
         }
+    }
+
+    /// The uids whose changing requests are taken.
+    #[must_use]
+    pub fn with_trusted(mut self, uids: Vec<u32>) -> Self {
+        self.trusted = uids;
+        self
     }
 
     /// The daemon, locked (a panic elsewhere does not wedge it).
@@ -85,6 +116,7 @@ pub async fn serve<B: Backend + 'static>(
 }
 
 async fn connection<B: Backend + 'static>(s: UnixStream, shared: Arc<Shared<B>>) -> io::Result<()> {
+    let uid = s.peer_cred().ok().map(|c| c.uid());
     let (r, mut w) = s.into_split();
     let mut r = BufReader::new(r);
     let mut line = String::new();
@@ -105,6 +137,11 @@ async fn connection<B: Backend + 'static>(s: UnixStream, shared: Arc<Shared<B>>)
             continue;
         } else {
             match serde_json::from_str::<Request>(&line) {
+                Ok(req) if authorize(&req, uid, &shared.trusted).is_err() => {
+                    let e = authorize(&req, uid, &shared.trusted).unwrap_err();
+                    tracing::warn!(?uid, request = ?req, "refused: {e}");
+                    Reply::Error(e)
+                }
                 Ok(req) => {
                     let sh = Arc::clone(&shared);
                     tokio::task::spawn_blocking(move || sh.handle(&req))

@@ -14,7 +14,7 @@ use semver::Version;
 use sensr_guard::compile::Compiled;
 use sensr_guard::daemon::{
     Backend, Daemon, HttpFetcher, KILL_SWITCH_STATE, LoadedPack, Options, StartError,
-    auto_check_due, check_packs, parse_lockdown,
+    auto_check_due, check_packs, parse_lockdown, record_attempt, sensr_version,
 };
 use sensr_guard::events::BootClock;
 use sensr_guard::loader::ProgramStatus;
@@ -482,7 +482,11 @@ fn sign(kp: &KeyPair, data: &[u8]) -> String {
 }
 
 fn archive(version: &str, object: &[u8]) -> Vec<u8> {
-    let manifest = json!({"name":"core","version":version,"min_sensr":"0.0.0",
+    named_archive("core", version, object)
+}
+
+fn named_archive(name: &str, version: &str, object: &[u8]) -> Vec<u8> {
+    let manifest = json!({"name":name,"version":version,"min_sensr":"0.0.0",
         "programs":["core.bpf.o"],"rules":"rules.json"})
     .to_string();
     let mut b = tar::Builder::new(Vec::new());
@@ -537,7 +541,7 @@ fn check_packs_installs_newer_and_reloads() {
     }
     env.config(json!({"pack_index": format!("{base}/guard-packs.json")}));
     let d = Mutex::new(env.start());
-    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::default()) else {
+    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::allow_http()) else {
         panic!("expected per-pack results");
     };
     assert_eq!(r.len(), 1);
@@ -559,7 +563,7 @@ fn check_packs_installs_newer_and_reloads() {
         "the check was recorded"
     );
     // nothing newer now
-    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::default()) else {
+    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::allow_http()) else {
         panic!()
     };
     assert!(!r[0].installed && r[0].error.is_none());
@@ -590,7 +594,7 @@ fn check_packs_keeps_current_on_bad_sig() {
     let _ = &kp;
     env.config(json!({"pack_index": format!("{base}/guard-packs.json")}));
     let d = Mutex::new(env.start());
-    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::default()) else {
+    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::allow_http()) else {
         panic!()
     };
     assert!(!r[0].installed);
@@ -606,7 +610,7 @@ fn check_packs_keeps_current_on_bad_sig() {
         *bad.last_mut().unwrap() ^= 1;
         f.insert("/core.tar.zst".into(), bad);
     }
-    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::default()) else {
+    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::allow_http()) else {
         panic!()
     };
     assert!(
@@ -626,7 +630,7 @@ fn check_packs_reports_an_unreachable_index() {
     let base = serve_shared(Arc::new(Mutex::new(HashMap::new())));
     env.config(json!({"pack_index": format!("{base}/guard-packs.json")}));
     let d = Mutex::new(env.start());
-    let Reply::Error(e) = check_packs(&d, &HttpFetcher::default()) else {
+    let Reply::Error(e) = check_packs(&d, &HttpFetcher::allow_http()) else {
         panic!()
     };
     assert!(e.contains("404"), "{e}");
@@ -817,7 +821,10 @@ async fn socket_serves_status_kill_switch_and_errors() {
     let env = Env::new();
     let sock = env.p("guard.sock");
     std::fs::write(&sock, "stale").unwrap();
-    let shared = Arc::new(Shared::new(env.start(), Box::new(HttpFetcher::default())));
+    let uid = own_uid(&env);
+    let shared = Arc::new(
+        Shared::new(env.start(), Box::new(HttpFetcher::allow_http())).with_trusted(vec![uid]),
+    );
     let l = bind(&sock).unwrap();
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(
@@ -873,4 +880,181 @@ fn builtin_wins_when_at_least_as_new() {
     let s = env.start().status();
     assert_eq!(s.packs[0].source, PackSource::Builtin, "{:?}", s.packs[0]);
     assert_eq!(s.packs[0].version, "0.0.1");
+}
+
+// --- fix round 1 ------------------------------------------------------------
+
+#[test]
+fn reload_with_owner_id_clashing_with_pack_rule_keeps_previous() {
+    let env = Env::new();
+    env.config(json!({"rules": [owner_rule("connect", json!({"net": {"cidr": "192.0.2.0/24"}}), "alert")]}));
+    let mut d = env.start();
+    let before = env.applies();
+    // compiles on its own, but core-a is already a pack rule id
+    env.config(
+        json!({"rules": [{"id": "core-a", "enabled": true, "hook": "exec",
+        "target": "any", "action": "block"}]}),
+    );
+    let Reply::Error(e) = d.handle(&Request::Reload) else {
+        panic!("a clashing rule id must be refused");
+    };
+    assert!(e.contains("core-a") && e.contains("kept"), "{e}");
+    assert_eq!(env.applies(), before, "nothing was applied");
+    let s = d.status();
+    assert!(rule(&s, OWNER).active, "the previous owner rule still runs");
+    assert!(s.reason.is_none(), "{:?}", s.reason);
+}
+
+#[test]
+fn sensr_version_comes_from_nixos_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("nixos-version");
+    std::fs::write(&f, "26.11.20261113.d5cc683\n").unwrap();
+    assert_eq!(sensr_version(&f), Version::new(26, 11, 20261113));
+    std::fs::write(&f, "26.11pre-git").unwrap();
+    assert_eq!(
+        sensr_version(&f),
+        Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
+        "unparseable: the crate's version"
+    );
+    assert_eq!(
+        sensr_version(&dir.path().join("missing")),
+        Version::parse(env!("CARGO_PKG_VERSION")).unwrap()
+    );
+}
+
+#[test]
+fn fetch_refuses_plain_http() {
+    let env = Env::new();
+    let base = serve_shared(Arc::new(Mutex::new(HashMap::new())));
+    env.config(json!({"pack_index": format!("{base}/guard-packs.json")}));
+    let d = Mutex::new(env.start());
+    let Reply::Error(e) = check_packs(&d, &HttpFetcher::default()) else {
+        panic!()
+    };
+    assert!(e.contains("https"), "{e}");
+}
+
+#[test]
+fn index_entries_must_be_https() {
+    let env = Env::new();
+    let kp = keypair(&env);
+    let a = archive("1.2.0", b"new object");
+    let files = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+    let base = serve_shared(Arc::clone(&files));
+    let mut idx: serde_json::Value =
+        serde_json::from_slice(&index(&base, &[("1.2.0", "aarch64", "core.tar.zst")])).unwrap();
+    idx["packs"][0]["url"] = json!("ftp://example.test/core.tar.zst");
+    files
+        .lock()
+        .unwrap()
+        .insert("/guard-packs.json".into(), idx.to_string().into_bytes());
+    files
+        .lock()
+        .unwrap()
+        .insert("/core.tar.zst".into(), a.clone());
+    files
+        .lock()
+        .unwrap()
+        .insert("/core.tar.zst.minisig".into(), sign(&kp, &a).into_bytes());
+    env.config(json!({"pack_index": format!("{base}/guard-packs.json")}));
+    let d = Mutex::new(env.start());
+    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::allow_http()) else {
+        panic!()
+    };
+    assert!(!r[0].installed);
+    assert!(r[0].error.as_deref().unwrap().contains("ftp://"), "{r:?}");
+}
+
+#[test]
+fn check_packs_refuses_an_archive_of_another_pack() {
+    let env = Env::new();
+    let kp = keypair(&env);
+    let a = named_archive("extra", "1.2.0", b"other object");
+    let files = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+    let base = serve_shared(Arc::clone(&files));
+    {
+        let mut f = files.lock().unwrap();
+        f.insert(
+            "/guard-packs.json".into(),
+            index(&base, &[("1.2.0", "aarch64", "core.tar.zst")]),
+        );
+        f.insert("/core.tar.zst.minisig".into(), sign(&kp, &a).into_bytes());
+        f.insert("/core.tar.zst".into(), a);
+    }
+    env.config(json!({"pack_index": format!("{base}/guard-packs.json")}));
+    let d = Mutex::new(env.start());
+    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::allow_http()) else {
+        panic!()
+    };
+    assert!(!r[0].installed);
+    assert!(r[0].error.as_deref().unwrap().contains("extra"), "{r:?}");
+    assert!(!env.p("state/packs/extra").exists(), "nothing installed");
+}
+
+#[test]
+fn auto_check_backs_off_after_a_failed_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    record_attempt(dir.path(), 1000);
+    assert!(!auto_check_due(dir.path(), 1000 + 600), "within the hour");
+    assert!(auto_check_due(dir.path(), 1000 + 3600), "an hour later");
+    // a success a day ago and an attempt just now: wait
+    std::fs::write(dir.path().join("last-pack-check"), "0\n").unwrap();
+    record_attempt(dir.path(), 100_000);
+    assert!(!auto_check_due(dir.path(), 100_010));
+}
+
+#[test]
+fn mutating_requests_need_a_trusted_peer() {
+    use sensr_guard::server::authorize;
+    let trusted = [0, 731];
+    for req in [
+        Request::Reload,
+        Request::KillSwitch { on: true },
+        Request::CheckPacks,
+    ] {
+        assert!(authorize(&req, Some(0), &trusted).is_ok());
+        assert!(authorize(&req, Some(731), &trusted).is_ok());
+        let e = authorize(&req, Some(1000), &trusted).unwrap_err();
+        assert!(e.contains("uid 1000") && e.contains("not allowed"), "{e}");
+        assert!(authorize(&req, None, &trusted).is_err(), "unknown peer");
+    }
+    assert!(authorize(&Request::Status, Some(1000), &trusted).is_ok());
+    assert!(authorize(&Request::Status, None, &trusted).is_ok());
+}
+
+#[tokio::test]
+async fn socket_refuses_mutations_from_untrusted_peers() {
+    use sensr_guard::server::{Shared, bind, serve};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+
+    let env = Env::new();
+    let sock = env.p("guard.sock");
+    // only root is trusted; this test does not run as root
+    let shared = Arc::new(
+        Shared::new(env.start(), Box::new(HttpFetcher::allow_http())).with_trusted(vec![0]),
+    );
+    if own_uid(&env) == 0 {
+        return;
+    }
+    tokio::spawn(serve(bind(&sock).unwrap(), Arc::clone(&shared)));
+    let s = tokio::net::UnixStream::connect(&sock).await.unwrap();
+    let (r, mut w) = s.into_split();
+    let mut r = TokioBufReader::new(r).lines();
+    w.write_all(b"{\"op\":\"kill_switch\",\"on\":true}\n{\"op\":\"status\"}\n")
+        .await
+        .unwrap();
+    let first: Reply = serde_json::from_str(&r.next_line().await.unwrap().unwrap()).unwrap();
+    let Reply::Error(e) = first else {
+        panic!("{first:?}")
+    };
+    assert!(e.contains("not allowed"), "{e}");
+    let second: Reply = serde_json::from_str(&r.next_line().await.unwrap().unwrap()).unwrap();
+    let Reply::Status(s) = second else { panic!() };
+    assert!(!s.kill_switch, "nothing changed");
+}
+
+fn own_uid(env: &Env) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(env.p("guard.json")).unwrap().uid()
 }

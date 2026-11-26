@@ -32,7 +32,10 @@ mod linux {
     use clap::Parser;
     use sensr_guard::config;
     use sensr_guard::daemon::kernel::Kernel;
-    use sensr_guard::daemon::{Daemon, HttpFetcher, LOCKDOWN, Options, StartError, auto_check_due};
+    use sensr_guard::daemon::{
+        Daemon, HttpFetcher, LOCKDOWN, NIXOS_VERSION, Options, StartError, auto_check_due,
+        sensr_version,
+    };
     use sensr_guard::events::BootClock;
     use sensr_guard::proto::Reply;
     use sensr_guard::server::{Shared, bind, serve};
@@ -71,6 +74,20 @@ mod linux {
         /// While this file exists nothing blocks.
         #[arg(long, default_value = config::KILL_SWITCH)]
         kill_switch_file: PathBuf,
+        /// Users (besides root) whose reload, kill-switch and pack-check
+        /// requests are taken; looked up in /etc/passwd at start.
+        #[arg(long = "trusted-user", default_value = "sensr-api")]
+        trusted_users: Vec<String>,
+    }
+
+    /// The uid of `name` in /etc/passwd.
+    fn uid_of(name: &str) -> Option<u32> {
+        let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+        passwd.lines().find_map(|l| {
+            let mut f = l.split(':');
+            (f.next()? == name).then_some(())?;
+            f.nth(1)?.parse().ok()
+        })
     }
 
     fn unix_now() -> i64 {
@@ -121,7 +138,7 @@ mod linux {
             keys_dir: args.keys.clone(),
             kill_switch_file: args.kill_switch_file.clone(),
             lockdown_file: PathBuf::from(LOCKDOWN),
-            sensr_version: semver::Version::parse(env!("CARGO_PKG_VERSION"))?,
+            sensr_version: sensr_version(Path::new(NIXOS_VERSION)),
             own_tgid: std::process::id(),
             clock: boot_clock()?,
             arch: std::env::consts::ARCH.to_owned(),
@@ -130,7 +147,15 @@ mod linux {
             .with_context(|| format!("creating {}", args.state.display()))?;
         let daemon = Daemon::start(opts, Kernel)?;
         log_status(&daemon.status());
-        let shared = Arc::new(Shared::new(daemon, Box::new(HttpFetcher::default())));
+        let mut trusted = vec![0];
+        for u in &args.trusted_users {
+            match uid_of(u) {
+                Some(uid) => trusted.push(uid),
+                None => tracing::warn!(user = %u, "no such user: not trusted"),
+            }
+        }
+        let shared =
+            Arc::new(Shared::new(daemon, Box::new(HttpFetcher::default())).with_trusted(trusted));
 
         let stop = Arc::new(AtomicBool::new(false));
         let events = {
@@ -194,10 +219,14 @@ mod linux {
         let mut last_prune: Option<Instant> = None;
         loop {
             let stopping = stop.load(Ordering::SeqCst);
-            let batches = if stopping {
-                shared.lock().drain().into_iter().collect()
-            } else {
-                shared.lock().poll_events(Instant::now())
+            let batches = {
+                let mut d = shared.lock();
+                let mut b = d.poll_events(Instant::now());
+                if stopping {
+                    // what the ring buffers still held, then everything
+                    b.extend(d.drain());
+                }
+                b
             };
             for batch in batches {
                 if store.is_none() {

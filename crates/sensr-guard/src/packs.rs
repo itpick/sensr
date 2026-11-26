@@ -191,7 +191,7 @@ pub struct PackStatus {
 }
 
 #[cfg(feature = "packs")]
-pub use install::{PublicKey, install, load_keys, resolve, verify};
+pub use install::{PublicKey, archive_manifest, install, load_keys, resolve, verify};
 
 #[cfg(feature = "packs")]
 mod install {
@@ -295,6 +295,17 @@ mod install {
             }
         }
         Ok(files)
+    }
+
+    /// An archive's manifest, unpacked in memory (nothing is verified or
+    /// written: callers [`verify`] first).
+    pub fn archive_manifest(archive: &[u8]) -> Result<Manifest, PackError> {
+        let files = unpack(archive)?;
+        Manifest::parse(
+            files
+                .get(MANIFEST_FILE)
+                .ok_or_else(|| corrupt("no manifest.json"))?,
+        )
     }
 
     /// The manifest-level checks shared by install and resolve.

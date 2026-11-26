@@ -281,3 +281,19 @@ is its host test, which `checks.<system>.guard-bpf-build` runs.
 - **Tasks that predate the load**: they have no entry, so only
   wildcard-exe rules match them. The loader may seed them by updating
   `task_exe` with a pidfd key and a `struct guard_path_key` value.
+
+## Versions
+
+- The core pack has its own semver in `VERSION`. Both the built-in pack
+  (`nix/packages/sensr-guard-bpf.nix`, its `manifest.json`) and the signed
+  release archive (`release.yml`) take it from there.
+- Any change here except this README and the host-side tests must raise
+  `VERSION`. CI checks pull requests against the merge base
+  (`.github/scripts/check-guard-pack-version.sh`).
+- A router installs a signed pack only when it is newer than the one it
+  runs. Its built-in copy wins whenever that copy is at least as new.
+- `min_sensr` is compared with the running system's version: the first
+  three numbers of `/run/current-system/nixos-version`, the version the
+  system updater compares. For example, `26.11.20261113.d5cc683` becomes
+  `26.11.20261113`. When that file is missing or unparseable, the
+  sensr-guard crate's version is used instead.

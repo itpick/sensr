@@ -473,6 +473,15 @@ in
         message = "services.sensr: security.lsm must include \"bpf\" (sensr-guard's programs are BPF LSM programs)";
       }
       {
+        # one lsm= only (the one security.lsm renders): a second would
+        # override it on the command line
+        assertion =
+          lib.filter (lib.hasPrefix "lsm=") config.boot.kernelParams == [
+            "lsm=${lib.concatStringsSep "," config.security.lsm}"
+          ];
+        message = "services.sensr: set the LSMs with security.lsm, not an lsm= kernel parameter";
+      }
+      {
         assertion = !(lib.elem "lockdown=confidentiality" config.boot.kernelParams);
         message = "services.sensr: lockdown=confidentiality stops sensr-guard's BPF programs";
       }

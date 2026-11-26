@@ -80,7 +80,10 @@ in
   # rules), built against the kernel the images boot.
   sensr-guard-bpf = final.callPackage ../packages/sensr-guard-bpf.nix {
     src = src + "/bpf/guard";
-    version = workspaceToml.workspace.package.version;
+    # The pack's own version (bpf/guard/VERSION, bumped with every change
+    # to the programs or default rules; CI checks it): a router installs a
+    # signed pack only when it is newer than what it runs.
+    version = lib.fileContents (src + "/bpf/guard/VERSION");
     kernel = final.linuxPackages_latest.kernel;
   };
 

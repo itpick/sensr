@@ -12,6 +12,7 @@
 let
   inherit (pkgs) lib;
   pack = "${guardBpf}/share/sensr-guard/packs/core";
+  packVersion = lib.fileContents ../../bpf/guard/VERSION;
   # the sections (programs) the linked object must carry, by source
   sections = {
     exec = [ "lsm.s/bprm_check_security" "lsm/task_alloc" ];
@@ -75,7 +76,8 @@ pkgs.runCommand "guard-bpf-build"
     [ "$hdr_len" = 24 ] || { echo "BTF hdr_len $hdr_len, want 24"; exit 1; }
 
     # the manifest names exactly that object
-    jq -e '.name == "core" and .min_sensr == "0.0.0" and (.version | type == "string")' \
+    # its version is bpf/guard/VERSION
+    jq -e '.name == "core" and .min_sensr == "0.0.0" and .version == "${packVersion}"' \
       ${pack}/manifest.json
     jq -e '.programs == ["${guardBpf.object}"]' ${pack}/manifest.json
 

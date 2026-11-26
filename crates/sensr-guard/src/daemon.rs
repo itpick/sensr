@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::compile::{Compiled, compile};
 use crate::config::Config;
-use crate::events::{Batch, BootClock, Pipeline, decode};
+use crate::events::{Batch, BootClock, Pipeline, decode, hook_name};
 use crate::loader::ProgramStatus;
 use crate::packs::{self, PackSource as Source, PublicKey, VerifiedPack};
 use crate::proto::{PackCheck, PackSource, PackStatus, ProgramView, Reply, RuleStatus, StatusView};
@@ -47,6 +47,12 @@ use crate::rule::{Action, Hook, Rule};
 pub const KILL_SWITCH_STATE: &str = "kill-switch";
 /// Unix seconds of the last pack check, inside the state directory.
 pub const LAST_PACK_CHECK: &str = "last-pack-check";
+/// Unix seconds of the last pack check attempt (failed or not).
+pub const LAST_PACK_ATTEMPT: &str = "last-pack-attempt";
+/// After a failed attempt the automatic check waits at least this long.
+pub const AUTO_CHECK_RETRY: Duration = Duration::from_secs(3600);
+/// The running system's version (what the system updater compares).
+pub const NIXOS_VERSION: &str = "/run/current-system/nixos-version";
 /// How often the automatic pack check runs.
 pub const AUTO_CHECK_EVERY: Duration = Duration::from_secs(24 * 3600);
 /// How often boot-complete.target is checked until it is reached.
@@ -57,6 +63,8 @@ pub const MAX_INDEX: u64 = 1024 * 1024;
 pub const MAX_ARCHIVE: u64 = 16 * 1024 * 1024;
 /// Largest signature accepted.
 pub const MAX_SIG: u64 = 4096;
+/// The event hook name of module loads (alerts wait for boot-complete).
+const MODULE_HOOK: &str = "module";
 /// The kernel's lockdown file.
 pub const LOCKDOWN: &str = "/sys/kernel/security/lockdown";
 
@@ -134,6 +142,21 @@ pub fn parse_lockdown(text: &str) -> String {
 /// The lockdown mode; `none` when the kernel has no lockdown LSM.
 pub fn read_lockdown(path: &Path) -> String {
     std::fs::read_to_string(path).map_or_else(|_| "none".to_owned(), |t| parse_lockdown(&t))
+}
+
+/// This sensr's version, which packs' `min_sensr` is compared with: the
+/// running system's `nixos-version` (`26.11.20261113.d5cc683`, the version
+/// the system updater compares) as `26.11.20261113`; the crate's version
+/// when that file is missing or does not start with three numbers.
+pub fn sensr_version(nixos_version: &Path) -> Version {
+    let parsed = std::fs::read_to_string(nixos_version).ok().and_then(|t| {
+        let mut parts = t.trim().split('.');
+        let mut num = || parts.next()?.parse::<u64>().ok();
+        Some(Version::new(num()?, num()?, num()?))
+    });
+    parsed.unwrap_or_else(|| {
+        Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 0, 0))
+    })
 }
 
 /// Read and parse the configuration.
@@ -313,11 +336,28 @@ pub struct IndexEntry {
 pub trait Fetcher: Send + Sync {
     /// The body of `url` (status 200), at most `max` bytes.
     fn get(&self, url: &str, max: u64) -> Result<Vec<u8>, String>;
+    /// Whether only https:// URLs may be fetched ([`fetch_updates`] checks
+    /// the index and every pack and signature URL).
+    fn https_only(&self) -> bool {
+        true
+    }
 }
 
-/// [`Fetcher`] over HTTP(S) with `ureq` (rustls, webpki roots).
+/// [`Fetcher`] over HTTPS with `ureq` (rustls, webpki roots).
 pub struct HttpFetcher {
     agent: ureq::Agent,
+    https_only: bool,
+}
+
+impl HttpFetcher {
+    /// A fetcher that also accepts plain http:// (tests against a local
+    /// fixture).
+    pub fn allow_http() -> Self {
+        Self {
+            https_only: false,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for HttpFetcher {
@@ -330,11 +370,18 @@ impl Default for HttpFetcher {
             .user_agent(concat!("sensr-guard/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
-        Self { agent }
+        Self {
+            agent,
+            https_only: true,
+        }
     }
 }
 
 impl Fetcher for HttpFetcher {
+    fn https_only(&self) -> bool {
+        self.https_only
+    }
+
     fn get(&self, url: &str, max: u64) -> Result<Vec<u8>, String> {
         let mut resp = self
             .agent
@@ -361,6 +408,16 @@ pub fn fetch_updates(
     wanted: &[(String, Option<Version>)],
     fetcher: &dyn Fetcher,
 ) -> Result<Vec<Download>, String> {
+    let allowed = |url: &str| -> Result<(), String> {
+        let https = url.starts_with("https://");
+        let http = url.starts_with("http://") && !fetcher.https_only();
+        if https || http {
+            Ok(())
+        } else {
+            Err(format!("{url}: only https:// URLs are fetched"))
+        }
+    };
+    allowed(index_url)?;
     let body = fetcher.get(index_url, MAX_INDEX)?;
     let index: PackIndex =
         serde_json::from_slice(&body).map_err(|e| format!("the pack index: {e}"))?;
@@ -376,12 +433,15 @@ pub fn fetch_updates(
             let newer = offer.filter(|e| current.as_ref().is_none_or(|c| e.version > *c));
             let fetched = match newer {
                 None => Ok(None),
-                Some(e) => fetcher.get(&e.url, MAX_ARCHIVE).and_then(|archive| {
-                    let sig = fetcher.get(&e.sig_url, MAX_SIG)?;
-                    let sig = String::from_utf8(sig)
-                        .map_err(|_| format!("{}: the signature is not text", e.sig_url))?;
-                    Ok(Some((archive, sig)))
-                }),
+                Some(e) => allowed(&e.url)
+                    .and_then(|()| allowed(&e.sig_url))
+                    .and_then(|()| fetcher.get(&e.url, MAX_ARCHIVE))
+                    .and_then(|archive| {
+                        let sig = fetcher.get(&e.sig_url, MAX_SIG)?;
+                        let sig = String::from_utf8(sig)
+                            .map_err(|_| format!("{}: the signature is not text", e.sig_url))?;
+                        Ok(Some((archive, sig)))
+                    }),
             };
             Download {
                 name: name.clone(),
@@ -393,12 +453,36 @@ pub fn fetch_updates(
         .collect())
 }
 
-/// Whether the daily check is due, given the state directory's record.
-pub fn auto_check_due(state_dir: &Path, now: i64) -> bool {
-    let last = std::fs::read_to_string(state_dir.join(LAST_PACK_CHECK))
+fn read_stamp(path: &Path) -> Option<i64> {
+    std::fs::read_to_string(path)
         .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok());
-    last.is_none_or(|l| now.saturating_sub(l) >= AUTO_CHECK_EVERY.as_secs() as i64 || l > now)
+        .and_then(|s| s.trim().parse::<i64>().ok())
+}
+
+/// Whether `last` is at least `every` before `now` (or in the future: a
+/// clock that went back).
+fn elapsed(last: Option<i64>, now: i64, every: Duration) -> bool {
+    last.is_none_or(|l| now.saturating_sub(l) >= every.as_secs() as i64 || l > now)
+}
+
+/// Record a pack check attempt at `now` (unix seconds).
+pub fn record_attempt(state_dir: &Path, now: i64) {
+    let _ = std::fs::write(state_dir.join(LAST_PACK_ATTEMPT), format!("{now}\n"));
+}
+
+/// Whether the daily check is due: a day after the last completed check,
+/// and at least an hour after the last attempt (a failing index is not
+/// hammered).
+pub fn auto_check_due(state_dir: &Path, now: i64) -> bool {
+    elapsed(
+        read_stamp(&state_dir.join(LAST_PACK_CHECK)),
+        now,
+        AUTO_CHECK_EVERY,
+    ) && elapsed(
+        read_stamp(&state_dir.join(LAST_PACK_ATTEMPT)),
+        now,
+        AUTO_CHECK_RETRY,
+    )
 }
 
 /// The whole check: what to look for (under the lock), the downloads
@@ -407,6 +491,7 @@ pub fn check_packs<B: Backend>(d: &Mutex<Daemon<B>>, fetcher: &dyn Fetcher) -> R
     let lock = || d.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let (url, arch, wanted) = {
         let d = lock();
+        record_attempt(&d.opts.state_dir, unix_now());
         (
             d.config.pack_index.clone(),
             d.opts.arch.clone(),
@@ -503,7 +588,10 @@ impl<B: Backend> Daemon<B> {
     /// not parse, or owner rules that do not compile, change nothing.
     pub fn reload(&mut self) -> Result<(), String> {
         let config = read_config(&self.opts.config)?;
-        if let Err(e) = compile(&config.rules) {
+        if let Err(e) = compile(&config.rules).map_err(|e| e.to_string()) {
+            return Err(format!("{e}; the running rules are kept"));
+        }
+        if let Err(e) = self.dry_run(&config) {
             return Err(format!("{e}; the running rules are kept"));
         }
         self.config = config;
@@ -716,6 +804,29 @@ impl<B: Backend> Daemon<B> {
         }
     }
 
+    /// Compile what `config` would give every loaded pack, as
+    /// [`Self::apply_all`] builds it (the pack's rules with the overrides,
+    /// the owner's rules on the first pack), without applying anything.
+    fn dry_run(&self, config: &Config) -> Result<(), String> {
+        let mut primary = true;
+        for p in &self.packs {
+            let PackState::Running(r) = &p.state else {
+                continue;
+            };
+            let mut rules = with_overrides(&p.name, &r.pack.rules, &config.pack_rules);
+            if primary {
+                rules.extend(config.rules.iter().cloned());
+            }
+            primary = false;
+            compile(&rules).map_err(|e| format!("pack {}: {e}", p.name))?;
+        }
+        if primary {
+            // nothing loaded: the owner's rules alone
+            compile(&config.rules).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     /// Compile and apply every loaded pack's rules.
     fn apply_all(&mut self) {
         let owner: Vec<Rule> = if self.owner_error.is_none() {
@@ -797,19 +908,28 @@ impl<B: Backend> Daemon<B> {
             match d.fetched {
                 Ok(None) => {}
                 Err(e) => check.error = Some(e),
-                Ok(Some((archive, sig))) => match packs::install(
-                    &archive,
-                    &sig,
-                    &self.keys,
-                    &self.opts.state_dir,
-                    &self.opts.sensr_version,
-                    false,
-                ) {
-                    Ok(s) if s.name != d.name => {
-                        installed_any = true;
-                        check.error =
-                            Some(format!("the archive holds pack {}, not {}", s.name, d.name));
-                    }
+                Ok(Some((archive, sig))) => match packs::verify(&archive, &sig, &self.keys)
+                    .and_then(|()| packs::archive_manifest(&archive))
+                    .and_then(|m| {
+                        if m.name == d.name {
+                            Ok(())
+                        } else {
+                            Err(packs::PackError::Corrupt(format!(
+                                "the archive holds pack {}, not {}",
+                                m.name, d.name
+                            )))
+                        }
+                    })
+                    .and_then(|()| {
+                        packs::install(
+                            &archive,
+                            &sig,
+                            &self.keys,
+                            &self.opts.state_dir,
+                            &self.opts.sensr_version,
+                            false,
+                        )
+                    }) {
                     Ok(_) => {
                         installed_any = true;
                         check.installed = true;
@@ -861,7 +981,7 @@ impl<B: Backend> Daemon<B> {
             let pipeline = &mut self.pipeline;
             r.loaded.drain_events(&mut |raw| {
                 let Some(e) = decode(raw) else { return };
-                if e.hook == 5 && !e.blocked && !boot_complete {
+                if hook_name(e.hook) == Some(MODULE_HOOK) && !e.blocked && !boot_complete {
                     return;
                 }
                 if let Some(b) = pipeline.push(e, now) {
