@@ -893,19 +893,35 @@ impl<A: Applier> Agent<A> {
                         .map(to_ipc)
                         .ok_or_else(|| err(ErrorKind::NotFound, "head has no earlier revision"))?,
                 };
-                let had_pending = inner.store.pending_confirm().map_err(internal)?.is_some();
+                let pending = inner.store.pending_confirm().map_err(internal)?;
+                let had_pending = pending.is_some();
                 let meta = meta_of(principal, format!("rollback to revision {target}"));
+                // Restoring a revision with block rules is as risky as
+                // committing them.
+                let restored = self.resolve(inner, Source::Revision(target))?;
+                let window = restored.as_ref().and_then(|d| self.guard_window(inner, d));
+                let known_good = pending
+                    .map(|p| p.rollback_to)
+                    .or_else(|| inner.applied.as_ref().and_then(|(id, _)| from_ipc(*id)));
                 // A restore supersedes any pending confirm.
                 let revision = self
-                    .commit_doc(inner, Write::Restore(target), meta, |_| None)
+                    .commit_doc(inner, Write::Restore(target), meta, |id| {
+                        let (w, rollback_to) = window.zip(known_good)?;
+                        Some(ConfirmState {
+                            pending: from_ipc(id)?,
+                            rollback_to,
+                            deadline_ms: now_ms() + w.as_millis() as i64,
+                        })
+                    })
                     .await?;
-                if had_pending {
+                if had_pending || window.is_some() {
                     self.confirm_changed.notify_one();
                 }
+                let pending_confirm = inner.store.pending_confirm().map_err(internal)?;
                 Ok(Response::Committed(Box::new(CommitOutcome {
                     revision,
-                    pending_confirm: None,
-                    confirm_reason: None,
+                    pending_confirm: pending_confirm.map(ipc_pending),
+                    confirm_reason: window.map(crate::guard_confirm::reason),
                 })))
             }
             Op::ConfigHistory { limit } => Ok(Response::History(
@@ -1275,6 +1291,14 @@ impl<A: Applier> Agent<A> {
         result("applied")
     }
 
+    /// The window a change to `next` must go through, if it may newly
+    /// block. Without an applied revision there is nothing to fall back to,
+    /// so no window is imposed.
+    fn guard_window(&self, inner: &Inner<A>, next: &Document) -> Option<Duration> {
+        (inner.applied.is_some() && crate::guard_confirm::guard_needs_confirm(&inner.head.1, next))
+            .then_some(self.settings.guard_confirm)
+    }
+
     async fn commit(
         &self,
         inner: &mut Inner<A>,
@@ -1304,14 +1328,9 @@ impl<A: Applier> Agent<A> {
         let Some(doc) = inner.candidate.clone().filter(|_| Self::dirty(inner)) else {
             return Err(err(ErrorKind::Conflict, "nothing to commit"));
         };
-        // A change that may newly block gets a confirm window of its own
-        // unless the caller chose one (and there is something to fall back to).
-        if window.is_none()
-            && inner.applied.is_some()
-            && crate::guard_confirm::guard_needs_confirm(&inner.head.1, &doc)
-        {
-            window = Some(self.settings.guard_confirm);
-            confirm_reason = Some(crate::guard_confirm::reason(self.settings.guard_confirm));
+        if let Some(w) = self.guard_window(inner, &doc).filter(|_| window.is_none()) {
+            window = Some(w);
+            confirm_reason = Some(crate::guard_confirm::reason(w));
         }
         let pending = inner.store.pending_confirm().map_err(internal)?;
         // Fall back to the last *confirmed* revision: a pending one was never

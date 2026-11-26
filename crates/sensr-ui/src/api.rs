@@ -86,6 +86,13 @@ pub struct Revision {
     pub user: String,
     /// Commit message.
     pub message: String,
+    /// Set when the commit is provisional (the caller asked, or the agent
+    /// imposed a window): the revision rolls back unless confirmed.
+    #[serde(default)]
+    pub confirm: Option<ConfirmWindow>,
+    /// Why the agent imposed a confirm window the caller did not ask for.
+    #[serde(default)]
+    pub confirm_reason: Option<String>,
 }
 
 /// A commit that rolls back automatically unless confirmed before the deadline.

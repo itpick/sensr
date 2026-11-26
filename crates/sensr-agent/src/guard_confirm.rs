@@ -2,10 +2,11 @@
 //! own management: when a commit may newly turn something into a block, it
 //! goes through commit-confirm even if the caller did not ask.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use sensr_schema::Document;
-use sensr_schema::models::guard::{GuardAction, GuardPackRule};
+use sensr_schema::models::guard::{Guard, GuardAction, GuardPackRule, GuardRule};
 
 /// The window imposed on a commit that may newly block.
 pub const GUARD_CONFIRM: Duration = Duration::from_secs(120);
@@ -21,59 +22,64 @@ pub fn reason(window: Duration) -> String {
 fn pack_rule_blocks(r: &GuardPackRule) -> bool {
     r.enabled != Some(false)
         && (r.action == Some(GuardAction::Block)
-            || r.enabled == Some(true) && r.action != Some(GuardAction::Alert))
+            || (r.enabled == Some(true) && r.action != Some(GuardAction::Alert)))
+}
+
+/// An owner rule that blocks, and is not the very same block rule as before
+/// (its `description` aside): widening the target or the process, or
+/// switching the hook, changes what is blocked.
+fn rule_newly_blocks(old: Option<&GuardRule>, new: &GuardRule) -> bool {
+    new.enabled
+        && new.action == GuardAction::Block
+        && !old.is_some_and(|o| {
+            o.enabled
+                && o.action == GuardAction::Block
+                && o.hook == new.hook
+                && o.process == new.process
+                && o.target == new.target
+        })
+}
+
+/// A pack-rule override that may block and differs from the old one.
+fn pack_rule_newly_blocks(old: Option<&GuardPackRule>, new: &GuardPackRule) -> bool {
+    pack_rule_blocks(new) && !old.is_some_and(|o| o == new)
 }
 
 /// True when going from `head` to `candidate` may newly block something:
-/// an owner rule that is enabled with action block and was not before, a
-/// pack-rule override that becomes block (or is enabled, its own action
-/// unknown here), or any pack newly enabled / the guard switched on (pack
+/// an owner rule that blocks and is new or changed, a pack-rule override
+/// that blocks (or is enabled, its own action unknown here) and is new or
+/// changed, or any pack newly enabled / the guard switched on (pack
 /// contents are not inspected, so any of them may carry a block rule).
 pub fn guard_needs_confirm(head: &Document, candidate: &Document) -> bool {
     let (h, c) = (&head.guard, &candidate.guard);
-    if !h.enabled && c.enabled {
-        return true;
-    }
     if !c.enabled {
         return false;
     }
-    let enabled_packs = |g: &sensr_schema::models::guard::Guard| {
+    if !h.enabled {
+        return true;
+    }
+    let enabled_packs = |g: &Guard| {
         g.packs
             .values()
             .filter(|p| p.enabled)
             .map(|p| p.name.clone())
-            .collect::<std::collections::BTreeSet<_>>()
+            .collect::<BTreeSet<_>>()
     };
-    let before = enabled_packs(h);
-    if enabled_packs(c).difference(&before).next().is_some() {
+    if !enabled_packs(c).is_subset(&enabled_packs(h)) {
         return true;
     }
-    let blocking =
-        |r: &sensr_schema::models::guard::GuardRule| r.enabled && r.action == GuardAction::Block;
-    if c.rules
+    c.rules
         .iter()
-        .any(|(id, r)| blocking(r) && !h.rules.get(id).is_some_and(blocking))
-    {
-        return true;
-    }
-    c.pack_rules.iter().any(|(id, r)| {
-        pack_rule_blocks(r)
-            && match h.pack_rules.get(id) {
-                None => true,
-                Some(old) => {
-                    // Became block, or was explicitly off and is on again.
-                    r.action == Some(GuardAction::Block) && old.action != Some(GuardAction::Block)
-                        || r.enabled != Some(false) && old.enabled == Some(false)
-                        || r.enabled == Some(true) && old.enabled != Some(true)
-                }
-            }
-    })
+        .any(|(id, r)| rule_newly_blocks(h.rules.get(id), r))
+        || c.pack_rules
+            .iter()
+            .any(|(id, r)| pack_rule_newly_blocks(h.pack_rules.get(id), r))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sensr_schema::models::guard::{GuardHook, GuardPack, GuardProcess, GuardRule, GuardTarget};
+    use sensr_schema::models::guard::{GuardHook, GuardPack, GuardProcess, GuardTarget};
 
     fn rule(enabled: bool, action: GuardAction) -> GuardRule {
         GuardRule {
@@ -214,5 +220,35 @@ mod tests {
         c.guard.enabled = false;
         c.guard.rules.push(rule(true, GuardAction::Block));
         assert!(!guard_needs_confirm(&h, &c));
+    }
+
+    fn changed_block(f: impl FnOnce(&mut GuardRule)) -> bool {
+        let (mut h, mut c) = pair();
+        let mut r = rule(true, GuardAction::Block);
+        r.target = GuardTarget::PathPrefix("/x".into());
+        r.process.exe_prefix = Some("/usr/bin".into());
+        let id = h.guard.rules.push(r.clone());
+        f(&mut r);
+        c.guard.rules.insert(id, r);
+        guard_needs_confirm(&h, &c)
+    }
+
+    #[test]
+    fn an_existing_block_rule_that_changes_scope_needs_confirm() {
+        assert!(changed_block(|r| r.target = GuardTarget::Any));
+        assert!(changed_block(|r| r.process.exe_prefix = None));
+        assert!(changed_block(|r| r.hook = GuardHook::Connect));
+        assert!(!changed_block(|r| r.description = "reworded".into()));
+        assert!(!changed_block(|_| {}));
+    }
+
+    #[test]
+    fn a_changed_block_pack_override_needs_confirm() {
+        let (mut h, mut c) = pair();
+        let id = h.guard.pack_rules.push(pr(None, Some(GuardAction::Block)));
+        c.guard
+            .pack_rules
+            .insert(id, pr(Some(true), Some(GuardAction::Block)));
+        assert!(guard_needs_confirm(&h, &c));
     }
 }

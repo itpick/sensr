@@ -1425,3 +1425,37 @@ async fn alert_only_change_commits_directly() {
     assert_eq!(out.pending_confirm, None);
     assert_eq!(out.confirm_reason, None);
 }
+
+#[tokio::test]
+async fn rollback_to_a_block_revision_forces_confirm_window() {
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    set(&mut c, "system.hostname", json!("a")).await;
+    commit(&mut c, None).await.unwrap();
+    set(&mut c, GUARD_RULE, guard_rule("block")).await;
+    commit(&mut c, Some(1000)).await.unwrap();
+    c.call(Op::ConfigConfirm).await.unwrap(); // rev 3 has the block rule
+    set(&mut c, GUARD_RULE, guard_rule("alert")).await;
+    let Response::Committed(out) = commit(&mut c, None).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(out.pending_confirm, None);
+    let Response::Committed(out) = c.call(Op::ConfigRollback { to: Some(3) }).await.unwrap() else {
+        panic!()
+    };
+    assert!(out.pending_confirm.is_some(), "restoring a block rule");
+    assert!(out.confirm_reason.unwrap().contains("confirm within"));
+}
+
+#[tokio::test]
+async fn first_block_commit_without_a_baseline_has_no_window() {
+    // Nothing applied yet: there is no revision to fall back to.
+    let fx = Fx::start_with(true, false).await;
+    let mut c = fx.client().await;
+    set(&mut c, GUARD_RULE, guard_rule("block")).await;
+    let Response::Committed(out) = commit(&mut c, None).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(out.pending_confirm, None);
+    assert_eq!(out.confirm_reason, None);
+}

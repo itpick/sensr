@@ -71,6 +71,8 @@ impl State {
             time: (self.clock)(),
             user: user.to_owned(),
             message: message.to_owned(),
+            confirm: None,
+            confirm_reason: None,
         };
         self.staged = doc.clone();
         self.history.push(Commit {
@@ -138,6 +140,8 @@ impl MockBackend {
                 time: t.saturating_sub(86_400 * 3),
                 user: "root".into(),
                 message: "Imported config.xml from OPNsense 26.1".into(),
+                confirm: None,
+                confirm_reason: None,
             },
             doc: doc.clone(),
         };
@@ -153,6 +157,8 @@ impl MockBackend {
                 time: t.saturating_sub(3_600 * 5),
                 user: "root".into(),
                 message: "system".into(),
+                confirm: None,
+                confirm_reason: None,
             },
             doc: second_doc.clone(),
         };

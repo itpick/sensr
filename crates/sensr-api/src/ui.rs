@@ -64,6 +64,20 @@ fn revision(r: sensr_ipc::RevisionInfo) -> Revision {
         time: u64::try_from(r.time_ms / 1000).unwrap_or(0),
         user: r.username,
         message: r.description,
+        confirm: None,
+        confirm_reason: None,
+    }
+}
+
+/// A commit's revision with the agent's confirm window and its reason.
+fn committed(o: sensr_ipc::CommitOutcome) -> Revision {
+    Revision {
+        confirm: o.pending_confirm.map(|p| ConfirmWindow {
+            revision: p.revision,
+            deadline: u64::try_from(p.deadline_ms / 1000).unwrap_or(0),
+        }),
+        confirm_reason: o.confirm_reason,
+        ..revision(o.revision)
     }
 }
 
@@ -194,7 +208,7 @@ impl Backend for UiBackend {
                 confirm_secs,
             };
             match self.call(op).await? {
-                Response::Committed(o) => Ok(revision(o.revision)),
+                Response::Committed(o) => Ok(committed(*o)),
                 other => Err(unexpected(other)),
             }
         }
@@ -222,7 +236,7 @@ impl Backend for UiBackend {
     fn rollback<'a>(&'a self, _user: &'a str, to: u64) -> BoxFuture<'a, ApiResult<Revision>> {
         async move {
             match self.call(Op::ConfigRollback { to: Some(to) }).await? {
-                Response::Committed(o) => Ok(revision(o.revision)),
+                Response::Committed(o) => Ok(committed(*o)),
                 other => Err(unexpected(other)),
             }
         }
