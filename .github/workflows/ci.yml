@@ -23,14 +23,19 @@ jobs:
       - run: cargo test -p sensr-guard --all-features
 
   guard-pack-version:
-    # a change to the core pack must raise bpf/guard/VERSION
-    if: github.event_name == 'pull_request'
+    # a change to the core pack must raise bpf/guard/VERSION (semver): on
+    # pull requests against the merge base, on pushes to main against the
+    # commit before the push
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - run: .github/scripts/check-guard-pack-version.sh "origin/${{ github.base_ref }}"
+      - name: Check bpf/guard/VERSION
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: .github/scripts/check-guard-pack-version.sh "$BASE"
 
   nft-goldens:
     # every nft JSON golden must load into a real kernel (nft -c: check, no commit)
