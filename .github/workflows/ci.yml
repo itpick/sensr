@@ -16,8 +16,9 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      # sensr-guard's loader (aya, Linux only) is behind the daemon feature,
-      # which nothing in the workspace enables
+      # sensr-guard's loader and daemon (aya, Linux only; the socket, the
+      # pack check, the sensr-guard binary) are behind the daemon feature,
+      # which only the Nix package turns on for the workspace
       - run: cargo clippy -p sensr-guard --all-targets --all-features -- -D warnings
       - run: cargo test -p sensr-guard --all-features
 
