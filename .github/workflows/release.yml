@@ -265,6 +265,7 @@ jobs:
           fi
           sudo apt-get update -q && sudo apt-get install -y -q minisign
           umask 077
+          trap 'rm -f "$RUNNER_TEMP/guard-pack.key"' EXIT
           printf '%s\n' "$GUARD_PACK_KEY" > "$RUNNER_TEMP/guard-pack.key"
           f="out/guard-pack-core-${{ matrix.arch }}.tar.zst"
           minisign -S -s "$RUNNER_TEMP/guard-pack.key" -m "$f" -x "$f.minisig" \

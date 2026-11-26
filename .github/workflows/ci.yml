@@ -22,6 +22,16 @@ jobs:
       - run: cargo clippy -p sensr-guard --all-targets --all-features -- -D warnings
       - run: cargo test -p sensr-guard --all-features
 
+  guard-pack-version:
+    # a change to the core pack must raise bpf/guard/VERSION
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: .github/scripts/check-guard-pack-version.sh "origin/${{ github.base_ref }}"
+
   nft-goldens:
     # every nft JSON golden must load into a real kernel (nft -c: check, no commit)
     runs-on: ubuntu-24.04
