@@ -9,8 +9,8 @@ repository.workspace = true
 
 [features]
 default = []
-# SQLite event store (later tasks add its dependencies).
-store = []
+# SQLite event store.
+store = ["dep:rusqlite"]
 # The loader and daemon. The BPF side (aya) is Linux-only; elsewhere the
 # feature builds the platform-neutral parts (the apply plan).
 daemon = ["dep:aya", "dep:object", "dep:serde_json"]
@@ -19,6 +19,7 @@ daemon = ["dep:aya", "dep:object", "dep:serde_json"]
 ipnet.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
