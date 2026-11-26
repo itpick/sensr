@@ -122,6 +122,8 @@ pub struct MockBackend {
     guard_dir: Option<std::path::PathBuf>,
     /// sensr-guard's socket cannot be reached.
     guard_down: bool,
+    /// The kill-switch file is on the boot partition: the switch is on and Off is refused.
+    guard_boot_file: bool,
 }
 
 impl Default for MockBackend {
@@ -191,7 +193,17 @@ impl MockBackend {
             scan_requests: Default::default(),
             guard_dir: None,
             guard_down: false,
+            guard_boot_file: false,
         }
+    }
+
+    /// The kill-switch file is on the boot partition: the switch is on, and sensr-guard
+    /// refuses to turn it off.
+    #[must_use]
+    pub fn with_guard_boot_file(mut self) -> Self {
+        self.guard_boot_file = true;
+        self.with(|s| s.guard_kill = true);
+        self
     }
 
     /// Reads guard events from `dir` instead of the daemon's directory.
@@ -489,6 +501,19 @@ impl Backend for MockBackend {
                 s.staged.clone()
             } else {
                 get_path(&s.staged, path).cloned().unwrap_or(Value::Null)
+            };
+            redact(&mut v);
+            Ok(v)
+        }))
+    }
+
+    fn get_head<'a>(&'a self, path: &'a str) -> BoxFuture<'a, ApiResult<Value>> {
+        ready(self.with(|s| {
+            let doc = &s.head().doc;
+            let mut v = if path.is_empty() {
+                doc.clone()
+            } else {
+                get_path(doc, path).cloned().unwrap_or(Value::Null)
             };
             redact(&mut v);
             Ok(v)
@@ -985,6 +1010,12 @@ impl Backend for MockBackend {
     fn guard_kill_switch(&self, on: bool) -> BoxFuture<'_, ApiResult<()>> {
         if self.guard_down {
             return ready(Err(ApiError::Backend(crate::guard::NOT_RUNNING.to_owned())));
+        }
+        if !on && self.guard_boot_file {
+            return ready(Err(ApiError::Conflict(format!(
+                "{} exists: remove it to let rules block again",
+                crate::guard::BOOT_FILE
+            ))));
         }
         ready(self.with(|s| {
             s.guard_kill = on;

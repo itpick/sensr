@@ -779,6 +779,11 @@ mod server {
     pub trait Backend: Send + Sync + 'static {
         /// Reads the staged value at `path` (committed value if nothing is staged).
         fn get<'a>(&'a self, path: &'a str) -> BoxFuture<'a, ApiResult<Value>>;
+        /// Reads the applied (head) value at `path`, to tell what runs from what is
+        /// staged. The default reads [`Backend::get`] (as if nothing were staged).
+        fn get_head<'a>(&'a self, path: &'a str) -> BoxFuture<'a, ApiResult<Value>> {
+            self.get(path)
+        }
         /// Stages `value` at `path`.
         fn set<'a>(&'a self, path: &'a str, value: Value) -> BoxFuture<'a, ApiResult<()>>;
         /// What is staged and whether a confirm window is open.

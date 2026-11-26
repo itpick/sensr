@@ -1620,6 +1620,11 @@ mod guard_imp {
         b.may_access("/api/v1/guard/kill-switch") && !b.read_only()
     }
 
+    /// The caller may run Check for pack updates (its own API privilege).
+    pub fn may_check(b: &BackendHandle) -> bool {
+        b.may_access("/api/v1/guard/check-packs") && !b.read_only()
+    }
+
     /// Back to the page with `q` (codes only).
     pub fn back(q: &str) {
         leptos_axum::redirect(&format!("/ui/guard?{q}"));
@@ -1698,6 +1703,12 @@ pub async fn guard_page(
     });
     let config = guard_imp::section(&b).await.map_err(imp::err)?;
     let rules = config.get("rules").cloned().unwrap_or_default();
+    let head = b
+        .get_head("guard.rules")
+        .await
+        .ok()
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_default();
     let packs = config.get("packs").cloned().unwrap_or_default();
     let (live, status) = match b.guard_status().await {
         Ok(v) => {
@@ -1739,7 +1750,12 @@ pub async fn guard_page(
     let pending = b.pending().await.ok();
     Ok(GuardView {
         can_write: guard_imp::may_write(&b),
-        rules: rule_rows(&rules, live.as_ref()),
+        rules: rule_rows(&rules, &head, live.as_ref()),
+        can_check: guard_imp::may_check(&b),
+        staged_sections: pending
+            .as_ref()
+            .map(|p| p.changed.clone())
+            .unwrap_or_default(),
         packs: pack_rows(&packs, live.as_ref()),
         status,
         events,
@@ -1826,14 +1842,19 @@ mod guard_rule_form {
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v))
         .collect();
+        // a refused edit comes back to the same rule's form (its key is checked above)
+        let edit = key
+            .as_ref()
+            .map(|k| format!("&edit={}#guard-rule-form", crate::pages::url_encode(k)))
+            .unwrap_or_default();
         let invalid = |fields: Vec<&str>| {
             let mut f: Vec<&str> = fields.into_iter().filter(|f| !f.is_empty()).collect();
             f.dedup();
             if f.is_empty() {
-                guard_imp::back("error=failed");
+                guard_imp::back(&format!("error=failed{edit}"));
             } else {
                 guard_imp::back(&format!(
-                    "invalid={}",
+                    "invalid={}{edit}",
                     crate::pages::url_encode(&f.join(","))
                 ));
             }
@@ -1914,6 +1935,10 @@ pub async fn guard_kill_switch_form(on: String) -> Result<(), ServerFnError> {
     };
     match b.guard_kill_switch(on).await {
         Ok(()) => guard_imp::back(if on { "kill=on" } else { "kill=off" }),
+        // the daemon refuses Off while the boot partition's file is there
+        Err(crate::api::ApiError::Conflict(m)) if !on && m.contains("exists: remove it") => {
+            guard_imp::back("error=boot_file");
+        }
         Err(e) => {
             tracing::info!("kill switch not changed: {e}");
             guard_imp::back(&format!("error={}", guard_imp::code(&e)));
@@ -1976,7 +2001,7 @@ pub async fn guard_pack_form(name: String, enabled: String) -> Result<(), Server
 #[server(prefix = "/ui/fn", endpoint = "guard_check_packs_form")]
 pub async fn guard_check_packs_form() -> Result<(), ServerFnError> {
     let b = imp::backend()?;
-    if !guard_imp::may_write(&b) {
+    if !guard_imp::may_check(&b) {
         guard_imp::back("error=forbidden");
         return Ok(());
     }
@@ -1985,7 +2010,6 @@ pub async fn guard_check_packs_form() -> Result<(), ServerFnError> {
             let lines: Vec<String> = checks
                 .iter()
                 .map(|c| crate::guard::check_line(c).encode())
-                .filter(|l| crate::guard::CheckLine::decode(l).is_some())
                 .collect();
             guard_imp::back(&format!(
                 "checked={}",
@@ -2020,7 +2044,19 @@ pub async fn guard_apply_form() -> Result<(), ServerFnError> {
     }
     match b.commit(&imp::user(), "", None).await {
         Ok(rev) if rev.confirm_reason.is_some() => {
-            guard_imp::back(&format!("applied={}&imposed=1", rev.id));
+            // the window as the agent said it, else from the deadline
+            let window = rev
+                .confirm_reason
+                .as_deref()
+                .and_then(crate::guard::reason_window)
+                .or_else(|| {
+                    let now = u64::try_from(guard_imp::now()).unwrap_or(0);
+                    rev.confirm.as_ref().map(|w| w.deadline.saturating_sub(now))
+                })
+                .filter(|w| *w > 0)
+                .map(|w| format!("&window={w}"))
+                .unwrap_or_default();
+            guard_imp::back(&format!("applied={}&imposed=1{window}", rev.id));
         }
         Ok(rev) => guard_imp::back(&format!("applied={}", rev.id)),
         Err(e) => {

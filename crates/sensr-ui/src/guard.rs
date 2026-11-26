@@ -109,8 +109,18 @@ impl Default for GuardRuleForm {
     }
 }
 
+/// A path prefix as sensr-guard compiles it (`compile.rs` `path_keys`): absolute, no NUL,
+/// no `.`, `..` or empty components (the kernel's paths are canonical, so they would
+/// never match), and at most 254 bytes without the trailing slash.
 fn absolute(p: &str) -> bool {
-    p.starts_with('/') && !p.contains('\0')
+    let base = p.trim_end_matches('/');
+    p.starts_with('/')
+        && !p.contains('\0')
+        && !base
+            .split('/')
+            .skip(1)
+            .any(|c| matches!(c, "" | "." | ".."))
+        && base.len() <= 254
 }
 
 fn is_cidr(s: &str) -> bool {
@@ -190,7 +200,7 @@ impl FormModel for GuardRuleForm {
             ));
         }
         let ok = match self.target_kind.as_str() {
-            "path_prefix" => absolute(target) && target.len() <= 253,
+            "path_prefix" => absolute(target),
             "net" => is_cidr(target),
             "uid" => target.parse::<u32>().is_ok_and(|u| u != u32::MAX),
             _ => true,
@@ -212,13 +222,15 @@ pub fn invalid_message(field: &str) -> &'static str {
     match field {
         "description" => "The description is too long.",
         "hook" | "action" => "Choose one of the listed options.",
-        "exe_prefix" => "The program must be an absolute path (start with /).",
+        "exe_prefix" => {
+            "The program must be an absolute path (start with /) without . or .. parts or double slashes, at most 254 characters."
+        }
         "unit" => "Enter a systemd unit name such as nginx.service (at most 63 characters).",
         "target_kind" => {
             "This target does not fit what the rule watches: a path prefix fits program starts, file writes and module loads; a network fits connections and listening sockets; a user id fits setuid."
         }
         "target" => {
-            "Check the target: a path prefix starts with /, a network looks like 10.0.0.0/8, a user id is a number."
+            "Check the target: a path prefix starts with / (no . or .. parts or double slashes, at most 254 characters), a network looks like 10.0.0.0/8, a user id is a number."
         }
         "ports" => "Ports are numbers from 1 to 65535 separated by commas, for a network only.",
         _ => "The rule could not be saved.",
@@ -242,6 +254,10 @@ pub struct GuardView {
     pub confirm: Option<ConfirmRow>,
     /// The guard settings have staged changes.
     pub staged: bool,
+    /// Every section with staged changes (Apply commits them all).
+    pub staged_sections: Vec<String>,
+    /// The caller may run Check for pack updates.
+    pub can_check: bool,
     /// The owner rule being edited (`?edit=`), with its form values.
     pub edit: Option<RuleEdit>,
 }
@@ -292,6 +308,25 @@ pub struct RuleRow {
     pub reason: Option<String>,
     /// Matches so far.
     pub hits: u64,
+    /// How the staged rule differs from what runs: `changed` (the running version has
+    /// [`RuleRow::live_action`]), `added` or `removed` (still active until applied).
+    pub change: Option<String>,
+    /// The running version's action, when a change alters it.
+    pub live_action: Option<String>,
+}
+
+impl RuleRow {
+    /// The change in words, for the State column.
+    pub fn change_text(&self) -> Option<String> {
+        Some(match self.change.as_deref()? {
+            "changed" => match &self.live_action {
+                Some(a) => format!("changed — not applied yet (running: {a})"),
+                None => "changed — not applied yet".to_owned(),
+            },
+            "removed" => "removed — still active until applied".to_owned(),
+            _ => "added — not applied yet".to_owned(),
+        })
+    }
 }
 
 /// One pack.
@@ -384,8 +419,9 @@ pub struct CheckLine {
     pub code: String,
 }
 
-const CHECK_CODES: [&str; 8] = [
+const CHECK_CODES: [&str; 9] = [
     "installed",
+    "installed_inactive",
     "current",
     "missing",
     "bad_signature",
@@ -455,6 +491,9 @@ impl CheckLine {
                     format!("{n}: {avail} installed (was {cur}).")
                 };
             }
+            "installed_inactive" => {
+                return format!("{n}: {avail} installed, but it does not run (see Packs).");
+            }
             "current" => return format!("{n}: {cur} is the latest."),
             "missing" => return format!("{n}: not offered by the pack index."),
             "bad_signature" => "its signature does not verify",
@@ -499,6 +538,8 @@ pub struct GuardQuery {
     /// This revision was applied, with a confirm window the agent imposed.
     pub applied: Option<u64>,
     pub imposed: bool,
+    /// The imposed window, seconds.
+    pub window: Option<u64>,
     /// The pending commit was confirmed.
     pub confirmed: bool,
     /// `not_running`, `forbidden`, `refused`, `nothing`, `no_rule` or another failure.
@@ -561,6 +602,9 @@ impl GuardQuery {
             }),
             applied: get("applied").and_then(|v| v.parse().ok()),
             imposed: flag("imposed"),
+            window: get("window")
+                .and_then(|v| v.parse().ok())
+                .filter(|w| (1..=86_400).contains(w)),
             confirmed: flag("confirmed"),
             error: get("error"),
         }
@@ -575,6 +619,9 @@ impl GuardQuery {
                     "not_running" => format!("{NOT_RUNNING}."),
                     "forbidden" => "You may not change the runtime guard.".to_owned(),
                     "refused" => "sensr-guard refused the change (see its log).".to_owned(),
+                    "boot_file" => format!(
+                        "The file {BOOT_FILE} exists: remove it from the SD card to let rules block again."
+                    ),
                     "nothing" => "There is nothing to apply.".to_owned(),
                     "no_rule" => "That rule no longer exists.".to_owned(),
                     "check_failed" => {
@@ -627,7 +674,7 @@ impl GuardQuery {
             return Some((
                 false,
                 if self.imposed {
-                    format!("Revision {rev} applied. {CONFIRM_WARNING}.")
+                    format!("Revision {rev} applied. {}.", self.confirm_heading())
                 } else {
                     format!("Revision {rev} applied.")
                 },
@@ -646,6 +693,15 @@ impl GuardQuery {
                 },
             )
         })
+    }
+
+    /// What the confirm card says after a commit the agent gave a window: from the
+    /// window it reported (`window=`), else in general words.
+    pub fn confirm_heading(&self) -> String {
+        match self.window {
+            Some(w) => format!("Blocking: you'll have {} to confirm", duration_words(w)),
+            None => "Blocking: confirm the change before its window closes".to_owned(),
+        }
     }
 
     /// The event filter as query pairs (for the paging links), at `offset`.
@@ -669,6 +725,26 @@ impl GuardQuery {
             .collect::<Vec<_>>()
             .join("&")
     }
+}
+
+/// The kill-switch file on the boot partition (sensr-guard's `KILL_SWITCH`).
+pub const BOOT_FILE: &str = "/boot/firmware/sensr/guard-off";
+
+/// `2 minutes`, `1 minute`, `90 seconds`.
+pub fn duration_words(secs: u64) -> String {
+    match (secs % 60, secs / 60) {
+        (0, 1) => "1 minute".to_owned(),
+        (0, m) if m > 1 => format!("{m} minutes"),
+        _ if secs == 1 => "1 second".to_owned(),
+        _ => format!("{secs} seconds"),
+    }
+}
+
+/// The window a commit's `confirm_reason` names (`… confirm within 120 s …`).
+pub fn reason_window(reason: &str) -> Option<u64> {
+    let rest = &reason[reason.find("within ")? + "within ".len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok().filter(|w| *w > 0)
 }
 
 /// The hook's label for the filter.
@@ -827,10 +903,20 @@ mod server {
         }
     }
 
+    fn action_name(a: sensr_guard::rule::Action) -> String {
+        match a {
+            sensr_guard::rule::Action::Block => "block".to_owned(),
+            sensr_guard::rule::Action::Alert => "alert".to_owned(),
+        }
+    }
+
     /// The Rules table: the configured owner rules (`rules`, the staged `guard.rules` map)
-    /// joined with the daemon's state, then the packs' rules. Without a status (the daemon
-    /// is down) every owner rule is inactive.
-    pub fn rule_rows(rules: &Value, status: Option<&StatusView>) -> Vec<RuleRow> {
+    /// joined with the daemon's state, then owner rules still running that the staged
+    /// configuration removes, then the packs' rules. `head` is the applied `guard.rules`:
+    /// a staged rule that differs from it is marked changed (its state, hits and, when it
+    /// differs, action are the running version's). Without a status (the daemon is down)
+    /// every owner rule is inactive.
+    pub fn rule_rows(rules: &Value, head: &Value, status: Option<&StatusView>) -> Vec<RuleRow> {
         let live: HashMap<&str, &sensr_guard::proto::RuleStatus> = status
             .map(|s| {
                 s.rules
@@ -840,40 +926,66 @@ mod server {
                     .collect()
             })
             .unwrap_or_default();
-        let mut out: Vec<RuleRow> = rules
-            .as_object()
-            .into_iter()
-            .flatten()
+        let staged = rules.as_object().cloned().unwrap_or_default();
+        let row = |key: &str, r: &Value| RuleRow {
+            key: Some(key.to_owned()),
+            description: s(r, "description"),
+            hook: s(r, "hook"),
+            process: process_text(r),
+            target: target_text(r.get("target").unwrap_or(&Value::Null)),
+            action: if s(r, "action") == "block" {
+                "block".to_owned()
+            } else {
+                "alert".to_owned()
+            },
+            ..RuleRow::default()
+        };
+        let mut out: Vec<RuleRow> = staged
+            .iter()
             .map(|(key, r)| {
                 let enabled = r.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-                let action = match s(r, "action").as_str() {
-                    "block" => "block",
-                    _ => "alert",
-                };
-                let (active, reason, hits) = match (status, live.get(key.as_str())) {
+                let changed = head.get(key).is_some_and(|h| h != r);
+                let l = live.get(key.as_str());
+                let (active, reason, hits) = match (status, l) {
                     (None, _) => (false, Some(NOT_RUNNING.to_owned()), 0),
-                    (Some(_), _) if !enabled => (false, Some("turned off".to_owned()), 0),
                     (Some(_), Some(l)) => (l.active, l.reason.clone(), l.hits),
+                    (Some(_), None) if !enabled => (false, Some("turned off".to_owned()), 0),
                     (Some(_), None) => (
                         false,
                         Some("not applied yet: apply the change to start it".to_owned()),
                         0,
                     ),
                 };
+                let mut row = row(key, r);
+                row.live_action = l
+                    .map(|l| action_name(l.action))
+                    .filter(|a| changed && *a != row.action);
+                row.change = changed.then(|| "changed".to_owned());
                 RuleRow {
-                    key: Some(key.clone()),
-                    pack: None,
-                    description: s(r, "description"),
-                    hook: s(r, "hook"),
-                    process: process_text(r),
-                    target: target_text(r.get("target").unwrap_or(&Value::Null)),
-                    action: action.to_owned(),
                     active,
                     reason,
                     hits,
+                    ..row
                 }
             })
             .collect();
+        // removed from the staged configuration, still running until applied
+        for (key, h) in head.as_object().into_iter().flatten() {
+            if staged.contains_key(key) {
+                continue;
+            }
+            if let Some(l) = live.get(key.as_str()) {
+                out.push(RuleRow {
+                    key: None,
+                    action: action_name(l.action),
+                    active: l.active,
+                    reason: l.reason.clone(),
+                    hits: l.hits,
+                    change: Some("removed".to_owned()),
+                    ..row(key, h)
+                });
+            }
+        }
         out.extend(
             status
                 .into_iter()
@@ -883,16 +995,11 @@ mod server {
                     key: None,
                     pack: r.pack.clone(),
                     description: r.id.clone(),
-                    hook: String::new(),
-                    process: String::new(),
-                    target: String::new(),
-                    action: match r.action {
-                        sensr_guard::rule::Action::Block => "block".to_owned(),
-                        sensr_guard::rule::Action::Alert => "alert".to_owned(),
-                    },
+                    action: action_name(r.action),
                     active: r.active,
                     reason: r.reason.clone(),
                     hits: r.hits,
+                    ..RuleRow::default()
                 }),
         );
         out
@@ -1014,19 +1121,21 @@ mod server {
 
     /// The URL code of one pack's check outcome.
     pub fn check_line(c: &PackCheck) -> CheckLine {
+        // PackCheck carries the error as text only: match the forms sensr-guard's
+        // PackError gives, anything else is a failure
         let code = match (&c.error, c.installed, &c.available) {
-            (_, true, _) => "installed",
+            (None, true, _) => "installed",
+            (Some(_), true, _) => "installed_inactive",
             (None, false, None) => "missing",
             (None, false, Some(_)) => "current",
             (Some(e), false, _) => {
-                let e = e.to_ascii_lowercase();
-                if e.contains("signature") {
+                if e == "pack signature does not verify" {
                     "bad_signature"
-                } else if e.contains("not trusted") || e.contains("key") {
+                } else if e == "pack is signed by a key that is not trusted" {
                     "untrusted_key"
-                } else if e.contains("needs sensr") {
+                } else if e.starts_with("pack needs sensr ") {
                     "too_new"
-                } else if e.contains("older than") {
+                } else if e.starts_with("pack ") && e.contains(" is older than the installed ") {
                     "downgrade"
                 } else {
                     "failed"
@@ -1034,11 +1143,21 @@ mod server {
             }
         };
         let v = |x: &Option<String>| x.clone().filter(|v| version_ok(v)).unwrap_or_default();
-        CheckLine {
+        let line = CheckLine {
             name: c.name.clone(),
             current: v(&c.current),
             available: v(&c.available),
             code: code.to_owned(),
+        };
+        if CheckLine::decode(&line.encode()).is_some() {
+            return line;
+        }
+        // a name that would not travel: still shown, as a failure
+        CheckLine {
+            name: "unnamed".to_owned(),
+            current: String::new(),
+            available: String::new(),
+            code: "failed".to_owned(),
         }
     }
 }
@@ -1130,6 +1249,52 @@ mod tests {
     }
 
     #[test]
+    fn paths_are_checked_as_sensr_guard_compiles_them() {
+        let target = |t: &str| {
+            apply_inputs::<GuardRuleForm>(
+                &serde_json::json!({}),
+                &inputs(&[
+                    ("hook", "exec"),
+                    ("target_kind", "path_prefix"),
+                    ("target", t),
+                ]),
+            )
+            .is_ok()
+        };
+        let long = format!("/{}", "a".repeat(253));
+        assert!(target("/") && target("/etc/") && target(&long));
+        for bad in ["/etc/../x", "//etc", "/a/./b", "/a//b", "etc", "/a\0"] {
+            assert!(!target(bad), "{bad:?}");
+        }
+        assert!(!target(&format!("{long}a")), "255 bytes");
+        let exe = |e: &str| {
+            apply_inputs::<GuardRuleForm>(&serde_json::json!({}), &inputs(&[("exe_prefix", e)]))
+                .is_ok()
+        };
+        assert!(exe("/usr/bin/curl") && !exe("/usr/../bin") && !exe(&format!("{long}a")));
+    }
+
+    #[test]
+    fn windows_read_as_words() {
+        assert_eq!(duration_words(120), "2 minutes");
+        assert_eq!(duration_words(60), "1 minute");
+        assert_eq!(duration_words(90), "90 seconds");
+        assert_eq!(
+            reason_window("blocking rules changed: confirm within 120 s or the change rolls back"),
+            Some(120)
+        );
+        assert_eq!(reason_window("no number"), None);
+        let q = GuardQuery {
+            window: Some(300),
+            ..GuardQuery::default()
+        };
+        assert_eq!(
+            q.confirm_heading(),
+            "Blocking: you'll have 5 minutes to confirm"
+        );
+    }
+
+    #[test]
     fn pack_check_lines_travel_as_codes() {
         let l = CheckLine {
             name: "core".into(),
@@ -1187,6 +1352,61 @@ mod tests {
             q.filter_query(50),
             "hook=exec&q=a%20b%26c&range=24h&offset=50"
         );
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn check_outcomes_keep_every_pack() {
+        use sensr_guard::proto::PackCheck;
+        let c = |name: &str, installed, error: Option<&str>| PackCheck {
+            name: name.into(),
+            current: Some("1.0.0".into()),
+            available: Some("1.1.0".into()),
+            installed,
+            error: error.map(Into::into),
+        };
+        let code = |p: PackCheck| check_line(&p).code;
+        assert_eq!(code(c("core", true, None)), "installed");
+        assert_eq!(
+            code(c("core", true, Some("no program attached"))),
+            "installed_inactive"
+        );
+        assert_eq!(
+            code(c("core", false, Some("pack signature does not verify"))),
+            "bad_signature"
+        );
+        assert_eq!(
+            code(c(
+                "core",
+                false,
+                Some("pack is signed by a key that is not trusted")
+            )),
+            "untrusted_key"
+        );
+        assert_eq!(
+            code(c(
+                "core",
+                false,
+                Some("pack needs sensr 2.0.0, this is 1.0.0")
+            )),
+            "too_new"
+        );
+        assert_eq!(
+            code(c(
+                "core",
+                false,
+                Some("pack 1.0.0 is older than the installed 1.1.0")
+            )),
+            "downgrade"
+        );
+        // loose words no longer pass for a known refusal
+        assert_eq!(
+            code(c("core", false, Some("https://x/key.pub: HTTP 404"))),
+            "failed"
+        );
+        let l = check_line(&c("Not A Name", false, None));
+        assert_eq!((l.name.as_str(), l.code.as_str()), ("unnamed", "failed"));
+        assert!(CheckLine::decode(&l.encode()).is_some());
     }
 
     #[cfg(feature = "ssr")]

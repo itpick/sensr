@@ -272,9 +272,20 @@ fn block_choice_warns_confirm() {
     assert!(!msg.0 && msg.1.contains(CONFIRM_WARNING), "{msg:?}");
     let p = page(&b, &q);
     assert!(p.staged);
+    let doc = body(p, &q);
+    let status = text(
+        doc.select(&sel("section[aria-labelledby=guard-status]"))
+            .next()
+            .unwrap(),
+    );
+    assert!(
+        status.contains("Staged changes not applied yet: guard. Apply changes applies all of them"),
+        "{status}"
+    );
     let loc = post(&b, sensr_ui::actions::guard_apply_form);
-    assert_eq!(loc, "/ui/guard?applied=3&imposed=1");
+    assert_eq!(loc, "/ui/guard?applied=3&imposed=1&window=120");
     let aq = query(&loc);
+    // the window comes from the agent's confirm_reason
     assert!(aq.message().unwrap().1.contains(CONFIRM_WARNING));
     let p = page(&b, &aq);
     let c = p.confirm.clone().expect("on probation");
@@ -315,6 +326,185 @@ fn block_choice_warns_confirm() {
         "/ui/guard?applied=3"
     );
     assert!(page(&b, &q).confirm.is_none());
+}
+
+fn rule_key(b: &BackendHandle, description: &str) -> String {
+    page(b, &GuardQuery::default())
+        .rules
+        .iter()
+        .find(|r| r.description == description && r.change.as_deref() != Some("removed"))
+        .and_then(|r| r.key.clone())
+        .unwrap()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_rule(
+    b: &BackendHandle,
+    key: Option<String>,
+    description: &str,
+    hook: &str,
+    target_kind: &str,
+    target: &str,
+    action: &str,
+) -> String {
+    let (d, h, tk, t, a) = (
+        description.to_owned(),
+        hook.to_owned(),
+        target_kind.to_owned(),
+        target.to_owned(),
+        action.to_owned(),
+    );
+    post(b, move || {
+        sensr_ui::actions::guard_rule_submit(
+            key,
+            Some("on".into()),
+            d,
+            h,
+            String::new(),
+            String::new(),
+            tk,
+            t,
+            String::new(),
+            a,
+        )
+    })
+}
+
+#[test]
+fn a_refused_edit_stays_on_the_rule() {
+    let (_d, b) = writer();
+    let key = rule_key(&b, LISTENERS);
+    let loc = submit_rule(
+        &b,
+        Some(key.clone()),
+        LISTENERS,
+        "listen",
+        "net",
+        "nope",
+        "alert",
+    );
+    assert_eq!(
+        loc,
+        format!("/ui/guard?invalid=target&edit={key}#guard-rule-form")
+    );
+    let q = query(loc.split('#').next().unwrap());
+    assert_eq!(q.edit.as_deref(), Some(key.as_str()));
+    let doc = body(page(&b, &q), &q);
+    let form = doc.select(&sel("form#guard-rule-form")).next().unwrap();
+    assert!(text(form).contains("Edit rule"));
+    let hidden = form.select(&sel("input[name=key]")).next().unwrap();
+    assert_eq!(hidden.value().attr("value"), Some(key.as_str()));
+    // the corrected submit updates that rule: no duplicate
+    let loc = submit_rule(
+        &b,
+        Some(key.clone()),
+        LISTENERS,
+        "listen",
+        "net",
+        "10.0.0.0/8",
+        "alert",
+    );
+    assert_eq!(loc, "/ui/guard?saved=1");
+    let p = page(&b, &GuardQuery::default());
+    let owners: Vec<_> = p.rules.iter().filter(|r| r.pack.is_none()).collect();
+    assert_eq!(owners.len(), 2, "{owners:?}");
+    let r = owners
+        .iter()
+        .find(|r| r.key.as_deref() == Some(&key))
+        .unwrap();
+    assert_eq!(r.target, "10.0.0.0/8");
+}
+
+#[test]
+fn staged_rules_say_what_still_runs() {
+    let (_d, b) = writer();
+    // a changed rule: the running version's state, hits and action
+    let key = rule_key(&b, SHELLS);
+    assert_eq!(
+        submit_rule(
+            &b,
+            Some(key.clone()),
+            SHELLS,
+            "exec",
+            "path_prefix",
+            "/bin/sh",
+            "block"
+        ),
+        "/ui/guard?saved=1&block=1"
+    );
+    let q = GuardQuery::default();
+    let p = page(&b, &q);
+    let r = p
+        .rules
+        .iter()
+        .find(|r| r.key.as_deref() == Some(&key))
+        .unwrap();
+    assert_eq!(r.change.as_deref(), Some("changed"));
+    assert_eq!(r.live_action.as_deref(), Some("alert"));
+    assert!(r.active);
+    assert_eq!(r.hits, 3);
+    let doc = body(p, &q);
+    let cells = row(&doc, "Rules", SHELLS);
+    assert!(
+        cells
+            .iter()
+            .any(|c| c == "active changed — not applied yet (running: alert)"),
+        "{cells:?}"
+    );
+    // a removed rule still runs until applied
+    let key = rule_key(&b, LISTENERS);
+    assert_eq!(
+        post(&b, || sensr_ui::actions::guard_rule_delete(key.clone())),
+        "/ui/guard?deleted=1"
+    );
+    let p = page(&b, &q);
+    let r = p.rules.iter().find(|r| r.description == LISTENERS).unwrap();
+    assert_eq!(r.change.as_deref(), Some("removed"));
+    assert_eq!(r.key, None, "nothing to edit");
+    let doc = body(p, &q);
+    let cells = row(&doc, "Rules", LISTENERS);
+    assert!(
+        cells
+            .iter()
+            .any(|c| c.starts_with("inactive")
+                && c.ends_with("removed — still active until applied")),
+        "{cells:?}"
+    );
+    // applied: both settle
+    post(&b, sensr_ui::actions::guard_apply_form);
+    let p = page(&b, &q);
+    assert!(p.rules.iter().all(|r| r.change.is_none()));
+    assert!(!p.rules.iter().any(|r| r.description == LISTENERS));
+}
+
+#[test]
+fn the_boot_file_keeps_the_kill_switch_on() {
+    let (_d, m) = guard_mock();
+    let b: BackendHandle = Arc::new(m.with_guard_boot_file());
+    let q = GuardQuery::default();
+    let doc = body(page(&b, &q), &q);
+    let status = text(
+        doc.select(&sel("section[aria-labelledby=guard-status]"))
+            .next()
+            .unwrap(),
+    );
+    assert!(
+        status.contains("While the file /boot/firmware/sensr/guard-off is on the SD card"),
+        "{status}"
+    );
+    let loc = post(&b, || {
+        sensr_ui::actions::guard_kill_switch_form("off".into())
+    });
+    assert_eq!(loc, "/ui/guard?error=boot_file");
+    assert_eq!(
+        query(&loc).message(),
+        Some((
+            true,
+            "The file /boot/firmware/sensr/guard-off exists: remove it from the SD card to let rules block again."
+                .into()
+        ))
+    );
+    assert!(page(&b, &q).status.kill_switch);
 }
 
 /// Every form control has a label (`<label for>`, `aria-label` or a wrapping label).
@@ -429,6 +619,10 @@ fn kill_switch_needs_a_writer_and_a_running_daemon() {
     assert!(!p.can_write);
     let doc = body(p, &q);
     assert_eq!(doc.select(&sel("form[method=post]")).count(), 0);
+    assert_eq!(
+        post(&ro, sensr_ui::actions::guard_check_packs_form),
+        "/ui/guard?error=forbidden"
+    );
     assert!(doc.select(&sel("form#guard-rule-form")).next().is_none());
     assert_eq!(
         post(&ro, || sensr_ui::actions::guard_kill_switch_form(
@@ -665,13 +859,19 @@ fn rule_form_saves_edits_and_deletes_with_codes_only() {
         .unwrap();
     assert_eq!((r.description.as_str(), r.target.as_str()), ("x", "/bin/…"));
     assert_eq!(p.rules.iter().filter(|r| r.pack.is_none()).count(), 2);
-    // an unchecked Enabled box turns the rule off
+    // an unchecked Enabled box turns the rule off (staged: it runs until applied)
+    assert_eq!(r.change.as_deref(), Some("changed"));
+    assert!(r.active, "the running version is still active");
+    post(&b, sensr_ui::actions::guard_apply_form);
+    let p = page(&b, &GuardQuery::default());
+    let r = p
+        .rules
+        .iter()
+        .find(|r| r.key.as_deref() == Some(&key))
+        .unwrap();
     assert!(
-        !p.rules
-            .iter()
-            .find(|r| r.key.as_deref() == Some(&key))
-            .unwrap()
-            .active
+        !r.active && r.reason.as_deref() == Some("turned off"),
+        "{r:?}"
     );
     // an unknown key is refused, not created
     assert_eq!(

@@ -176,6 +176,20 @@ impl Backend for UiBackend {
         .boxed()
     }
 
+    fn get_head<'a>(&'a self, p: &'a str) -> BoxFuture<'a, ApiResult<Value>> {
+        async move {
+            let op = Op::ConfigGet {
+                path: path(p)?,
+                source: Source::Head,
+            };
+            match self.call(op).await? {
+                Response::Value(v) => Ok(v.unwrap_or(Value::Null)),
+                other => Err(unexpected(other)),
+            }
+        }
+        .boxed()
+    }
+
     fn set<'a>(&'a self, p: &'a str, value: Value) -> BoxFuture<'a, ApiResult<()>> {
         async move {
             match self

@@ -1768,9 +1768,7 @@ fn plain_fields(
 /// The Runtime Guard page's cards for `p`, with the message `q` came back with. Process
 /// and device text is rendered as text only.
 pub fn guard_body(p: crate::guard::GuardView, q: &crate::guard::GuardQuery) -> AnyView {
-    use crate::guard::{
-        CONFIRM_WARNING, GuardRuleForm, HOOKS, PER_PAGE, RANGES, hook_label, hook_name,
-    };
+    use crate::guard::{BOOT_FILE, GuardRuleForm, HOOKS, PER_PAGE, RANGES, hook_label, hook_name};
     let can = p.can_write;
     let message = q.message().map(|(bad, m)| {
         if bad {
@@ -1781,7 +1779,7 @@ pub fn guard_body(p: crate::guard::GuardView, q: &crate::guard::GuardQuery) -> A
     });
     let confirm = p.confirm.clone().map(|c| {
         let heading = if q.imposed {
-            CONFIRM_WARNING.to_owned()
+            q.confirm_heading()
         } else {
             "A change is waiting for confirmation".to_owned()
         };
@@ -1829,6 +1827,11 @@ pub fn guard_body(p: crate::guard::GuardView, q: &crate::guard::GuardQuery) -> A
                 <dd>
                     {if st.kill_switch { "on: nothing is blocked, alerts only" } else { "off" }}
                     {kill_form}
+                    {st.kill_switch.then(|| view! {
+                        <p class="help">{format!(
+                            "While the file {BOOT_FILE} is on the SD card the switch stays on: remove the file to let rules block again."
+                        )}</p>
+                    })}
                 </dd>
                 <dt>"Kernel lockdown"</dt>
                 <dd>{st.lockdown.clone()}</dd>
@@ -1844,9 +1847,12 @@ pub fn guard_body(p: crate::guard::GuardView, q: &crate::guard::GuardQuery) -> A
         view! { <p class="field-error" role="alert">{n}". The configured rules are listed, every one inactive."</p> }
     });
     let apply = (can && p.staged).then(|| {
+        let sections = p.staged_sections.join(", ");
         view! {
             <form method="post" action="/ui/fn/guard_apply_form" class="scan-form">
-                <p>"The guard settings have changes that are not applied yet."</p>
+                <p>{format!(
+                    "Staged changes not applied yet: {sections}. Apply changes applies all of them, not only the guard's."
+                )}</p>
                 <button type="submit" class="btn btn-primary">"Apply changes"</button>
             </form>
         }
@@ -1889,6 +1895,7 @@ pub fn guard_body(p: crate::guard::GuardView, q: &crate::guard::GuardQuery) -> A
                     <td>
                         <span class=if r.active { "pill pill-on" } else { "pill pill-warn" }>{state}</span>
                         {r.reason.clone().map(|x| view! { " "<span class="muted">{x}</span> })}
+                        {r.change_text().map(|x| view! { " "<span class="pill pill-info">{x}</span> })}
                     </td>
                     <td class="num">{r.hits}</td>
                     <td class="col-actions">{actions}</td>
@@ -2060,7 +2067,7 @@ pub fn guard_body(p: crate::guard::GuardView, q: &crate::guard::GuardQuery) -> A
         }
         .into_any()
     };
-    let check = can.then(|| {
+    let check = p.can_check.then(|| {
         view! {
             <form method="post" action="/ui/fn/guard_check_packs_form">
                 <button type="submit" class="btn">"Check for pack updates"</button>
