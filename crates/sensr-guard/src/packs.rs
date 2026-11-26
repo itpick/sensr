@@ -125,16 +125,55 @@ pub enum PackSource {
     Builtin,
 }
 
-/// A resolved pack directory.
+/// A pack whose contents were verified (or, for the built-in pack, read
+/// once from the image). The loader loads from these bytes, never from the
+/// disk again, so nothing can change between the check and the load.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackDir {
-    /// The directory to hand to the loader.
-    pub path: PathBuf,
+pub struct VerifiedPack {
+    /// Pack name.
+    pub name: String,
+    /// Pack version.
+    pub version: Version,
     /// Where it came from.
     pub source: PackSource,
     /// Why a newer choice was passed over (revoked key, too new, damaged
     /// files), if one was.
     pub fallback_reason: Option<String>,
+    /// The manifest.
+    pub manifest: Manifest,
+    /// The one BPF object.
+    pub object: Vec<u8>,
+    /// The pack's default rules.
+    pub rules: Vec<Rule>,
+}
+
+/// Read a pack directory once: manifest, its one object, and the rules.
+/// Every entry must be a regular file (no symlinks). Used for the built-in
+/// pack, which is trusted without a signature.
+pub fn read_pack_dir(dir: &Path) -> Result<VerifiedPack, PackError> {
+    let read = |name: &str| -> Result<Vec<u8>, PackError> {
+        let p = dir.join(name);
+        if !std::fs::symlink_metadata(&p)?.is_file() {
+            return Err(corrupt(format!("{} is not a regular file", p.display())));
+        }
+        Ok(std::fs::read(&p)?)
+    };
+    let manifest = Manifest::parse(&read(MANIFEST_FILE)?)?;
+    let [program] = manifest.programs.as_slice() else {
+        return Err(corrupt("a pack has exactly one .bpf.o"));
+    };
+    let object = read(program)?;
+    let rules = serde_json::from_slice(&read(&manifest.rules)?)
+        .map_err(|e| corrupt(format!("rules: {e}")))?;
+    Ok(VerifiedPack {
+        name: manifest.name.clone(),
+        version: manifest.version.clone(),
+        source: PackSource::Builtin,
+        fallback_reason: None,
+        manifest,
+        object,
+        rules,
+    })
 }
 
 /// The result of an install.
@@ -158,21 +197,19 @@ pub use install::{PublicKey, install, load_keys, resolve, verify};
 mod install {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     pub use minisign_verify::PublicKey;
     use minisign_verify::{Error as SigError, Signature};
     use semver::Version;
 
     use super::{
-        MANIFEST_FILE, Manifest, OBJECT_SUFFIX, PackDir, PackError, PackSource, PackStatus,
-        RULES_FILE, Rule, corrupt,
+        MANIFEST_FILE, Manifest, OBJECT_SUFFIX, PackError, PackSource, PackStatus, RULES_FILE,
+        Rule, VerifiedPack, corrupt, read_pack_dir,
     };
 
     /// Archives (packed and unpacked) larger than this are refused.
     const MAX_UNPACKED: u64 = 16 * 1024 * 1024;
-    /// Versions kept on disk: the current one and the last good.
-    const KEEP: usize = 2;
     /// The verified archive and its signature, kept in each version dir.
     const ARCHIVE_FILE: &str = "pack.tar.zst";
     const SIG_FILE: &str = "pack.minisig";
@@ -328,7 +365,18 @@ mod install {
         let lock = std::fs::File::create(root.join(".lock"))?;
         lock.lock()?;
 
-        let previous = current_dir(&root);
+        // The current version counts only if it still verifies; an
+        // unverifiable one neither blocks a downgrade nor is kept as last
+        // good.
+        let previous = current_dir(&root).and_then(|name| {
+            match check_dir(&root.join(&name), &manifest.name, keys, current_sensr) {
+                Ok(c) => Some((name, c.manifest.version)),
+                Err(e) => {
+                    eprintln!("sensr-guard: current pack {name} does not verify: {e}");
+                    None
+                }
+            }
+        });
         let previous_version = previous.as_ref().map(|(_, v)| v.clone());
         if let Some(cur) = &previous_version
             && manifest.version < *cur
@@ -350,7 +398,8 @@ mod install {
         };
         let dest = root.join(&dir_name);
         let tmp = root.join(format!(".tmp-{}", random_suffix()?));
-        let swapped = (|| -> Result<(), PackError> {
+        let mut swapped = false;
+        let staged = (|| -> Result<(), PackError> {
             std::fs::create_dir(&tmp)?;
             for (name, data) in &files {
                 write_synced(&tmp.join(name), data)?;
@@ -366,22 +415,36 @@ mod install {
                 let _ = std::fs::remove_file(&link_tmp);
                 return Err(e.into());
             }
-            sync_dir(&root)?;
+            swapped = true;
             Ok(())
         })();
-        if let Err(e) = swapped {
+        if let Err(e) = staged {
             let _ = std::fs::remove_dir_all(&tmp);
             // `current` was not moved, so the new directory is unused.
             let _ = std::fs::remove_dir_all(&dest);
             return Err(e);
         }
+        debug_assert!(swapped);
+        // The swap happened: a failing fsync now is only a durability
+        // warning. `dest` is what `current` points at and is never removed.
+        if let Err(e) = sync_dir(&root) {
+            eprintln!(
+                "sensr-guard: fsync of {} failed after install: {e}",
+                root.display()
+            );
+        }
 
         let previous_good = previous_version.filter(|p| *p != manifest.version);
         prune(
             &root,
-            &dir_name,
-            &manifest.version,
-            previous.map(|(d, _)| d),
+            &Keep {
+                current: &dir_name,
+                version: &manifest.version,
+                previous_dir: previous.map(|(d, _)| d),
+            },
+            &manifest.name,
+            keys,
+            current_sensr,
         );
         Ok(PackStatus {
             name: manifest.name,
@@ -391,25 +454,23 @@ mod install {
         })
     }
 
-    /// `current`'s directory name and the version in its manifest.
-    fn current_dir(root: &Path) -> Option<(String, Version)> {
+    /// The directory name `current` points at (one plain component).
+    fn current_dir(root: &Path) -> Option<String> {
         let target = std::fs::read_link(root.join("current")).ok()?;
         let mut comps = target.components();
-        let name = match (comps.next(), comps.next()) {
-            (Some(std::path::Component::Normal(n)), None) => n.to_str()?.to_owned(),
-            _ => return None,
-        };
-        let m = Manifest::parse(&std::fs::read(root.join(&name).join(MANIFEST_FILE)).ok()?).ok()?;
-        Some((name, m.version))
+        match (comps.next(), comps.next()) {
+            (Some(std::path::Component::Normal(n)), None) => Some(n.to_str()?.to_owned()),
+            _ => None,
+        }
     }
 
-    /// Version directories (not dot-files) with the version their manifest
-    /// states, newest first.
-    fn version_dirs(root: &Path) -> Vec<(String, Version)> {
+    /// Version directories (not dot-files), newest first by the version in
+    /// their manifest; a directory whose manifest does not parse has `None`.
+    fn version_dirs(root: &Path) -> Vec<(String, Option<Version>)> {
         let Ok(rd) = std::fs::read_dir(root) else {
             return Vec::new();
         };
-        let mut out: Vec<(String, Version)> = rd
+        let mut out: Vec<(String, Option<Version>)> = rd
             .filter_map(Result::ok)
             .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
             .filter_map(|e| {
@@ -417,64 +478,105 @@ mod install {
                 if name.starts_with('.') {
                     return None;
                 }
-                let m = Manifest::parse(&std::fs::read(e.path().join(MANIFEST_FILE)).ok()?).ok()?;
-                Some((name, m.version))
+                let v = std::fs::read(e.path().join(MANIFEST_FILE))
+                    .ok()
+                    .and_then(|b| Manifest::parse(&b).ok())
+                    .map(|m| m.version);
+                Some((name, v))
             })
             .collect();
         out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
         out
     }
 
-    /// Keep the new current and the last good; drop the rest and the
-    /// leftovers of interrupted installs. Best effort; the caller holds the
-    /// lock.
-    fn prune(root: &Path, current: &str, version: &Version, previous_dir: Option<String>) {
+    struct Keep<'a> {
+        current: &'a str,
+        version: &'a Version,
+        previous_dir: Option<String>,
+    }
+
+    /// Keep the new current and the last good (verified like `resolve`
+    /// does); drop the rest, directories with an unparseable manifest, and
+    /// the leftovers of interrupted installs. Best effort; the caller holds
+    /// the lock.
+    fn prune(root: &Path, keep: &Keep, name: &str, keys: &[PublicKey], current_sensr: &Version) {
         if let Ok(rd) = std::fs::read_dir(root) {
             for e in rd.filter_map(Result::ok) {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if name.starts_with(".tmp-") {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if n.starts_with(".tmp-") {
                     let _ = std::fs::remove_dir_all(e.path());
-                } else if name.starts_with(".link-") {
+                } else if n.starts_with(".link-") {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
         }
         let dirs = version_dirs(root);
-        let mut keep = vec![current.to_owned()];
+        let good = |n: &str, v: &Option<Version>| {
+            v.as_ref().is_some_and(|v| v != keep.version)
+                && n != keep.current
+                && check_dir(&root.join(n), name, keys, current_sensr).is_ok()
+        };
         // The last good: the directory that was current, unless it is the
-        // same version (a reinstall), then the newest other version.
-        let last_good = previous_dir
-            .filter(|d| dirs.iter().any(|(n, v)| n == d && v != version))
+        // same version (a reinstall); then the newest other version that
+        // still verifies.
+        let last_good = keep
+            .previous_dir
+            .as_ref()
+            .filter(|d| dirs.iter().any(|(n, v)| n == *d && good(n, v)))
+            .cloned()
             .or_else(|| {
                 dirs.iter()
-                    .find(|(_, v)| v != version)
+                    .find(|(n, v)| good(n, v))
                     .map(|(n, _)| n.clone())
             });
-        keep.extend(last_good);
-        debug_assert!(keep.len() <= KEEP);
-        for (name, _) in dirs {
-            if !keep.contains(&name) {
-                let _ = std::fs::remove_dir_all(root.join(name));
+        for (n, _) in dirs {
+            if n != keep.current && Some(&n) != last_good.as_ref() {
+                let _ = std::fs::remove_dir_all(root.join(n));
             }
         }
     }
 
+    /// A version directory that passed [`check_dir`]: the signed archive's
+    /// own entries.
+    struct Checked {
+        manifest: Manifest,
+        files: Files,
+    }
+
+    /// Cap on a stored signature (a minisign signature is about 300 bytes).
+    const MAX_SIG: u64 = 4096;
+
     /// Re-check an installed version directory against the current key
     /// list and running sensr: the stored archive must verify, the manifest
-    /// must fit this sensr, and the unpacked files must be byte-identical
-    /// to the archive's.
+    /// must fit this sensr, and the on-disk files must be regular files
+    /// byte-identical to the archive's. The caller uses the archive's bytes,
+    /// not the disk's.
     fn check_dir(
         dir: &Path,
         name: &str,
         keys: &[PublicKey],
         current_sensr: &Version,
-    ) -> Result<Version, PackError> {
-        let limit = MAX_UNPACKED + 1;
+    ) -> Result<Checked, PackError> {
+        let regular = |p: &Path| -> Result<(), PackError> {
+            if std::fs::symlink_metadata(p)?.is_file() {
+                Ok(())
+            } else {
+                Err(corrupt(format!("{} is not a regular file", p.display())))
+            }
+        };
         let mut archive = Vec::new();
+        regular(&dir.join(ARCHIVE_FILE))?;
         std::fs::File::open(dir.join(ARCHIVE_FILE))?
-            .take(limit)
+            .take(MAX_UNPACKED + 1)
             .read_to_end(&mut archive)?;
-        let sig = std::fs::read_to_string(dir.join(SIG_FILE))?;
+        let mut sig = String::new();
+        regular(&dir.join(SIG_FILE))?;
+        std::fs::File::open(dir.join(SIG_FILE))?
+            .take(MAX_SIG + 1)
+            .read_to_string(&mut sig)?;
+        if sig.len() as u64 > MAX_SIG {
+            return Err(PackError::BadSignature);
+        }
         verify(&archive, &sig, keys)?;
         let files = unpack(&archive)?;
         let manifest = check(&files, current_sensr)?;
@@ -482,8 +584,8 @@ mod install {
             return Err(corrupt("pack name does not match its directory"));
         }
         for (file, data) in &files {
-            let on_disk = std::fs::read(dir.join(file))?;
-            if on_disk != *data {
+            regular(&dir.join(file))?;
+            if std::fs::read(dir.join(file))? != *data {
                 return Err(corrupt(format!("{file} differs from the signed archive")));
             }
         }
@@ -493,25 +595,31 @@ mod install {
                 return Err(corrupt(format!("unexpected file {n} on disk")));
             }
         }
-        Ok(manifest.version)
+        Ok(Checked { manifest, files })
     }
 
-    /// The pack directory for `name`: the installed `current` version if its
-    /// stored archive still verifies against `keys` (so a revoked key stops
-    /// it), it still fits `current_sensr`, and its files are intact; else
-    /// the last good version that does; else the built-in pack. The reason
-    /// a better choice was passed over is in `fallback_reason`.
+    /// The pack for `name`, with its contents in memory: the installed
+    /// `current` version if its stored archive still verifies against
+    /// `keys` (so a revoked key stops it), it still fits `current_sensr`,
+    /// and its files are intact; else the newest other installed version
+    /// that does (any older version that still verifies is acceptable; there
+    /// is no version floor); else the built-in pack (read once, regular
+    /// files only). The bytes come from the verified archive, so the loader
+    /// never reads the disk again. The reason a better choice was passed
+    /// over is in `fallback_reason`.
     pub fn resolve(
         name: &str,
         builtin_dir: &Path,
         state_dir: &Path,
         keys: &[PublicKey],
         current_sensr: &Version,
-    ) -> PackDir {
+    ) -> Result<VerifiedPack, PackError> {
         let root = state_dir.join("packs").join(name);
-        let current = std::fs::read_link(root.join("current"))
-            .ok()
-            .and_then(|t| t.to_str().map(str::to_owned));
+        // A shared lock keeps an install from pruning under us.
+        let _lock = std::fs::File::open(root.join(".lock")).ok().inspect(|f| {
+            let _ = f.lock_shared();
+        });
+        let current = current_dir(&root);
         let mut candidates: Vec<String> = current.iter().cloned().collect();
         candidates.extend(
             version_dirs(&root)
@@ -521,30 +629,33 @@ mod install {
         );
         let mut reason = None;
         for dir_name in candidates {
-            // A dir name from the link must be one plain component.
-            if dir_name.contains('/') || dir_name.starts_with('.') {
-                reason.get_or_insert_with(|| format!("bad current link {dir_name}"));
-                continue;
-            }
-            let dir: PathBuf = root.join(&dir_name);
-            match check_dir(&dir, name, keys, current_sensr) {
-                Ok(version) => {
-                    return PackDir {
-                        path: dir,
-                        source: PackSource::Installed(version),
+            match check_dir(&root.join(&dir_name), name, keys, current_sensr) {
+                Ok(c) => {
+                    let object = c
+                        .files
+                        .get(&c.manifest.programs[0])
+                        .cloned()
+                        .ok_or_else(|| corrupt("object vanished"))?;
+                    let rules = serde_json::from_slice(&c.files[RULES_FILE])
+                        .map_err(|e| corrupt(format!("rules: {e}")))?;
+                    return Ok(VerifiedPack {
+                        name: c.manifest.name.clone(),
+                        version: c.manifest.version.clone(),
+                        source: PackSource::Installed(c.manifest.version.clone()),
                         fallback_reason: reason,
-                    };
+                        manifest: c.manifest,
+                        object,
+                        rules,
+                    });
                 }
                 Err(e) => {
                     reason.get_or_insert_with(|| format!("installed pack {dir_name}: {e}"));
                 }
             }
         }
-        PackDir {
-            path: builtin_dir.join(name),
-            source: PackSource::Builtin,
-            fallback_reason: reason,
-        }
+        let mut builtin = read_pack_dir(&builtin_dir.join(name))?;
+        builtin.fallback_reason = reason;
+        Ok(builtin)
     }
 }
 
@@ -599,6 +710,20 @@ mod tests {
         ])
     }
 
+    /// Resolve "extra" with a built-in "extra" pack under `st/builtin`.
+    fn res(st: &Path, keys: &[PublicKey], sensr: &str) -> VerifiedPack {
+        let b = st.join("builtin/extra");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(
+            b.join("manifest.json"),
+            manifest("0.0.1", "0.0.0", &["extra.bpf.o"]),
+        )
+        .unwrap();
+        std::fs::write(b.join("extra.bpf.o"), b"builtin").unwrap();
+        std::fs::write(b.join("rules.json"), "[]").unwrap();
+        resolve("extra", &st.join("builtin"), st, keys, &v(sensr)).unwrap()
+    }
+
     fn v(s: &str) -> Version {
         Version::parse(s).unwrap()
     }
@@ -627,17 +752,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.version, v("1.0.0"));
-        let r = resolve(
-            "extra",
-            Path::new("/nonexistent"),
-            st.path(),
-            std::slice::from_ref(&k.public),
-            &v("0.2.0"),
-        );
+        let r = res(st.path(), std::slice::from_ref(&k.public), "0.2.0");
         assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
-        assert!(r.path.join("extra.bpf.o").is_file());
-        let m = Manifest::parse(&std::fs::read(r.path.join("manifest.json")).unwrap()).unwrap();
-        assert_eq!(read_rules(&r.path, &m).unwrap()[0].id, "p-1");
+        assert_eq!(r.object, b"\x7fELF");
+        assert_eq!(r.rules[0].id, "p-1");
+        assert_eq!(r.manifest.name, "extra");
     }
 
     #[test]
@@ -684,7 +803,7 @@ mod tests {
         let b = pack("2.0.0", "9.0.0");
         let e = install(&b, &sign(&k, &b), &ks, st.path(), &v("0.2.0"), false).unwrap_err();
         assert!(matches!(e, PackError::TooNew { .. }), "{e:?}");
-        let r = resolve("extra", Path::new("/x"), st.path(), &ks, &v("0.2.0"));
+        let r = res(st.path(), &ks, "0.2.0");
         assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
         assert!(!st.path().join("packs/extra/2.0.0").exists());
     }
@@ -716,14 +835,20 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_builtin() {
         let st = tempfile::tempdir().unwrap();
-        let r = resolve("core", Path::new("/b"), st.path(), &[], &v("1.0.0"));
-        assert_eq!(
-            r,
-            PackDir {
-                path: PathBuf::from("/b/core"),
-                source: PackSource::Builtin,
-                fallback_reason: None
-            }
+        let r = res(st.path(), &[], "1.0.0");
+        assert_eq!(r.source, PackSource::Builtin);
+        assert_eq!(r.object, b"builtin");
+        assert_eq!(r.fallback_reason, None);
+        // A missing built-in pack is an error, not a panic.
+        assert!(
+            resolve(
+                "core",
+                Path::new("/nonexistent"),
+                st.path(),
+                &[],
+                &v("1.0.0")
+            )
+            .is_err()
         );
     }
 
@@ -742,14 +867,7 @@ mod tests {
         .unwrap();
         std::fs::remove_file(s.dir.join("extra.bpf.o")).unwrap();
         assert_eq!(
-            resolve(
-                "extra",
-                Path::new("/b"),
-                st.path(),
-                std::slice::from_ref(&k.public),
-                &v("1.0.0")
-            )
-            .source,
+            res(st.path(), std::slice::from_ref(&k.public), "1.0.0").source,
             PackSource::Builtin
         );
     }
@@ -884,27 +1002,27 @@ mod tests {
         .unwrap()
     }
 
+    /// Install signed by `k`, trusting `ks`.
+    fn installed_ks(k: &Keys, ks: &[PublicKey], st: &Path, ver: &str) {
+        let a = pack(ver, "0.1.0");
+        install(&a, &sign(k, &a), ks, st, &v("1.0.0"), false).unwrap();
+    }
+
     #[test]
     fn revoked_key_falls_back_to_last_good_then_builtin() {
         let (k1, k2, st) = (keys(), keys(), tempfile::tempdir().unwrap());
-        installed(&k1, st.path(), "1.0.0", "0.1.0");
-        installed(&k2, st.path(), "1.1.0", "0.1.0");
         let both = [k1.public.clone(), k2.public.clone()];
-        let r = resolve("extra", Path::new("/b"), st.path(), &both, &v("1.0.0"));
+        installed_ks(&k1, &both, st.path(), "1.0.0");
+        installed_ks(&k2, &both, st.path(), "1.1.0");
+        let r = res(st.path(), &both, "1.0.0");
         assert_eq!(r.source, PackSource::Installed(v("1.1.0")));
         assert_eq!(r.fallback_reason, None);
         // k2 revoked: back to the 1.0.0 signed by k1.
-        let r = resolve(
-            "extra",
-            Path::new("/b"),
-            st.path(),
-            std::slice::from_ref(&k1.public),
-            &v("1.0.0"),
-        );
+        let r = res(st.path(), std::slice::from_ref(&k1.public), "1.0.0");
         assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
         assert!(r.fallback_reason.is_some());
         // Both revoked: built-in.
-        let r = resolve("extra", Path::new("/b"), st.path(), &[], &v("1.0.0"));
+        let r = res(st.path(), &[], "1.0.0");
         assert_eq!(r.source, PackSource::Builtin);
         assert!(r.fallback_reason.unwrap().contains("not trusted"));
     }
@@ -915,10 +1033,10 @@ mod tests {
         installed(&k, st.path(), "1.0.0", "0.1.0");
         installed(&k, st.path(), "1.1.0", "0.5.0");
         let ks = [k.public];
-        let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("0.2.0"));
+        let r = res(st.path(), &ks, "0.2.0");
         assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
         assert!(r.fallback_reason.unwrap().contains("needs sensr"));
-        let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("0.0.1"));
+        let r = res(st.path(), &ks, "0.0.1");
         assert_eq!(r.source, PackSource::Builtin);
     }
 
@@ -930,14 +1048,14 @@ mod tests {
         let ks = [k.public];
         for bad in [&b"evil"[..], &b""[..]] {
             std::fs::write(s.dir.join("extra.bpf.o"), bad).unwrap();
-            let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("1.0.0"));
+            let r = res(st.path(), &ks, "1.0.0");
             assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
             assert!(r.fallback_reason.unwrap().contains("differs"));
         }
         // An extra object dropped next to the pack is refused too.
         std::fs::write(s.dir.join("extra.bpf.o"), b"\x7fELF").unwrap();
         std::fs::write(s.dir.join("more.bpf.o"), b"x").unwrap();
-        let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("1.0.0"));
+        let r = res(st.path(), &ks, "1.0.0");
         assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
     }
 
@@ -961,13 +1079,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(e, PackError::MissingProgram(_)));
-        let r = resolve(
-            "extra",
-            Path::new("/b"),
-            st.path(),
-            std::slice::from_ref(&k.public),
-            &v("1.0.0"),
-        );
+        let r = res(st.path(), std::slice::from_ref(&k.public), "1.0.0");
         assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
     }
 
@@ -980,12 +1092,12 @@ mod tests {
         let sg = sign(&k, &a);
         let e = install(&a, &sg, &ks, st.path(), &v("1.0.0"), false).unwrap_err();
         assert!(matches!(e, PackError::Downgrade { .. }), "{e:?}");
-        let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("1.0.0"));
+        let r = res(st.path(), &ks, "1.0.0");
         assert_eq!(r.source, PackSource::Installed(v("1.1.0")));
         let s = install(&a, &sg, &ks, st.path(), &v("1.0.0"), true).unwrap();
         assert_eq!(s.version, v("1.0.0"));
         assert_eq!(s.previous, Some(v("1.1.0")));
-        let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("1.0.0"));
+        let r = res(st.path(), &ks, "1.0.0");
         assert_eq!(r.source, PackSource::Installed(v("1.0.0")));
     }
 
@@ -1034,7 +1146,7 @@ mod tests {
                 });
             }
         });
-        let r = resolve("extra", Path::new("/b"), st.path(), &ks, &v("1.0.0"));
+        let r = res(st.path(), &ks, "1.0.0");
         assert!(matches!(r.source, PackSource::Installed(_)), "{r:?}");
         let dirs = std::fs::read_dir(st.path().join("packs/extra"))
             .unwrap()
@@ -1047,5 +1159,77 @@ mod tests {
             })
             .count();
         assert_eq!(dirs, 3, "two versions + current");
+    }
+
+    #[test]
+    fn builtin_pack_rejects_symlinked_files() {
+        let st = tempfile::tempdir().unwrap();
+        res(st.path(), &[], "1.0.0");
+        let b = st.path().join("builtin/extra");
+        std::fs::remove_file(b.join("extra.bpf.o")).unwrap();
+        std::fs::write(st.path().join("elsewhere"), b"x").unwrap();
+        std::os::unix::fs::symlink(st.path().join("elsewhere"), b.join("extra.bpf.o")).unwrap();
+        let e = read_pack_dir(&b).unwrap_err();
+        assert!(matches!(e, PackError::Corrupt(_)), "{e:?}");
+    }
+
+    #[test]
+    fn symlinked_object_on_disk_falls_back_and_bytes_come_from_the_archive() {
+        let (k, st) = (keys(), tempfile::tempdir().unwrap());
+        installed(&k, st.path(), "1.0.0", "0.1.0");
+        let s = installed(&k, st.path(), "1.1.0", "0.1.0");
+        let ks = [k.public];
+        // The verified bytes are the archive's, whatever the disk holds.
+        let r = res(st.path(), &ks, "1.0.0");
+        assert_eq!(r.version, v("1.1.0"));
+        assert_eq!(r.object, b"\x7fELF");
+        // A symlink with identical content is still refused.
+        std::fs::remove_file(s.dir.join("extra.bpf.o")).unwrap();
+        std::fs::write(st.path().join("same"), b"\x7fELF").unwrap();
+        std::os::unix::fs::symlink(st.path().join("same"), s.dir.join("extra.bpf.o")).unwrap();
+        let r = res(st.path(), &ks, "1.0.0");
+        assert_eq!(r.version, v("1.0.0"));
+        assert!(r.fallback_reason.unwrap().contains("not a regular file"));
+    }
+
+    #[test]
+    fn oversized_signature_is_refused_on_resolve() {
+        let (k, st) = (keys(), tempfile::tempdir().unwrap());
+        let s = installed(&k, st.path(), "1.0.0", "0.1.0");
+        std::fs::write(s.dir.join("pack.minisig"), vec![b'a'; 10_000]).unwrap();
+        let r = res(st.path(), std::slice::from_ref(&k.public), "1.0.0");
+        assert_eq!(r.source, PackSource::Builtin);
+    }
+
+    #[test]
+    fn unverifiable_current_does_not_block_a_downgrade_or_count_as_last_good() {
+        let (k1, k2, st) = (keys(), keys(), tempfile::tempdir().unwrap());
+        let both = [k1.public.clone(), k2.public.clone()];
+        installed_ks(&k1, &both, st.path(), "1.0.0");
+        installed_ks(&k2, &both, st.path(), "2.0.0");
+        // k2 is revoked: installing 1.5.0 (older than the unverifiable 2.0.0)
+        // is not a downgrade.
+        let a = pack("1.5.0", "0.1.0");
+        let ks = [k1.public.clone()];
+        let s = install(&a, &sign(&k1, &a), &ks, st.path(), &v("1.0.0"), false).unwrap();
+        assert_eq!(s.previous, None);
+        let root = st.path().join("packs/extra");
+        assert!(!root.join("2.0.0").exists(), "unverifiable dir is not kept");
+        assert!(
+            root.join("1.0.0").is_dir(),
+            "verified older one is last good"
+        );
+        assert!(root.join("1.5.0").is_dir());
+    }
+
+    #[test]
+    fn unparseable_version_dirs_are_pruned() {
+        let (k, st) = (keys(), tempfile::tempdir().unwrap());
+        installed(&k, st.path(), "1.0.0", "0.1.0");
+        let junk = st.path().join("packs/extra/junk");
+        std::fs::create_dir(&junk).unwrap();
+        std::fs::write(junk.join("manifest.json"), "{").unwrap();
+        installed(&k, st.path(), "1.1.0", "0.1.0");
+        assert!(!junk.exists());
     }
 }

@@ -26,3 +26,7 @@ pack ships in the image and is trusted without a signature.
   be installed and only the built-in packs run.
 - Pack archives are `.tar.zst` containing exactly `manifest.json`, one
   `*.bpf.o` and `rules.json`; sign the archive bytes (`minisign -S -m pack.tar.zst`).
+- Fallback has no version floor: when the current version fails
+  verification, the daemon may pick any older installed version that still
+  verifies against the key list (that is how the last good version is used).
+  Revoke a key rather than relying on version order to keep an old pack out.

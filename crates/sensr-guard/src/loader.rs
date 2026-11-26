@@ -37,7 +37,7 @@ use crate::maps::{
 #[cfg(target_os = "linux")]
 mod kernel;
 #[cfg(target_os = "linux")]
-pub use kernel::{ApplyError, LoadError, Loaded, load};
+pub use kernel::{ApplyError, LoadError, Loaded, load, load_bytes};
 
 /// One program of the pack, and whether it is attached.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

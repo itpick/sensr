@@ -177,11 +177,24 @@ fn attach(program: &mut Program, hook: &str, btf: &Btf) -> Result<(), String> {
     }
 }
 
-/// Load the pack in `pack_dir` (its `manifest.json` names the object) and
-/// attach every program. A program that fails to load or attach is
-/// recorded in [`Loaded::status`]; the others still run.
+/// Load the built-in pack in `pack_dir` (its `manifest.json` names the
+/// object) and attach every program. Every file must be a regular file. A
+/// program that fails to load or attach is recorded in
+/// [`Loaded::status`]; the others still run. Signed packs go through
+/// [`load_bytes`] instead.
 pub fn load(pack_dir: &Path) -> Result<Loaded, LoadError> {
-    let read = |p: PathBuf| std::fs::read(&p).map_err(|source| LoadError::Read { path: p, source });
+    let read = |p: PathBuf| {
+        let regular = std::fs::symlink_metadata(&p).and_then(|m| {
+            if m.is_file() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("not a regular file"))
+            }
+        });
+        regular
+            .and_then(|()| std::fs::read(&p))
+            .map_err(|source| LoadError::Read { path: p, source })
+    };
     let manifest_path = pack_dir.join("manifest.json");
     let manifest =
         crate::packs::Manifest::parse(&read(manifest_path.clone())?).map_err(|source| {
@@ -194,16 +207,29 @@ pub fn load(pack_dir: &Path) -> Result<Loaded, LoadError> {
         return Err(LoadError::ObjectCount(manifest.programs.len()));
     };
     let bytes = read(pack_dir.join(object))?;
-    let sections = program_sections(object, &bytes)?;
+    load_object(object, &bytes)
+}
+
+/// Load a verified pack from its in-memory object: the bytes that were
+/// checked are the bytes that run.
+pub fn load_bytes(pack: &crate::packs::VerifiedPack) -> Result<Loaded, LoadError> {
+    let [object] = pack.manifest.programs.as_slice() else {
+        return Err(LoadError::ObjectCount(pack.manifest.programs.len()));
+    };
+    load_object(object, &pack.object)
+}
+
+fn load_object(object: &str, bytes: &[u8]) -> Result<Loaded, LoadError> {
+    let sections = program_sections(object, bytes)?;
     let btf = Btf::from_sys_fs()?;
     let mut ebpf = EbpfLoader::new()
         .btf(&btf)
         // task_exe and scratch are TASK_STORAGE, which aya creates but has no
         // typed userspace API for; the loader never reads or writes them.
         .allow_unsupported_maps()
-        .load(&bytes)
+        .load(bytes)
         .map_err(|e| LoadError::Ebpf {
-            object: object.clone(),
+            object: object.to_owned(),
             source: Box::new(e),
         })?;
 
