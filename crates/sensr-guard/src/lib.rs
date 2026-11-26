@@ -9,6 +9,7 @@ pub mod events;
 #[cfg(feature = "daemon")]
 pub mod loader;
 pub mod maps;
+pub mod packs;
 pub mod proto;
 pub mod rule;
 #[cfg(feature = "store")]

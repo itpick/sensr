@@ -13,12 +13,19 @@ default = []
 store = ["dep:rusqlite"]
 # The loader and daemon. The BPF side (aya) is Linux-only; elsewhere the
 # feature builds the platform-neutral parts (the apply plan).
-daemon = ["dep:aya", "dep:object", "dep:serde_json"]
+daemon = ["packs", "dep:aya", "dep:object"]
+# Pack archives: minisign verification, unpacking, atomic install.
+packs = ["dep:tar", "dep:zstd", "dep:minisign-verify", "dep:getrandom"]
 
 [dependencies]
 ipnet.workspace = true
 serde.workspace = true
-serde_json = { workspace = true, optional = true }
+serde_json.workspace = true
+semver.workspace = true
+tar = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
+minisign-verify = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 thiserror.workspace = true
 
@@ -27,7 +34,8 @@ aya = { workspace = true, optional = true }
 object = { workspace = true, optional = true }
 
 [dev-dependencies]
-serde_json.workspace = true
+minisign.workspace = true
+tempfile.workspace = true
 
 # Test tool for the loader's VM test (nix/tests/guard-load.nix) and live
 # runs: loads a pack, applies rules on command, and exits on `quit`.

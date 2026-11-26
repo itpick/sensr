@@ -87,6 +87,8 @@ sha-crypt = { version = "0.6.0", features = ["getrandom"] }
 similar = "3.2.1"
 socket2 = { version = "0.6.5", features = ["all"] }
 syn = "3.0.10"
+semver = { version = "1.0.28", features = ["serde"] }
+tar = { version = "0.4.46", default-features = false }
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
@@ -102,6 +104,9 @@ webauthn-rs = { version = "0.6.2", features = ["danger-credential-internals"] }
 uuid = { version = "1.29.2", features = ["v4", "serde"] }
 wasm-bindgen = "0.2.130"
 web-sys = "0.3.107"
+zstd = "0.14.5"
+minisign-verify = "0.3.0"
+minisign = "0.10.0"
 zip = { version = "9.6.1", default-features = false, features = ["deflate"] }
 
 [workspace.lints.cargo]
