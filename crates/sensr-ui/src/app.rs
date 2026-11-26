@@ -97,6 +97,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/ui/ids/userdefined") view=IdsUserRulesPage/>
                     <Route path=path!("/ui/ids/alerts") view=IdsAlertsPage/>
                     <Route path=path!("/ui/portscan") view=PortscanPage/>
+                    <Route path=path!("/ui/guard") view=GuardPage/>
                     <Route path=path!("/ui/diagnostics/networkinsight") view=Insight/>
                     <Route path=path!("/ui/hosts/:mac") view=HostActivityPage/>
                     <Route path=path!("/*any") view=NotYet/>

@@ -1662,6 +1662,477 @@ pub fn portscan_body(
     .into_any()
 }
 
+// ------------------------------------------------------------ Services › Runtime Guard
+
+/// Services › Runtime Guard: status (with the kill switch), the rules with the add/edit
+/// form, the events and the packs. Server-rendered with plain forms that come back here
+/// (see [`crate::guard::GuardQuery`]).
+#[component]
+pub fn GuardPage() -> impl IntoView {
+    let q = use_query_map().get_untracked();
+    let q = crate::guard::GuardQuery::from_query(|k| q.get(k));
+    let load = move || {
+        let q = q.clone();
+        Suspend::new(async move {
+            match crate::actions::guard_page(
+                q.hook.clone(),
+                q.q.clone(),
+                q.range.clone(),
+                q.offset,
+                q.edit.clone(),
+            )
+            .await
+            {
+                Ok(p) => guard_body(p, &q),
+                Err(e) => load_error(e),
+            }
+        })
+    };
+    view! {
+        <p class="intro">"The runtime guard watches what programs on the router do — programs started, connections made, sockets opened for listening, files written, privilege changes, kernel modules and bpf() — and records or blocks what a rule matches. New rules only record (alert); a rule that blocks has to be confirmed after it is applied."</p>
+        <Suspense fallback=|| ()>{load}</Suspense>
+    }
+}
+
+/// The rule form's fields from `fields` (the model), as plain inputs named by their path
+/// and filled from `inputs`; `invalid` fields get their message. The Action field's help is
+/// the Block warning, which the stylesheet shows only while Block is chosen.
+fn plain_fields(
+    fields: &'static [crate::form::FieldSpec],
+    inputs: &crate::form::Inputs,
+    invalid: &[String],
+    form_id: &str,
+) -> impl IntoView + use<> {
+    use crate::form::FieldKind;
+    fields
+        .iter()
+        .map(|f| {
+            let id = f.dom_id(form_id);
+            let help_id = format!("{id}-help");
+            let err_id = format!("{id}-err");
+            let err = invalid
+                .iter()
+                .any(|p| p == f.path)
+                .then(|| crate::guard::invalid_message(f.path));
+            let mut described = Vec::new();
+            if !f.help.is_empty() {
+                described.push(help_id.clone());
+            }
+            if err.is_some() {
+                described.push(err_id.clone());
+            }
+            let described = (!described.is_empty()).then(|| described.join(" "));
+            let invalid_attr = err.map(|_| "true");
+            let cur = inputs.get(f.path).cloned().unwrap_or_default();
+            let input = match f.kind {
+                FieldKind::Checkbox => view! {
+                    <input type="checkbox" name=f.path id=id.clone() value="on" checked=cur == "true"
+                        aria-describedby=described aria-invalid=invalid_attr/>
+                }
+                .into_any(),
+                FieldKind::Select(options) => view! {
+                    <select name=f.path id=id.clone() required=f.required
+                        aria-describedby=described aria-invalid=invalid_attr>
+                        {options.iter().map(|(v, l)| view! {
+                            <option value=*v selected=cur == *v>{*l}</option>
+                        }).collect_view()}
+                    </select>
+                }
+                .into_any(),
+                _ => view! {
+                    <input type="text" name=f.path id=id.clone() value=cur spellcheck="false"
+                        aria-describedby=described aria-invalid=invalid_attr/>
+                }
+                .into_any(),
+            };
+            let help_class = if f.path == "action" {
+                "help confirm-warn"
+            } else {
+                "help"
+            };
+            let check = matches!(f.kind, FieldKind::Checkbox);
+            view! {
+                <div class="field" class:field-check=check class:has-error=err.is_some()>
+                    <label for=id.clone()>{f.label}</label>
+                    <div class="control">
+                        {input}
+                        {(!f.help.is_empty()).then(|| view! { <p class=help_class id=help_id.clone()>{f.help}</p> })}
+                        {err.map(|m| view! { <p class="field-error" id=err_id.clone()>{m}</p> })}
+                    </div>
+                </div>
+            }
+        })
+        .collect_view()
+}
+
+/// The Runtime Guard page's cards for `p`, with the message `q` came back with. Process
+/// and device text is rendered as text only.
+pub fn guard_body(p: crate::guard::GuardView, q: &crate::guard::GuardQuery) -> AnyView {
+    use crate::guard::{
+        CONFIRM_WARNING, GuardRuleForm, HOOKS, PER_PAGE, RANGES, hook_label, hook_name,
+    };
+    let can = p.can_write;
+    let message = q.message().map(|(bad, m)| {
+        if bad {
+            view! { <p class="field-error" role="alert">{m}</p> }.into_any()
+        } else {
+            view! { <p class="notice" role="status">{m}</p> }.into_any()
+        }
+    });
+    let confirm = p.confirm.clone().map(|c| {
+        let heading = if q.imposed {
+            CONFIRM_WARNING.to_owned()
+        } else {
+            "A change is waiting for confirmation".to_owned()
+        };
+        view! {
+            <section class="card card-warn" aria-labelledby="guard-confirm">
+                <h2 id="guard-confirm">{heading}</h2>
+                <p>{format!(
+                    "Revision {} is on probation: it rolls back in {} s unless you confirm it.",
+                    c.revision, c.seconds_left
+                )}</p>
+                {can.then(|| view! {
+                    <form method="post" action="/ui/fn/guard_confirm_form" class="row-actions">
+                        <button type="submit" class="btn btn-primary">"Confirm"</button>
+                    </form>
+                })}
+            </section>
+        }
+    });
+
+    // ---- status
+    let st = &p.status;
+    let up = st.note.is_none();
+    let kill_form = (can && up).then(|| {
+        let (to, label) = if st.kill_switch {
+            ("off", "Turn kill switch off")
+        } else {
+            ("on", "Turn kill switch on")
+        };
+        view! {
+            <form method="post" action="/ui/fn/guard_kill_switch_form">
+                <input type="hidden" name="on" value=to/>
+                <button type="submit" class="btn btn-sm">{label}</button>
+            </form>
+        }
+    });
+    let yes = |b: bool| if b { "yes" } else { "no" };
+    let status_dl = up.then(|| {
+        view! {
+            <dl class="guard-status">
+                <dt>"Daemon"</dt>
+                <dd>{if st.running { "running" } else { "running, nothing loaded" }}</dd>
+                <dt>"Enforcing"</dt>
+                <dd>{yes(st.enforcing)}{st.reason.clone().map(|r| view! { <span class="muted">{format!(" — {r}")}</span> })}</dd>
+                <dt>"Kill switch"</dt>
+                <dd>
+                    {if st.kill_switch { "on: nothing is blocked, alerts only" } else { "off" }}
+                    {kill_form}
+                </dd>
+                <dt>"Kernel lockdown"</dt>
+                <dd>{st.lockdown.clone()}</dd>
+                <dt>"Dropped events"</dt>
+                <dd>{format!(
+                    "{} kernel buffer full · {} over the rate cap · {} blocked not recorded",
+                    st.dropped_kernel, st.dropped_rate, st.dropped_blocked
+                )}</dd>
+            </dl>
+        }
+    });
+    let note = st.note.clone().map(|n| {
+        view! { <p class="field-error" role="alert">{n}". The configured rules are listed, every one inactive."</p> }
+    });
+    let apply = (can && p.staged).then(|| {
+        view! {
+            <form method="post" action="/ui/fn/guard_apply_form" class="scan-form">
+                <p>"The guard settings have changes that are not applied yet."</p>
+                <button type="submit" class="btn btn-primary">"Apply changes"</button>
+            </form>
+        }
+    });
+
+    // ---- rules
+    let rule_rows = p
+        .rules
+        .iter()
+        .map(|r| {
+            let name = if r.description.is_empty() {
+                "(no description)".to_owned()
+            } else {
+                r.description.clone()
+            };
+            let actions = r.key.clone().filter(|_| can).map(|k| {
+                let edit = format!("/ui/guard?edit={}#guard-rule-form", url_encode(&k));
+                view! {
+                    <a class="btn btn-sm" href=edit aria-label=format!("Edit rule: {name}")>"Edit"</a>
+                    <form method="post" action="/ui/fn/guard_rule_delete" class="row-actions">
+                        <input type="hidden" name="key" value=k/>
+                        <button type="submit" class="btn btn-sm" aria-label=format!("Delete rule: {name}")>"Delete"</button>
+                    </form>
+                }
+            });
+            let state = if r.active { "active" } else { "inactive" };
+            let hook = if r.hook.is_empty() {
+                "—".to_owned()
+            } else {
+                hook_name(&r.hook)
+            };
+            view! {
+                <tr>
+                    <td>{name.clone()}</td>
+                    <td>{r.pack.clone().unwrap_or_default()}</td>
+                    <td>{hook}</td>
+                    <td class="muted">{r.process.clone()}</td>
+                    <td>{r.target.clone()}</td>
+                    <td>{r.action.clone()}</td>
+                    <td>
+                        <span class=if r.active { "pill pill-on" } else { "pill pill-warn" }>{state}</span>
+                        {r.reason.clone().map(|x| view! { " "<span class="muted">{x}</span> })}
+                    </td>
+                    <td class="num">{r.hits}</td>
+                    <td class="col-actions">{actions}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    let rules_empty = p
+        .rules
+        .is_empty()
+        .then(|| view! { <p class="muted">"No rules yet."</p> });
+    let rule_form = can.then(|| {
+        let fields = <GuardRuleForm as crate::form::FormModel>::fields();
+        let (key, inputs) = match &p.edit {
+            Some(e) => (Some(e.key.clone()), e.inputs.clone()),
+            None => (
+                None,
+                crate::form::to_inputs(
+                    fields,
+                    &serde_json::to_value(GuardRuleForm::default()).unwrap_or_default(),
+                ),
+            ),
+        };
+        let editing = key.is_some();
+        view! {
+            <form method="post" action="/ui/fn/guard_rule_submit" id="guard-rule-form" class="guard-rule-form">
+                <h3>{if editing { "Edit rule" } else { "Add rule" }}</h3>
+                {key.map(|k| view! { <input type="hidden" name="key" value=k/> })}
+                {plain_fields(fields, &inputs, &q.invalid, "guard-rule")}
+                <div class="filter-actions">
+                    <button type="submit" class="btn btn-primary">{if editing { "Save rule" } else { "Add rule" }}</button>
+                    {editing.then(|| view! { <a class="btn" href="/ui/guard">"Cancel"</a> })}
+                </div>
+            </form>
+        }
+    });
+
+    // ---- events
+    let ev = &p.events;
+    let hook_options = std::iter::once(("", "All hooks".to_owned()))
+        .chain(HOOKS.iter().map(|(v, _)| (*v, hook_label(v))))
+        .map(|(v, l)| {
+            let sel = q.hook.as_deref().unwrap_or("") == v;
+            view! { <option value=v selected=sel>{l}</option> }
+        })
+        .collect_view();
+    let range_options = RANGES
+        .iter()
+        .map(|(v, l, _)| view! { <option value=*v selected=q.range == *v>{*l}</option> })
+        .collect_view();
+    let event_rows = ev
+        .rows
+        .iter()
+        .map(|e| {
+            view! {
+                <tr>
+                    <td class="num">{e.time.clone()}</td>
+                    <td>{hook_name(&e.hook)}</td>
+                    <td>{if e.blocked { "blocked" } else { "alert" }}</td>
+                    <td>{e.rule.clone()}</td>
+                    <td>{e.exe.clone()}<span class="muted">{format!(" pid {} · uid {}", e.pid, e.uid)}</span></td>
+                    <td>{e.target.clone()}</td>
+                    <td>{e.unit.clone()}</td>
+                    <td class="num">{e.count}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    let href = |offset: u32| {
+        let qs = q.filter_query(offset);
+        if qs.is_empty() {
+            "/ui/guard#guard-events".to_owned()
+        } else {
+            format!("/ui/guard?{qs}#guard-events")
+        }
+    };
+    let shown = u32::try_from(ev.rows.len()).unwrap_or(0);
+    let pages = (ev.total > 0).then(|| {
+        let newer = (ev.offset > 0)
+            .then(|| view! { <a class="btn btn-sm" href=href(ev.offset.saturating_sub(PER_PAGE))>"Newer"</a> });
+        let older = (u64::from(ev.offset) + u64::from(shown) < ev.total)
+            .then(|| view! { <a class="btn btn-sm" href=href(ev.offset + PER_PAGE)>"Older"</a> });
+        view! {
+            <nav class="filter-actions" aria-label="Event pages">
+                <span class="muted">{format!(
+                    "{}–{} of {}",
+                    ev.offset + u32::from(shown > 0),
+                    ev.offset + shown,
+                    ev.total
+                )}</span>
+                {newer}
+                {older}
+            </nav>
+        }
+    });
+    let events_table = if let Some(n) = &ev.note {
+        view! { <p class="field-error" role="alert">{n.clone()}</p> }.into_any()
+    } else if !ev.available {
+        view! { <p class="muted">"No events yet. They appear once sensr-guard has recorded its first match."</p> }.into_any()
+    } else if ev.rows.is_empty() {
+        view! { <p class="muted">"No events match the filter."</p> }.into_any()
+    } else {
+        view! {
+            <div class="table-wrap">
+                <table class="guard-events">
+                    <caption class="sr-only">"Events"</caption>
+                    <thead><tr>
+                        <th scope="col">"Time"</th><th scope="col">"Watch"</th>
+                        <th scope="col">"Outcome"</th><th scope="col">"Rule"</th>
+                        <th scope="col">"Program"</th><th scope="col">"Target"</th>
+                        <th scope="col">"Service"</th><th scope="col">"Count"</th>
+                    </tr></thead>
+                    <tbody>{event_rows}</tbody>
+                </table>
+            </div>
+            {pages}
+        }
+        .into_any()
+    };
+
+    // ---- packs
+    let pack_rows = p
+        .packs
+        .iter()
+        .map(|k| {
+            let toggle = can.then(|| {
+                let (to, label) = if k.enabled {
+                    ("off", "Turn off")
+                } else {
+                    ("on", "Turn on")
+                };
+                view! {
+                    <form method="post" action="/ui/fn/guard_pack_form" class="row-actions">
+                        <input type="hidden" name="name" value=k.name.clone()/>
+                        <input type="hidden" name="enabled" value=to/>
+                        <button type="submit" class="btn btn-sm" aria-label=format!("{label} pack {}", k.name)>{label}</button>
+                    </form>
+                }
+            });
+            view! {
+                <tr>
+                    <td>{k.name.clone()}</td>
+                    <td class="num">{k.version.clone()}</td>
+                    <td>{k.source.clone()}</td>
+                    <td>{if k.verified { "verified" } else { "not verified" }}</td>
+                    <td>{if k.active { "active" } else { "inactive" }}</td>
+                    <td class="muted">{k.reason.clone().unwrap_or_default()}{(!k.enabled).then_some(" (turned off)")}</td>
+                    <td class="col-actions">{toggle}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    let packs_table = if p.packs.is_empty() {
+        view! { <p class="muted">"No packs loaded."</p> }.into_any()
+    } else {
+        view! {
+            <div class="table-wrap">
+                <table class="guard-packs">
+                    <caption class="sr-only">"Packs"</caption>
+                    <thead><tr>
+                        <th scope="col">"Pack"</th><th scope="col">"Version"</th>
+                        <th scope="col">"Source"</th><th scope="col">"Signature"</th>
+                        <th scope="col">"State"</th><th scope="col">"Reason"</th>
+                        <th scope="col" class="col-actions"><span class="sr-only">"Actions"</span></th>
+                    </tr></thead>
+                    <tbody>{pack_rows}</tbody>
+                </table>
+            </div>
+        }
+        .into_any()
+    };
+    let check = can.then(|| {
+        view! {
+            <form method="post" action="/ui/fn/guard_check_packs_form">
+                <button type="submit" class="btn">"Check for pack updates"</button>
+            </form>
+        }
+    });
+    let checked = q.checked.as_ref().filter(|l| !l.is_empty()).map(|lines| {
+        let items = lines
+            .iter()
+            .map(|l| view! { <li>{l.message()}</li> })
+            .collect_view();
+        view! { <ul class="pack-checks" role="status">{items}</ul> }
+    });
+
+    view! {
+        {message}
+        {confirm}
+        <section class="card" aria-labelledby="guard-status">
+            <h2 id="guard-status">"Status"</h2>
+            {note}
+            {status_dl}
+            {apply}
+        </section>
+        <section class="card" aria-labelledby="guard-rules">
+            <h2 id="guard-rules">"Rules"</h2>
+            {rules_empty}
+            <div class="table-wrap">
+                <table class="guard-rules">
+                    <caption class="sr-only">"Rules"</caption>
+                    <thead><tr>
+                        <th scope="col">"Rule"</th><th scope="col">"Pack"</th>
+                        <th scope="col">"Watch"</th><th scope="col">"Program"</th>
+                        <th scope="col">"Target"</th><th scope="col">"Action"</th>
+                        <th scope="col">"State"</th><th scope="col">"Hits"</th>
+                        <th scope="col" class="col-actions"><span class="sr-only">"Actions"</span></th>
+                    </tr></thead>
+                    <tbody>{rule_rows}</tbody>
+                </table>
+            </div>
+            {rule_form}
+        </section>
+        <section class="card" aria-labelledby="guard-events">
+            <h2 id="guard-events">"Events"</h2>
+            <form method="get" action="/ui/guard" class="scan-form" role="search" aria-label="Filter events">
+                <div class="field-stack">
+                    <label for="guard-ev-hook">"Watch"</label>
+                    <select id="guard-ev-hook" name="hook">{hook_options}</select>
+                </div>
+                <div class="field-stack">
+                    <label for="guard-ev-q">"Program, target or service"</label>
+                    <input id="guard-ev-q" name="q" type="search" spellcheck="false" value=q.q.clone()/>
+                </div>
+                <div class="field-stack">
+                    <label for="guard-ev-range">"Time"</label>
+                    <select id="guard-ev-range" name="range">{range_options}</select>
+                </div>
+                <div class="filter-actions">
+                    <button type="submit" class="btn">"Filter"</button>
+                </div>
+            </form>
+            {events_table}
+        </section>
+        <section class="card" aria-labelledby="guard-packs">
+            <h2 id="guard-packs">"Packs"</h2>
+            {packs_table}
+            {check}
+            {checked}
+        </section>
+    }
+    .into_any()
+}
+
 // ------------------------------------------------------------ Reporting › Insight
 
 fn insight_url(range: &str, host: Option<&str>) -> String {

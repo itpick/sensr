@@ -38,6 +38,8 @@ struct State {
     scan_queue: Vec<sensr_scan::proto::QueuedJob>,
     /// Job ids cancelled through [`Backend::portscan`].
     scans_cancelled: std::collections::HashSet<u64>,
+    /// The runtime guard's kill switch.
+    guard_kill: bool,
 }
 
 impl State {
@@ -116,6 +118,10 @@ pub struct MockBackend {
     scanner_down: bool,
     /// Every start request the daemon was sent, oldest first.
     scan_requests: std::sync::Arc<Mutex<Vec<sensr_scan::proto::StartReq>>>,
+    /// Where the guard's event database is (see [`seed_guard`]).
+    guard_dir: Option<std::path::PathBuf>,
+    /// sensr-guard's socket cannot be reached.
+    guard_down: bool,
 }
 
 impl Default for MockBackend {
@@ -174,6 +180,7 @@ impl MockBackend {
                 forgotten: Default::default(),
                 scan_queue: Vec::new(),
                 scans_cancelled: Default::default(),
+                guard_kill: false,
             }),
             users: vec![("root".into(), "sensr".into())],
             insight_dir: None,
@@ -182,7 +189,107 @@ impl MockBackend {
             scan_dir: None,
             scanner_down: false,
             scan_requests: Default::default(),
+            guard_dir: None,
+            guard_down: false,
         }
+    }
+
+    /// Reads guard events from `dir` instead of the daemon's directory.
+    #[must_use]
+    pub fn with_guard_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.guard_dir = Some(dir.into());
+        self
+    }
+
+    /// sensr-guard's control socket cannot be reached.
+    #[must_use]
+    pub fn with_guard_down(mut self) -> Self {
+        self.guard_down = true;
+        self
+    }
+
+    /// The guard daemon's status for the applied document: the owner's enabled rules
+    /// (a listen rule reported not attached, so one rule is inactive with its reason),
+    /// the built-in `core` pack and the signed `net-watch` pack with their rules, each
+    /// pack off when `guard.packs` turns it off.
+    fn guard_view(&self) -> sensr_guard::proto::StatusView {
+        use sensr_guard::proto::{PackSource, PackStatus, RuleStatus, StatusView};
+        use sensr_guard::rule::Action;
+        self.with(|s| {
+            let doc = &s.head().doc;
+            let action = |r: &Value| {
+                if r["action"] == "block" {
+                    Action::Block
+                } else {
+                    Action::Alert
+                }
+            };
+            let mut rules: Vec<RuleStatus> = doc["guard"]["rules"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(_, r)| r["enabled"] != false)
+                .enumerate()
+                .map(|(i, (id, r))| {
+                    let listen = r["hook"] == "listen";
+                    RuleStatus {
+                        id: id.clone(),
+                        pack: None,
+                        slot: Some(u32::try_from(i).unwrap_or(0)),
+                        action: action(r),
+                        active: !listen,
+                        reason: listen.then(|| {
+                            "the listen program is not attached: the kernel refused it".to_owned()
+                        }),
+                        hits: if r["hook"] == "exec" { 3 } else { 0 },
+                    }
+                })
+                .collect();
+            let on = |name: &str| crate::guard::pack_enabled(&doc["guard"]["packs"], name);
+            let pack = |name: &str, version: &str, source| PackStatus {
+                name: name.into(),
+                version: version.into(),
+                source,
+                verified: true,
+                active: on(name),
+                reason: (!on(name)).then(|| "turned off in the configuration".to_owned()),
+                programs: Vec::new(),
+            };
+            let packs = vec![
+                pack("core", "1.0.0", PackSource::Builtin),
+                pack("net-watch", "0.3.1", PackSource::Signed),
+            ];
+            for (id, p, slot, hits) in [
+                ("core-module-load", "core", 2, 3),
+                ("core-bpf-load", "core", 3, 1),
+                ("net-watch-ssh-out", "net-watch", 5, 1),
+            ] {
+                if on(p) {
+                    rules.push(RuleStatus {
+                        id: id.into(),
+                        pack: Some(p.into()),
+                        slot: Some(slot),
+                        action: Action::Alert,
+                        active: true,
+                        reason: None,
+                        hits,
+                    });
+                }
+            }
+            StatusView {
+                running: true,
+                enforcing: true,
+                reason: None,
+                kill_switch: s.guard_kill,
+                lockdown: "integrity".into(),
+                packs,
+                rules,
+                dropped_kernel: 0,
+                dropped_rate: 12,
+                dropped_blocked: 0,
+                boot_complete: true,
+            }
+        })
     }
 
     /// The start requests sent to the port scanner (shared: read it after the mock is
@@ -435,14 +542,24 @@ impl Backend for MockBackend {
                 message.to_owned()
             };
             let doc = s.staged.clone();
-            let rev = s.push(user, &message, doc);
+            // as the agent: a change that may newly block gets a window of its own
+            let imposed = confirm_secs.is_none() && guard_newly_blocks(&s.head().doc, &doc);
+            let confirm_secs = confirm_secs.or(imposed.then_some(GUARD_CONFIRM_SECS));
+            let mut rev = s.push(user, &message, doc);
             match confirm_secs {
                 Some(secs) => {
-                    s.confirm = Some(ConfirmWindow {
+                    let w = ConfirmWindow {
                         revision: rev.id,
                         deadline: (s.clock)() + u64::from(secs),
-                    });
+                    };
+                    s.confirm = Some(w.clone());
                     s.confirm_fallback = Some(before);
+                    rev.confirm = Some(w);
+                    rev.confirm_reason = imposed.then(|| {
+                        format!(
+                            "blocking rules changed: confirm within {GUARD_CONFIRM_SECS} s or the change rolls back"
+                        )
+                    });
                 }
                 None => {
                     s.confirm = None;
@@ -850,6 +967,51 @@ impl Backend for MockBackend {
 
     fn dns_stats(&self) -> BoxFuture<'_, ApiResult<DnsStats>> {
         ready(Ok(simulated_dns_stats()))
+    }
+    fn guard_dir(&self) -> std::path::PathBuf {
+        self.guard_dir.clone().unwrap_or_else(|| {
+            std::env::var_os("SENSR_GUARD_DIR").map_or_else(
+                || std::path::PathBuf::from(sensr_guard::config::STATE_DIR),
+                std::path::PathBuf::from,
+            )
+        })
+    }
+    fn guard_status(&self) -> BoxFuture<'_, ApiResult<sensr_guard::proto::StatusView>> {
+        if self.guard_down {
+            return ready(Err(ApiError::Backend(crate::guard::NOT_RUNNING.to_owned())));
+        }
+        ready(Ok(self.guard_view()))
+    }
+    fn guard_kill_switch(&self, on: bool) -> BoxFuture<'_, ApiResult<()>> {
+        if self.guard_down {
+            return ready(Err(ApiError::Backend(crate::guard::NOT_RUNNING.to_owned())));
+        }
+        ready(self.with(|s| {
+            s.guard_kill = on;
+            Ok(())
+        }))
+    }
+    fn guard_check_packs(&self) -> BoxFuture<'_, ApiResult<Vec<sensr_guard::proto::PackCheck>>> {
+        use sensr_guard::proto::PackCheck;
+        if self.guard_down {
+            return ready(Err(ApiError::Backend(crate::guard::NOT_RUNNING.to_owned())));
+        }
+        ready(Ok(vec![
+            PackCheck {
+                name: "core".into(),
+                current: Some("1.0.0".into()),
+                available: Some("1.0.0".into()),
+                installed: false,
+                error: None,
+            },
+            PackCheck {
+                name: "net-watch".into(),
+                current: Some("0.3.1".into()),
+                available: Some("0.4.0".into()),
+                installed: false,
+                error: Some("pack signature does not verify".into()),
+            },
+        ]))
     }
     fn dhcp_leases(&self) -> BoxFuture<'_, ApiResult<Vec<DhcpLease>>> {
         ready(Ok(simulated_leases()))
@@ -2550,6 +2712,17 @@ pub fn seed() -> Value {
                     "allowed_ips": ["10.10.0.3/32"], "keepalive": 25}
             }
         },
+        "guard": {
+            "rules": {
+                "6a000000-0000-4000-a000-000000000001": {
+                    "description": "Shells started by the web server", "hook": "exec",
+                    "process": {"unit": "nginx.service"}, "target": {"path_prefix": "/bin/sh"},
+                    "action": "alert"},
+                "6a000000-0000-4000-a000-000000000002": {
+                    "description": "Unexpected listening sockets", "hook": "listen",
+                    "target": {"net": {"cidr": "0.0.0.0/0"}}, "action": "alert"}
+            }
+        },
         "portscan": {
             "exclude": {
                 "5c000000-0000-4000-a000-000000000001": {"target": "00:14:78:38:a5:fc",
@@ -2621,6 +2794,99 @@ fn unredact(new: &mut Value, old: &Value) {
         }
         _ => {}
     }
+}
+
+/// The window the agent imposes on a commit that may newly block (sensr-agent's
+/// `GUARD_CONFIRM`).
+pub const GUARD_CONFIRM_SECS: u32 = 120;
+
+/// Whether `candidate` has an enabled block rule that `head` does not have the same way
+/// (its description aside): the mock's version of the agent's guard check (owner rules
+/// only).
+pub fn guard_newly_blocks(head: &Value, candidate: &Value) -> bool {
+    let rules = |d: &Value| d["guard"]["rules"].as_object().cloned().unwrap_or_default();
+    let (old, new) = (rules(head), rules(candidate));
+    let same = |a: &Value, b: &Value| {
+        ["enabled", "hook", "process", "target", "action"]
+            .iter()
+            .all(|k| a.get(*k) == b.get(*k))
+    };
+    new.iter().any(|(id, r)| {
+        r["enabled"] != false && r["action"] == "block" && !old.get(id).is_some_and(|o| same(o, r))
+    })
+}
+
+/// Writes a guard event database into `dir` for the dev server and the tests: 60 rows over
+/// the last two days (`at` is now, unix seconds) for the seed's rules and the mock's packs
+/// (see [`MockBackend::with_guard_dir`]).
+pub fn seed_guard(dir: &std::path::Path, at: i64) -> Result<(), String> {
+    use sensr_guard::events::{Batch, Row};
+    let path = dir.join(sensr_guard::config::EVENTS_DB);
+    let _ = std::fs::remove_file(&path);
+    let mut s = sensr_guard::store::Store::open(&path).map_err(|e| e.to_string())?;
+    let row = |ago: i64, hook: &str, slot: u32, exe: &str, target: &str, unit: &str| Row {
+        ts: at - ago,
+        ts_ms: 0,
+        hook: hook.into(),
+        action: "alert".into(),
+        blocked: false,
+        rule_id: slot,
+        exe: exe.into(),
+        target: target.into(),
+        unit: unit.into(),
+        pid: 4_000 + u32::try_from(ago % 1_000).unwrap_or(0),
+        uid: 33,
+        count: 1,
+    };
+    let mut rows: Vec<Row> = (0..54)
+        .map(|i| {
+            row(
+                600 + i * 3_100,
+                "exec",
+                0,
+                "/bin/sh",
+                "/bin/sh -c /usr/lib/cgi-bin/status",
+                "nginx.service",
+            )
+        })
+        .collect();
+    for (i, m) in ["ftdi_sio", "usbserial", "cdc_acm"].iter().enumerate() {
+        let mut r = row(
+            7_200 + 40_000 * i64::try_from(i).unwrap_or(0),
+            "module",
+            2,
+            "/usr/bin/kmod",
+            &format!("/lib/modules/6.6.51/kernel/drivers/usb/serial/{m}.ko"),
+            "systemd-udevd.service",
+        );
+        r.uid = 0;
+        rows.push(r);
+    }
+    let mut bpf = row(
+        9_000,
+        "bpf",
+        3,
+        "/usr/bin/bpftool",
+        "BPF_PROG_LOAD",
+        "session-2.scope",
+    );
+    bpf.uid = 0;
+    rows.push(bpf);
+    let mut ssh = row(
+        1_800,
+        "connect",
+        5,
+        "/usr/bin/ssh",
+        "203.0.113.9:22",
+        "session-3.scope",
+    );
+    ssh.count = 4;
+    ssh.uid = 1_000;
+    rows.push(ssh);
+    let mut late = row(120, "exec", 0, "/bin/sh", "/bin/sh -c id", "nginx.service");
+    late.count = 2;
+    rows.push(late);
+    s.write_batch(&Batch { rows }).map_err(|e| e.to_string())
 }
 
 /// Validates a whole document the way the agent does: typed parse, then cross-checks.

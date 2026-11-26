@@ -871,6 +871,93 @@ mod server {
                 })
             })
         }
+        /// Directory holding sensr-guard's `events.db`: `SENSR_GUARD_DIR` when set (as for
+        /// sensr-api), else the daemon's default.
+        fn guard_dir(&self) -> std::path::PathBuf {
+            std::env::var_os("SENSR_GUARD_DIR").map_or_else(
+                || std::path::PathBuf::from(sensr_guard::config::STATE_DIR),
+                std::path::PathBuf::from,
+            )
+        }
+        /// sensr-guard's control socket: `SENSR_GUARD_SOCKET` when set, else the daemon's
+        /// default.
+        fn guard_socket(&self) -> std::path::PathBuf {
+            std::env::var_os("SENSR_GUARD_SOCKET").map_or_else(
+                || std::path::PathBuf::from(sensr_guard::config::SOCKET),
+                std::path::PathBuf::from,
+            )
+        }
+        /// The daemon's status. A socket nobody listens on is [`ApiError::Backend`] with
+        /// [`crate::guard::NOT_RUNNING`]; the caller checks the guard privilege.
+        fn guard_status(&self) -> BoxFuture<'_, ApiResult<sensr_guard::proto::StatusView>> {
+            use sensr_guard::proto::{Reply, Request};
+            let sock = self.guard_socket();
+            Box::pin(async move {
+                match guard_send(sock, Request::Status, sensr_guard::client::SHORT_TIMEOUT).await? {
+                    Reply::Status(v) => Ok(v),
+                    other => Err(guard_unexpected(other)),
+                }
+            })
+        }
+        /// Turns the kill switch on or off. The daemon's refusal is [`ApiError::Conflict`]
+        /// with its explanation; the caller checks the privilege and read-only.
+        fn guard_kill_switch(&self, on: bool) -> BoxFuture<'_, ApiResult<()>> {
+            use sensr_guard::proto::{Reply, Request};
+            let sock = self.guard_socket();
+            Box::pin(async move {
+                match guard_send(
+                    sock,
+                    Request::KillSwitch { on },
+                    sensr_guard::client::TIMEOUT,
+                )
+                .await?
+                {
+                    Reply::Ok => Ok(()),
+                    other => Err(guard_unexpected(other)),
+                }
+            })
+        }
+        /// Fetches the pack index and installs newer packs that verify: each pack's
+        /// outcome. Errors as [`Backend::guard_kill_switch`].
+        fn guard_check_packs(
+            &self,
+        ) -> BoxFuture<'_, ApiResult<Vec<sensr_guard::proto::PackCheck>>> {
+            use sensr_guard::proto::{Reply, Request};
+            let sock = self.guard_socket();
+            Box::pin(async move {
+                match guard_send(sock, Request::CheckPacks, sensr_guard::client::TIMEOUT).await? {
+                    Reply::Packs(p) => Ok(p),
+                    other => Err(guard_unexpected(other)),
+                }
+            })
+        }
+        /// Events matching `filter`, newest first, from `offset`, and how many match;
+        /// `None` while the guard has never run (no database in [`Backend::guard_dir`]).
+        fn guard_events(
+            &self,
+            filter: sensr_guard::store::Filter,
+            limit: u32,
+            offset: u32,
+        ) -> BoxFuture<'_, ApiResult<GuardEvents>> {
+            let db = self.guard_dir().join(sensr_guard::config::EVENTS_DB);
+            Box::pin(async move {
+                let read = move || -> ApiResult<GuardEvents> {
+                    if !db.exists() {
+                        return Ok(None);
+                    }
+                    let s = sensr_guard::store::Store::open_ro(&db).map_err(guard_db_error)?;
+                    let rows = s.events(&filter, limit, offset).map_err(guard_db_error)?;
+                    Ok(Some((rows, s.count(&filter).map_err(guard_db_error)?)))
+                };
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    tokio::task::spawn_blocking(read)
+                        .await
+                        .map_err(|e| ApiError::Backend(e.to_string()))?
+                } else {
+                    read()
+                }
+            })
+        }
         /// Run-time state of one subsystem as the agent reports it (`null` when the
         /// subsystem is not running). Parse with [`crate::runtime::parse`].
         fn runtime(
@@ -924,6 +1011,51 @@ mod server {
         fn read_only(&self) -> bool {
             false
         }
+    }
+
+    /// A page of guard events and how many match; `None` while the guard has never run.
+    pub type GuardEvents = Option<(Vec<sensr_guard::store::StoredEvent>, u64)>;
+
+    fn guard_db_error(e: impl std::fmt::Display) -> ApiError {
+        tracing::warn!(error = %e, "sensr-guard events database");
+        ApiError::Backend("the guard's event database could not be read".into())
+    }
+
+    /// One request to sensr-guard's control socket at `sock`, off the async threads when
+    /// there is a runtime. A socket that is missing or refuses the connection is
+    /// [`crate::guard::NOT_RUNNING`]; other failures are logged and said in general words.
+    pub async fn guard_send(
+        sock: std::path::PathBuf,
+        req: sensr_guard::proto::Request,
+        timeout: std::time::Duration,
+    ) -> ApiResult<sensr_guard::proto::Reply> {
+        let run = move || sensr_guard::client::send_with_timeout(&sock, &req, timeout);
+        let r = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::spawn_blocking(run)
+                .await
+                .map_err(|e| ApiError::Backend(e.to_string()))?
+        } else {
+            run()
+        };
+        r.map_err(|e| {
+            use std::io::ErrorKind::{ConnectionRefused, NotFound};
+            if matches!(e.kind(), NotFound | ConnectionRefused) {
+                ApiError::Backend(crate::guard::NOT_RUNNING.to_owned())
+            } else {
+                tracing::warn!(error = %e, "sensr-guard control socket");
+                ApiError::Backend("sensr-guard did not answer".to_owned())
+            }
+        })
+    }
+
+    /// A reply that is not the one asked for: the daemon's refusal (its text is an
+    /// owner-facing explanation) or a fault.
+    pub fn guard_unexpected(r: sensr_guard::proto::Reply) -> ApiError {
+        if let sensr_guard::proto::Reply::Error(e) = r {
+            return ApiError::Conflict(e);
+        }
+        tracing::error!(reply = ?r, "unexpected reply from sensr-guard");
+        ApiError::Backend("unexpected reply from sensr-guard".to_owned())
     }
 
     /// A backend bound to one signed-in user (their identity and privileges travel with

@@ -589,3 +589,20 @@ dialog.modal[open]:not(:modal) { position: fixed; inset: 0; margin: auto; height
 .passkey-row:last-child { border-bottom: 0; }
 .passkey-name { font-weight: 600; }
 .passkey-add { margin-top: 8px; }
+
+/* ------------------------------------------------------------ runtime guard */
+/* The rule form's Block warning shows only while Block is chosen. */
+.confirm-warn {
+  display: none;
+  color: var(--warn);
+  font-weight: 600;
+}
+.field:has(option[value="block"]:checked) .confirm-warn { display: block; }
+.card-warn { border-left: 4px solid var(--warn); }
+.guard-status { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 12px; }
+.guard-status dt { color: var(--muted); }
+.guard-status dd { margin: 0; overflow-wrap: anywhere; }
+.guard-status dd form { display: inline-block; margin-left: 8px; }
+.guard-events td, .guard-rules td { overflow-wrap: anywhere; }
+.guard-rule-form { margin-top: 16px; max-width: 720px; }
+.pack-checks { margin: 12px 0 0; padding-left: 20px; }

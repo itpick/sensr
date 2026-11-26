@@ -5495,6 +5495,7 @@ dependencies = [
  "scraper",
  "sensr-auth",
  "sensr-flow",
+ "sensr-guard",
  "sensr-scan",
  "sensr-schema",
  "serde",

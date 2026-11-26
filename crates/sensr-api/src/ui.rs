@@ -330,6 +330,14 @@ impl Backend for UiBackend {
         crate::portscan::socket()
     }
 
+    fn guard_dir(&self) -> std::path::PathBuf {
+        crate::guard::dir()
+    }
+
+    fn guard_socket(&self) -> std::path::PathBuf {
+        crate::guard::socket()
+    }
+
     fn may_access(&self, url: &str) -> bool {
         self.state
             .registry

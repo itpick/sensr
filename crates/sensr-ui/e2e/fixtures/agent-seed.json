@@ -500,6 +500,31 @@
       }
     }
   },
+  "guard": {
+    "rules": {
+      "6a000000-0000-4000-a000-000000000001": {
+        "description": "Shells started by the web server",
+        "hook": "exec",
+        "process": {
+          "unit": "nginx.service"
+        },
+        "target": {
+          "path_prefix": "/bin/sh"
+        },
+        "action": "alert"
+      },
+      "6a000000-0000-4000-a000-000000000002": {
+        "description": "Unexpected listening sockets",
+        "hook": "listen",
+        "target": {
+          "net": {
+            "cidr": "0.0.0.0/0"
+          }
+        },
+        "action": "alert"
+      }
+    }
+  },
   "portscan": {
     "exclude": {
       "5c000000-0000-4000-a000-000000000001": {
