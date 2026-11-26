@@ -3,6 +3,7 @@
 //! `proto`) compile with no features; the store and daemon sit behind the
 //! `store` and `daemon` features.
 
+pub mod client;
 pub mod compile;
 pub mod config;
 #[cfg(feature = "daemon")]

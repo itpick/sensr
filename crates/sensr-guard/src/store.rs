@@ -58,6 +58,12 @@ pub struct Filter {
     pub unit: Option<String>,
     /// Unix seconds, inclusive lower bound.
     pub since: Option<i64>,
+    /// Unix milliseconds, inclusive lower bound.
+    pub since_ms: Option<i64>,
+    /// Unix milliseconds, exclusive upper bound.
+    pub until_ms: Option<i64>,
+    /// Case-insensitive text found in the executable, target or unit.
+    pub text: Option<String>,
 }
 
 /// The events database.
@@ -137,8 +143,8 @@ impl Store {
         tx.commit()
     }
 
-    /// Events, newest first.
-    pub fn events(&self, f: &Filter, limit: u32, offset: u32) -> Result<Vec<StoredEvent>> {
+    /// The WHERE clause (with its leading keyword, or empty) and arguments of `f`.
+    fn where_clause(f: &Filter) -> (String, Vec<Value>) {
         let mut conds = Vec::new();
         let mut args: Vec<Value> = Vec::new();
         if let Some(h) = &f.hook {
@@ -161,11 +167,45 @@ impl Store {
             conds.push("ts >= ?");
             args.push(t.into());
         }
+        if let Some(t) = f.since_ms {
+            conds.push("(ts * 1000 + ts_ms) >= ?");
+            args.push(t.into());
+        }
+        if let Some(t) = f.until_ms {
+            conds.push("(ts * 1000 + ts_ms) < ?");
+            args.push(t.into());
+        }
+        if let Some(t) = &f.text {
+            conds.push(
+                "(instr(lower(exe), lower(?)) > 0 OR instr(lower(target), lower(?)) > 0
+                  OR instr(lower(unit), lower(?)) > 0)",
+            );
+            for _ in 0..3 {
+                args.push(t.clone().into());
+            }
+        }
         let wher = if conds.is_empty() {
             String::new()
         } else {
             format!("WHERE {}", conds.join(" AND "))
         };
+        (wher, args)
+    }
+
+    /// How many events match `f`.
+    pub fn count(&self, f: &Filter) -> Result<u64> {
+        let (wher, args) = Self::where_clause(f);
+        let n: i64 = self.db.query_row(
+            &format!("SELECT COUNT(*) FROM events {wher}"),
+            params_from_iter(args),
+            |r| r.get(0),
+        )?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
+    /// Events, newest first.
+    pub fn events(&self, f: &Filter, limit: u32, offset: u32) -> Result<Vec<StoredEvent>> {
+        let (wher, mut args) = Self::where_clause(f);
         args.push(i64::from(limit).into());
         args.push(i64::from(offset).into());
         let sql = format!(
@@ -280,6 +320,38 @@ mod tests {
             ..Filter::default()
         };
         assert!(s.events(&f, 10, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn text_time_range_and_count() {
+        let mut s = Store::memory().unwrap();
+        s.write_batch(&batch(vec![
+            row(100, "exec", false, "/Usr/Bin/Curl"),
+            row(200, "connect", true, "1.1.1.1:53"),
+            row(300, "exec", true, "/c"),
+        ]))
+        .unwrap();
+        let f = Filter {
+            text: Some("curl".into()),
+            ..Filter::default()
+        };
+        assert_eq!(s.count(&f).unwrap(), 1);
+        assert_eq!(s.events(&f, 10, 0).unwrap()[0].row.ts, 100);
+        let f = Filter {
+            text: Some("U.SERVICE".into()),
+            ..Filter::default()
+        };
+        assert_eq!(s.count(&f).unwrap(), 3, "unit is searched too");
+        // ts_ms is 250: 200_250 is included, 300_250 is not.
+        let f = Filter {
+            since_ms: Some(200_250),
+            until_ms: Some(300_250),
+            ..Filter::default()
+        };
+        let r = s.events(&f, 10, 0).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].row.ts, 200);
+        assert_eq!(s.count(&Filter::default()).unwrap(), 3);
     }
 
     #[test]

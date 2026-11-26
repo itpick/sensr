@@ -72,6 +72,18 @@ async fn start() -> Fx {
             "insightviewers",
             json!(["page-diagnostics-networkinsight"]),
         ),
+        (10, "guardviewers", json!(["page-services-guard"])),
+        (
+            11,
+            "guardreaders",
+            json!(["page-services-guard", "user-config-readonly"]),
+        ),
+        (12, "idsviewers", json!(["page-services-ids"])),
+        (
+            13,
+            "idsguardviewers",
+            json!(["page-services-ids", "page-services-guard"]),
+        ),
         (8, "scanviewers", json!(["page-services-portscan"])),
         (
             9,
@@ -94,6 +106,10 @@ async fn start() -> Fx {
         (7, "insightonly", "pw", "insightviewers"),
         (8, "scanner", "pw", "scanviewers"),
         (9, "scanreader", "pw", "scanreaders"),
+        (10, "guarder", "pw", "guardviewers"),
+        (11, "guardreader", "pw", "guardreaders"),
+        (12, "idsonly", "pw", "idsviewers"),
+        (13, "idsguard", "pw", "idsguardviewers"),
     ] {
         let mut user = json!({"name": name, "uid": if n == 1 { 0 } else { 2000 + n },
             "password_hash": hash_password(password).unwrap(), "groups": [group]});
@@ -1251,4 +1267,490 @@ async fn portscan_read_only_users_can_read_but_not_start_or_cancel() {
             "{body}"
         );
     }
+}
+
+/// Guard events, a fake `sensr-guard` socket that can be taken down, and the
+/// IDS alerts database, shared by the guard tests (the API reads its paths
+/// from process-wide settings, so the tests that touch the daemon take turns).
+struct GuardFx {
+    sock: std::path::PathBuf,
+}
+
+impl GuardFx {
+    /// Start (or stop) answering on the socket.
+    fn daemon(&self, up: bool) {
+        use sensr_guard::proto::{PackCheck, Reply, Request, RuleStatus, StatusView};
+        use sensr_guard::rule::Action;
+        use std::io::{BufRead, BufReader, Write};
+        let _ = std::fs::remove_file(&self.sock);
+        if !up {
+            return;
+        }
+        let l = std::os::unix::net::UnixListener::bind(&self.sock).unwrap();
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                let mut line = String::new();
+                BufReader::new(&s).read_line(&mut line).unwrap();
+                let reply = match serde_json::from_str::<Request>(&line).unwrap() {
+                    Request::Status => Reply::Status(StatusView {
+                        running: true,
+                        enforcing: true,
+                        reason: None,
+                        kill_switch: false,
+                        lockdown: "none".into(),
+                        packs: vec![],
+                        rules: vec![
+                            RuleStatus {
+                                id: "no-curl".into(),
+                                pack: None,
+                                slot: Some(4),
+                                action: Action::Alert,
+                                active: true,
+                                reason: None,
+                                hits: 3,
+                            },
+                            RuleStatus {
+                                id: "core-twin-a".into(),
+                                pack: Some("core".into()),
+                                slot: Some(8),
+                                action: Action::Alert,
+                                active: true,
+                                reason: None,
+                                hits: 0,
+                            },
+                            RuleStatus {
+                                id: "other-twin-b".into(),
+                                pack: Some("other".into()),
+                                slot: Some(8),
+                                action: Action::Alert,
+                                active: true,
+                                reason: None,
+                                hits: 0,
+                            },
+                        ],
+                        dropped_kernel: 0,
+                        dropped_rate: 0,
+                        dropped_blocked: 0,
+                        boot_complete: true,
+                    }),
+                    Request::Reload => Reply::Ok,
+                    Request::KillSwitch { on } => {
+                        if on {
+                            Reply::Ok
+                        } else {
+                            Reply::Error("kill switch file is read-only".into())
+                        }
+                    }
+                    Request::CheckPacks => Reply::Packs(vec![PackCheck {
+                        name: "core".into(),
+                        current: Some("1".into()),
+                        available: Some("2".into()),
+                        installed: true,
+                        error: None,
+                    }]),
+                };
+                let mut out = serde_json::to_vec(&reply).unwrap();
+                out.push(b'\n');
+                (&s).write_all(&out).unwrap();
+            }
+        });
+    }
+}
+
+async fn guard_fixture() -> (GuardFx, tokio::sync::MutexGuard<'static, ()>) {
+    use sensr_flow::eve::{Alert, AlertStore, Event};
+    use sensr_guard::events::{Batch, Row};
+    use sensr_guard::store::Store;
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    static ONCE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    let guard = LOCK.lock().await;
+    let dir = ONCE.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let row = |ts: i64, ts_ms: u32, hook: &str, blocked: bool, slot: u32, target: &str| Row {
+            ts,
+            ts_ms,
+            hook: hook.into(),
+            action: if blocked { "block" } else { "alert" }.into(),
+            blocked,
+            rule_id: slot,
+            exe: "/usr/bin/curl".into(),
+            target: target.into(),
+            unit: "app.service".into(),
+            pid: 9,
+            uid: 1000,
+            count: 2,
+        };
+        let mut st = Store::open(&dir.join(sensr_guard::config::EVENTS_DB)).unwrap();
+        st.write_batch(&Batch {
+            rows: vec![
+                row(1000, 500, "connect", false, 4, "1.1.1.1:53"),
+                row(3000, 0, "exec", true, 8, "/bin/nc"),
+                row(5000, 0, "exec", false, 77, "/bin/ls"),
+            ],
+        })
+        .unwrap();
+        // IDS alerts at 2000 ms and 4000 ms (milliseconds).
+        let mut a = AlertStore::open(&dir.join(sensr_flow::config::ALERTS_DB)).unwrap();
+        let alert = |ts: i64, sid: u32, sig: &str| {
+            Event::Alert(Box::new(Alert {
+                id: 0,
+                ts,
+                gid: 1,
+                sid,
+                rev: 1,
+                signature: sig.into(),
+                category: "c".into(),
+                severity: 2,
+                action: "allowed".into(),
+                proto: "TCP".into(),
+                src_ip: "10.0.0.1".into(),
+                src_port: Some(1),
+                dest_ip: "10.0.0.2".into(),
+                dest_port: Some(2),
+                iface: "lan".into(),
+                app_proto: String::new(),
+                raw: "{}".into(),
+            }))
+        };
+        a.write(
+            &[alert(2_000_000, 1, "ET old"), alert(4_000_000, 2, "ET new")],
+            None,
+        )
+        .unwrap();
+        let sock = dir.join("guard.sock");
+        assert!(sensr_api::guard::use_paths(dir.clone(), sock));
+        assert!(sensr_api::insight::use_dir(dir.clone()));
+        dir
+    });
+    let fx = GuardFx {
+        sock: dir.join("guard.sock"),
+    };
+    fx.daemon(true);
+    (fx, guard)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_when_daemon_down_marks_rules_inactive() {
+    let (g, _lock) = guard_fixture().await;
+    let fx = start().await;
+    // Two configured rules, one of them disabled.
+    let mut c = Client::connect(&fx.socket, Principal::unix("seed", 0))
+        .await
+        .unwrap();
+    for (n, enabled) in [(1, true), (2, false)] {
+        c.call(Op::ConfigSet {
+            path: format!("guard.rules.7e570000-0000-4000-8000-{n:012}")
+                .parse()
+                .unwrap(),
+            value: json!({"enabled": enabled, "description": "d", "hook": "connect",
+                "target": {"net": {"cidr": "10.0.0.0/8", "ports": [22]}}}),
+        })
+        .await
+        .unwrap();
+    }
+    c.call(Op::ConfigCommit {
+        description: Some("guard rules".into()),
+        confirm_secs: None,
+    })
+    .await
+    .unwrap();
+    let who = pw("guarder", "pw");
+
+    let (st, up) = http(&fx, "GET", "/api/v1/guard/status", Some(&who), None).await;
+    assert_eq!(st, 200, "{up}");
+    assert_eq!(up["running"], true);
+    assert_eq!(up["rules"][0]["id"], "no-curl");
+    assert_eq!(up["rules"][0]["active"], true);
+
+    g.daemon(false);
+    let (st, down) = http(&fx, "GET", "/api/v1/guard/status", Some(&who), None).await;
+    assert_eq!(st, 200, "{down}");
+    assert_eq!(
+        (&down["running"], &down["enforcing"]),
+        (&json!(false), &json!(false))
+    );
+    assert_eq!(down["reason"], "sensr-guard is not running");
+    let rules = down["rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 1, "the disabled rule is not listed: {down}");
+    assert_eq!(rules[0]["id"], "7e570000-0000-4000-8000-000000000001");
+    assert_eq!(rules[0]["active"], false);
+    assert_eq!(rules[0]["action"], "alert");
+    assert_eq!(rules[0]["reason"], "sensr-guard is not running");
+    assert!(down["packs"].as_array().unwrap().is_empty());
+
+    // Writes are 503 while it is down.
+    let (st, body) = http(&fx, "POST", "/api/v1/guard/reload", Some(&who), None).await;
+    assert_eq!(st, 503, "{body}");
+    assert_eq!(body["message"], "sensr-guard is not running");
+    // Events are still readable, with no rule ids to map slots to.
+    let (st, body) = http(&fx, "GET", "/api/v1/guard/events", Some(&who), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body["rows"][2]["rule"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn events_filtered() {
+    let (_g, _lock) = guard_fixture().await;
+    let fx = start().await;
+    let who = pw("guarder", "pw");
+    let get = |q: &'static str| http(&fx, "GET", q, Some(&who), None);
+
+    let (st, body) = get("/api/v1/guard/events").await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        (&body["available"], &body["total"]),
+        (&json!(true), &json!(3))
+    );
+    let ts: Vec<_> = body["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["ts"].clone())
+        .collect();
+    assert_eq!(ts, [5000, 3000, 1000], "newest first");
+    // slot 4 -> its rule; slot 8 is shared by two packs -> none; slot 77 unknown -> none
+    assert_eq!(body["rows"][2]["rule"], "no-curl");
+    assert_eq!(body["rows"][2]["rule_id"], 4);
+    assert!(body["rows"][1]["rule"].is_null() && body["rows"][0]["rule"].is_null());
+    assert_eq!(body["rows"][2]["count"], 2);
+
+    let (_, body) = get("/api/v1/guard/events?hook=exec").await;
+    assert_eq!(body["total"], 2);
+    let (_, body) = get("/api/v1/guard/events?hook=exec&q=NC").await;
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["rows"][0]["target"], "/bin/nc");
+    let (_, body) = get("/api/v1/guard/events?q=app.service&limit=1&offset=1").await;
+    assert_eq!(body["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        (&body["rows"][0]["ts"], &body["total"]),
+        (&json!(3000), &json!(3))
+    );
+    let (_, body) = get("/api/v1/guard/events?q=nothing-like-this").await;
+    assert_eq!(
+        (&body["total"], body["rows"].as_array().unwrap().len()),
+        (&json!(0), 0)
+    );
+
+    assert_eq!(get("/api/v1/guard/events?hook=nope").await.0, 400);
+    assert_eq!(get("/api/v1/guard/events?limit=0").await.0, 400);
+    assert_eq!(get("/api/v1/guard/events?limit=1001").await.0, 400);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn guard_switches_reach_the_daemon() {
+    let (_g, _lock) = guard_fixture().await;
+    let fx = start().await;
+    let who = pw("guarder", "pw");
+    let post = |p: &'static str, b: Option<Value>| http(&fx, "POST", p, Some(&who), b);
+    assert_eq!(post("/api/v1/guard/reload", None).await, (200, json!({})));
+    assert_eq!(
+        post("/api/v1/guard/kill-switch", Some(json!({"on": true}))).await,
+        (200, json!({}))
+    );
+    // A daemon refusal is 409 with a fixed message.
+    let (st, body) = post("/api/v1/guard/kill-switch", Some(json!({"on": false}))).await;
+    assert_eq!(st, 409, "{body}");
+    assert_eq!(body["message"], "sensr-guard refused the request");
+    assert_eq!(
+        post("/api/v1/guard/kill-switch", Some(json!({}))).await.0,
+        422
+    );
+    assert_eq!(
+        post(
+            "/api/v1/guard/kill-switch",
+            Some(json!({"on": true, "x": 1}))
+        )
+        .await
+        .0,
+        422
+    );
+    let (st, body) = post("/api/v1/guard/check-packs", None).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["packs"][0]["name"], "core");
+    assert_eq!(body["packs"][0]["installed"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn readonly_cannot_toggle_kill_switch() {
+    let (_g, _lock) = guard_fixture().await;
+    let fx = start().await;
+    let who = pw("guardreader", "pw");
+    let (st, body) = http(&fx, "GET", "/api/v1/guard/status", Some(&who), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        http(&fx, "GET", "/api/v1/guard/events", Some(&who), None)
+            .await
+            .0,
+        200
+    );
+    for (p, b) in [
+        ("/api/v1/guard/kill-switch", Some(json!({"on": true}))),
+        ("/api/v1/guard/reload", None),
+        ("/api/v1/guard/check-packs", None),
+    ] {
+        let (st, body) = http(&fx, "POST", p, Some(&who), b).await;
+        assert_eq!(st, 403, "{p}: {body}");
+        assert!(
+            body["message"].as_str().unwrap().contains("guardreader"),
+            "{body}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn guard_needs_its_privilege() {
+    let (_g, _lock) = guard_fixture().await;
+    let fx = start().await;
+    for who in [
+        pw("watcher", "pw"),
+        pw("idsonly", "pw"),
+        pw("scanner", "pw"),
+    ] {
+        for (m, p, b) in [
+            ("GET", "/api/v1/guard/status", None),
+            ("GET", "/api/v1/guard/events", None),
+            ("POST", "/api/v1/guard/reload", None),
+            (
+                "POST",
+                "/api/v1/guard/kill-switch",
+                Some(json!({"on": true})),
+            ),
+            ("POST", "/api/v1/guard/check-packs", None),
+        ] {
+            assert_eq!(http(&fx, m, p, Some(&who), b).await.0, 403, "{m} {p}");
+        }
+    }
+    let admin = pw("admin", "adminpw");
+    assert_eq!(
+        http(&fx, "GET", "/api/v1/guard/status", Some(&admin), None)
+            .await
+            .0,
+        200
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn alerts_merge_guard_events_sorted_by_time() {
+    let (_g, _lock) = guard_fixture().await;
+    let fx = start().await;
+    let both = pw("idsguard", "pw");
+    let (st, body) = http(&fx, "GET", "/api/v1/ids/alerts", Some(&both), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        (&body["available"], &body["total"]),
+        (&json!(true), &json!(5))
+    );
+    let rows = body["rows"].as_array().unwrap();
+    let order: Vec<_> = rows
+        .iter()
+        .map(|r| (r["source"].as_str().unwrap(), r["ts"].as_i64().unwrap()))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            ("runtime-guard", 5_000_000),
+            ("ids", 4_000_000),
+            ("runtime-guard", 3_000_000),
+            ("ids", 2_000_000),
+            ("runtime-guard", 1_000_500),
+        ]
+    );
+    assert_eq!(rows[1]["signature"], "ET new");
+    let g = &rows[2];
+    assert_eq!(g["hook"], "exec");
+    assert_eq!(g["action"], "blocked");
+    assert_eq!(g["severity"], 1);
+    assert_eq!(g["target"], "/bin/nc");
+    assert_eq!(g["category"], "runtime-guard");
+    assert_eq!(rows[4]["rule"], "no-curl");
+
+    // paging runs over the merged list
+    let (_, body) = http(
+        &fx,
+        "GET",
+        "/api/v1/ids/alerts?limit=2&offset=1",
+        Some(&both),
+        None,
+    )
+    .await;
+    let order: Vec<_> = body["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["ts"].as_i64().unwrap())
+        .collect();
+    assert_eq!(order, [4_000_000, 3_000_000]);
+    assert_eq!(body["total"], 5);
+    // time range (ms) and text apply to both
+    let (_, body) = http(
+        &fx,
+        "GET",
+        "/api/v1/ids/alerts?since=2000000&until=4000000",
+        Some(&both),
+        None,
+    )
+    .await;
+    let order: Vec<_> = body["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["ts"].as_i64().unwrap())
+        .collect();
+    assert_eq!(order, [3_000_000, 2_000_000]);
+    let (_, body) = http(
+        &fx,
+        "GET",
+        "/api/v1/ids/alerts?text=bin/nc",
+        Some(&both),
+        None,
+    )
+    .await;
+    assert_eq!(body["total"], 1);
+    // a signature or host filter has no guard rows
+    for q in ["sid=1", "host=10.0.0.1"] {
+        let (_, body) = http(
+            &fx,
+            "GET",
+            &format!("/api/v1/ids/alerts?{q}"),
+            Some(&both),
+            None,
+        )
+        .await;
+        let sources: Vec<_> = body["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["source"].clone())
+            .collect();
+        assert!(
+            sources.iter().all(|s| s == "ids") && !sources.is_empty(),
+            "{q}: {body}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn alerts_without_the_guard_privilege_stay_ids_only() {
+    let (_g, _lock) = guard_fixture().await;
+    let fx = start().await;
+    let who = pw("idsonly", "pw");
+    let (st, body) = http(&fx, "GET", "/api/v1/ids/alerts", Some(&who), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["total"], 2);
+    let rows = body["rows"].as_array().unwrap();
+    assert!(rows.iter().all(|r| r["source"] == "ids"));
+    assert_eq!(rows[0]["signature"], "ET new");
+    // and the guard privilege alone does not open the alerts
+    assert_eq!(
+        http(
+            &fx,
+            "GET",
+            "/api/v1/ids/alerts",
+            Some(&pw("guarder", "pw")),
+            None
+        )
+        .await
+        .0,
+        403
+    );
 }

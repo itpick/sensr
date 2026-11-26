@@ -4,10 +4,12 @@
 //! (`ids.suppressions`) through the normal config routes.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::Extension;
 use axum::Json;
-use axum::extract::Query;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use sensr_flow::config::{ALERTS_DB, DB_DIR, FLOWS_DB};
 use sensr_flow::eve::{AlertFilter, AlertStore};
@@ -15,15 +17,23 @@ use sensr_flow::store::{FlowStore, RowKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::AppState;
+use crate::auth::Caller;
 use crate::error::ApiError;
 
 type ApiResult = Result<Json<Value>, ApiError>;
 
-#[cfg(test)]
 static TEST_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// Test hook: read the insight databases from `dir` (tests cannot set the
+/// environment: `unsafe_code` is forbidden). Only the first call has any
+/// effect; returns whether it did. Not for production use.
+#[doc(hidden)]
+pub fn use_dir(dir: PathBuf) -> bool {
+    TEST_DIR.set(dir).is_ok()
+}
+
 pub(crate) fn dir() -> PathBuf {
-    #[cfg(test)]
     if let Some(d) = TEST_DIR.get() {
         return d.clone();
     }
@@ -172,18 +182,72 @@ fn alerts_db() -> Option<AlertStore> {
     p.exists().then(|| AlertStore::open_read_only(&p).ok())?
 }
 
+/// The most rows either source is asked for in one page of the alerts list.
+const MAX_PAGE: u32 = 5000;
+
 /// `GET /api/v1/ids/alerts`: newest first, filtered by signature id, text
-/// or host.
-pub async fn alerts(Query(q): Query<AlertQuery>) -> ApiResult {
-    let f = q.filter();
+/// or host. Every row has a `source`: `ids`, or `runtime-guard` for the
+/// guard's events, which are merged in only for a caller who also holds the
+/// guard privilege (and which a signature or host filter excludes: they
+/// have neither).
+pub async fn alerts(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    Query(q): Query<AlertQuery>,
+) -> ApiResult {
+    let with_guard = q.sid.is_none()
+        && q.host.as_deref().is_none_or(str::is_empty)
+        && state.registry.grants(
+            caller.info.privileges.iter().map(String::as_str),
+            "/api/v1/guard/events",
+        );
+    let mut f = q.filter();
+    let (limit, offset) = (f.limit.clamp(1, MAX_PAGE), f.offset);
+    let guard = if with_guard {
+        // Each side's newest `offset + limit` rows hold the merged page.
+        let newest = limit.saturating_add(offset).min(MAX_PAGE);
+        f.limit = newest;
+        f.offset = 0;
+        crate::guard::alert_rows(crate::guard::AlertsWanted {
+            text: f.text.clone(),
+            since: f.since,
+            until: f.until,
+            newest,
+        })
+        .await?
+    } else {
+        None
+    };
     blocking(move || {
-        let Some(s) = alerts_db() else {
-            return Ok(json!({ "available": false, "rows": [], "total": 0 }));
+        let ids = alerts_db();
+        let (mut rows, mut total) = match &ids {
+            Some(s) => {
+                let (rows, total) = s.list(&f).map_err(internal)?;
+                (rows.iter().map(ids_row).collect::<Vec<_>>(), total)
+            }
+            None => (Vec::new(), 0),
         };
-        let (rows, total) = s.list(&f).map_err(internal)?;
-        Ok(json!({ "available": true, "rows": rows, "total": total }))
+        let available = ids.is_some() || guard.is_some();
+        if let Some((g, n)) = guard {
+            rows.extend(g);
+            total += n;
+            // Stable: on equal times the IDS alert stays first.
+            rows.sort_by_key(|r| std::cmp::Reverse(r["ts"].as_i64().unwrap_or(0)));
+            rows = rows
+                .into_iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .collect();
+        }
+        Ok(json!({ "available": available, "rows": rows, "total": total }))
     })
     .await
+}
+
+fn ids_row(a: &sensr_flow::eve::Alert) -> Value {
+    let mut v = json!(a);
+    v["source"] = json!("ids");
+    v
 }
 
 /// `GET /api/v1/ids/signatures`: the most frequent signatures.
@@ -241,7 +305,23 @@ mod tests {
         }))
         .await;
         assert!(bad_kind.is_err());
-        let a = alerts(Query(AlertQuery::default())).await.unwrap();
+        let caller = Caller {
+            info: sensr_ipc::AuthInfo {
+                user: "u".into(),
+                uid: 0,
+                groups: vec![],
+                privileges: vec!["page-all".into()],
+            },
+            via: sensr_ipc::AuthMethod::Password,
+        };
+        let state = AppState::new(d.path().join("none.sock"));
+        let a = alerts(
+            State(state),
+            Extension(caller),
+            Query(AlertQuery::default()),
+        )
+        .await
+        .unwrap();
         assert_eq!(a.0["total"], 0);
     }
 }

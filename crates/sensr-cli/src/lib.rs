@@ -49,6 +49,8 @@ pub enum Command {
     Insight(InsightCmd),
     /// Port scanner: scan a device or range, see what is running, show results.
     Scan(ScanArgs),
+    /// Runtime guard: its status, recent events, and the kill switch.
+    Guard(GuardArgs),
     /// Import a foreign configuration into the candidate.
     #[command(subcommand)]
     Import(ImportCmd),
@@ -130,6 +132,47 @@ pub struct ScanArgs {
     /// What else to do.
     #[command(subcommand)]
     pub cmd: Option<ScanCmd>,
+}
+
+/// `sensr guard …`: talks to `sensr-guard` directly (its control socket and
+/// event database), like `sensr scan`.
+#[derive(Debug, clap::Args)]
+pub struct GuardArgs {
+    /// sensr-guard control socket.
+    #[arg(long, env = "SENSR_GUARD_SOCKET", default_value = sensr_guard::config::SOCKET)]
+    pub guard_socket: PathBuf,
+    /// Guard state directory (the event database).
+    #[arg(long, env = "SENSR_GUARD_DIR", default_value = sensr_guard::config::STATE_DIR)]
+    pub db_dir: PathBuf,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// What to do.
+    #[command(subcommand)]
+    pub cmd: GuardCmd,
+}
+
+/// `sensr guard status|events|off|on`.
+#[derive(Debug, Subcommand)]
+pub enum GuardCmd {
+    /// Whether the guard is running and enforcing, and each rule's state.
+    Status,
+    /// Recent events, newest first.
+    Events {
+        /// Only this hook (exec, connect, listen, file_write, setuid, module, bpf).
+        #[arg(long)]
+        hook: Option<String>,
+        /// Only events whose executable, target or unit contains this text.
+        #[arg(short, long)]
+        q: Option<String>,
+        /// How many to show.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Turn the kill switch on: nothing blocks, rules only alert.
+    Off,
+    /// Turn the kill switch off: blocking rules block again.
+    On,
 }
 
 /// `sensr scan status` and `sensr scan show`.
@@ -407,6 +450,10 @@ pub async fn run_with_input(
         scan(args, out)?;
         return Ok(());
     }
+    if let Command::Guard(args) = &cli.command {
+        guard(args, out)?;
+        return Ok(());
+    }
     let mut c = Client::connect(&cli.socket, principal())
         .await
         .map_err(|e| anyhow::anyhow!(describe(&e)))?;
@@ -438,7 +485,7 @@ pub async fn run_with_input(
             )?;
         }
         // Handled before the agent connection: insight reads the local database.
-        Command::Insight(_) | Command::Scan(_) => {}
+        Command::Insight(_) | Command::Scan(_) | Command::Guard(_) => {}
         Command::Config(cmd) => config(&mut c, cmd, out).await?,
         Command::Interfaces(cmd) => interfaces(&mut c, cmd, input, out).await?,
         Command::Import(ImportCmd::Opnsense {
@@ -562,6 +609,159 @@ fn insight_hosts(
         for r in &rows {
             writeln!(out, "{}  up {}  down {}", r.key, bytes(r.up), bytes(r.down))?;
         }
+    }
+    Ok(())
+}
+
+fn guard_send(
+    socket: &std::path::Path,
+    req: &sensr_guard::proto::Request,
+) -> anyhow::Result<sensr_guard::proto::Reply> {
+    sensr_guard::client::send(socket, req).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+            anyhow::anyhow!("sensr-guard is not running ({}: {e})", socket.display())
+        }
+        std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(
+            "permission denied on the sensr-guard socket {} (run as root)",
+            socket.display()
+        ),
+        _ => anyhow::anyhow!("sensr-guard did not answer: {e}"),
+    })
+}
+
+fn yes_no(b: bool) -> &'static str {
+    if b { "yes" } else { "no" }
+}
+
+/// `sensr guard …`.
+fn guard(args: &GuardArgs, out: &mut dyn Write) -> anyhow::Result<()> {
+    use sensr_guard::proto::{Reply, Request};
+    match &args.cmd {
+        GuardCmd::Status => match guard_send(&args.guard_socket, &Request::Status) {
+            Ok(Reply::Status(v)) if args.json => writeln!(out, "{}", output::json(&v))?,
+            Ok(Reply::Status(v)) => {
+                writeln!(
+                    out,
+                    "running: {}  enforcing: {}  kill switch: {}  lockdown: {}",
+                    yes_no(v.running),
+                    yes_no(v.enforcing),
+                    if v.kill_switch {
+                        "on (nothing blocks)"
+                    } else {
+                        "off"
+                    },
+                    v.lockdown
+                )?;
+                if let Some(r) = &v.reason {
+                    writeln!(out, "note: {r}")?;
+                }
+                for p in &v.packs {
+                    writeln!(
+                        out,
+                        "pack {} {}: {}{}",
+                        p.name,
+                        p.version,
+                        if p.active { "active" } else { "inactive" },
+                        p.reason
+                            .as_deref()
+                            .map_or_else(String::new, |r| format!(" ({r})"))
+                    )?;
+                }
+                for r in &v.rules {
+                    writeln!(
+                        out,
+                        "rule {}: {:?} {}  hits {}{}",
+                        r.id,
+                        r.action,
+                        if r.active { "active" } else { "inactive" },
+                        r.hits,
+                        r.reason
+                            .as_deref()
+                            .map_or_else(String::new, |x| format!(" ({x})"))
+                    )?;
+                }
+            }
+            Ok(other) => bail!("unexpected reply from sensr-guard: {other:?}"),
+            // Down is an answer to "status", not a failure.
+            Err(e) if e.to_string().contains("not running") => {
+                if args.json {
+                    writeln!(
+                        out,
+                        "{}",
+                        serde_json::json!({"running": false, "enforcing": false})
+                    )?;
+                } else {
+                    writeln!(out, "running: no  (sensr-guard is not running)")?;
+                }
+            }
+            Err(e) => return Err(e),
+        },
+        GuardCmd::Events { hook, q, limit } => {
+            guard_events(args, hook.as_deref(), q.as_deref(), *limit, out)?
+        }
+        GuardCmd::Off | GuardCmd::On => {
+            let on = matches!(args.cmd, GuardCmd::Off);
+            match guard_send(&args.guard_socket, &Request::KillSwitch { on })? {
+                Reply::Ok if on => {
+                    writeln!(out, "kill switch on: nothing blocks, rules only alert")?
+                }
+                Reply::Ok => writeln!(out, "kill switch off: blocking rules block again")?,
+                Reply::Error(e) => bail!("sensr-guard refused: {e}"),
+                other => bail!("unexpected reply from sensr-guard: {other:?}"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `sensr guard events`: read the event database.
+fn guard_events(
+    args: &GuardArgs,
+    hook: Option<&str>,
+    q: Option<&str>,
+    limit: u32,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    use sensr_guard::store::{Filter, Store};
+    if !(1..=1000).contains(&limit) {
+        bail!("limit is 1 to 1000");
+    }
+    let path = args.db_dir.join(sensr_guard::config::EVENTS_DB);
+    let store = Store::open_ro(&path).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot read {}: {e} (has the guard run yet? the database is readable by group sensr)",
+            path.display()
+        )
+    })?;
+    let f = Filter {
+        hook: hook.map(str::to_owned),
+        text: q.filter(|t| !t.is_empty()).map(str::to_owned),
+        ..Filter::default()
+    };
+    let rows = store.events(&f, limit, 0)?;
+    if args.json {
+        writeln!(out, "{}", output::json(&rows))?;
+        return Ok(());
+    }
+    for e in &rows {
+        let r = &e.row;
+        writeln!(
+            out,
+            "{}.{:03}  {}  {}  rule#{}  {} {}  {}{}",
+            r.ts,
+            r.ts_ms,
+            r.hook,
+            if r.blocked { "BLOCKED" } else { "alert" },
+            r.rule_id,
+            r.exe,
+            r.target,
+            r.unit,
+            if r.count > 1 {
+                format!("  x{}", r.count)
+            } else {
+                String::new()
+            }
+        )?;
     }
     Ok(())
 }
@@ -1046,6 +1246,171 @@ mod tests {
             panic!()
         };
         assert!(a.confirm);
+    }
+
+    #[test]
+    fn guard_arguments_parse() {
+        use clap::Parser;
+        let parse = |a: &[&str]| Cli::try_parse_from([&["sensr"], a].concat());
+        let g = |a: &[&str]| match parse(a).unwrap().command {
+            Command::Guard(g) => g,
+            c => panic!("not guard: {c:?}"),
+        };
+        assert!(matches!(g(&["guard", "status"]).cmd, GuardCmd::Status));
+        assert!(matches!(g(&["guard", "off"]).cmd, GuardCmd::Off));
+        assert!(matches!(g(&["guard", "on"]).cmd, GuardCmd::On));
+        let a = g(&[
+            "guard", "--json", "events", "--hook", "exec", "-q", "curl", "--limit", "5",
+        ]);
+        assert!(a.json);
+        let GuardCmd::Events { hook, q, limit } = a.cmd else {
+            panic!()
+        };
+        assert_eq!(
+            (hook.as_deref(), q.as_deref(), limit),
+            (Some("exec"), Some("curl"), 5)
+        );
+        let GuardCmd::Events { limit, .. } = g(&["guard", "events"]).cmd else {
+            panic!()
+        };
+        assert_eq!(limit, 50);
+        assert!(parse(&["guard"]).is_err(), "a subcommand is required");
+        assert!(parse(&["guard", "maybe"]).is_err());
+    }
+
+    #[test]
+    fn guard_talks_to_the_daemon_and_reads_events() {
+        use sensr_guard::proto::Request;
+        use std::io::BufRead;
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("g.sock");
+        let l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let t = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            for reply in [
+                r#"{"op":"ok"}"#,
+                r#"{"op":"ok"}"#,
+                r#"{"op":"error","data":"nope"}"#,
+                r#"{"op":"status","data":{"running":true,"enforcing":false,"reason":"apply failed","kill_switch":true,"lockdown":"none","packs":[],"rules":[{"id":"r1","action":"block","active":false,"reason":"off","hits":2}],"dropped_kernel":0,"dropped_rate":0,"dropped_blocked":0,"boot_complete":true}}"#,
+            ] {
+                let (s, _) = l.accept().unwrap();
+                let mut line = String::new();
+                std::io::BufReader::new(&s).read_line(&mut line).unwrap();
+                got.push(serde_json::from_str::<Request>(&line).unwrap());
+                (&s).write_all(format!("{reply}\n").as_bytes()).unwrap();
+            }
+            got
+        });
+        let args = |cmd| GuardArgs {
+            guard_socket: sock.clone(),
+            db_dir: dir.path().to_owned(),
+            json: false,
+            cmd,
+        };
+        let run = |a: &GuardArgs| {
+            let mut out = Vec::new();
+            guard(a, &mut out).map(|()| String::from_utf8(out).unwrap())
+        };
+        assert!(
+            run(&args(GuardCmd::Off))
+                .unwrap()
+                .contains("nothing blocks")
+        );
+        assert!(run(&args(GuardCmd::On)).unwrap().contains("block again"));
+        let e = run(&args(GuardCmd::Off)).unwrap_err();
+        assert!(e.to_string().contains("refused: nope"), "{e}");
+        let text = run(&args(GuardCmd::Status)).unwrap();
+        assert!(
+            text.contains("running: yes  enforcing: no  kill switch: on"),
+            "{text}"
+        );
+        assert!(text.contains("note: apply failed"), "{text}");
+        assert!(
+            text.contains("rule r1: Block inactive  hits 2 (off)"),
+            "{text}"
+        );
+        assert_eq!(
+            t.join().unwrap(),
+            [
+                Request::KillSwitch { on: true },
+                Request::KillSwitch { on: false },
+                Request::KillSwitch { on: true },
+                Request::Status
+            ]
+        );
+
+        // the daemon is gone now: status says so, switches fail
+        let text = run(&args(GuardCmd::Status)).unwrap();
+        assert!(text.contains("running: no"), "{text}");
+        let mut a = args(GuardCmd::Status);
+        a.json = true;
+        let v: serde_json::Value = serde_json::from_str(&run(&a).unwrap()).unwrap();
+        assert_eq!(v["running"], false);
+        assert!(
+            run(&args(GuardCmd::On))
+                .unwrap_err()
+                .to_string()
+                .contains("not running")
+        );
+
+        // events: no database yet, then rows
+        let ev = |hook: Option<&str>, q: Option<&str>, limit| {
+            run(&args(GuardCmd::Events {
+                hook: hook.map(str::to_owned),
+                q: q.map(str::to_owned),
+                limit,
+            }))
+        };
+        assert!(
+            ev(None, None, 50)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot read")
+        );
+        let mut st =
+            sensr_guard::store::Store::open(&dir.path().join(sensr_guard::config::EVENTS_DB))
+                .unwrap();
+        let row = |ts, hook: &str, blocked, target: &str| sensr_guard::events::Row {
+            ts,
+            ts_ms: 5,
+            hook: hook.into(),
+            action: "alert".into(),
+            blocked,
+            rule_id: 3,
+            exe: "/usr/bin/curl".into(),
+            target: target.into(),
+            unit: "a.service".into(),
+            pid: 1,
+            uid: 2,
+            count: 4,
+        };
+        st.write_batch(&sensr_guard::events::Batch {
+            rows: vec![
+                row(10, "connect", false, "1.1.1.1:53"),
+                row(20, "exec", true, "/bin/nc"),
+            ],
+        })
+        .unwrap();
+        let text = ev(None, None, 50).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert_eq!(
+            lines[0],
+            "20.005  exec  BLOCKED  rule#3  /usr/bin/curl /bin/nc  a.service  x4"
+        );
+        assert!(lines[1].contains("connect") && lines[1].contains("alert"));
+        assert_eq!(ev(Some("connect"), None, 50).unwrap().lines().count(), 1);
+        assert_eq!(ev(None, Some("NC"), 50).unwrap().lines().count(), 1);
+        assert_eq!(ev(None, None, 1).unwrap().lines().count(), 1);
+        assert!(ev(None, None, 0).is_err());
+        let mut a = args(GuardCmd::Events {
+            hook: None,
+            q: None,
+            limit: 1,
+        });
+        a.json = true;
+        let v: serde_json::Value = serde_json::from_str(&run(&a).unwrap()).unwrap();
+        assert_eq!(v[0]["target"], "/bin/nc");
     }
 
     #[test]
