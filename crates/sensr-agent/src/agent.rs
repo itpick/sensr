@@ -54,6 +54,8 @@ pub struct Settings {
     pub max_confirm: Duration,
     /// Delay before retrying a rollback whose apply failed.
     pub rollback_retry: Duration,
+    /// Confirm window imposed on a commit that may newly block (guard).
+    pub guard_confirm: Duration,
     /// Where the web GUI's local CA and certificate live; `None` keeps them
     /// in memory (tests).
     pub tls_dir: Option<std::path::PathBuf>,
@@ -76,6 +78,7 @@ impl Default for Settings {
             trusted_gids: Vec::new(),
             max_confirm: Duration::from_secs(24 * 3600),
             rollback_retry: Duration::from_secs(5),
+            guard_confirm: crate::guard_confirm::GUARD_CONFIRM,
             tls_dir: None,
             host_root: PathBuf::from("/"),
             pin_first_boot: false,
@@ -902,6 +905,7 @@ impl<A: Applier> Agent<A> {
                 Ok(Response::Committed(Box::new(CommitOutcome {
                     revision,
                     pending_confirm: None,
+                    confirm_reason: None,
                 })))
             }
             Op::ConfigHistory { limit } => Ok(Response::History(
@@ -1278,7 +1282,8 @@ impl<A: Applier> Agent<A> {
         description: Option<String>,
         confirm_secs: Option<u32>,
     ) -> Result<Response, IpcError> {
-        let window = confirm_secs.map(|s| Duration::from_secs(u64::from(s)));
+        let mut window = confirm_secs.map(|s| Duration::from_secs(u64::from(s)));
+        let mut confirm_reason = None;
         if let Some(w) = window {
             if w.is_zero() || w > self.settings.max_confirm {
                 return Err(err(
@@ -1299,6 +1304,15 @@ impl<A: Applier> Agent<A> {
         let Some(doc) = inner.candidate.clone().filter(|_| Self::dirty(inner)) else {
             return Err(err(ErrorKind::Conflict, "nothing to commit"));
         };
+        // A change that may newly block gets a confirm window of its own
+        // unless the caller chose one (and there is something to fall back to).
+        if window.is_none()
+            && inner.applied.is_some()
+            && crate::guard_confirm::guard_needs_confirm(&inner.head.1, &doc)
+        {
+            window = Some(self.settings.guard_confirm);
+            confirm_reason = Some(crate::guard_confirm::reason(self.settings.guard_confirm));
+        }
         let pending = inner.store.pending_confirm().map_err(internal)?;
         // Fall back to the last *confirmed* revision: a pending one was never
         // shown to keep management reachable.
@@ -1330,6 +1344,7 @@ impl<A: Applier> Agent<A> {
         Ok(Response::Committed(Box::new(CommitOutcome {
             revision,
             pending_confirm: pending_confirm.map(ipc_pending),
+            confirm_reason,
         })))
     }
 
