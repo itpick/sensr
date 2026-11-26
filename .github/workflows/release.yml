@@ -209,6 +209,124 @@ jobs:
           path: out/*
           retention-days: 3
 
+  # The runtime guard's core pack as a signed archive per architecture, for
+  # sensr-guard's "Check for pack updates" (guard-packs.json). Signing needs
+  # the GUARD_PACK_KEY secret (an unencrypted minisign secret key, `minisign
+  # -G -W`, whose public half is in nix/pi5/guard-keys); without it the pack
+  # is still built, but nothing is signed or published.
+  guard-pack:
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+      - uses: DeterminateSystems/nix-installer-action@main
+      # Binary cache: see updater-x86_64.
+      - uses: cachix/cachix-action@v17
+        if: vars.CACHIX_CACHE != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          skipPush: ${{ github.event_name == 'pull_request' }}
+          pushFilter: '(\.img(\.zst)?|\.iso|\.qcow2?|-sd-image-.*|-nixos-disk-image|-installer.*)$'
+      - name: Build the core pack archive
+        run: |
+          set -euo pipefail
+          pack="$(nix build -L --print-out-paths .#sensr-guard-bpf)/share/sensr-guard/packs/core"
+          mkdir -p work out
+          # The archive's version is the pack's own (manifest.json): a router
+          # installs it only when it is newer than what it runs, and its
+          # built-in copy wins when that is at least as new.
+          cp "$pack"/manifest.json "$pack"/rules.json "$pack"/core.bpf.o work/
+          jq -r .version work/manifest.json > "out/guard-pack-core-${{ matrix.arch }}.version"
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 \
+            -C work -cf - core.bpf.o manifest.json rules.json \
+            | zstd -19 -q -o "out/guard-pack-core-${{ matrix.arch }}.tar.zst"
+          sha256sum "out/guard-pack-core-${{ matrix.arch }}.tar.zst" > "out/guard-pack-core-${{ matrix.arch }}.tar.zst.sha256"
+      - name: Sign the core pack
+        id: sign
+        env:
+          GUARD_PACK_KEY: ${{ secrets.GUARD_PACK_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GUARD_PACK_KEY:-}" ]; then
+            echo "::notice title=guard pack not signed::GUARD_PACK_KEY is not set; the core pack is not signed or published, and guard-packs.json is not published for $TAG"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sudo apt-get update -q && sudo apt-get install -y -q minisign
+          umask 077
+          printf '%s\n' "$GUARD_PACK_KEY" > "$RUNNER_TEMP/guard-pack.key"
+          f="out/guard-pack-core-${{ matrix.arch }}.tar.zst"
+          minisign -S -s "$RUNNER_TEMP/guard-pack.key" -m "$f" -x "$f.minisig" \
+            -t "sensr-guard core $(cat "out/guard-pack-core-${{ matrix.arch }}.version") ${{ matrix.arch }} $TAG"
+          rm -f "$RUNNER_TEMP/guard-pack.key"
+          # The signature must verify with a key the image ships, or no
+          # router would accept the pack.
+          ok=false
+          for k in nix/pi5/guard-keys/*.pub; do
+            [ -f "$k" ] || continue
+            if minisign -V -q -p "$k" -m "$f" -x "$f.minisig"; then ok=true; fi
+          done
+          if [ "$ok" != true ]; then
+            echo "::error::the guard pack signature does not verify with any key in nix/pi5/guard-keys"
+            exit 1
+          fi
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v5
+        if: steps.sign.outputs.signed == 'true'
+        with:
+          name: guard-pack-${{ matrix.arch }}
+          path: out/*
+          retention-days: 3
+
+  # Attaches the signed packs and their index to the release (only when they
+  # were signed: an unsigned pack would be refused by every router anyway).
+  publish-guard-packs:
+    needs: [publish-update, guard-pack]
+    if: needs.guard-pack.outputs.signed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: guard-pack-*
+          path: assets
+          merge-multiple: true
+      - name: Publish the packs and guard-packs.json
+        run: |
+          set -euo pipefail
+          base="https://github.com/itpick/sensr/releases/download/$TAG"
+          files=()
+          entries='[]'
+          for arch in x86_64 aarch64; do
+            f="guard-pack-core-$arch.tar.zst"
+            for x in "$f" "$f.minisig" "$f.sha256"; do
+              [ -s "assets/$x" ] || { echo "missing $x"; exit 1; }
+              files+=("assets/$x")
+            done
+            v=$(cat "assets/guard-pack-core-$arch.version")
+            entries=$(jq --arg a "$arch" --arg v "$v" --arg u "$base/$f" \
+              --arg s "$base/$f.minisig" \
+              '. + [{name: "core", version: $v, arch: $a, url: $u, sig_url: $s}]' <<<"$entries")
+          done
+          jq -n --argjson packs "$entries" '{packs: $packs}' > assets/guard-packs.json
+          gh release upload "$TAG" --clobber -R "$GITHUB_REPOSITORY" "${files[@]}"
+          # the index goes up after the archives it names
+          gh release upload "$TAG" --clobber -R "$GITHUB_REPOSITORY" assets/guard-packs.json
+
   # Creates the release with what routers need. Runs as soon as both
   # toplevels are packed, without waiting for any disk image.
   publish-update:
