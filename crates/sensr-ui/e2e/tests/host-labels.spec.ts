@@ -16,7 +16,7 @@ const card = (page: Page) => page.locator("section.hosts-card");
 const rows = (page: Page) => card(page).locator("tbody tr");
 const banner = (page: Page) => page.getByRole("region", { name: "Pending changes" });
 const row = (page: Page, host: string) =>
-  rows(page).filter({ has: page.locator("td:first-child", { hasText: new RegExp(`^${host}$`) }) });
+  rows(page).filter({ has: page.locator("a.host-link", { hasText: new RegExp(`^${host}$`) }) });
 const label = (page: Page, host: string) => row(page, host).locator(".host-label");
 const icon = (page: Page, host: string) => label(page, host).locator(".host-kind-icon");
 const pencil = (page: Page, host: string) => row(page, host).getByRole("button", { name: `Edit label for ${host}` });

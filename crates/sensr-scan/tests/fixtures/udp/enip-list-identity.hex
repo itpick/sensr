@@ -1,0 +1,8 @@
+# enip-list-identity: identity '1756-L83E/B', revision 32.11
+# Source: written by the sensr authors from ODVA CIP Vol 2 §2-4.3 (ListIdentity).
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+63 00 33 00 00 00 00 00 00 00 00 00 73 65 6e 73
+72 63 69 70 00 00 00 00 01 00 0c 00 2d 00 01 00
+00 02 af 12 c0 a8 01 28 00 00 00 00 00 00 00 00
+01 00 0e 00 a6 00 20 0b 30 00 ee ff c0 00 0b 31
+37 35 36 2d 4c 38 33 45 2f 42 03

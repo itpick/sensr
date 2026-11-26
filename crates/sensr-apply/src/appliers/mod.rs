@@ -20,6 +20,7 @@ pub mod interfaces;
 pub mod kea;
 pub mod nft;
 pub mod ntp;
+pub mod portscan;
 pub mod qdisc;
 pub mod suricata;
 pub mod sysctl;

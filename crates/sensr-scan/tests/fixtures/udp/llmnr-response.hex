@@ -1,0 +1,6 @@
+# llmnr-response: answer for 'wpad' A 192.168.1.66
+# Source: written by the sensr authors from RFC 4795 §2.1.1.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+73 65 80 00 00 01 00 01 00 00 00 00 04 77 70 61
+64 00 00 01 00 01 c0 0c 00 01 00 01 00 00 00 1e
+00 04 c0 a8 01 42

@@ -1,0 +1,7 @@
+# snmp-sysdescr: v2c GetResponse sysDescr.0 = 'Linux nas 6.1'
+# Source: written by the sensr authors from RFC 3416 §3 and ITU-T X.690 BER.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+30 36 02 01 01 04 06 70 75 62 6c 69 63 a2 29 02
+04 73 65 6e 73 02 01 00 02 01 00 30 1b 30 19 06
+08 2b 06 01 02 01 01 01 00 04 0d 4c 69 6e 75 78
+20 6e 61 73 20 36 2e 31

@@ -1455,6 +1455,213 @@ pub fn IdsAlertsPage() -> impl IntoView {
     }
 }
 
+// ------------------------------------------------------------ Services › Port Scanner
+
+/// Services › Port Scanner: New scan, the queue (with Cancel), every device's latest scan
+/// (with Scan now) and the range scans, then the settings and the devices never scanned.
+/// Server-rendered with plain forms that come back here (see
+/// [`crate::portscan::PortscanQuery`]).
+#[component]
+pub fn PortscanPage() -> impl IntoView {
+    let q = use_query_map().get_untracked();
+    let q = crate::portscan::PortscanQuery::from_query(|k| q.get(k));
+    let load = move || {
+        let q = q.clone();
+        Suspend::new(async move {
+            match crate::actions::portscan_page().await {
+                Ok(p) => portscan_body(p, &q),
+                Err(e) => load_error(e),
+            }
+        })
+    };
+    view! {
+        <p class="intro">"The port scanner finds what each device offers on the network: every TCP port, the well-known UDP services, and what each service says about itself (names, versions, page titles, certificates). It scans a device once when it first appears, and whenever you ask."</p>
+        <Suspense fallback=|| ()>{load}</Suspense>
+        <SettingsForm<PortscanSettings> title="Settings"/>
+        <Grid<PortscanExclude> title="Never scanned"/>
+    }
+}
+
+/// The Port Scanner page's cards for `p`, with the message `q` came back with. Device text
+/// is rendered as text only.
+pub fn portscan_body(
+    p: crate::portscan::PortscanView,
+    q: &crate::portscan::PortscanQuery,
+) -> AnyView {
+    use crate::islands::{chip_view, dotted, ports_items};
+    let can = p.can_scan;
+    let message = q.message().map(|(bad, m)| {
+        if bad {
+            view! { <p class="field-error" role="alert">{m}</p> }.into_any()
+        } else {
+            view! { <p class="notice" role="status">{m}</p> }.into_any()
+        }
+    });
+    let new_scan = can.then(|| {
+        view! {
+            <section class="card" aria-labelledby="ps-new">
+                <h2 id="ps-new">"New scan"</h2>
+                <form method="post" action="/ui/fn/portscan_submit" class="scan-form">
+                    <div class="field-stack">
+                        <label for="ps-target">"Address, network or range"</label>
+                        <input id="ps-target" name="target" type="text" required spellcheck="false"
+                            placeholder="192.168.1.20, 192.168.1.0/24 or 192.168.1.10-40" value=q.target.clone()/>
+                    </div>
+                    <label class="check">
+                        <input type="checkbox" name="public_ok" value="on"/>
+                        " Scan addresses outside the local networks"
+                    </label>
+                    <label class="check">
+                        <input type="checkbox" name="include_excluded" value="on"/>
+                        " Include excluded devices (Never scanned)"
+                    </label>
+                    <div class="filter-actions">
+                        <button type="submit" class="btn btn-primary">"Scan"</button>
+                    </div>
+                </form>
+                {message}
+                {scan_anyway(q, None)}
+            </section>
+        }
+    });
+    let cancel = move |id: u64, what: &str| {
+        can.then(|| {
+            view! {
+                <form method="post" action="/ui/fn/portscan_cancel_form" class="row-actions">
+                    <input type="hidden" name="job_id" value=id.to_string()/>
+                    <button type="submit" class="btn btn-sm" aria-label=format!("Cancel the scan of {what}")>"Cancel"</button>
+                </form>
+            }
+        })
+    };
+    let queue = if let Some(n) = &p.note {
+        view! { <p class="field-error" role="alert">{n.clone()}</p> }.into_any()
+    } else if p.jobs.is_empty() {
+        view! { <p class="muted">"Nothing is being scanned."</p> }.into_any()
+    } else {
+        let rows = p
+            .jobs
+            .iter()
+            .map(|j| {
+                view! {
+                    <tr>
+                        <td class="num">{j.target.clone()}</td>
+                        <td>{j.kind.clone()}</td>
+                        <td>{j.progress.clone()}</td>
+                        <td class="col-actions">{cancel(j.job_id, &j.target)}</td>
+                    </tr>
+                }
+            })
+            .collect_view();
+        view! {
+            <div class="table-wrap">
+                <table class="scan-queue">
+                    <caption class="sr-only">"Running and queued scans"</caption>
+                    <thead><tr>
+                        <th scope="col">"Target"</th><th scope="col">"Kind"</th>
+                        <th scope="col">"Progress"</th>
+                        <th scope="col" class="col-actions"><span class="sr-only">"Actions"</span></th>
+                    </tr></thead>
+                    <tbody>{rows}</tbody>
+                </table>
+            </div>
+        }
+        .into_any()
+    };
+    let devices = p
+        .devices
+        .iter()
+        .map(|d| {
+            let scan = (can && !d.ports.scanning)
+                .then_some(())
+                .and(d.ipv4.clone())
+                .map(|ip| {
+                    view! {
+                        <form method="post" action="/ui/fn/portscan_submit" class="row-actions">
+                            <input type="hidden" name="target" value=ip/>
+                            <input type="hidden" name="mac" value=d.mac.clone()/>
+                            <button type="submit" class="btn btn-sm" aria-label=format!("Scan now: {}", d.name)>"Scan now"</button>
+                        </form>
+                    }
+                });
+            let items = ports_items(&d.ports, &d.key);
+            let none = items.is_empty().then_some("not scanned");
+            view! {
+                <tr>
+                    <td><a href=crate::runtime::host_href(&d.key)>{d.name.clone()}</a></td>
+                    <td class="num">{d.ipv4.clone().unwrap_or_default()}</td>
+                    <td class="muted">{dotted(items)}{none}</td>
+                    <td class="col-actions">{scan}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    let ranges = p
+        .ranges
+        .iter()
+        .map(|j| {
+            let results = j
+                .results
+                .iter()
+                .map(|x| {
+                    let none = x.open.is_empty().then_some("nothing open");
+                    let ports = dotted(x.open.iter().map(chip_view).collect());
+                    view! { <li><span class="num">{x.address.clone()}</span>": "{ports}{none}</li> }
+                })
+                .collect_view();
+            view! {
+                <tr>
+                    <td class="num">{j.target.clone()}</td>
+                    <td class="num">{j.started.clone()}</td>
+                    <td>{j.status.clone()}</td>
+                    <td class="num">{j.alive}</td>
+                    <td><ul class="range-results">{results}</ul></td>
+                </tr>
+            }
+        })
+        .collect_view();
+    // without New scan, the message goes on its own
+    let message = (!can).then(|| q.message()).flatten().map(|(_, m)| {
+        view! { <section class="card"><p class="field-error" role="alert">{m}</p></section> }
+    });
+    view! {
+        {new_scan}
+        {message}
+        <section class="card" aria-labelledby="ps-queue">
+            <h2 id="ps-queue">"Running"</h2>
+            {queue}
+            <p><a class="btn btn-sm" href="/ui/portscan">"Refresh"</a></p>
+        </section>
+        <section class="card">
+            <div class="table-wrap">
+                <table class="device-scans">
+                    <caption>"Device scans"</caption>
+                    <thead><tr>
+                        <th scope="col">"Device"</th><th scope="col">"Address"</th>
+                        <th scope="col">"Open ports"</th>
+                        <th scope="col" class="col-actions"><span class="sr-only">"Actions"</span></th>
+                    </tr></thead>
+                    <tbody>{devices}</tbody>
+                </table>
+            </div>
+        </section>
+        <section class="card">
+            <div class="table-wrap">
+                <table class="range-scans">
+                    <caption>"Range scans"</caption>
+                    <thead><tr>
+                        <th scope="col">"Target"</th><th scope="col">"Started (UTC)"</th>
+                        <th scope="col">"Status"</th><th scope="col">"Alive"</th>
+                        <th scope="col">"Results"</th>
+                    </tr></thead>
+                    <tbody>{ranges}</tbody>
+                </table>
+            </div>
+        </section>
+    }
+    .into_any()
+}
+
 // ------------------------------------------------------------ Reporting › Insight
 
 fn insight_url(range: &str, host: Option<&str>) -> String {
@@ -1749,6 +1956,8 @@ pub struct HostQuery {
     pub saved: Option<String>,
     /// The override editor's refusal.
     pub error: Option<String>,
+    /// What Scan now came back with (`scan_`-prefixed keys).
+    pub scan: crate::portscan::PortscanQuery,
 }
 
 impl HostQuery {
@@ -1769,6 +1978,7 @@ impl HostQuery {
             edit: qm.get("edit").filter(|e| !e.is_empty()),
             saved: qm.get("saved"),
             error: qm.get("error"),
+            scan: crate::portscan::PortscanQuery::from_query(|k| qm.get(&format!("scan_{k}"))),
         }
     }
 }
@@ -2255,6 +2465,138 @@ fn override_dialog(
     .into_any()
 }
 
+/// Scan anyway, after Scan now on a device of the exclude list was refused (see
+/// [`crate::portscan::PortscanQuery::confirm_excluded`]): the same scan, confirmed. On the
+/// host page (`host`: the device's MAC) it comes back there.
+fn scan_anyway(q: &crate::portscan::PortscanQuery, host: Option<&str>) -> Option<AnyView> {
+    let (target, mac) = q.confirm_excluded()?;
+    let mac = host.map(str::to_owned).or(mac);
+    let back = host.map(|_| view! { <input type="hidden" name="back" value="host"/> });
+    let mac = mac.map(|m| view! { <input type="hidden" name="mac" value=m/> });
+    Some(
+        view! {
+            <form method="post" action="/ui/fn/portscan_submit" class="scan-anyway">
+                <input type="hidden" name="target" value=target.clone()/>
+                {mac}
+                <input type="hidden" name="confirm" value="on"/>
+                {back}
+                <button type="submit" class="btn btn-sm" aria-label=format!("Scan {target} anyway")>"Scan anyway"</button>
+            </form>
+        }
+        .into_any(),
+    )
+}
+
+/// The host page's Ports section (`#ports`): every port of the latest scan with what it
+/// said, Scan now, and the scan history, newest first. Device text is rendered as text.
+fn ports_card(d: &crate::portscan::HostPortsDetail, q: &crate::portscan::PortscanQuery) -> AnyView {
+    use sensr_scan::types::{PortState, Proto};
+    let state = |s: PortState| match s {
+        PortState::Open => "open",
+        PortState::OpenFiltered => "open|filtered",
+        PortState::Closed => "closed",
+        PortState::Filtered => "filtered",
+    };
+    let scan = match (&d.ipv4, d.can_scan && !d.scanning) {
+        _ if d.scanning => {
+            Some(view! { <p class="muted port-scanning">"scanning…"</p> }.into_any())
+        }
+        (Some(ip), true) => Some(
+            view! {
+                <form method="post" action="/ui/fn/portscan_submit" class="scan-now">
+                    <input type="hidden" name="target" value=ip.clone()/>
+                    <input type="hidden" name="mac" value=d.mac.clone()/>
+                    <input type="hidden" name="back" value="host"/>
+                    <button type="submit" class="btn btn-sm">"Scan now"</button>
+                </form>
+            }
+            .into_any(),
+        ),
+        _ => None,
+    };
+    let message = q.message().map(|(bad, m)| {
+        if bad {
+            view! { <p class="field-error" role="alert">{m}</p> }.into_any()
+        } else {
+            view! { <p class="notice" role="status">{m}</p> }.into_any()
+        }
+    });
+    let anyway = (d.can_scan && !d.scanning)
+        .then(|| scan_anyway(q, Some(&d.mac)))
+        .flatten();
+    let table = if d.ports.is_empty() {
+        let msg = if d.history.is_empty() {
+            "Not scanned yet."
+        } else {
+            "No open ports."
+        };
+        view! { <p class="muted">{msg}</p> }.into_any()
+    } else {
+        let rows = d
+            .ports
+            .iter()
+            .map(|p| {
+                let grey = p.state != PortState::Open;
+                let said = if p.state == PortState::OpenFiltered {
+                    crate::runtime::OPEN_FILTERED_TIP.to_owned()
+                } else {
+                    crate::portscan::said(&p.ident)
+                };
+                view! {
+                    <tr class:dimmed=grey>
+                        <td class="num">{p.port}</td>
+                        <td>{if p.proto == Proto::Tcp { "TCP" } else { "UDP" }}</td>
+                        <td>{state(p.state)}</td>
+                        <td>{p.service.clone().unwrap_or_default()}</td>
+                        <td class="said">{said}</td>
+                    </tr>
+                }
+            })
+            .collect_view();
+        view! {
+            <div class="table-wrap">
+                <table class="ports">
+                    <thead><tr>
+                        <th scope="col">"Port"</th><th scope="col">"Protocol"</th>
+                        <th scope="col">"State"</th><th scope="col">"Service"</th>
+                        <th scope="col">"What it said"</th>
+                    </tr></thead>
+                    <tbody>{rows}</tbody>
+                </table>
+            </div>
+        }
+        .into_any()
+    };
+    let history = (!d.history.is_empty()).then(|| {
+        let items = d
+            .history
+            .iter()
+            .map(|h| {
+                let when = fmt_time(u64::try_from(h.finished).unwrap_or(0));
+                let mut parts = vec![when, h.status.clone(), format!("{} open", h.open)];
+                parts.extend(h.changes.iter().cloned());
+                parts.push(format!("at {}", h.address));
+                view! { <li>{parts.join(" · ")}</li> }
+            })
+            .collect_view();
+        view! {
+            <h3>"History"</h3>
+            <ol class="scan-history">{items}</ol>
+        }
+    });
+    view! {
+        <section class="card hp-wide" id="ports" aria-labelledby="hp-ports">
+            <h2 id="hp-ports">"Ports"</h2>
+            {message}
+            {anyway}
+            {scan}
+            {table}
+            {history}
+        </section>
+    }
+    .into_any()
+}
+
 /// The body of a host page.
 pub fn host_page_body(p: crate::actions::HostPageData, q: HostQuery) -> AnyView {
     let range = p
@@ -2297,12 +2639,14 @@ pub fn host_page_body(p: crate::actions::HostPageData, q: HostQuery) -> AnyView 
         .into_any()
     });
     let dialog = p.draft.as_ref().map(|d| override_dialog(&p, d, &q));
+    let ports = p.ports.as_ref().map(|d| ports_card(d, &q.scan));
     view! {
         <div class="hp-grid">
             {header}
             {saved}
             {note}
             {body}
+            {ports}
         </div>
         {dialog}
     }

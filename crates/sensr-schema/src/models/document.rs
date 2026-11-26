@@ -19,6 +19,7 @@ use super::insight::Insight;
 use super::interfaces::{Interface, InterfaceRole, Interfaces, Ipv4Config, Ipv6Config};
 use super::nat::Nat;
 use super::ntp::Ntp;
+use super::portscan::Portscan;
 use super::routes::Routes;
 use super::system::System;
 use super::trust::Trust;
@@ -132,11 +133,13 @@ pub enum Section {
     Hosts,
     /// `guard`.
     Guard,
+    /// `portscan`.
+    Portscan,
 }
 
 impl Section {
     /// Every section, in document order.
-    pub const ALL: [Section; 19] = [
+    pub const ALL: [Section; 20] = [
         Self::System,
         Self::Interfaces,
         Self::Firewall,
@@ -156,6 +159,7 @@ impl Section {
         Self::Insight,
         Self::Hosts,
         Self::Guard,
+        Self::Portscan,
     ];
 
     /// The section's key in the JSON document.
@@ -180,6 +184,7 @@ impl Section {
             Self::Insight => "insight",
             Self::Hosts => "hosts",
             Self::Guard => "guard",
+            Self::Portscan => "portscan",
         }
     }
 }
@@ -249,6 +254,9 @@ pub struct Document {
     /// Runtime guard (omitted while at defaults).
     #[serde(default, skip_serializing_if = "Guard::is_empty")]
     pub guard: Guard,
+    /// Port scanner (omitted while at defaults).
+    #[serde(default, skip_serializing_if = "Portscan::is_default")]
+    pub portscan: Portscan,
 }
 
 impl Default for Document {
@@ -274,6 +282,7 @@ impl Default for Document {
             insight: Insight::default(),
             hosts: Hosts::default(),
             guard: Guard::default(),
+            portscan: Portscan::default(),
         }
     }
 }
@@ -397,6 +406,8 @@ impl Document {
         self.insight.validate(self, &root.join("insight"), &mut out);
         self.hosts.validate(self, &root.join("hosts"), &mut out);
         self.guard.validate(self, &root.join("guard"), &mut out);
+        self.portscan
+            .validate(self, &root.join("portscan"), &mut out);
         out
     }
 
@@ -432,6 +443,7 @@ impl Document {
                 Section::Insight => self.insight != other.insight,
                 Section::Hosts => self.hosts != other.hosts,
                 Section::Guard => self.guard != other.guard,
+                Section::Portscan => self.portscan != other.portscan,
             })
             .collect()
     }

@@ -1,0 +1,6 @@
+# xdmcp-willing: Willing, host 'devbox', status 'Linux 6.1.0 x86_64'
+# Source: written by the sensr authors from XDMCP 1.1 §10 (Willing).
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+00 01 00 05 00 1e 00 00 00 06 64 65 76 62 6f 78
+00 12 4c 69 6e 75 78 20 36 2e 31 2e 30 20 78 38
+36 5f 36 34

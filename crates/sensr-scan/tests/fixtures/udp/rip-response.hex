@@ -1,0 +1,6 @@
+# rip-response: RIPv2 response with 2 routes
+# Source: written by the sensr authors from RFC 2453 §4.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+02 02 00 00 00 02 00 00 0a 00 00 00 ff 00 00 00
+00 00 00 00 00 00 00 01 00 02 00 00 c0 a8 01 00
+ff ff ff 00 00 00 00 00 00 00 00 01

@@ -15,6 +15,7 @@ serde_json.workspace = true
 sensr-flow.workspace = true
 sensr-guard.workspace = true
 sensr-rules.workspace = true
+sensr-scan.workspace = true
 sensr-schema.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

@@ -1,0 +1,20 @@
+# ssdp-response: M-SEARCH 200 OK with SERVER and X-Friendly-Name
+# Source: written by the sensr authors from UPnP Device Architecture 2.0 §1.3.3.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+48 54 54 50 2f 31 2e 31 20 32 30 30 20 4f 4b 0d
+0a 43 41 43 48 45 2d 43 4f 4e 54 52 4f 4c 3a 20
+6d 61 78 2d 61 67 65 3d 31 38 30 30 0d 0a 45 58
+54 3a 0d 0a 4c 4f 43 41 54 49 4f 4e 3a 20 68 74
+74 70 3a 2f 2f 31 39 32 2e 31 36 38 2e 31 2e 32
+30 3a 38 32 30 30 2f 72 6f 6f 74 44 65 73 63 2e
+78 6d 6c 0d 0a 53 45 52 56 45 52 3a 20 4c 69 6e
+75 78 2f 36 2e 31 20 55 50 6e 50 2f 31 2e 30 20
+4d 69 6e 69 44 4c 4e 41 2f 31 2e 33 2e 33 0d 0a
+53 54 3a 20 75 70 6e 70 3a 72 6f 6f 74 64 65 76
+69 63 65 0d 0a 55 53 4e 3a 20 75 75 69 64 3a 34
+64 36 39 36 65 36 39 2d 34 34 34 63 2d 31 36 34
+65 2d 39 64 34 31 2d 30 30 31 31 32 32 33 33 34
+34 35 35 3a 3a 75 70 6e 70 3a 72 6f 6f 74 64 65
+76 69 63 65 0d 0a 58 2d 46 72 69 65 6e 64 6c 79
+2d 4e 61 6d 65 3a 20 4c 69 76 69 6e 67 20 52 6f
+6f 6d 20 4e 41 53 0d 0a 0d 0a

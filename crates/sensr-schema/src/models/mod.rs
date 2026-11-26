@@ -25,6 +25,7 @@ pub mod insight;
 pub mod interfaces;
 pub mod nat;
 pub mod ntp;
+pub mod portscan;
 pub mod routes;
 pub mod system;
 pub mod trust;

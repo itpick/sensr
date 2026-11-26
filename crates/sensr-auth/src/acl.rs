@@ -195,6 +195,11 @@ impl Registry {
             ],
         );
         r.insert(
+            "page-services-portscan",
+            "Services: Port Scanner",
+            &["ui/portscan", "ui/portscan/*", "api/v1/portscan/*"],
+        );
+        r.insert(
             "page-sensr-status",
             "sensr: Status (native API)",
             &["api/v1/status", "api/v1/status/*"],

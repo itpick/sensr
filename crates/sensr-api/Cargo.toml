@@ -33,6 +33,7 @@ rustls-pki-types.workspace = true
 sensr-auth.workspace = true
 sensr-flow = { workspace = true, features = ["store"] }
 sensr-ipc.workspace = true
+sensr-scan = { workspace = true, features = ["store", "client"] }
 sensr-schema.workspace = true
 sensr-ui.workspace = true
 serde.workspace = true

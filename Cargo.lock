@@ -5130,6 +5130,7 @@ dependencies = [
  "sensr-monitor",
  "sensr-net",
  "sensr-rules",
+ "sensr-scan",
  "sensr-schema",
  "serde",
  "serde_json",
@@ -5168,6 +5169,7 @@ dependencies = [
  "sensr-auth",
  "sensr-flow",
  "sensr-ipc",
+ "sensr-scan",
  "sensr-schema",
  "sensr-ui",
  "serde",
@@ -5196,6 +5198,7 @@ dependencies = [
  "sensr-flow",
  "sensr-guard",
  "sensr-rules",
+ "sensr-scan",
  "sensr-schema",
  "serde",
  "serde_json",
@@ -5232,6 +5235,7 @@ dependencies = [
  "sensr-flow",
  "sensr-import-opnsense",
  "sensr-ipc",
+ "sensr-scan",
  "sensr-schema",
  "serde",
  "serde_json",
@@ -5423,6 +5427,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "sensr-scan"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ipnet",
+ "rcgen",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "x509-parser",
+]
+
+[[package]]
 name = "sensr-schema"
 version = "0.0.0"
 dependencies = [
@@ -5467,6 +5493,7 @@ dependencies = [
  "scraper",
  "sensr-auth",
  "sensr-flow",
+ "sensr-scan",
  "sensr-schema",
  "serde",
  "serde_json",

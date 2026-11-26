@@ -500,6 +500,14 @@
       }
     }
   },
+  "portscan": {
+    "exclude": {
+      "5c000000-0000-4000-a000-000000000001": {
+        "target": "00:14:78:38:a5:fc",
+        "description": "Old router: reboots when scanned"
+      }
+    }
+  },
   "ids": {
     "enabled": true,
     "interfaces": [

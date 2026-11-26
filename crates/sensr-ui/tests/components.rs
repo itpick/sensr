@@ -37,7 +37,7 @@ fn assert_all_labelled(doc: &Html, what: &str) {
     }
 }
 
-const FORMS: [FormId; 12] = [
+const FORMS: [FormId; 13] = [
     FormId::SystemGeneral,
     FormId::Interface,
     FormId::SourceNatMode,
@@ -50,9 +50,10 @@ const FORMS: [FormId; 12] = [
     FormId::UnboundAclDefault,
     FormId::UnboundForwarding,
     FormId::IdsSettings,
+    FormId::PortscanSettings,
 ];
 
-const GRIDS: [GridId; 16] = [
+const GRIDS: [GridId; 17] = [
     GridId::Assignments,
     GridId::Aliases,
     GridId::FilterRules,
@@ -69,6 +70,7 @@ const GRIDS: [GridId; 16] = [
     GridId::IdsSuppressions,
     GridId::IdsUserRules,
     GridId::FirewallIsolation,
+    GridId::PortscanExcludes,
 ];
 
 #[test]
@@ -2467,4 +2469,679 @@ fn wordmark_text_fits_its_box_in_any_font() {
     let html = leptos::prelude::view! { <sensr_ui::app::Wordmark/> }.to_html();
     assert!(html.contains("textLength=\"168\""), "{html}");
     assert!(html.contains("lengthAdjust=\"spacingAndGlyphs\""), "{html}");
+}
+
+// ------------------------------------------------------------ port scanner
+
+/// 2026-11-25 12:00 UTC: when the seeded scans finish.
+const SCAN_AT: i64 = 1_795_608_000;
+const NAS: &str = "52:54:00:aa:bb:01";
+const BENCH_PI: &str = "b8:27:eb:7d:4e:25";
+
+/// The hosts mock reading the seeded scan database (kept alive by the returned directory).
+fn scan_mock() -> (tempfile::TempDir, sensr_ui::mock::MockBackend) {
+    let d = tempfile::tempdir().unwrap();
+    sensr_ui::mock::seed_scans(d.path(), SCAN_AT).unwrap();
+    let m = hosts_mock().with_scan_dir(d.path());
+    (d, m)
+}
+
+/// Runs a server function with `b` as the signed-in backend.
+fn as_user<T>(
+    b: &sensr_ui::api::BackendHandle,
+    f: impl std::future::Future<Output = Result<T, ServerFnError>>,
+) -> Result<T, ServerFnError> {
+    let owner = Owner::new();
+    owner.with(|| {
+        provide_context(b.clone());
+        futures::executor::block_on(f)
+    })
+}
+
+/// The ports line under a host's name, whitespace collapsed.
+fn ports_line(doc: &Html, name: &str) -> Option<String> {
+    host_row(doc, name)
+        .select(&sel(".host-ports"))
+        .next()
+        .map(|p| text(p).split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+#[test]
+fn hosts_line_shows_ports() {
+    let (_d, m) = scan_mock();
+    let mut card = hosts_from(m).unwrap();
+    // the never-seen printer sorts past the first 20 rows
+    card.list.hosts.retain(|h| {
+        matches!(h.name.as_deref(), Some("nas" | "printer" | "laptop"))
+            || h.mac.as_deref() == Some("7c:78:b2:10:9e:41")
+    });
+    let doc = render_hosts(Some(card));
+    let line = ports_line(&doc, "nas").expect("nas has a ports line");
+    assert_eq!(
+        line,
+        r#"22 ssh · 80 http "Synology" · 53/udp domain · scanned Nov 25 · Scan now"#
+    );
+    let row = host_row(&doc, "nas");
+    // each port's tooltip is what it said
+    let tips: Vec<_> = row
+        .select(&sel(".host-ports .port-chip"))
+        .map(|c| c.value().attr("title").unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(tips[0], "SSH-2.0-OpenSSH_9.6");
+    assert!(
+        tips[1].contains("Synology") && tips[1].contains("nginx"),
+        "{tips:?}"
+    );
+    let button = row.select(&sel(".host-ports button")).next().unwrap();
+    assert_eq!(text(button), "Scan now");
+    assert_eq!(button.value().attr("aria-label"), Some("Scan now: nas"));
+    // the date is UTC, the full time in its tooltip
+    let date = row.select(&sel(".host-ports .port-date")).next().unwrap();
+    assert_eq!(date.value().attr("title"), Some("2026-11-25 12:00:00 UTC"));
+    // the name stays the link's text
+    assert_eq!(name_text(row.select(&sel("td")).next().unwrap()), "nas");
+
+    // open|filtered UDP is greyed, with the tooltip saying why; a partial scan says so
+    let cam = doc
+        .select(&sel("tbody tr"))
+        .find(|r| text(*r).contains("7c:78:b2:10:9e:41"))
+        .unwrap();
+    let grey = cam
+        .select(&sel(".port-chip.port-of"))
+        .next()
+        .expect("grey chip");
+    assert_eq!(text(grey), "1900/udp ssdp");
+    assert_eq!(
+        grey.value().attr("title"),
+        Some("no reply: open or filtered")
+    );
+    assert!(text(cam).contains("partial scan"), "{}", text(cam));
+    // a device that did not answer
+    assert_eq!(
+        ports_line(&doc, "printer").as_deref(),
+        Some("scanned Nov 25 · no response · Scan now")
+    );
+    // never scanned: only the button
+    assert_eq!(ports_line(&doc, "laptop").as_deref(), Some("Scan now"));
+}
+
+#[test]
+fn hosts_line_marks_new_port() {
+    let (_d, m) = scan_mock();
+    let mut card = hosts_from(m).unwrap();
+    card.list
+        .hosts
+        .retain(|h| matches!(h.name.as_deref(), Some("bench-pi" | "device-01")));
+    let doc = render_hosts(Some(card));
+    assert_eq!(
+        ports_line(&doc, "bench-pi").as_deref(),
+        Some("22 ssh · +3389 new · scanned Nov 25 · Scan now")
+    );
+    // the first 8 open ports, then a link to the rest on the host page
+    let line = ports_line(&doc, "device-01").unwrap();
+    let row = host_row(&doc, "device-01");
+    assert_eq!(row.select(&sel(".port-chip")).count(), 8, "{line}");
+    let more = row.select(&sel(".host-ports a")).next().unwrap();
+    assert_eq!(text(more), "+4 more");
+    assert_eq!(
+        more.value().attr("href"),
+        Some("/ui/hosts/02:00:00:00:00:01#ports")
+    );
+}
+
+#[test]
+fn hosts_line_read_only_and_hidden() {
+    let (_d, m) = scan_mock();
+    let card = hosts_from(m.with_privileges(&["page-all", "user-config-readonly"])).unwrap();
+    assert!(!card.can_scan);
+    let doc = render_hosts(Some(card));
+    assert_eq!(
+        ports_line(&doc, "nas").as_deref(),
+        Some(r#"22 ssh · 80 http "Synology" · 53/udp domain · scanned Nov 25"#)
+    );
+    assert!(ports_line(&doc, "laptop").is_none(), "nothing to show");
+
+    // hosts without the port scanner privilege: no line at all
+    let (_d, m) = scan_mock();
+    let card = hosts_from(m.with_privileges(&["page-sensr-hosts"])).unwrap();
+    assert!(card.list.hosts.iter().all(|h| h.ports.is_none()));
+    let doc = render_hosts(Some(card));
+    assert!(doc.select(&sel(".host-ports")).next().is_none());
+}
+
+#[test]
+fn hosts_line_escapes_titles() {
+    use sensr_scan::proto::JobKind;
+    use sensr_scan::types::{Ident, PortRow, PortState, Proto, ScanStatus};
+    const BAD: &str = "<img src=x onerror=alert(1)>";
+    let d = tempfile::tempdir().unwrap();
+    let s = sensr_scan::store::Store::open(&d.path().join(sensr_scan::config::DB)).unwrap();
+    let job = s
+        .begin_job(JobKind::Device, "192.168.1.20", Some(NAS), false, false)
+        .unwrap();
+    let port = PortRow {
+        proto: Proto::Tcp,
+        port: 80,
+        state: PortState::Open,
+        service: Some(BAD.into()),
+        ident: Ident {
+            title: Some(BAD.into()),
+            banner: Some(BAD.into()),
+            ..Ident::default()
+        },
+    };
+    s.write_scan(
+        job,
+        "192.168.1.20".parse().unwrap(),
+        Some(NAS),
+        SCAN_AT - 60,
+        SCAN_AT,
+        ScanStatus::Complete,
+        false,
+        &[port],
+    )
+    .unwrap();
+    let card = hosts_from(hosts_mock().with_scan_dir(d.path()));
+    let html = {
+        let owner = Owner::new();
+        owner.with(|| {
+            view! { <sensr_ui::islands::HostsCard initial=card/> }
+                .into_any()
+                .to_html()
+        })
+    };
+    assert!(!html.contains("<img"), "markup injected");
+    assert!(
+        html.contains("&lt;img src=x onerror=alert(1)&gt;"),
+        "{html}"
+    );
+    let doc = Html::parse_fragment(&html);
+    let chip = host_row(&doc, "nas")
+        .select(&sel(".port-chip"))
+        .next()
+        .unwrap();
+    assert_eq!(text(chip), format!("80 {BAD} \"{BAD}\""));
+    assert!(chip.value().attr("title").unwrap().contains(BAD));
+}
+
+#[test]
+fn hosts_line_shows_scanning_after_scan_now() {
+    use sensr_ui::actions::{ScanStart, portscan_start};
+    let (_d, m) = scan_mock();
+    let b: sensr_ui::api::BackendHandle = std::sync::Arc::new(m);
+    let r = as_user(
+        &b,
+        portscan_start("192.168.1.112".into(), Some(BENCH_PI.into()), false),
+    )
+    .unwrap();
+    assert!(matches!(r, ScanStart::Started(_)), "{r:?}");
+    let card = as_user(&b, sensr_ui::actions::hosts()).unwrap();
+    let doc = render_hosts(card);
+    // the old result stays, the date and button give way to "scanning…"
+    assert_eq!(
+        ports_line(&doc, "bench-pi").as_deref(),
+        Some("22 ssh · +3389 new · scanning…")
+    );
+}
+
+#[test]
+fn portscan_actions_enforce_the_rules() {
+    use sensr_ui::actions::{ScanStart, portscan_cancel, portscan_start, portscan_status};
+    let (_d, m) = scan_mock();
+    let b: sensr_ui::api::BackendHandle = std::sync::Arc::new(m);
+    // a public address needs the tick
+    let r = as_user(&b, portscan_start("8.8.8.8".into(), None, false)).unwrap();
+    assert_eq!(
+        r,
+        ScanStart::Refused(
+            "the target is outside the local networks; allow public targets to scan it anyway"
+                .into()
+        )
+    );
+    let r = as_user(&b, portscan_start("8.8.8.8".into(), None, true)).unwrap();
+    assert!(matches!(r, ScanStart::Started(_)));
+    let r = as_user(&b, portscan_start("192.168.1.0/16x".into(), None, false)).unwrap();
+    assert!(
+        matches!(&r, ScanStart::Refused(t) if t.starts_with("the target is not valid")),
+        "{r:?}"
+    );
+    let ScanStart::Started(id) =
+        as_user(&b, portscan_start("192.168.1.0/24".into(), None, false)).unwrap()
+    else {
+        panic!("not started");
+    };
+    let st = as_user(&b, portscan_status()).unwrap();
+    assert!(
+        st.queue
+            .iter()
+            .any(|q| q.job_id == id && q.target == "192.168.1.0/24")
+    );
+    as_user(&b, portscan_cancel(id)).unwrap();
+    let st = as_user(&b, portscan_status()).unwrap();
+    assert!(!st.queue.iter().any(|q| q.job_id == id));
+    // a bad MAC never reaches the daemon
+    assert!(
+        as_user(
+            &b,
+            portscan_start("192.168.1.5".into(), Some("nope".into()), false)
+        )
+        .is_err()
+    );
+
+    // read-only callers may look but not start or cancel
+    let (_d, m) = scan_mock();
+    let ro: sensr_ui::api::BackendHandle =
+        std::sync::Arc::new(m.with_privileges(&["page-all", "user-config-readonly"]));
+    assert!(as_user(&ro, portscan_status()).is_ok());
+    assert!(as_user(&ro, portscan_start("192.168.1.5".into(), None, false)).is_err());
+    assert!(as_user(&ro, portscan_cancel(1)).is_err());
+    // and callers without the privilege may do neither
+    let (_d, m) = scan_mock();
+    let none: sensr_ui::api::BackendHandle =
+        std::sync::Arc::new(m.with_privileges(&["page-sensr-hosts"]));
+    assert!(as_user(&none, portscan_status()).is_err());
+    assert!(as_user(&none, sensr_ui::actions::portscan_page()).is_err());
+    assert!(as_user(&none, portscan_start("192.168.1.5".into(), None, false)).is_err());
+
+    // a daemon that is not there
+    let (_d, m) = scan_mock();
+    let down: sensr_ui::api::BackendHandle = std::sync::Arc::new(m.with_scanner_down());
+    let e = as_user(&down, portscan_start("192.168.1.5".into(), None, false)).unwrap_err();
+    assert_eq!(
+        sensr_ui::actions::server_message(&e),
+        "The port scanner is not running."
+    );
+    let page = as_user(&down, sensr_ui::actions::portscan_page()).unwrap();
+    assert_eq!(
+        page.note.as_deref(),
+        Some("The port scanner is not running.")
+    );
+}
+
+#[test]
+fn host_page_ports_section() {
+    let (_d, m) = scan_mock();
+    let p = host_page_from(m, BENCH_PI, "today", None);
+    let doc = render_host_page(p, host_query("today"));
+    let sec = doc
+        .select(&sel("section#ports"))
+        .next()
+        .expect("Ports section");
+    assert!(text(sec).contains("Ports"));
+    let rows: Vec<Vec<String>> = sec
+        .select(&sel("table tbody tr"))
+        .map(|r| {
+            r.select(&sel("td"))
+                .map(|c| text(c).trim().to_owned())
+                .collect()
+        })
+        .collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0][..4], ["22", "TCP", "open", "ssh"]);
+    assert_eq!(rows[0][4], "SSH-2.0-OpenSSH_9.2p1");
+    assert_eq!(rows[1][..4], ["3389", "TCP", "open", "ms-wbt-server"]);
+    let history: Vec<String> = sec
+        .select(&sel("ol.scan-history li"))
+        .map(|l| text(l).split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    assert_eq!(history.len(), 2, "{history:?}");
+    assert!(history[0].starts_with("2026-11-25"), "{history:?}");
+    assert!(
+        history[0].contains("complete") && history[0].contains("+3389 new"),
+        "{history:?}"
+    );
+    assert!(
+        history[1].starts_with("2026-11-18") && history[1].contains("complete"),
+        "{history:?}"
+    );
+    assert!(
+        sec.select(&sel("form[action='/ui/fn/portscan_submit'] button"))
+            .any(|b| text(b) == "Scan now"),
+        "Scan now on the host page"
+    );
+
+    // back from Scan now: what happened, in the section
+    let (_d, m) = scan_mock();
+    let p = host_page_from(m, BENCH_PI, "today", None);
+    let mut q = host_query("today");
+    q.scan.refused = Some("excluded".into());
+    q.scan.target = "192.168.1.112".into();
+    let doc = render_host_page(p, q);
+    let alert = doc
+        .select(&sel("section#ports [role=alert]"))
+        .next()
+        .unwrap();
+    assert_eq!(
+        text(alert),
+        "Not scanned: the device is on the exclude list (Never scanned)."
+    );
+    // ... and Scan anyway, back to the host page with confirm
+    let form = doc
+        .select(&sel("section#ports form[action='/ui/fn/portscan_submit']"))
+        .find(|f| {
+            f.select(&sel("input[name=confirm][value=on]"))
+                .next()
+                .is_some()
+        })
+        .expect("a confirm form");
+    let hidden = |n: &str| {
+        form.select(&sel(&format!("input[type=hidden][name={n}]")))
+            .next()
+            .and_then(|i| i.value().attr("value"))
+            .map(str::to_owned)
+    };
+    assert_eq!(hidden("back").as_deref(), Some("host"));
+    assert_eq!(hidden("mac").as_deref(), Some(BENCH_PI));
+    assert_eq!(hidden("target").as_deref(), Some("192.168.1.112"));
+    assert!(
+        form.select(&sel("button"))
+            .any(|b| text(b) == "Scan anyway")
+    );
+}
+
+/// The mock excludes old-router (by MAC) from scanning.
+const OLD_ROUTER: &str = "00:14:78:38:a5:fc";
+
+#[test]
+fn an_excluded_device_is_scanned_only_when_confirmed() {
+    use sensr_ui::actions::{ScanStart, portscan_start, portscan_submit};
+    use sensr_ui::portscan::PortscanQuery;
+    // Scan now on the Port Scanner page: refused, with what Scan anyway needs
+    let (_d, m) = scan_mock();
+    let loc = form_post_location(m, || {
+        portscan_submit(
+            "192.168.72.2".into(),
+            Some(OLD_ROUTER.into()),
+            None,
+            None,
+            None,
+            None,
+        )
+    });
+    assert_eq!(
+        loc,
+        "/ui/portscan?refused=excluded&mac=00%3A14%3A78%3A38%3Aa5%3Afc&target=192.168.72.2"
+    );
+    let pairs = [
+        ("refused", "excluded"),
+        ("mac", OLD_ROUTER),
+        ("target", "192.168.72.2"),
+    ];
+    let q = PortscanQuery::from_query(|k| pairs.iter().find(|p| p.0 == k).map(|p| p.1.to_owned()));
+    assert_eq!(q.mac.as_deref(), Some(OLD_ROUTER));
+    let (_d, m) = scan_mock();
+    let b: sensr_ui::api::BackendHandle = std::sync::Arc::new(m);
+    let p = as_user(&b, sensr_ui::actions::portscan_page()).unwrap();
+    let doc = render(|| sensr_ui::pages::portscan_body(p, &q));
+    let form = doc
+        .select(&sel("form[action='/ui/fn/portscan_submit']"))
+        .find(|f| {
+            f.select(&sel("input[name=confirm][value=on]"))
+                .next()
+                .is_some()
+        })
+        .expect("a confirm form");
+    assert!(
+        form.select(&sel("button"))
+            .any(|b| text(b) == "Scan anyway")
+    );
+    assert!(
+        form.select(&sel("input[type=hidden][name=mac]"))
+            .any(|i| i.value().attr("value") == Some(OLD_ROUTER))
+    );
+    assert!(form.select(&sel("input[name=back]")).next().is_none());
+    assert_all_labelled(&doc, "port scanner page with a confirm form");
+    // a MAC that is not one is dropped
+    let q = PortscanQuery::from_query(|k| (k == "mac").then(|| "<b>x</b>".to_owned()));
+    assert_eq!(q.mac, None);
+
+    // Scan anyway: confirmed
+    let (_d, m) = scan_mock();
+    let loc = form_post_location(m, || {
+        portscan_submit(
+            "192.168.72.2".into(),
+            Some(OLD_ROUTER.into()),
+            None,
+            Some("on".into()),
+            None,
+            None,
+        )
+    });
+    assert!(loc.starts_with("/ui/portscan?started="), "{loc}");
+
+    // Scan now on the Hosts card (an island, no confirm there) says where to confirm
+    let (_d, m) = scan_mock();
+    let b: sensr_ui::api::BackendHandle = std::sync::Arc::new(m);
+    let r = as_user(
+        &b,
+        portscan_start("192.168.72.2".into(), Some(OLD_ROUTER.into()), false),
+    )
+    .unwrap();
+    assert!(
+        matches!(&r, ScanStart::Refused(t) if t.contains("host page")),
+        "{r:?}"
+    );
+}
+
+#[test]
+fn new_scan_can_include_excluded_devices() {
+    use sensr_ui::actions::portscan_submit;
+    let (_d, m) = scan_mock();
+    let b: sensr_ui::api::BackendHandle = std::sync::Arc::new(m);
+    let p = as_user(&b, sensr_ui::actions::portscan_page()).unwrap();
+    let q = sensr_ui::portscan::PortscanQuery::default();
+    let doc = render(|| sensr_ui::pages::portscan_body(p, &q));
+    let tick = doc
+        .select(&sel(
+            "form.scan-form input[type=checkbox][name=include_excluded]",
+        ))
+        .next()
+        .expect("an include excluded devices tick");
+    assert_eq!(tick.value().attr("value"), Some("on"));
+    // the tick reaches the daemon
+    let (_d, m) = scan_mock();
+    let log = m.scan_requests();
+    form_post_location(m, || {
+        portscan_submit(
+            "192.168.72.0/28".into(),
+            None,
+            None,
+            None,
+            Some("on".into()),
+            None,
+        )
+    });
+    let r = log
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("a start request");
+    assert!(r.include_excluded && !r.confirm, "{r:?}");
+}
+
+#[test]
+fn portscan_page_lists_jobs() {
+    let (_d, m) = scan_mock();
+    let b: sensr_ui::api::BackendHandle = std::sync::Arc::new(m);
+    let p = as_user(&b, sensr_ui::actions::portscan_page()).unwrap();
+    assert!(p.can_scan && p.note.is_none());
+    let q = sensr_ui::portscan::PortscanQuery::default();
+    let doc = render(|| sensr_ui::pages::portscan_body(p, &q));
+    assert!(
+        doc.select(&sel(
+            "form[action='/ui/fn/portscan_submit'] input[name=target]"
+        ))
+        .next()
+        .is_some()
+    );
+    assert!(
+        doc.select(&sel("form input[type=checkbox][name=public_ok]"))
+            .next()
+            .is_some()
+    );
+    let all = text(doc.root_element());
+    assert!(all.contains("12 of 254 alive"), "{all}");
+    assert!(
+        doc.select(&sel("button")).any(|b| text(b) == "Cancel"),
+        "the running job can be cancelled"
+    );
+    let caption = |t: &str| {
+        doc.select(&sel("table"))
+            .find(|tb| tb.select(&sel("caption")).any(|c| text(c) == t))
+            .unwrap_or_else(|| panic!("no {t} table"))
+    };
+    let devices = caption("Device scans");
+    assert!(text(devices).contains("nas"));
+    assert!(text(devices).contains("+3389 new"));
+    let ranges = caption("Range scans");
+    assert!(text(ranges).contains("192.168.1.0/24"), "{}", text(ranges));
+    assert!(text(ranges).contains("Printer setup"), "{}", text(ranges));
+    assert_all_labelled(&doc, "port scanner page");
+
+    // read-only: results without the forms
+    let (_d, m) = scan_mock();
+    let ro: sensr_ui::api::BackendHandle =
+        std::sync::Arc::new(m.with_privileges(&["page-all", "user-config-readonly"]));
+    let p = as_user(&ro, sensr_ui::actions::portscan_page()).unwrap();
+    assert!(!p.can_scan);
+    let q = sensr_ui::portscan::PortscanQuery::default();
+    let doc = render(|| sensr_ui::pages::portscan_body(p, &q));
+    assert!(doc.select(&sel("input[name=target]")).next().is_none());
+    assert!(!text(doc.root_element()).contains("Scan now"));
+    assert!(text(doc.root_element()).contains("12 of 254 alive"));
+}
+
+#[test]
+fn portscan_menu_entry() {
+    let menu = sensr_ui::menu::build(&[]);
+    let services = menu.iter().find(|m| m.id == "Services").unwrap();
+    let item = services
+        .children
+        .iter()
+        .find(|c| c.id == "Portscan")
+        .expect("Services › Port Scanner");
+    assert_eq!(item.label, "Port Scanner");
+    assert_eq!(item.url.as_deref(), Some("/ui/portscan"));
+    assert_eq!(
+        sensr_ui::models::FormId::PortscanSettings.page_url(),
+        "/ui/portscan"
+    );
+}
+
+#[test]
+fn portscan_forms_redirect_with_codes_only() {
+    use sensr_ui::actions::{portscan_cancel_form, portscan_submit};
+    use sensr_ui::portscan::PortscanQuery;
+    let post = |m, target: &str, public: bool| {
+        let t = target.to_owned();
+        form_post_location(m, move || {
+            portscan_submit(t, None, public.then(|| "on".to_owned()), None, None, None)
+        })
+    };
+    let (_d, m) = scan_mock();
+    let loc = post(m, "8.8.8.8", false);
+    assert_eq!(loc, "/ui/portscan?refused=public&target=8.8.8.8");
+    let (_d, m) = scan_mock();
+    let loc = post(m, "192.168.1.0/24", false);
+    assert!(loc.starts_with("/ui/portscan?started="), "{loc}");
+    assert!(loc.ends_with("&target=192.168.1.0%2F24"), "{loc}");
+    let (_d, m) = scan_mock();
+    assert_eq!(
+        post(m, "10.0.0.0/8", true),
+        "/ui/portscan?refused=too_large&addresses=16777216&max=4096&target=10.0.0.0%2F8"
+    );
+    // hostile text is never echoed: only a target that parses travels back
+    for bad in HOSTILE {
+        let (_d, m) = scan_mock();
+        let loc = post(m, bad, false);
+        assert_eq!(loc, "/ui/portscan?refused=invalid", "{bad:?}");
+    }
+    let (_d, m) = scan_mock();
+    assert_eq!(
+        post(m.with_scanner_down(), "192.168.1.5", false),
+        "/ui/portscan?error=not_running&target=192.168.1.5"
+    );
+    let (_d, m) = scan_mock();
+    assert_eq!(
+        post(
+            m.with_privileges(&["page-all", "user-config-readonly"]),
+            "192.168.1.5",
+            false
+        ),
+        "/ui/portscan?error=forbidden&target=192.168.1.5"
+    );
+    let (_d, m) = scan_mock();
+    assert_eq!(
+        form_post_location(m, || portscan_cancel_form(7)),
+        "/ui/portscan?cancelled=7"
+    );
+    let (_d, m) = scan_mock();
+    let ro = m.with_privileges(&["page-all", "user-config-readonly"]);
+    assert_eq!(
+        form_post_location(ro, || portscan_cancel_form(7)),
+        "/ui/portscan?error=forbidden"
+    );
+
+    // Scan now on a host page goes back there, keys prefixed (the page has its own error)
+    let (_d, m) = scan_mock();
+    let loc = form_post_location(m, || {
+        portscan_submit(
+            "192.168.1.112".into(),
+            Some(BENCH_PI.to_uppercase()),
+            None,
+            None,
+            None,
+            Some("host".into()),
+        )
+    });
+    assert!(
+        loc.starts_with(&format!("/ui/hosts/{BENCH_PI}?scan_started=")),
+        "{loc}"
+    );
+    assert!(loc.ends_with("&scan_target=192.168.1.112#ports"), "{loc}");
+
+    // what the page makes of the codes
+    let q = |pairs: &[(&str, &str)]| {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect();
+        PortscanQuery::from_query(|k| pairs.iter().find(|p| p.0 == k).map(|p| p.1.clone()))
+    };
+    assert_eq!(
+        q(&[("refused", "public"), ("target", "8.8.8.8")]).message(),
+        Some((
+            true,
+            "Not scanned: the target is outside the local networks. Tick \"Scan addresses outside the local networks\" to scan it anyway.".into()
+        ))
+    );
+    assert_eq!(
+        q(&[
+            ("refused", "too_large"),
+            ("addresses", "8192"),
+            ("max", "4096")
+        ])
+        .message(),
+        Some((
+            true,
+            "Not scanned: 8192 addresses is more than the 4096 allowed.".into()
+        ))
+    );
+    assert_eq!(
+        q(&[("started", "12"), ("target", "192.168.1.0/24")]).message(),
+        Some((false, "Scan of 192.168.1.0/24 queued (job 12).".into()))
+    );
+    // a target that does not parse is dropped, not shown
+    let hostile = q(&[("started", "12"), ("target", "<b>owned</b>")]);
+    assert_eq!(hostile.target, "");
+    assert_eq!(
+        hostile.message(),
+        Some((false, "Scan queued (job 12).".into()))
+    );
+    assert_eq!(
+        q(&[("error", "not_running")]).message(),
+        Some((true, "The port scanner is not running.".into()))
+    );
+    assert_eq!(q(&[]).message(), None);
 }

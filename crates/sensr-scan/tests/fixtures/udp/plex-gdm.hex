@@ -1,0 +1,12 @@
+# plex-gdm: media server 'basement', version 1.40.2.8395-c67dce28e
+# Source: written by the sensr authors from the Plex GDM discovery reply format (HTTP-style headers).
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+48 54 54 50 2f 31 2e 30 20 32 30 30 20 4f 4b 0d
+0a 43 6f 6e 74 65 6e 74 2d 54 79 70 65 3a 20 70
+6c 65 78 2f 6d 65 64 69 61 2d 73 65 72 76 65 72
+0d 0a 4e 61 6d 65 3a 20 62 61 73 65 6d 65 6e 74
+0d 0a 50 6f 72 74 3a 20 33 32 34 30 30 0d 0a 52
+65 73 6f 75 72 63 65 2d 49 64 65 6e 74 69 66 69
+65 72 3a 20 61 62 63 31 32 33 0d 0a 56 65 72 73
+69 6f 6e 3a 20 31 2e 34 30 2e 32 2e 38 33 39 35
+2d 63 36 37 64 63 65 32 38 65 0d 0a 0d 0a

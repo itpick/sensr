@@ -11,6 +11,7 @@ pub mod error;
 pub mod insight;
 pub mod native;
 pub mod oidc;
+pub mod portscan;
 pub mod saml;
 pub mod tls;
 pub mod ui;
@@ -92,6 +93,12 @@ pub const ROUTES: &[Route] = &[
     ("/api/v1/ids/alerts", || get(insight::alerts)),
     ("/api/v1/ids/signatures", || get(insight::signatures)),
     ("/api/v1/ids/stats", || get(insight::stats)),
+    ("/api/v1/portscan/status", || get(portscan::status)),
+    ("/api/v1/portscan/jobs", || get(portscan::jobs)),
+    ("/api/v1/portscan/jobs/{id}", || get(portscan::job)),
+    ("/api/v1/portscan/hosts/{mac}", || get(portscan::host)),
+    ("/api/v1/portscan/start", || post(portscan::start)),
+    ("/api/v1/portscan/cancel", || post(portscan::cancel)),
     ("/api/core/firmware/info", || get(compat::firmware_info)),
     ("/api/interfaces/overview/interfaces_info", || {
         get(compat::interfaces_info).post(compat::interfaces_info)

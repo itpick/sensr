@@ -407,6 +407,9 @@ in
     boot.kernel.sysctl = {
       "net.ipv4.ip_forward" = mkDefault 1;
       "net.ipv6.conf.all.forwarding" = mkDefault 1;
+      # NixOS already sets net.ipv4.ping_group_range to allow unprivileged
+      # ICMP sockets, which sensr-scan's discovery relies on (asserted in
+      # nix/tests/portscan.nix).
     };
     # Loaded up front: the agent runs with ProtectKernelModules.
     boot.kernelModules = [
@@ -438,6 +441,11 @@ in
         "sensr-dnstap"
       ];
       description = "sensr traffic insight";
+    };
+    users.users.sensr-scan = {
+      isSystemUser = true;
+      group = "sensr";
+      description = "sensr port scanner";
     };
     users.users.suricata = {
       isSystemUser = true;
@@ -784,6 +792,10 @@ in
         RuntimeDirectoryPreserve = "yes";
         StateDirectory = "sensr";
         StateDirectoryMode = "0700";
+        # The port scanner's socket is 0660 sensr-scan:sensr in a 0750
+        # directory, and this root lacks CAP_DAC_OVERRIDE: the group is what
+        # lets the agent report new devices to it (automatic scans).
+        SupplementaryGroups = [ "sensr" ];
         # Root, but only with the capabilities applying config needs:
         # netlink/nft/wg (NET_ADMIN), raw sockets for probes (NET_RAW),
         # binding helpers (NET_BIND_SERVICE), remounting the seed partition
@@ -1339,6 +1351,58 @@ in
           "AF_INET6"
         ];
         MemoryMax = "256M";
+      };
+    };
+
+    # Port scanner (Diagnostics > Port Scan). The agent writes
+    # /run/sensr/portscan/portscan.json and restarts the unit when it
+    # changes (stops it when scanning is switched off). sensr-api and the
+    # agent, both in group sensr, reach the control socket.
+    systemd.services.sensr-scan = {
+      description = "sensr port scanner";
+      after = [ "sensr-net.target" ];
+      partOf = [ "sensr-agent.service" ];
+      unitConfig.ConditionPathExists = "${runtimeDir}/portscan/portscan.json";
+      serviceConfig = commonHardening // {
+        ExecStart = lib.escapeShellArgs [
+          "${cfg.package}/bin/sensr-scan"
+          "--config"
+          "${runtimeDir}/portscan/portscan.json"
+          "--db"
+          "/var/lib/sensr-scan/scans.db"
+          "--socket"
+          "/run/sensr-scan/scan.sock"
+          # port numbers to service names (NixOS provides it from iana-etc)
+          "--services"
+          "/etc/services"
+        ];
+        Restart = "on-failure";
+        RestartSec = 5;
+        User = "sensr-scan";
+        Group = "sensr";
+        # systemd creates both sensr-scan:sensr, 0750: group sensr traverses
+        # /run/sensr-scan to the socket, which sensr-scan makes 0660 (group
+        # sensr, its primary group), and reads scans.db (0640 by the umask).
+        RuntimeDirectory = "sensr-scan";
+        RuntimeDirectoryMode = "0750";
+        StateDirectory = "sensr-scan";
+        StateDirectoryMode = "0750";
+        UMask = "0027";
+        # TCP connects and UDP probes from an ordinary user: no capabilities
+        # (an empty bounding set, so none can be gained either).
+        CapabilityBoundingSet = "";
+        ProtectSystem = "strict";
+        PrivateDevices = true;
+        ProtectKernelTunables = true;
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_INET"
+          "AF_INET6"
+          "AF_NETLINK"
+        ];
+        # a background job: it yields to forwarding and the other daemons
+        Nice = 10;
+        MemoryMax = "128M";
       };
     };
 

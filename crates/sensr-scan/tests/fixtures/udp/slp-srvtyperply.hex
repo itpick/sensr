@@ -1,0 +1,6 @@
+# slp-srvtyperply: SrvTypeRply listing service:printer,service:ipp
+# Source: written by the sensr authors from RFC 2608 §8 and §10.2.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+02 0a 00 00 2f 00 00 00 00 00 73 65 00 02 65 6e
+00 00 00 1b 73 65 72 76 69 63 65 3a 70 72 69 6e
+74 65 72 2c 73 65 72 76 69 63 65 3a 69 70 70

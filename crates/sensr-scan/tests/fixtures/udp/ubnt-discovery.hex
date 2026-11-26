@@ -1,0 +1,7 @@
+# ubnt-discovery: firmware UAP6.6.55, hostname office-ap, model U6-Lite
+# Source: written by the sensr authors from the Ubiquiti discovery v1 TLV layout (public community documentation).
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+01 00 00 2f 02 00 0a 24 5a 4c 00 00 01 c0 a8 01
+02 03 00 09 55 41 50 36 2e 36 2e 35 35 0b 00 09
+6f 66 66 69 63 65 2d 61 70 0c 00 07 55 36 2d 4c
+69 74 65

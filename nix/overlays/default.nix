@@ -1,7 +1,8 @@
 # pkgs.sensr: the whole Cargo workspace built with crane, one derivation that
-# carries every binary (sensr-agent, sensr-api, sensr). The dependency-only
-# derivation (cargoArtifacts) is cached separately, so a change to sensr's own
-# code does not rebuild the crates.io graph.
+# carries every binary (sensr-agent, sensr-api, sensr, sensr-insight,
+# sensr-scan). The dependency-only derivation (cargoArtifacts) is cached
+# separately, so a change to sensr's own code does not rebuild the crates.io
+# graph.
 #
 # The toolchain is the one rust-toolchain.toml pins, so Nix and cargo always
 # build with the same compiler. Needs rust-overlay's overlay applied first
@@ -43,10 +44,12 @@ let
     pname = "sensr";
     version = workspaceToml.workspace.package.version;
     strictDeps = true;
-    # xtask is developer tooling and never ships in an image. The guard's
-    # daemon (the aya loader, Linux only) is behind sensr-guard's `daemon`
-    # feature, which nothing else in the workspace turns on.
-    cargoExtraArgs = "--locked --workspace"
+    # xtask is developer tooling and never ships in an image. The daemons'
+    # binaries need their crates' `daemon` features (the crates' default is
+    # the light shared part the agent and apply link against; sensr-guard's
+    # daemon is the aya loader, Linux only); in commonArgs so the
+    # dependency-only build caches the daemons' crates too.
+    cargoExtraArgs = "--locked --workspace --features sensr-scan/daemon"
       + lib.optionalString (builtins.pathExists (src + "/crates/xtask")) " --exclude xtask"
       + lib.optionalString final.stdenv.hostPlatform.isLinux " --features sensr-guard/daemon";
   };

@@ -1,0 +1,8 @@
+# mndp: identity core-router, version 7.16.1, board RB5009UG+S+
+# Source: written by the sensr authors from the MikroTik MNDP TLV layout (MikroTik documentation).
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+00 00 00 00 00 01 00 06 4c 5e 0c 01 02 03 00 05
+00 0b 63 6f 72 65 2d 72 6f 75 74 65 72 00 07 00
+0f 37 2e 31 36 2e 31 20 28 73 74 61 62 6c 65 29
+00 08 00 08 4d 69 6b 72 6f 54 69 6b 00 0c 00 0b
+52 42 35 30 30 39 55 47 2b 53 2b

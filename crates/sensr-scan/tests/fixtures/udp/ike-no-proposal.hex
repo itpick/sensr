@@ -1,0 +1,6 @@
+# ike-no-proposal: IKE_SA_INIT response, Notify NO_PROPOSAL_CHOSEN
+# Source: written by the sensr authors from RFC 7296 §3.1 and §3.10.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+73 65 6e 73 72 49 4b 45 01 02 03 04 05 06 07 08
+29 20 22 20 00 00 00 00 00 00 00 24 00 00 00 08
+00 00 00 0e

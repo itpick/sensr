@@ -1,0 +1,6 @@
+# ntp-server: mode 4 server reply, stratum 2, refid 192.0.2.1
+# Source: written by the sensr authors from RFC 5905 §7.3.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+24 02 06 ec 00 00 01 00 00 00 02 00 c0 00 02 01
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00

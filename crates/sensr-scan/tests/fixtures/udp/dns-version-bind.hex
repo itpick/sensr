@@ -1,0 +1,7 @@
+# dns-version-bind: response, TXT 'unbound 1.22'
+# Source: written by the sensr authors from RFC 1035 §4.1 and RFC 4892.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+73 65 84 00 00 01 00 01 00 00 00 00 07 76 65 72
+73 69 6f 6e 04 62 69 6e 64 00 00 10 00 03 c0 0c
+00 10 00 03 00 00 00 00 00 0d 0c 75 6e 62 6f 75
+6e 64 20 31 2e 32 32

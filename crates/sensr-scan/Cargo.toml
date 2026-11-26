@@ -1,0 +1,79 @@
+[package]
+name = "sensr-scan"
+description = "Port scanner service (Diagnostics > Port Scan): shared config, wire protocol and target handling, with the scan daemon and storage behind features."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# SQLite storage of scan results.
+store = ["dep:rusqlite", "dep:serde_json"]
+# The blocking control-socket client (agent, API).
+client = ["dep:serde_json"]
+# The scan daemon (TLS probing, sockets, CLI).
+daemon = [
+  "store",
+  "client",
+  "dep:tokio",
+  "dep:tokio-util",
+  "dep:tokio-rustls",
+  "dep:rustls",
+  "dep:socket2",
+  "dep:clap",
+  "dep:tracing",
+  "dep:tracing-subscriber",
+  "dep:anyhow",
+  "dep:x509-parser",
+]
+
+[dependencies]
+anyhow = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+ipnet.workspace = true
+rusqlite = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+serde.workspace = true
+serde_json = { workspace = true, optional = true }
+socket2 = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+x509-parser = { workspace = true, optional = true }
+
+[dev-dependencies]
+rcgen.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
+
+[[test]]
+name = "tcp"
+required-features = ["daemon"]
+
+[[test]]
+name = "udp"
+required-features = ["daemon"]
+
+[[test]]
+name = "ident"
+required-features = ["daemon"]
+
+[[test]]
+name = "daemon"
+required-features = ["daemon"]
+
+[[test]]
+name = "bin"
+required-features = ["daemon"]
+
+[[bin]]
+name = "sensr-scan"
+path = "src/bin/sensr-scan.rs"
+required-features = ["daemon"]

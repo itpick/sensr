@@ -422,6 +422,105 @@ pub struct HostRow {
     /// Hosts card's colour preview; empty when there is no DNS data.
     #[serde(deserialize_with = "null_default")]
     pub dns_mix: Vec<(String, u32)>,
+    /// What the port scanner found on it (set by the UI when the caller may read port
+    /// scans and the host has a MAC); `None` otherwise.
+    pub ports: Option<HostPorts>,
+}
+
+/// A device's latest port scan, for the Hosts card's line under its name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostPorts {
+    /// The first [`HostPorts::SHOWN`] open ports (open, then open|filtered), without the
+    /// ones new since the scan before (those are in `changes`).
+    pub open: Vec<PortChip>,
+    /// Open ports left out of `open`.
+    pub more: u32,
+    /// What changed since the scan before: `+3389 new`, `-22 closed`, `443 changed`.
+    pub changes: Vec<String>,
+    /// When the latest scan finished (Unix seconds); `None` when never scanned.
+    pub scanned_at: Option<i64>,
+    /// How the latest scan ended: `complete`, `partial`, `cancelled`, `failed`; empty
+    /// when never scanned.
+    pub status: String,
+    /// A scan of it is running or queued.
+    pub scanning: bool,
+}
+
+impl HostPorts {
+    /// Ports the line shows before "+N more".
+    pub const SHOWN: usize = 8;
+
+    /// What the status says on the line: `partial scan` or `no response`.
+    pub fn status_note(&self) -> Option<&'static str> {
+        match self.status.as_str() {
+            "partial" | "cancelled" => Some("partial scan"),
+            "failed" => Some("no response"),
+            _ => None,
+        }
+    }
+
+    /// Nothing to show but a Scan now button.
+    pub fn is_empty(&self) -> bool {
+        self.open.is_empty()
+            && self.more == 0
+            && self.changes.is_empty()
+            && self.scanned_at.is_none()
+            && !self.scanning
+    }
+}
+
+/// One port on the Hosts card's ports line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortChip {
+    pub proto: sensr_scan::types::Proto,
+    pub port: u16,
+    /// Service name from the port table, e.g. `ssh`.
+    pub service: Option<String>,
+    /// The page title or product it named, shown in quotes.
+    pub label: Option<String>,
+    /// What it said (plain text, for the tooltip); empty when it said nothing.
+    pub tip: String,
+    /// UDP without a reply: open or filtered, shown greyed.
+    pub open_filtered: bool,
+}
+
+/// Tooltip of an open|filtered port.
+pub const OPEN_FILTERED_TIP: &str = "no reply: open or filtered";
+
+impl PortChip {
+    /// `22 ssh`, `80 http "Synology"`, `53/udp domain`.
+    pub fn text(&self) -> String {
+        let mut t = port_name(self.proto, self.port);
+        if let Some(s) = &self.service {
+            t.push(' ');
+            t.push_str(s);
+        }
+        if let Some(l) = &self.label {
+            t.push_str(&format!(" \"{l}\""));
+        }
+        t
+    }
+}
+
+/// `22` for TCP, `53/udp` for UDP.
+pub fn port_name(proto: sensr_scan::types::Proto, port: u16) -> String {
+    match proto {
+        sensr_scan::types::Proto::Tcp => port.to_string(),
+        sensr_scan::types::Proto::Udp => format!("{port}/udp"),
+    }
+}
+
+/// `Nov 25` (UTC) for Unix seconds `t`.
+pub fn fmt_day(t: i64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    // fmt_time's civil date: YYYY-MM-DD
+    let date = fmt_time(u64::try_from(t).unwrap_or(0));
+    let m: usize = date[5..7].parse().unwrap_or(1);
+    let d: u32 = date[8..10].parse().unwrap_or(1);
+    format!("{} {d}", MONTHS[m.clamp(1, 12) - 1])
 }
 
 /// `(key, display name)` of every DNS activity category, in display order (sensr-schema's

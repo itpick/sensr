@@ -50,7 +50,7 @@ test("forget removes a dynamic host", async ({ page }) => {
   await open(page);
   const before = await count(page);
   const row = rows(page).filter({ hasText: /device-\d+/ }).first();
-  const name = ((await row.locator("td").first().textContent()) ?? "").trim();
+  const name = ((await row.locator("a.host-link").textContent()) ?? "").trim();
   let message = "";
   page.once("dialog", (d) => {
     message = d.message();

@@ -155,6 +155,10 @@
             inherit pkgs;
             sensrModules = testModules;
           };
+          portscan = import ./nix/tests/portscan.nix {
+            inherit pkgs;
+            sensrModules = testModules;
+          };
           ids = import ./nix/tests/ids.nix {
             inherit pkgs;
             sensrModules = testModules;

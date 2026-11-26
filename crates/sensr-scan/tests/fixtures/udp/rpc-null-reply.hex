@@ -1,0 +1,5 @@
+# rpc-null-reply: MSG_ACCEPTED SUCCESS reply to the NULL call
+# Source: written by the sensr authors from RFC 5531 §9.
+# Not captured from or derived from nmap data. Hex, '#' starts a comment.
+73 65 6e 73 00 00 00 01 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00
