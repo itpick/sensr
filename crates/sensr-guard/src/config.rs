@@ -14,6 +14,11 @@ pub const EVENTS_DB: &str = "events.db";
 pub const SOCKET: &str = "/run/sensr-guard/guard.sock";
 /// While this file exists nothing blocks.
 pub const KILL_SWITCH: &str = "/boot/firmware/sensr/guard-off";
+/// The signed packs' index (`guard-packs.json`), by default.
+pub const PACK_INDEX: &str =
+    "https://github.com/itpick/sensr/releases/latest/download/guard-packs.json";
+/// The public keys packs are verified against, in the image.
+pub const KEYS_DIR: &str = "/run/current-system/sw/share/sensr-guard/keys";
 /// Packs built into the image.
 pub const BUILTIN_PACKS: &str = "/run/current-system/sw/share/sensr-guard/packs";
 
@@ -62,6 +67,16 @@ pub struct Config {
     pub retention_days: u16,
     /// Most event rows kept.
     pub max_rows: u32,
+    /// Where [`crate::proto::Request::CheckPacks`] fetches the pack index.
+    #[serde(default = "pack_index")]
+    pub pack_index: String,
+    /// Check for pack updates once a day.
+    #[serde(default)]
+    pub pack_auto_check: bool,
+}
+
+fn pack_index() -> String {
+    PACK_INDEX.to_owned()
 }
 
 #[cfg(test)]
@@ -94,12 +109,26 @@ mod tests {
             }],
             retention_days: 30,
             max_rows: 200_000,
+            pack_index: "https://example.test/guard-packs.json".into(),
+            pack_auto_check: true,
         };
         let s = serde_json::to_string(&c).unwrap();
         assert_eq!(serde_json::from_str::<Config>(&s).unwrap(), c);
         let mut v: serde_json::Value = serde_json::from_str(&s).unwrap();
         v["bogus"] = 1.into();
         assert!(serde_json::from_value::<Config>(v).is_err());
+    }
+
+    #[test]
+    fn pack_index_and_auto_check_default() {
+        let c: Config =
+            serde_json::from_str(r#"{"enabled":true,"retention_days":30,"max_rows":1000}"#)
+                .unwrap();
+        assert_eq!(
+            c.pack_index,
+            "https://github.com/itpick/sensr/releases/latest/download/guard-packs.json"
+        );
+        assert!(!c.pack_auto_check);
     }
 
     #[test]

@@ -145,6 +145,20 @@ pub struct Guard {
     /// Most event rows kept (1000-5000000).
     #[serde(default = "max_rows")]
     pub max_rows: u32,
+    /// The signed packs' index (`guard-packs.json`, https).
+    #[serde(default = "pack_index")]
+    pub pack_index: String,
+    /// Check for pack updates once a day.
+    #[serde(default)]
+    pub pack_auto_check: bool,
+}
+
+/// The default pack index: the latest release's `guard-packs.json`.
+pub const PACK_INDEX: &str =
+    "https://github.com/itpick/sensr/releases/latest/download/guard-packs.json";
+
+fn pack_index() -> String {
+    PACK_INDEX.to_owned()
 }
 
 fn retention_days() -> u16 {
@@ -163,6 +177,8 @@ impl Default for Guard {
             rules: ArrayField::default(),
             retention_days: retention_days(),
             max_rows: max_rows(),
+            pack_index: pack_index(),
+            pack_auto_check: false,
         }
     }
 }
@@ -188,6 +204,13 @@ impl Validate for Guard {
             out,
         );
         check::range(self.max_rows, 1000..=5_000_000, &at.join("max_rows"), out);
+        if !self.pack_index.starts_with("https://") || self.pack_index.len() <= "https://".len() {
+            out.add(
+                &at.join("pack_index"),
+                ValidatorKind::Callback,
+                "The pack index must be an https:// URL.",
+            );
+        }
         let rules = at.join("rules");
         for (id, r) in &self.rules {
             let rp = rules.join(id);
@@ -227,6 +250,11 @@ mod tests {
         assert_eq!(g, Guard::default());
         assert!(g.enabled && g.is_empty());
         assert_eq!((g.retention_days, g.max_rows), (30, 200_000));
+        assert_eq!(
+            g.pack_index,
+            "https://github.com/itpick/sensr/releases/latest/download/guard-packs.json"
+        );
+        assert!(!g.pack_auto_check);
         let mut d = Document::factory();
         assert!(d.guard.is_empty() && d.validate().is_empty());
         assert!(serde_json::to_value(&d).unwrap().get("guard").is_none());
@@ -274,6 +302,21 @@ mod tests {
             d.guard = serde_json::from_value(json!({ k: good })).unwrap();
             assert!(d.validate().is_empty(), "{k}={good}");
         }
+    }
+
+    #[test]
+    fn pack_index_must_be_https() {
+        let mut d = Document::factory();
+        d.guard =
+            serde_json::from_value(json!({"pack_index": "http://x/guard-packs.json"})).unwrap();
+        let v = format!("{:?}", d.validate());
+        assert!(v.contains("guard.pack_index"), "{v}");
+        d.guard = serde_json::from_value(
+            json!({"pack_index": "https://mirror.example/guard-packs.json", "pack_auto_check": true}),
+        )
+        .unwrap();
+        assert!(d.validate().is_empty());
+        assert!(d.guard.pack_auto_check && !d.guard.is_empty());
     }
 
     #[test]

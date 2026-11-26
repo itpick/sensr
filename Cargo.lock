@@ -5330,7 +5330,9 @@ dependencies = [
 name = "sensr-guard"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "aya",
+ "clap",
  "getrandom 0.4.3",
  "ipnet",
  "minisign",
@@ -5343,6 +5345,10 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
  "zstd",
 ]
 

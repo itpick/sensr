@@ -1,0 +1,876 @@
+//! The daemon's logic against a fake kernel ([`Backend`]), and the pack
+//! check against a local HTTP fixture.
+
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::mem::{offset_of, size_of};
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use minisign::KeyPair;
+use semver::Version;
+use sensr_guard::compile::Compiled;
+use sensr_guard::daemon::{
+    Backend, Daemon, HttpFetcher, KILL_SWITCH_STATE, LoadedPack, Options, StartError,
+    auto_check_due, check_packs, parse_lockdown,
+};
+use sensr_guard::events::BootClock;
+use sensr_guard::loader::ProgramStatus;
+use sensr_guard::maps::GuardEvent;
+use sensr_guard::packs::VerifiedPack;
+use sensr_guard::proto::{PackSource, Reply, Request, RuleStatus, StatusView};
+use serde_json::json;
+
+/// One apply: rule ids in slot order, enabled flags, actions, kill switch.
+type Apply = (Vec<String>, Vec<u8>, Vec<u8>, bool);
+
+/// What the fake kernel saw.
+#[derive(Default)]
+struct Log {
+    /// Versions loaded, in order.
+    loads: Vec<String>,
+    applies: Vec<Apply>,
+}
+
+#[derive(Default)]
+struct Knobs {
+    /// Program name -> attach error.
+    unattached: HashMap<String, String>,
+    /// Pack versions whose load fails.
+    fail_load: Vec<String>,
+    /// The next applies fail with this.
+    fail_apply: Option<String>,
+    /// Records waiting in the ring buffer.
+    events: Vec<Vec<u8>>,
+    boot_complete: bool,
+    dropped: u64,
+}
+
+#[derive(Clone, Default)]
+struct Fake {
+    log: Arc<Mutex<Log>>,
+    knobs: Arc<Mutex<Knobs>>,
+}
+
+struct FakePack {
+    fake: Fake,
+    last: Option<Compiled>,
+}
+
+const PROGRAMS: [(&str, &str); 12] = [
+    ("guard_bind", "socket_bind"),
+    ("guard_bpf", "bpf"),
+    ("guard_connect", "socket_connect"),
+    ("guard_exec", "bprm_check_security"),
+    ("guard_exec_inherit", "task_alloc"),
+    ("guard_file_open", "file_open"),
+    ("guard_listen", "socket_listen"),
+    ("guard_module_data", "kernel_load_data"),
+    ("guard_module_file", "kernel_read_file"),
+    ("guard_path_rename", "path_rename"),
+    ("guard_path_unlink", "path_unlink"),
+    ("guard_setuid", "task_fix_setuid"),
+];
+
+impl Backend for Fake {
+    fn load(&mut self, pack: &VerifiedPack) -> Result<Box<dyn LoadedPack>, String> {
+        let v = pack.version.to_string();
+        if self.knobs.lock().unwrap().fail_load.contains(&v) {
+            return Err(format!("verifier rejected {v}"));
+        }
+        self.log.lock().unwrap().loads.push(v);
+        Ok(Box::new(FakePack {
+            fake: self.clone(),
+            last: None,
+        }))
+    }
+
+    fn boot_complete(&mut self) -> bool {
+        self.knobs.lock().unwrap().boot_complete
+    }
+}
+
+impl LoadedPack for FakePack {
+    fn programs(&self) -> Vec<ProgramStatus> {
+        let k = self.fake.knobs.lock().unwrap();
+        PROGRAMS
+            .iter()
+            .map(|(name, hook)| {
+                let reason = k.unattached.get(*name).cloned();
+                ProgramStatus {
+                    name: (*name).into(),
+                    hook: (*hook).into(),
+                    attached: reason.is_none(),
+                    reason,
+                }
+            })
+            .collect()
+    }
+
+    fn apply(&mut self, c: &Compiled, kill_switch: bool, own_tgid: u32) -> Result<(), String> {
+        assert_eq!(own_tgid, 4242);
+        if let Some(e) = self.fake.knobs.lock().unwrap().fail_apply.clone() {
+            return Err(e);
+        }
+        self.fake.log.lock().unwrap().applies.push((
+            c.meta.iter().map(|m| m.id.clone()).collect(),
+            c.meta.iter().map(|m| m.meta.enabled).collect(),
+            c.meta.iter().map(|m| m.meta.action).collect(),
+            kill_switch,
+        ));
+        self.last = Some(c.clone());
+        Ok(())
+    }
+
+    fn hits_by_id(&self) -> Result<HashMap<String, u64>, String> {
+        Ok(self
+            .last
+            .iter()
+            .flat_map(|c| c.meta.iter().map(|m| (m.id.clone(), 1)))
+            .collect())
+    }
+
+    fn ringbuf_dropped(&self) -> Result<u64, String> {
+        Ok(self.fake.knobs.lock().unwrap().dropped)
+    }
+
+    fn drain_events(&mut self, sink: &mut dyn FnMut(&[u8])) {
+        let ev = std::mem::take(&mut self.fake.knobs.lock().unwrap().events);
+        for e in ev {
+            sink(&e);
+        }
+    }
+}
+
+const CORE_RULES: &str = r#"[
+  {"id":"core-a","enabled":true,"hook":"exec","target":{"path_prefix":"/tmp"},"action":"alert"},
+  {"id":"core-b","enabled":true,"hook":"listen","target":"any","action":"alert"}
+]"#;
+
+struct Env {
+    dir: tempfile::TempDir,
+    fake: Fake,
+}
+
+impl Env {
+    fn new() -> Env {
+        let dir = tempfile::tempdir().unwrap();
+        let core = dir.path().join("builtin/core");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::write(
+            core.join("manifest.json"),
+            json!({"name":"core","version":"0.0.1","min_sensr":"0.0.0",
+                   "programs":["core.bpf.o"],"rules":"rules.json"})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(core.join("core.bpf.o"), b"builtin object").unwrap();
+        std::fs::write(core.join("rules.json"), CORE_RULES).unwrap();
+        for d in ["state", "keys", "boot"] {
+            std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        }
+        std::fs::write(
+            dir.path().join("lockdown"),
+            "[none] integrity confidentiality\n",
+        )
+        .unwrap();
+        let env = Env {
+            dir,
+            fake: Fake::default(),
+        };
+        env.config(json!({}));
+        env
+    }
+
+    fn p(&self, rel: &str) -> PathBuf {
+        self.dir.path().join(rel)
+    }
+
+    /// Write guard.json: the defaults merged with `extra`.
+    fn config(&self, extra: serde_json::Value) {
+        let mut c = json!({"enabled": true, "retention_days": 30, "max_rows": 200000});
+        for (k, v) in extra.as_object().unwrap() {
+            c[k] = v.clone();
+        }
+        std::fs::write(self.p("guard.json"), c.to_string()).unwrap();
+    }
+
+    fn opts(&self) -> Options {
+        Options {
+            config: self.p("guard.json"),
+            state_dir: self.p("state"),
+            builtin_dir: self.p("builtin"),
+            keys_dir: self.p("keys"),
+            kill_switch_file: self.p("boot/guard-off"),
+            lockdown_file: self.p("lockdown"),
+            sensr_version: Version::new(1, 0, 0),
+            own_tgid: 4242,
+            clock: BootClock::new(1_700_000_000_000, 0),
+            arch: "aarch64".into(),
+        }
+    }
+
+    fn start(&self) -> Daemon<Fake> {
+        Daemon::start(self.opts(), self.fake.clone()).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn last_apply(&self) -> Apply {
+        self.fake
+            .log
+            .lock()
+            .unwrap()
+            .applies
+            .last()
+            .cloned()
+            .unwrap()
+    }
+
+    fn applies(&self) -> usize {
+        self.fake.log.lock().unwrap().applies.len()
+    }
+
+    fn knobs(&self) -> std::sync::MutexGuard<'_, Knobs> {
+        self.fake.knobs.lock().unwrap()
+    }
+}
+
+fn rule<'a>(s: &'a StatusView, id: &str) -> &'a RuleStatus {
+    s.rules
+        .iter()
+        .find(|r| r.id == id)
+        .unwrap_or_else(|| panic!("no rule {id} in {:#?}", s.rules))
+}
+
+const OWNER: &str = "6d0de000-0000-4000-8000-000000000001";
+
+fn owner_rule(hook: &str, target: serde_json::Value, action: &str) -> serde_json::Value {
+    json!({"id": OWNER, "enabled": true, "hook": hook, "target": target, "action": action})
+}
+
+#[test]
+fn starts_with_the_builtin_pack_and_merges_rules() {
+    let env = Env::new();
+    env.config(json!({"rules": [owner_rule("connect", json!({"net": {"cidr": "192.0.2.0/24"}}), "alert")]}));
+    let d = env.start();
+    let s = d.status();
+    assert!(s.running && s.enforcing && !s.kill_switch, "{s:#?}");
+    assert_eq!(s.reason, None);
+    assert_eq!(s.lockdown, "none");
+    assert_eq!(env.fake.log.lock().unwrap().loads, ["0.0.1"]);
+    assert_eq!(s.packs.len(), 1);
+    assert_eq!(s.packs[0].source, PackSource::Builtin);
+    assert_eq!(s.packs[0].programs.len(), 12);
+    let (ids, _, _, kill) = env.last_apply();
+    assert_eq!(
+        ids,
+        ["core-a", "core-b", OWNER],
+        "pack rules first, then the owner's"
+    );
+    assert!(!kill);
+    assert_eq!(rule(&s, "core-a").pack.as_deref(), Some("core"));
+    let o = rule(&s, OWNER);
+    assert!(o.active && o.pack.is_none() && o.slot == Some(2), "{o:?}");
+    assert_eq!(o.hits, 1, "hits are reported by rule id");
+}
+
+#[test]
+fn rule_on_unattached_hook_is_inactive() {
+    let env = Env::new();
+    env.knobs()
+        .unattached
+        .insert("guard_connect".into(), "the verifier said no".into());
+    env.config(json!({"rules": [owner_rule("connect", json!({"net": {"cidr": "192.0.2.0/24"}}), "block")]}));
+    let d = env.start();
+    let s = d.status();
+    let o = rule(&s, OWNER);
+    assert!(!o.active, "{o:?}");
+    let why = o.reason.as_deref().unwrap();
+    assert!(
+        why.contains("guard_connect") && why.contains("the verifier said no"),
+        "{why}"
+    );
+    assert!(rule(&s, "core-a").active, "exec still works");
+    let p = s.packs[0]
+        .programs
+        .iter()
+        .find(|p| p.name == "guard_connect")
+        .unwrap();
+    assert!(!p.attached);
+}
+
+#[test]
+fn an_exe_rule_needs_exec_tracking() {
+    let env = Env::new();
+    env.knobs()
+        .unattached
+        .insert("guard_exec_inherit".into(), "no task_alloc".into());
+    env.config(
+        json!({"rules": [{"id": OWNER, "enabled": true, "hook": "connect",
+        "process": {"exe_prefix": "/usr/bin"}, "target": "any", "action": "alert"}]}),
+    );
+    let s = env.start().status();
+    assert!(!rule(&s, OWNER).active);
+    assert!(
+        rule(&s, OWNER)
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("task_alloc")
+    );
+}
+
+#[test]
+fn kill_switch_file_disables_blocking() {
+    let env = Env::new();
+    std::fs::write(env.p("boot/guard-off"), "").unwrap();
+    env.config(json!({"rules": [owner_rule("connect", json!({"net": {"cidr": "192.0.2.0/24"}}), "block")]}));
+    let mut d = env.start();
+    let s = d.status();
+    assert!(s.kill_switch);
+    assert!(env.last_apply().3, "applied with the kill switch on");
+    let o = rule(&s, OWNER);
+    assert!(!o.active);
+    assert!(
+        o.reason.as_deref().unwrap().contains("kill switch"),
+        "{o:?}"
+    );
+    assert!(rule(&s, "core-a").active, "alerts still apply");
+    // the owner's file wins over a live "on"
+    let Reply::Error(e) = d.handle(&Request::KillSwitch { on: false }) else {
+        panic!("off must be refused while the file exists");
+    };
+    assert!(e.contains("guard-off"), "{e}");
+    assert!(d.status().kill_switch);
+}
+
+#[test]
+fn kill_switch_toggles_live_and_persists() {
+    let env = Env::new();
+    let mut d = env.start();
+    assert!(!env.last_apply().3);
+    assert_eq!(d.handle(&Request::KillSwitch { on: true }), Reply::Ok);
+    assert!(env.last_apply().3 && d.status().kill_switch);
+    assert!(env.p("state").join(KILL_SWITCH_STATE).exists());
+    drop(d);
+    let mut d = env.start();
+    assert!(d.status().kill_switch, "a restart keeps it on");
+    assert_eq!(d.handle(&Request::KillSwitch { on: false }), Reply::Ok);
+    assert!(!env.last_apply().3 && !d.status().kill_switch);
+    assert!(!env.p("state").join(KILL_SWITCH_STATE).exists());
+}
+
+#[test]
+fn reload_with_bad_rule_keeps_previous() {
+    let env = Env::new();
+    env.config(json!({"rules": [owner_rule("connect", json!({"net": {"cidr": "192.0.2.0/24"}}), "alert")]}));
+    let mut d = env.start();
+    let before = env.applies();
+    // a path target on the connect hook does not compile
+    env.config(json!({"rules": [owner_rule("connect", json!({"path_prefix": "/etc"}), "block")]}));
+    let Reply::Error(e) = d.handle(&Request::Reload) else {
+        panic!("a bad rule must be refused");
+    };
+    assert!(e.contains(OWNER) && e.contains("kept"), "{e}");
+    assert_eq!(env.applies(), before, "nothing was applied");
+    let s = d.status();
+    assert!(s.enforcing);
+    assert!(rule(&s, OWNER).active);
+    assert_eq!(rule(&s, OWNER).action, sensr_guard::rule::Action::Alert);
+    // an unparseable file too
+    std::fs::write(env.p("guard.json"), "{").unwrap();
+    assert!(matches!(d.handle(&Request::Reload), Reply::Error(_)));
+    // a good one goes through
+    env.config(json!({"rules": [owner_rule("connect", json!({"net": {"cidr": "198.51.100.0/24"}}), "block")]}));
+    assert_eq!(d.handle(&Request::Reload), Reply::Ok);
+    assert_eq!(env.applies(), before + 1);
+    assert_eq!(
+        rule(&d.status(), OWNER).action,
+        sensr_guard::rule::Action::Block
+    );
+}
+
+#[test]
+fn bad_owner_rules_at_start_still_run_the_pack_rules() {
+    let env = Env::new();
+    env.config(json!({"rules": [owner_rule("connect", json!({"path_prefix": "/etc"}), "block")]}));
+    let s = env.start().status();
+    assert_eq!(env.last_apply().0, ["core-a", "core-b"]);
+    assert!(rule(&s, "core-a").active);
+    let o = rule(&s, OWNER);
+    assert!(!o.active && o.reason.as_deref().unwrap().contains("not applied"));
+    assert!(s.reason.as_deref().unwrap().contains("owner"));
+}
+
+#[test]
+fn pack_override_disables_default_rule() {
+    let env = Env::new();
+    env.config(json!({"pack_rules": [
+        {"pack": "core", "rule_id": "core-a", "enabled": false},
+        {"pack": "core", "rule_id": "core-b", "action": "block"},
+        {"pack": "other", "rule_id": "core-b", "enabled": false}
+    ]}));
+    let s = env.start().status();
+    let (ids, enabled, actions, _) = env.last_apply();
+    assert_eq!(ids, ["core-a", "core-b"], "a disabled rule keeps its slot");
+    assert_eq!(enabled, [0, 1]);
+    assert_eq!(actions, [0, 1], "core-b now blocks");
+    let a = rule(&s, "core-a");
+    assert!(!a.active && a.reason.as_deref() == Some("disabled"));
+    assert!(rule(&s, "core-b").active);
+    assert_eq!(rule(&s, "core-b").action, sensr_guard::rule::Action::Block);
+}
+
+#[test]
+fn pack_switched_off_loads_nothing() {
+    let env = Env::new();
+    env.config(json!({"packs": [{"name": "core", "enabled": false}],
+        "rules": [owner_rule("exec", json!("any"), "alert")]}));
+    let s = env.start().status();
+    assert!(env.fake.log.lock().unwrap().loads.is_empty());
+    assert!(!s.running && !s.enforcing);
+    assert!(!s.packs[0].active && s.packs[0].reason.as_deref() == Some("switched off"));
+    assert!(!rule(&s, OWNER).active);
+}
+
+#[test]
+fn lockdown_confidentiality_refuses_start() {
+    let env = Env::new();
+    std::fs::write(env.p("lockdown"), "none integrity [confidentiality]\n").unwrap();
+    let Err(e) = Daemon::start(env.opts(), env.fake.clone()) else {
+        panic!("must refuse");
+    };
+    assert!(matches!(e, StartError::Lockdown(ref m) if m == "confidentiality"));
+    assert!(e.to_string().contains("lockdown"), "{e}");
+    assert!(
+        env.fake.log.lock().unwrap().loads.is_empty(),
+        "nothing loaded"
+    );
+    assert_eq!(
+        parse_lockdown("none [integrity] confidentiality"),
+        "integrity"
+    );
+    assert_eq!(parse_lockdown(""), "none");
+    // integrity mode is fine
+    std::fs::write(env.p("lockdown"), "none [integrity] confidentiality\n").unwrap();
+    assert_eq!(env.start().status().lockdown, "integrity");
+}
+
+#[test]
+fn apply_failure_reports_not_enforcing() {
+    let env = Env::new();
+    env.knobs().fail_apply = Some("map rules_meta: no space".into());
+    let s = env.start().status();
+    assert!(s.running && !s.enforcing, "{s:#?}");
+    assert!(s.reason.as_deref().unwrap().contains("no space"));
+    assert!(s.rules.iter().all(|r| !r.active));
+}
+
+// --- packs -----------------------------------------------------------------
+
+fn keypair(env: &Env) -> KeyPair {
+    let kp = KeyPair::generate_unencrypted_keypair().unwrap();
+    std::fs::write(env.p("keys/test.pub"), kp.pk.to_box().unwrap().to_string()).unwrap();
+    kp
+}
+
+fn sign(kp: &KeyPair, data: &[u8]) -> String {
+    minisign::sign(Some(&kp.pk), &kp.sk, data, None, None)
+        .unwrap()
+        .to_string()
+}
+
+fn archive(version: &str, object: &[u8]) -> Vec<u8> {
+    let manifest = json!({"name":"core","version":version,"min_sensr":"0.0.0",
+        "programs":["core.bpf.o"],"rules":"rules.json"})
+    .to_string();
+    let mut b = tar::Builder::new(Vec::new());
+    for (name, data) in [
+        ("manifest.json", manifest.as_bytes()),
+        ("core.bpf.o", object),
+        ("rules.json", CORE_RULES.as_bytes()),
+    ] {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(data.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, name, data).unwrap();
+    }
+    zstd::encode_all(&b.into_inner().unwrap()[..], 3).unwrap()
+}
+
+fn index(base: &str, entries: &[(&str, &str, &str)]) -> Vec<u8> {
+    let packs: Vec<_> = entries
+        .iter()
+        .map(|(version, arch, file)| {
+            json!({"name": "core", "version": version, "arch": arch,
+                   "url": format!("{base}/{file}"), "sig_url": format!("{base}/{file}.minisig")})
+        })
+        .collect();
+    json!({ "packs": packs }).to_string().into_bytes()
+}
+
+#[test]
+fn check_packs_installs_newer_and_reloads() {
+    let env = Env::new();
+    let kp = keypair(&env);
+    let a = archive("1.2.0", b"new object");
+    let sig = sign(&kp, &a);
+    let files = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+    let base = serve_shared(Arc::clone(&files));
+    {
+        let mut f = files.lock().unwrap();
+        f.insert(
+            "/guard-packs.json".into(),
+            index(
+                &base,
+                &[
+                    ("1.2.0", "aarch64", "core-1.2.0.tar.zst"),
+                    // another architecture's newer build is not for us
+                    ("9.0.0", "x86_64", "core-9.tar.zst"),
+                ],
+            ),
+        );
+        f.insert("/core-1.2.0.tar.zst".into(), a);
+        f.insert("/core-1.2.0.tar.zst.minisig".into(), sig.into_bytes());
+    }
+    env.config(json!({"pack_index": format!("{base}/guard-packs.json")}));
+    let d = Mutex::new(env.start());
+    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::default()) else {
+        panic!("expected per-pack results");
+    };
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].name, "core");
+    assert_eq!(r[0].current.as_deref(), Some("0.0.1"));
+    assert_eq!(r[0].available.as_deref(), Some("1.2.0"));
+    assert!(r[0].installed && r[0].error.is_none(), "{r:?}");
+    assert_eq!(
+        env.fake.log.lock().unwrap().loads,
+        ["0.0.1", "1.2.0"],
+        "reloaded"
+    );
+    let s = d.lock().unwrap().status();
+    assert_eq!(s.packs[0].version, "1.2.0");
+    assert_eq!(s.packs[0].source, PackSource::Signed);
+    assert!(s.enforcing);
+    assert!(
+        !auto_check_due(&env.p("state"), now()),
+        "the check was recorded"
+    );
+    // nothing newer now
+    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::default()) else {
+        panic!()
+    };
+    assert!(!r[0].installed && r[0].error.is_none());
+    assert_eq!(env.fake.log.lock().unwrap().loads.len(), 2);
+}
+
+#[test]
+fn check_packs_keeps_current_on_bad_sig() {
+    let env = Env::new();
+    let kp = keypair(&env);
+    let other = KeyPair::generate_unencrypted_keypair().unwrap();
+    let a = archive("1.2.0", b"new object");
+    let files = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+    let base = serve_shared(Arc::clone(&files));
+    {
+        let mut f = files.lock().unwrap();
+        f.insert(
+            "/guard-packs.json".into(),
+            index(&base, &[("1.2.0", "aarch64", "core.tar.zst")]),
+        );
+        // signed by a key the image does not trust
+        f.insert(
+            "/core.tar.zst.minisig".into(),
+            sign(&other, &a).into_bytes(),
+        );
+        f.insert("/core.tar.zst".into(), a.clone());
+    }
+    let _ = &kp;
+    env.config(json!({"pack_index": format!("{base}/guard-packs.json")}));
+    let d = Mutex::new(env.start());
+    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::default()) else {
+        panic!()
+    };
+    assert!(!r[0].installed);
+    assert!(
+        r[0].error.as_deref().unwrap().contains("not trusted"),
+        "{r:?}"
+    );
+    // a tampered archive with a trusted key's signature over the original
+    {
+        let mut f = files.lock().unwrap();
+        f.insert("/core.tar.zst.minisig".into(), sign(&kp, &a).into_bytes());
+        let mut bad = a;
+        *bad.last_mut().unwrap() ^= 1;
+        f.insert("/core.tar.zst".into(), bad);
+    }
+    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::default()) else {
+        panic!()
+    };
+    assert!(
+        r[0].error.as_deref().unwrap().contains("does not verify"),
+        "{r:?}"
+    );
+    assert_eq!(env.fake.log.lock().unwrap().loads, ["0.0.1"], "no reload");
+    let s = d.lock().unwrap().status();
+    assert_eq!(s.packs[0].version, "0.0.1");
+    assert!(s.enforcing);
+    assert!(!env.p("state/packs/core/current").exists());
+}
+
+#[test]
+fn check_packs_reports_an_unreachable_index() {
+    let env = Env::new();
+    let base = serve_shared(Arc::new(Mutex::new(HashMap::new())));
+    env.config(json!({"pack_index": format!("{base}/guard-packs.json")}));
+    let d = Mutex::new(env.start());
+    let Reply::Error(e) = check_packs(&d, &HttpFetcher::default()) else {
+        panic!()
+    };
+    assert!(e.contains("404"), "{e}");
+}
+
+#[test]
+fn load_failure_keeps_last_good() {
+    let env = Env::new();
+    let kp = keypair(&env);
+    let a = archive("1.2.0", b"new object");
+    sensr_guard::packs::install(
+        &a,
+        &sign(&kp, &a),
+        &sensr_guard::packs::load_keys(&env.p("keys")).unwrap(),
+        &env.p("state"),
+        &Version::new(1, 0, 0),
+        false,
+    )
+    .unwrap();
+    // 1.2.0 is rejected by the kernel: the built-in copy runs, and says why
+    env.knobs().fail_load.push("1.2.0".into());
+    let mut d = env.start();
+    let s = d.status();
+    assert_eq!(s.packs[0].version, "0.0.1");
+    assert!(s.packs[0].active && s.enforcing);
+    assert!(
+        s.packs[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("verifier rejected 1.2.0"),
+        "{:?}",
+        s.packs[0]
+    );
+    // now 1.2.0 loads; then 1.3.0 arrives and fails: 1.2.0 keeps running
+    env.knobs().fail_load.clear();
+    assert_eq!(d.handle(&Request::Reload), Reply::Ok);
+    assert_eq!(d.status().packs[0].version, "1.2.0");
+    let b = archive("1.3.0", b"newer object");
+    sensr_guard::packs::install(
+        &b,
+        &sign(&kp, &b),
+        &sensr_guard::packs::load_keys(&env.p("keys")).unwrap(),
+        &env.p("state"),
+        &Version::new(1, 0, 0),
+        false,
+    )
+    .unwrap();
+    env.knobs().fail_load.push("1.3.0".into());
+    assert_eq!(d.handle(&Request::Reload), Reply::Ok);
+    let s = d.status();
+    assert_eq!(s.packs[0].version, "1.2.0");
+    assert!(s.packs[0].reason.as_deref().unwrap().contains("1.3.0"));
+    assert!(s.enforcing);
+}
+
+#[test]
+fn auto_check_is_daily() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(auto_check_due(dir.path(), 1000), "never checked");
+    std::fs::write(dir.path().join("last-pack-check"), "1000\n").unwrap();
+    assert!(!auto_check_due(dir.path(), 1000 + 3600));
+    assert!(auto_check_due(dir.path(), 1000 + 24 * 3600));
+    assert!(auto_check_due(dir.path(), 10), "a clock that went back");
+}
+
+// --- events ----------------------------------------------------------------
+
+fn raw_event(hook: u8, blocked: bool, target: &str) -> Vec<u8> {
+    let mut b = vec![0u8; size_of::<GuardEvent>()];
+    b[0..8].copy_from_slice(&5_000_000_000u64.to_le_bytes());
+    b[offset_of!(GuardEvent, pid)..][..4].copy_from_slice(&42u32.to_le_bytes());
+    b[offset_of!(GuardEvent, hook)] = hook;
+    b[offset_of!(GuardEvent, action)] = u8::from(blocked);
+    b[offset_of!(GuardEvent, blocked)] = u8::from(blocked);
+    b[offset_of!(GuardEvent, exe)..][..7].copy_from_slice(b"/bin/sh");
+    b[offset_of!(GuardEvent, target)..][..target.len()].copy_from_slice(target.as_bytes());
+    b
+}
+
+#[test]
+fn events_flow_into_batches_and_counters() {
+    let env = Env::new();
+    let mut d = env.start();
+    let t0 = Instant::now();
+    env.knobs().boot_complete = true;
+    env.knobs().events = vec![raw_event(0, false, "/tmp/x"), raw_event(0, false, "/tmp/x")];
+    env.knobs().dropped = 7;
+    assert!(d.poll_events(t0).is_empty(), "the first batch waits");
+    let s = d.status();
+    assert_eq!(s.dropped_kernel, 7);
+    assert!(s.boot_complete);
+    let b = d.poll_events(t0 + Duration::from_secs(16));
+    assert_eq!(b.len(), 1);
+    assert_eq!(b[0].rows.len(), 1);
+    assert_eq!(b[0].rows[0].count, 2, "deduplicated");
+    // a failed write goes back and leaves with the drain
+    d.requeue(b[0].clone());
+    let drained = d.drain().unwrap();
+    assert_eq!(drained.rows, b[0].rows);
+}
+
+#[test]
+fn module_events_wait_for_boot_complete() {
+    let env = Env::new();
+    let mut d = env.start();
+    let t0 = Instant::now();
+    env.knobs().events = vec![
+        raw_event(5, false, "/lib/modules/x.ko"),
+        raw_event(5, true, "/lib/modules/blocked.ko"),
+        raw_event(0, false, "/tmp/x"),
+    ];
+    assert!(d.poll_events(t0).is_empty());
+    assert!(!d.status().boot_complete);
+    let rows = d.drain().unwrap().rows;
+    let targets: Vec<_> = rows.iter().map(|r| r.target.as_str()).collect();
+    assert!(
+        targets.contains(&"/lib/modules/blocked.ko") && targets.contains(&"/tmp/x"),
+        "{targets:?}"
+    );
+    assert!(!targets.contains(&"/lib/modules/x.ko"), "{targets:?}");
+    // boot completes; checked at most once a second
+    env.knobs().boot_complete = true;
+    env.knobs().events = vec![raw_event(5, false, "/lib/modules/y.ko")];
+    d.poll_events(t0 + Duration::from_millis(500));
+    assert!(
+        !d.status().boot_complete,
+        "not checked again within a second"
+    );
+    assert!(d.drain().is_none());
+    env.knobs().events = vec![raw_event(5, false, "/lib/modules/z.ko")];
+    d.poll_events(t0 + Duration::from_secs(2));
+    assert!(d.status().boot_complete);
+    assert_eq!(d.drain().unwrap().rows[0].target, "/lib/modules/z.ko");
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// A tiny HTTP/1.1 server for `files` (path -> body, changeable while it
+/// runs); 404 otherwise.
+fn serve_shared(files: Arc<Mutex<HashMap<String, Vec<u8>>>>) -> String {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { continue };
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut line = String::new();
+            if r.read_line(&mut line).is_err() {
+                continue;
+            }
+            let path = line.split_whitespace().nth(1).unwrap_or("/").to_owned();
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).is_err() || h == "\r\n" || h.is_empty() {
+                    break;
+                }
+            }
+            let body = files.lock().unwrap().get(&path).cloned();
+            let (status, body) = match body {
+                Some(b) => ("200 OK", b),
+                None => ("404 Not Found", b"no".to_vec()),
+            };
+            let _ = write!(
+                s,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = s.write_all(&body);
+            let _ = s.flush();
+        }
+    });
+    base
+}
+
+// --- the socket ------------------------------------------------------------
+
+#[tokio::test]
+async fn socket_serves_status_kill_switch_and_errors() {
+    use sensr_guard::server::{Shared, bind, serve};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+
+    let env = Env::new();
+    let sock = env.p("guard.sock");
+    std::fs::write(&sock, "stale").unwrap();
+    let shared = Arc::new(Shared::new(env.start(), Box::new(HttpFetcher::default())));
+    let l = bind(&sock).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777,
+        0o660
+    );
+    tokio::spawn(serve(l, Arc::clone(&shared)));
+
+    let s = tokio::net::UnixStream::connect(&sock).await.unwrap();
+    let (r, mut w) = s.into_split();
+    let mut r = TokioBufReader::new(r).lines();
+    let mut ask = async |line: &str| -> Reply {
+        w.write_all(format!("{line}\n").as_bytes()).await.unwrap();
+        let reply = r.next_line().await.unwrap().unwrap();
+        serde_json::from_str(&reply).unwrap_or_else(|e| panic!("{reply}: {e}"))
+    };
+    let Reply::Status(s) = ask(r#"{"op":"status"}"#).await else {
+        panic!("status")
+    };
+    assert!(s.running && !s.kill_switch);
+    assert_eq!(ask(r#"{"op":"kill_switch","on":true}"#).await, Reply::Ok);
+    let Reply::Status(s) = ask(r#"{"op":"status"}"#).await else {
+        panic!()
+    };
+    assert!(s.kill_switch);
+    assert!(env.last_apply().3);
+    let Reply::Error(e) = ask(r#"{"op":"nope"}"#).await else {
+        panic!()
+    };
+    assert!(e.contains("bad request"), "{e}");
+    assert_eq!(ask(r#"{"op":"reload"}"#).await, Reply::Ok);
+    assert!(
+        shared.lock().status().kill_switch,
+        "reload keeps the kill switch"
+    );
+}
+
+#[test]
+fn builtin_wins_when_at_least_as_new() {
+    let env = Env::new();
+    let kp = keypair(&env);
+    // an installed copy of the same version as the image's
+    let a = archive("0.0.1", b"installed object");
+    sensr_guard::packs::install(
+        &a,
+        &sign(&kp, &a),
+        &sensr_guard::packs::load_keys(&env.p("keys")).unwrap(),
+        &env.p("state"),
+        &Version::new(1, 0, 0),
+        false,
+    )
+    .unwrap();
+    let s = env.start().status();
+    assert_eq!(s.packs[0].source, PackSource::Builtin, "{:?}", s.packs[0]);
+    assert_eq!(s.packs[0].version, "0.0.1");
+}

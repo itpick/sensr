@@ -85,6 +85,8 @@ pub fn config(doc: &Document) -> Option<Config> {
             .collect(),
         retention_days: g.retention_days,
         max_rows: g.max_rows,
+        pack_index: g.pack_index.clone(),
+        pack_auto_check: g.pack_auto_check,
     })
 }
 
@@ -108,12 +110,15 @@ mod tests {
                      "target": {"net": {"cidr": "10.0.0.0/8", "ports": [22]}}},
                 U2: {"enabled": false, "hook": "exec", "target": "any"}
             },
-            "retention_days": 7, "max_rows": 5000
+            "retention_days": 7, "max_rows": 5000,
+            "pack_index": "https://mirror.example/guard-packs.json", "pack_auto_check": true
         }))
         .unwrap();
         let c = config(&d).unwrap();
         assert!(c.enabled);
         assert_eq!((c.retention_days, c.max_rows), (7, 5000));
+        assert_eq!(c.pack_index, "https://mirror.example/guard-packs.json");
+        assert!(c.pack_auto_check);
         assert_eq!(
             c.packs,
             [PackToggle {
