@@ -33,8 +33,7 @@ mod linux {
     use sensr_guard::config;
     use sensr_guard::daemon::kernel::Kernel;
     use sensr_guard::daemon::{
-        Daemon, HttpFetcher, LOCKDOWN, NIXOS_VERSION, Options, StartError, auto_check_due,
-        sensr_version,
+        Daemon, HttpFetcher, LOCKDOWN, Options, RELEASE_FILE, StartError, auto_check_due,
     };
     use sensr_guard::events::BootClock;
     use sensr_guard::proto::Reply;
@@ -78,6 +77,10 @@ mod linux {
         /// requests are taken; looked up in /etc/passwd at start.
         #[arg(long = "trusted-user", default_value = "sensr-api")]
         trusted_users: Vec<String>,
+        /// The running sensr release, as the system updater records it
+        /// (packs' min_sensr).
+        #[arg(long, default_value = RELEASE_FILE)]
+        release_file: PathBuf,
     }
 
     /// The uid of `name` in /etc/passwd.
@@ -138,7 +141,7 @@ mod linux {
             keys_dir: args.keys.clone(),
             kill_switch_file: args.kill_switch_file.clone(),
             lockdown_file: PathBuf::from(LOCKDOWN),
-            sensr_version: sensr_version(Path::new(NIXOS_VERSION)),
+            release_file: args.release_file.clone(),
             own_tgid: std::process::id(),
             clock: boot_clock()?,
             arch: std::env::consts::ARCH.to_owned(),

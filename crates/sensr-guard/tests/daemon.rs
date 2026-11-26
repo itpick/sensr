@@ -14,7 +14,7 @@ use semver::Version;
 use sensr_guard::compile::Compiled;
 use sensr_guard::daemon::{
     Backend, Daemon, HttpFetcher, KILL_SWITCH_STATE, LoadedPack, Options, StartError,
-    auto_check_due, check_packs, parse_lockdown, record_attempt, sensr_version,
+    auto_check_due, check_packs, parse_lockdown, record_attempt, sensr_release,
 };
 use sensr_guard::events::BootClock;
 use sensr_guard::loader::ProgramStatus;
@@ -176,12 +176,28 @@ impl Env {
             "[none] integrity confidentiality\n",
         )
         .unwrap();
+        std::fs::write(dir.path().join("running-release"), "v1.0.0\n").unwrap();
         let env = Env {
             dir,
             fake: Fake::default(),
         };
         env.config(json!({}));
         env
+    }
+
+    /// Another built-in pack with these rules.
+    fn builtin(&self, name: &str, rules: serde_json::Value) {
+        let d = self.p(&format!("builtin/{name}"));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("manifest.json"),
+            json!({"name":name,"version":"0.0.1","min_sensr":"0.0.0",
+                   "programs":[format!("{name}.bpf.o")],"rules":"rules.json"})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(d.join(format!("{name}.bpf.o")), b"object").unwrap();
+        std::fs::write(d.join("rules.json"), rules.to_string()).unwrap();
     }
 
     fn p(&self, rel: &str) -> PathBuf {
@@ -205,7 +221,7 @@ impl Env {
             keys_dir: self.p("keys"),
             kill_switch_file: self.p("boot/guard-off"),
             lockdown_file: self.p("lockdown"),
-            sensr_version: Version::new(1, 0, 0),
+            release_file: self.p("running-release"),
             own_tgid: 4242,
             clock: BootClock::new(1_700_000_000_000, 0),
             arch: "aarch64".into(),
@@ -486,14 +502,18 @@ fn archive(version: &str, object: &[u8]) -> Vec<u8> {
 }
 
 fn named_archive(name: &str, version: &str, object: &[u8]) -> Vec<u8> {
-    let manifest = json!({"name":name,"version":version,"min_sensr":"0.0.0",
+    full_archive(name, version, "0.0.0", CORE_RULES, object)
+}
+
+fn full_archive(name: &str, version: &str, min: &str, rules: &str, object: &[u8]) -> Vec<u8> {
+    let manifest = json!({"name":name,"version":version,"min_sensr":min,
         "programs":["core.bpf.o"],"rules":"rules.json"})
     .to_string();
     let mut b = tar::Builder::new(Vec::new());
     for (name, data) in [
         ("manifest.json", manifest.as_bytes()),
         ("core.bpf.o", object),
-        ("rules.json", CORE_RULES.as_bytes()),
+        ("rules.json", rules.as_bytes()),
     ] {
         let mut h = tar::Header::new_gnu();
         h.set_size(data.len() as u64);
@@ -906,21 +926,16 @@ fn reload_with_owner_id_clashing_with_pack_rule_keeps_previous() {
 }
 
 #[test]
-fn sensr_version_comes_from_nixos_version() {
+fn sensr_release_comes_from_the_updater_record() {
     let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("nixos-version");
-    std::fs::write(&f, "26.11.20261113.d5cc683\n").unwrap();
-    assert_eq!(sensr_version(&f), Version::new(26, 11, 20261113));
-    std::fs::write(&f, "26.11pre-git").unwrap();
-    assert_eq!(
-        sensr_version(&f),
-        Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
-        "unparseable: the crate's version"
-    );
-    assert_eq!(
-        sensr_version(&dir.path().join("missing")),
-        Version::parse(env!("CARGO_PKG_VERSION")).unwrap()
-    );
+    let f = dir.path().join("running-release");
+    std::fs::write(&f, "v0.1.31\n").unwrap();
+    assert_eq!(sensr_release(&f), Some(Version::new(0, 1, 31)));
+    std::fs::write(&f, "0.2.0").unwrap();
+    assert_eq!(sensr_release(&f), Some(Version::new(0, 2, 0)));
+    std::fs::write(&f, "26.11.20261113.d5cc683").unwrap();
+    assert_eq!(sensr_release(&f), None, "a nixos label is not a release");
+    assert_eq!(sensr_release(&dir.path().join("missing")), None);
 }
 
 #[test]
@@ -1057,4 +1072,170 @@ async fn socket_refuses_mutations_from_untrusted_peers() {
 fn own_uid(env: &Env) -> u32 {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(env.p("guard.json")).unwrap().uid()
+}
+
+// --- fix round 2 ------------------------------------------------------------
+
+const EXTRA_RULES: &str =
+    r#"[{"id":"x-1","enabled":true,"hook":"setuid","target":{"uid":0},"action":"alert"}]"#;
+
+#[test]
+fn reload_disabling_core_moves_owner_rules_to_the_next_pack() {
+    let env = Env::new();
+    env.builtin(
+        "more",
+        json!([{"id":"more-1","enabled":true,"hook":"bpf","target":"any","action":"alert"}]),
+    );
+    let owner = owner_rule("connect", json!({"net": {"cidr": "192.0.2.0/24"}}), "alert");
+    env.config(json!({ "rules": [owner.clone()] }));
+    let mut d = env.start();
+    assert_eq!(env.last_apply().0, ["more-1"], "more: its own rules only");
+    env.config(json!({"packs": [{"name": "core", "enabled": false}], "rules": [owner.clone()]}));
+    assert_eq!(d.handle(&Request::Reload), Reply::Ok);
+    let s = d.status();
+    assert_eq!(
+        env.last_apply().0,
+        ["more-1", OWNER],
+        "the owner's rules moved"
+    );
+    let o = rule(&s, OWNER);
+    assert!(o.active && o.slot == Some(1), "{o:?}");
+    assert!(s.reason.is_none(), "{:?}", s.reason);
+    // with no pack left they are shown inactive, not dropped
+    env.config(json!({"packs": [{"name": "core", "enabled": false},
+        {"name": "more", "enabled": false}], "rules": [owner]}));
+    assert_eq!(d.handle(&Request::Reload), Reply::Ok);
+    let s = d.status();
+    let o = rule(&s, OWNER);
+    assert!(
+        !o.active && o.reason.as_deref() == Some("no pack is loaded"),
+        "{o:?}"
+    );
+}
+
+#[test]
+fn reload_enabling_a_clashing_pack_changes_nothing() {
+    let env = Env::new();
+    env.builtin("extra", serde_json::from_str(EXTRA_RULES).unwrap());
+    // the owner's rule has the id of extra's rule
+    let owner = json!({"id": "x-1", "enabled": true, "hook": "exec", "target": "any",
+        "action": "alert"});
+    env.config(json!({"packs": [{"name": "extra", "enabled": false}], "rules": [owner.clone()]}));
+    let mut d = env.start();
+    let before = env.applies();
+    let loads = env.fake.log.lock().unwrap().loads.len();
+    // core off, extra on: the owner's rules would go to extra and clash
+    env.config(json!({"packs": [{"name": "core", "enabled": false},
+        {"name": "extra", "enabled": true}], "rules": [owner]}));
+    let Reply::Error(e) = d.handle(&Request::Reload) else {
+        panic!("the clash must be refused");
+    };
+    assert!(e.contains("x-1") && e.contains("kept"), "{e}");
+    assert_eq!(env.applies(), before);
+    assert_eq!(
+        env.fake.log.lock().unwrap().loads.len(),
+        loads,
+        "nothing loaded"
+    );
+    let s = d.status();
+    assert!(s.packs.iter().any(|p| p.name == "core" && p.active));
+    assert!(rule(&s, "x-1").active && rule(&s, "x-1").pack.is_none());
+}
+
+#[test]
+fn check_packs_refuses_a_version_whose_rules_clash() {
+    let env = Env::new();
+    let kp = keypair(&env);
+    let rules = format!(
+        r#"[{{"id":"{OWNER}","enabled":true,"hook":"exec","target":"any","action":"alert"}}]"#
+    );
+    let a = full_archive("core", "1.2.0", "0.0.0", &rules, b"new object");
+    let files = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+    let base = serve_shared(Arc::clone(&files));
+    {
+        let mut f = files.lock().unwrap();
+        f.insert(
+            "/guard-packs.json".into(),
+            index(&base, &[("1.2.0", "aarch64", "core.tar.zst")]),
+        );
+        f.insert("/core.tar.zst.minisig".into(), sign(&kp, &a).into_bytes());
+        f.insert("/core.tar.zst".into(), a);
+    }
+    env.config(json!({"pack_index": format!("{base}/guard-packs.json"),
+        "rules": [owner_rule("connect", json!({"net": {"cidr": "192.0.2.0/24"}}), "alert")]}));
+    let d = Mutex::new(env.start());
+    let Reply::Packs(r) = check_packs(&d, &HttpFetcher::allow_http()) else {
+        panic!()
+    };
+    assert!(!r[0].installed, "{r:?}");
+    assert!(
+        r[0].error.as_deref().unwrap().contains("do not merge"),
+        "{r:?}"
+    );
+    assert!(!env.p("state/packs/core/current").exists());
+    let s = d.lock().unwrap().status();
+    assert_eq!(s.packs[0].version, "0.0.1");
+    assert!(rule(&s, OWNER).active);
+}
+
+#[test]
+fn packs_needing_a_release_wait_until_the_release_is_known() {
+    let env = Env::new();
+    std::fs::remove_file(env.p("running-release")).unwrap();
+    let kp = keypair(&env);
+    let a = full_archive("core", "1.2.0", "0.1.31", CORE_RULES, b"new object");
+    let files = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+    let base = serve_shared(Arc::clone(&files));
+    {
+        let mut f = files.lock().unwrap();
+        f.insert(
+            "/guard-packs.json".into(),
+            index(&base, &[("1.2.0", "aarch64", "core.tar.zst")]),
+        );
+        f.insert("/core.tar.zst.minisig".into(), sign(&kp, &a).into_bytes());
+        f.insert("/core.tar.zst".into(), a);
+    }
+    env.config(json!({"pack_index": format!("{base}/guard-packs.json")}));
+    let d = Mutex::new(env.start());
+    let check = || {
+        let Reply::Packs(r) = check_packs(&d, &HttpFetcher::allow_http()) else {
+            panic!()
+        };
+        r
+    };
+    let r = check();
+    assert!(!r[0].installed);
+    assert!(
+        r[0].error
+            .as_deref()
+            .unwrap()
+            .contains("sensr release unknown"),
+        "{r:?}"
+    );
+    // too old a release: refused, naming it
+    std::fs::write(env.p("running-release"), "v0.1.30\n").unwrap();
+    let r = check();
+    assert!(
+        !r[0].installed && r[0].error.as_deref().unwrap().contains("0.1.30"),
+        "{r:?}"
+    );
+    // the updater records a new enough release: the next check installs it
+    std::fs::write(env.p("running-release"), "v0.1.31\n").unwrap();
+    let r = check();
+    assert!(r[0].installed, "{r:?}");
+    assert_eq!(d.lock().unwrap().status().packs[0].version, "1.2.0");
+    // the record vanishes: a reload falls back to the built-in copy, saying why
+    std::fs::remove_file(env.p("running-release")).unwrap();
+    assert_eq!(d.lock().unwrap().handle(&Request::Reload), Reply::Ok);
+    let s = d.lock().unwrap().status();
+    assert_eq!(s.packs[0].version, "0.0.1");
+    assert!(
+        s.packs[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("sensr release unknown"),
+        "{:?}",
+        s.packs[0]
+    );
 }

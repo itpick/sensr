@@ -137,17 +137,18 @@ async fn connection<B: Backend + 'static>(s: UnixStream, shared: Arc<Shared<B>>)
             continue;
         } else {
             match serde_json::from_str::<Request>(&line) {
-                Ok(req) if authorize(&req, uid, &shared.trusted).is_err() => {
-                    let e = authorize(&req, uid, &shared.trusted).unwrap_err();
-                    tracing::warn!(?uid, request = ?req, "refused: {e}");
-                    Reply::Error(e)
-                }
-                Ok(req) => {
-                    let sh = Arc::clone(&shared);
-                    tokio::task::spawn_blocking(move || sh.handle(&req))
-                        .await
-                        .map_err(io::Error::other)?
-                }
+                Ok(req) => match authorize(&req, uid, &shared.trusted) {
+                    Err(e) => {
+                        tracing::warn!(?uid, request = ?req, "refused: {e}");
+                        Reply::Error(e)
+                    }
+                    Ok(()) => {
+                        let sh = Arc::clone(&shared);
+                        tokio::task::spawn_blocking(move || sh.handle(&req))
+                            .await
+                            .map_err(io::Error::other)?
+                    }
+                },
                 Err(e) => Reply::Error(format!("bad request: {e}")),
             }
         };

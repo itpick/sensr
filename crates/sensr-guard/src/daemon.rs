@@ -51,8 +51,9 @@ pub const LAST_PACK_CHECK: &str = "last-pack-check";
 pub const LAST_PACK_ATTEMPT: &str = "last-pack-attempt";
 /// After a failed attempt the automatic check waits at least this long.
 pub const AUTO_CHECK_RETRY: Duration = Duration::from_secs(3600);
-/// The running system's version (what the system updater compares).
-pub const NIXOS_VERSION: &str = "/run/current-system/nixos-version";
+/// Where the system updater (nix/modules/updates.nix) records the running
+/// release tag.
+pub const RELEASE_FILE: &str = "/var/lib/sensr/updates/running-release";
 /// How often the automatic pack check runs.
 pub const AUTO_CHECK_EVERY: Duration = Duration::from_secs(24 * 3600);
 /// How often boot-complete.target is checked until it is reached.
@@ -107,8 +108,9 @@ pub struct Options {
     pub kill_switch_file: PathBuf,
     /// The kernel's lockdown file ([`LOCKDOWN`]).
     pub lockdown_file: PathBuf,
-    /// This sensr's version (packs' `min_sensr`).
-    pub sensr_version: Version,
+    /// Where the system updater records the running sensr release
+    /// ([`RELEASE_FILE`]), which packs' `min_sensr` is compared with.
+    pub release_file: PathBuf,
     /// sensr-guard's own pid (never blocked, its bpf() calls ignored).
     pub own_tgid: u32,
     /// Boot time to wall time for events.
@@ -144,19 +146,16 @@ pub fn read_lockdown(path: &Path) -> String {
     std::fs::read_to_string(path).map_or_else(|_| "none".to_owned(), |t| parse_lockdown(&t))
 }
 
-/// This sensr's version, which packs' `min_sensr` is compared with: the
-/// running system's `nixos-version` (`26.11.20261113.d5cc683`, the version
-/// the system updater compares) as `26.11.20261113`; the crate's version
-/// when that file is missing or does not start with three numbers.
-pub fn sensr_version(nixos_version: &Path) -> Version {
-    let parsed = std::fs::read_to_string(nixos_version).ok().and_then(|t| {
-        let mut parts = t.trim().split('.');
-        let mut num = || parts.next()?.parse::<u64>().ok();
-        Some(Version::new(num()?, num()?, num()?))
-    });
-    parsed.unwrap_or_else(|| {
-        Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 0, 0))
-    })
+/// The running sensr release (`v0.1.9` becomes 0.1.9) as the system
+/// updater records it whenever the running system matches a release
+/// manifest. `None` when it is not recorded (a fresh image before its first
+/// update check, a hand-built system): then only packs whose `min_sensr` is
+/// 0.0.0 load. The image carries no other record of its release (the
+/// crate's version is not one).
+pub fn sensr_release(path: &Path) -> Option<Version> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let t = text.trim();
+    Version::parse(t.strip_prefix('v').unwrap_or(t)).ok()
 }
 
 /// Read and parse the configuration.
@@ -294,6 +293,16 @@ struct Pack {
     state: PackState,
 }
 
+/// What a pack will be after the next reconcile.
+enum Planned {
+    /// Not enabled (the reason).
+    Off(String),
+    /// Enabled, but it does not resolve (the reason).
+    Unresolved(String),
+    /// The pack to run.
+    Resolved(Box<VerifiedPack>),
+}
+
 /// One pack's download for [`Daemon::install_updates`].
 #[derive(Debug, Clone)]
 pub struct Download {
@@ -353,16 +362,13 @@ impl HttpFetcher {
     /// A fetcher that also accepts plain http:// (tests against a local
     /// fixture).
     pub fn allow_http() -> Self {
-        Self {
-            https_only: false,
-            ..Self::default()
-        }
+        Self::new(false)
     }
-}
 
-impl Default for HttpFetcher {
-    fn default() -> Self {
+    fn new(https_only: bool) -> Self {
         let agent: ureq::Agent = ureq::Agent::config_builder()
+            // no redirect from https:// to http:// either
+            .https_only(https_only)
             .timeout_global(Some(Duration::from_secs(120)))
             .timeout_resolve(Some(Duration::from_secs(10)))
             .timeout_connect(Some(Duration::from_secs(10)))
@@ -370,10 +376,13 @@ impl Default for HttpFetcher {
             .user_agent(concat!("sensr-guard/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
-        Self {
-            agent,
-            https_only: true,
-        }
+        Self { agent, https_only }
+    }
+}
+
+impl Default for HttpFetcher {
+    fn default() -> Self {
+        Self::new(true)
     }
 }
 
@@ -521,6 +530,8 @@ pub struct Daemon<B: Backend> {
     last_boot_check: Option<Instant>,
     /// Ring-buffer drops of packs no longer loaded.
     dropped_kernel_base: u64,
+    /// The running sensr release (`None`: unknown).
+    sensr: Option<Version>,
 }
 
 impl<B: Backend> Daemon<B> {
@@ -551,9 +562,12 @@ impl<B: Backend> Daemon<B> {
             boot_complete: false,
             last_boot_check: None,
             dropped_kernel_base: 0,
+            sensr: None,
         };
+        d.sensr = sensr_release(&d.opts.release_file);
         d.load_keys();
-        d.reconcile_packs();
+        let plan = d.plan_packs(&d.config);
+        d.reconcile_packs(plan);
         d.apply_all();
         Ok(d)
     }
@@ -584,20 +598,31 @@ impl<B: Backend> Daemon<B> {
         }
     }
 
-    /// Re-read the configuration and re-apply. A configuration that does
-    /// not parse, or owner rules that do not compile, change nothing.
+    /// Re-read the configuration and the sensr release, and re-apply. The
+    /// next pack set is planned first and the full merge (every pack's
+    /// rules with the overrides, the owner's rules on the first pack) is
+    /// compiled against it; a configuration that does not parse or a merge
+    /// that does not compile changes nothing.
     pub fn reload(&mut self) -> Result<(), String> {
         let config = read_config(&self.opts.config)?;
         if let Err(e) = compile(&config.rules).map_err(|e| e.to_string()) {
             return Err(format!("{e}; the running rules are kept"));
         }
-        if let Err(e) = self.dry_run(&config) {
+        let previous = (
+            self.keys.clone(),
+            self.keys_error.clone(),
+            self.sensr.clone(),
+        );
+        self.load_keys();
+        self.sensr = sensr_release(&self.opts.release_file);
+        let plan = self.plan_packs(&config);
+        if let Err(e) = self.dry_run(&config, &plan) {
+            (self.keys, self.keys_error, self.sensr) = previous;
             return Err(format!("{e}; the running rules are kept"));
         }
         self.config = config;
         self.owner_error = None;
-        self.load_keys();
-        self.reconcile_packs();
+        self.reconcile_packs(plan);
         self.apply_all();
         Ok(())
     }
@@ -628,11 +653,11 @@ impl<B: Backend> Daemon<B> {
         Ok(())
     }
 
-    fn pack_names(&self) -> Vec<String> {
+    fn pack_names(&self, config: &Config) -> Vec<String> {
         let mut names: BTreeSet<String> = subdirs(&self.opts.builtin_dir).into_iter().collect();
         names.extend(subdirs(&self.opts.state_dir.join("packs")));
         names.extend(
-            self.config
+            config
                 .packs
                 .iter()
                 .map(|p| p.name.clone())
@@ -644,16 +669,85 @@ impl<B: Backend> Daemon<B> {
         v
     }
 
-    fn enabled(&self, name: &str) -> bool {
-        if !self.config.enabled {
+    fn enabled_in(&self, config: &Config, name: &str) -> bool {
+        if !config.enabled {
             return false;
         }
-        self.config
+        config
             .packs
             .iter()
             .rev()
             .find(|p| p.name == name)
             .map_or_else(|| self.opts.builtin_dir.join(name).is_dir(), |p| p.enabled)
+    }
+
+    fn enabled(&self, name: &str) -> bool {
+        self.enabled_in(&self.config, name)
+    }
+
+    /// This sensr's release for packs' `min_sensr` (0.0.0 when unknown:
+    /// only packs that need no particular release pass).
+    fn sensr_or_zero(&self) -> Version {
+        self.sensr.clone().unwrap_or_else(|| Version::new(0, 0, 0))
+    }
+
+    /// A pack error, saying so when the sensr release is unknown.
+    fn explain(&self, e: String) -> String {
+        if self.sensr.is_none() && e.contains("needs sensr") {
+            e.replace(
+                "pack needs sensr",
+                "sensr release unknown: pack needs sensr",
+            )
+            .replace(", this is 0.0.0", "")
+        } else {
+            e
+        }
+    }
+
+    /// The pack `name` resolves to now: the installed version if it still
+    /// verifies, unless the built-in copy is at least as new.
+    fn resolve_pack(&self, name: &str) -> Result<VerifiedPack, String> {
+        let mut vp = packs::resolve(
+            name,
+            &self.opts.builtin_dir,
+            &self.opts.state_dir,
+            &self.keys,
+            &self.sensr_or_zero(),
+        )
+        .map_err(|e| self.explain(e.to_string()))?;
+        // the image's own copy wins when it is at least as new (an
+        // installed pack from an older release must not replace it)
+        if matches!(vp.source, Source::Installed(_))
+            && let Ok(b) = packs::read_pack_dir(&self.opts.builtin_dir.join(name))
+            && b.version >= vp.version
+        {
+            vp = b;
+        }
+        vp.fallback_reason = vp.fallback_reason.map(|r| self.explain(r));
+        Ok(vp)
+    }
+
+    /// What every pack would be under `config`, decided without loading
+    /// anything (used by the dry run and then by the reconcile).
+    fn plan_packs(&self, config: &Config) -> Vec<(String, Planned)> {
+        self.pack_names(config)
+            .into_iter()
+            .map(|name| {
+                let planned = if !self.enabled_in(config, &name) {
+                    Planned::Off(if config.enabled {
+                        "switched off".into()
+                    } else {
+                        "the guard is off".into()
+                    })
+                } else {
+                    match self.resolve_pack(&name) {
+                        Ok(vp) => Planned::Resolved(Box::new(vp)),
+                        Err(e) => Planned::Unresolved(format!("not loaded: {e}")),
+                    }
+                };
+                (name, planned)
+            })
+            .collect()
     }
 
     /// Load `vp`; on failure the pack comes back with the error.
@@ -672,20 +766,19 @@ impl<B: Backend> Daemon<B> {
         }
     }
 
-    /// Bring the loaded packs in line with the configuration and the disk.
-    fn reconcile_packs(&mut self) {
-        let names = self.pack_names();
+    /// Bring the loaded packs in line with `plan`.
+    fn reconcile_packs(&mut self, plan: Vec<(String, Planned)>) {
         let mut old: HashMap<String, Pack> = std::mem::take(&mut self.packs)
             .into_iter()
             .map(|p| (p.name.clone(), p))
             .collect();
         let mut new = Vec::new();
-        for name in names {
+        for (name, planned) in plan {
             let prev = old.remove(&name).and_then(|p| match p.state {
                 PackState::Running(r) => Some(r),
                 PackState::Inactive { .. } => None,
             });
-            let state = self.next_state(&name, prev);
+            let state = self.next_state(&name, prev, planned);
             new.push(Pack { name, state });
         }
         for p in old.into_values() {
@@ -700,42 +793,15 @@ impl<B: Backend> Daemon<B> {
         }
     }
 
-    fn next_state(&mut self, name: &str, prev: Option<Box<Running>>) -> PackState {
-        if !self.enabled(name) {
-            let reason = if self.config.enabled {
-                "switched off"
-            } else {
-                "the guard is off"
-            };
-            let state = PackState::Inactive {
-                version: None,
-                source: PackSource::Builtin,
-                verified: false,
-                reason: reason.into(),
-            };
-            if let Some(r) = prev {
-                self.retire(PackState::Running(r));
-            }
-            return state;
-        }
-        let resolved = packs::resolve(
-            name,
-            &self.opts.builtin_dir,
-            &self.opts.state_dir,
-            &self.keys,
-            &self.opts.sensr_version,
-        );
-        let vp = match resolved {
-            // the image's own copy wins when it is at least as new (an
-            // installed pack from an older release must not replace it)
-            Ok(vp) if matches!(vp.source, Source::Installed(_)) => {
-                match packs::read_pack_dir(&self.opts.builtin_dir.join(name)) {
-                    Ok(b) if b.version >= vp.version => b,
-                    _ => vp,
-                }
-            }
-            Ok(vp) => vp,
-            Err(e) => {
+    fn next_state(
+        &mut self,
+        name: &str,
+        prev: Option<Box<Running>>,
+        planned: Planned,
+    ) -> PackState {
+        let vp = match planned {
+            Planned::Resolved(vp) => *vp,
+            Planned::Off(reason) | Planned::Unresolved(reason) => {
                 if let Some(r) = prev {
                     self.retire(PackState::Running(r));
                 }
@@ -743,7 +809,7 @@ impl<B: Backend> Daemon<B> {
                     version: None,
                     source: PackSource::Builtin,
                     verified: false,
-                    reason: format!("not loaded: {e}"),
+                    reason,
                 };
             }
         };
@@ -804,21 +870,24 @@ impl<B: Backend> Daemon<B> {
         }
     }
 
-    /// Compile what `config` would give every loaded pack, as
-    /// [`Self::apply_all`] builds it (the pack's rules with the overrides,
-    /// the owner's rules on the first pack), without applying anything.
-    fn dry_run(&self, config: &Config) -> Result<(), String> {
+    /// Compile what `config` would give the packs of `plan`, as
+    /// [`Self::apply_all`] builds it (each pack's rules with the overrides,
+    /// the owner's rules on the first pack), without applying anything. A
+    /// planned pack whose new version then fails to load keeps (or falls
+    /// back to) another version's rules; a clash those cause is reported in
+    /// the status, not hidden.
+    fn dry_run(&self, config: &Config, plan: &[(String, Planned)]) -> Result<(), String> {
         let mut primary = true;
-        for p in &self.packs {
-            let PackState::Running(r) = &p.state else {
+        for (name, planned) in plan {
+            let Planned::Resolved(vp) = planned else {
                 continue;
             };
-            let mut rules = with_overrides(&p.name, &r.pack.rules, &config.pack_rules);
+            let mut rules = with_overrides(name, &vp.rules, &config.pack_rules);
             if primary {
                 rules.extend(config.rules.iter().cloned());
             }
             primary = false;
-            compile(&rules).map_err(|e| format!("pack {}: {e}", p.name))?;
+            compile(&rules).map_err(|e| format!("pack {name} {}: {e}", vp.version))?;
         }
         if primary {
             // nothing loaded: the owner's rules alone
@@ -895,6 +964,7 @@ impl<B: Backend> Daemon<B> {
     /// version), record the check, and reload the packs if anything was
     /// installed.
     pub fn install_updates(&mut self, downloads: Vec<Download>) -> Vec<PackCheck> {
+        self.sensr = sensr_release(&self.opts.release_file);
         let mut installed_any = false;
         let mut out = Vec::new();
         for d in downloads {
@@ -908,33 +978,12 @@ impl<B: Backend> Daemon<B> {
             match d.fetched {
                 Ok(None) => {}
                 Err(e) => check.error = Some(e),
-                Ok(Some((archive, sig))) => match packs::verify(&archive, &sig, &self.keys)
-                    .and_then(|()| packs::archive_manifest(&archive))
-                    .and_then(|m| {
-                        if m.name == d.name {
-                            Ok(())
-                        } else {
-                            Err(packs::PackError::Corrupt(format!(
-                                "the archive holds pack {}, not {}",
-                                m.name, d.name
-                            )))
-                        }
-                    })
-                    .and_then(|()| {
-                        packs::install(
-                            &archive,
-                            &sig,
-                            &self.keys,
-                            &self.opts.state_dir,
-                            &self.opts.sensr_version,
-                            false,
-                        )
-                    }) {
-                    Ok(_) => {
+                Ok(Some((archive, sig))) => match self.install_one(&d.name, &archive, &sig) {
+                    Ok(()) => {
                         installed_any = true;
                         check.installed = true;
                     }
-                    Err(e) => check.error = Some(e.to_string()),
+                    Err(e) => check.error = Some(e),
                 },
             }
             out.push(check);
@@ -944,7 +993,12 @@ impl<B: Backend> Daemon<B> {
             format!("{}\n", unix_now()),
         );
         if installed_any {
-            self.reconcile_packs();
+            let plan = self.plan_packs(&self.config);
+            if let Err(e) = self.dry_run(&self.config, &plan) {
+                // install_one checked the new pack; this is another change
+                tracing::warn!("after the pack install: {e}");
+            }
+            self.reconcile_packs(plan);
             self.apply_all();
             // a pack that was installed but does not run says why
             for c in out.iter_mut().filter(|c| c.installed) {
@@ -957,6 +1011,43 @@ impl<B: Backend> Daemon<B> {
             }
         }
         out
+    }
+
+    /// Verify one downloaded pack, check that it is the pack it is offered
+    /// as and that its rules merge with the owner's (else the install is
+    /// refused and the current version kept), then install it.
+    fn install_one(&self, name: &str, archive: &[u8], sig: &str) -> Result<(), String> {
+        packs::verify(archive, sig, &self.keys).map_err(|e| e.to_string())?;
+        let (m, rules) = packs::archive_contents(archive).map_err(|e| e.to_string())?;
+        if m.name != name {
+            return Err(format!("the archive holds pack {}, not {name}", m.name));
+        }
+        // would it be the first loaded pack (the one with the owner's rules)?
+        let primary = self
+            .packs
+            .iter()
+            .find(|p| matches!(p.state, PackState::Running(_)) || p.name == name)
+            .is_some_and(|p| p.name == name);
+        let mut merged = with_overrides(name, &rules, &self.config.pack_rules);
+        if primary {
+            merged.extend(self.config.rules.iter().cloned());
+        }
+        compile(&merged).map_err(|e| {
+            format!(
+                "{name} {}: its rules do not merge with the configured ones ({e}); the current version is kept",
+                m.version
+            )
+        })?;
+        packs::install(
+            archive,
+            sig,
+            &self.keys,
+            &self.opts.state_dir,
+            &self.sensr_or_zero(),
+            false,
+        )
+        .map(|_| ())
+        .map_err(|e| self.explain(e.to_string()))
     }
 
     /// Drain the ring buffers into the pipeline and return the batches that

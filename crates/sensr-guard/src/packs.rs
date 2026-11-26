@@ -191,7 +191,7 @@ pub struct PackStatus {
 }
 
 #[cfg(feature = "packs")]
-pub use install::{PublicKey, archive_manifest, install, load_keys, resolve, verify};
+pub use install::{PublicKey, archive_contents, install, load_keys, resolve, verify};
 
 #[cfg(feature = "packs")]
 mod install {
@@ -297,15 +297,20 @@ mod install {
         Ok(files)
     }
 
-    /// An archive's manifest, unpacked in memory (nothing is verified or
-    /// written: callers [`verify`] first).
-    pub fn archive_manifest(archive: &[u8]) -> Result<Manifest, PackError> {
+    /// An archive's manifest and default rules, unpacked in memory (nothing
+    /// is verified or written: callers [`verify`] first).
+    pub fn archive_contents(archive: &[u8]) -> Result<(Manifest, Vec<Rule>), PackError> {
         let files = unpack(archive)?;
-        Manifest::parse(
+        let manifest = Manifest::parse(
             files
                 .get(MANIFEST_FILE)
                 .ok_or_else(|| corrupt("no manifest.json"))?,
-        )
+        )?;
+        let rules = files
+            .get(&manifest.rules)
+            .ok_or_else(|| corrupt("the archive lacks its rules file"))?;
+        let rules = serde_json::from_slice(rules).map_err(|e| corrupt(format!("rules: {e}")))?;
+        Ok((manifest, rules))
     }
 
     /// The manifest-level checks shared by install and resolve.

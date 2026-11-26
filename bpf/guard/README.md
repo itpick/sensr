@@ -292,8 +292,15 @@ is its host test, which `checks.<system>.guard-bpf-build` runs.
   (`.github/scripts/check-guard-pack-version.sh`).
 - A router installs a signed pack only when it is newer than the one it
   runs. Its built-in copy wins whenever that copy is at least as new.
-- `min_sensr` is compared with the running system's version: the first
-  three numbers of `/run/current-system/nixos-version`, the version the
-  system updater compares. For example, `26.11.20261113.d5cc683` becomes
-  `26.11.20261113`. When that file is missing or unparseable, the
-  sensr-guard crate's version is used instead.
+- `min_sensr` gates the **sensr release**, not the NixOS label. Set it to a
+  sensr release such as `0.1.31`, or to `0.0.0` for a pack that runs on any
+  release.
+- sensr-guard compares `min_sensr` with the release that the system
+  updater records in `/var/lib/sensr/updates/running-release`. The file
+  holds a tag like `v0.1.31`, read as 0.1.31.
+- That record is re-read at start, on every reload and on every pack check.
+- When there is no record, the release is unknown. This happens on a fresh
+  image before its first update check, or on a hand-built system; the
+  image carries no other record of its release. While the release is
+  unknown, only packs whose `min_sensr` is `0.0.0` load. The others are
+  refused with "sensr release unknown".
