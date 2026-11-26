@@ -172,6 +172,12 @@
           # The runtime guard's loader on a BPF-LSM kernel (the same checks
           # run by hand on aarch64 with nix/tests/guard-load.sh).
           guard-load = import ./nix/tests/guard-load.nix { inherit pkgs; };
+          # The runtime guard end to end on the router: alerts, blocks held
+          # for confirm, never-block, kill switch, refused pack, restart.
+          guard = import ./nix/tests/guard.nix {
+            inherit pkgs;
+            sensrModules = testModules;
+          };
           agent-api = import ./nix/tests/agent-api.nix {
             inherit pkgs;
             sensrModules = testModules;
