@@ -7,9 +7,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::{Extension, Json};
 use sensr_guard::client;
 use sensr_guard::config::{EVENTS_DB, SOCKET, STATE_DIR};
@@ -25,6 +27,34 @@ use crate::auth::Caller;
 use crate::error::ApiError;
 
 type ApiResult = Result<Json<Value>, ApiError>;
+
+/// Failure of a switch: an API error, or the daemon's own refusal.
+pub enum WriteError {
+    /// Any other failure.
+    Api(ApiError),
+    /// The daemon answered with an error: its text is an owner-facing
+    /// explanation and goes to the caller as `{"error": text}` (409).
+    Refused(String),
+}
+
+impl From<ApiError> for WriteError {
+    fn from(e: ApiError) -> Self {
+        Self::Api(e)
+    }
+}
+
+impl IntoResponse for WriteError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::Api(e) => e.into_response(),
+            Self::Refused(text) => {
+                (StatusCode::CONFLICT, Json(json!({ "error": text }))).into_response()
+            }
+        }
+    }
+}
+
+type WriteResult = Result<Json<Value>, WriteError>;
 
 /// Events listed when `limit` is not given, and the most that can be asked for.
 const DEFAULT_LIMIT: u32 = 100;
@@ -110,10 +140,10 @@ fn writable(caller: &Caller) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Ask the daemon.
-async fn send(req: Request) -> std::io::Result<Reply> {
+/// Ask the daemon, waiting `timeout` for the answer.
+async fn send(req: Request, timeout: Duration) -> std::io::Result<Reply> {
     let sock = socket();
-    tokio::task::spawn_blocking(move || client::send(&sock, &req))
+    tokio::task::spawn_blocking(move || client::send_with_timeout(&sock, &req, timeout))
         .await
         .map_err(std::io::Error::other)?
 }
@@ -140,15 +170,20 @@ fn unreachable(e: &std::io::Error) -> ApiError {
     ApiError::new(StatusCode::BAD_GATEWAY, "sensr-guard did not answer")
 }
 
-async fn ask(req: Request) -> Result<Reply, ApiError> {
-    send(req).await.map_err(|e| unreachable(&e))
+async fn ask(req: Request, timeout: Duration) -> Result<Reply, ApiError> {
+    send(req, timeout).await.map_err(|e| unreachable(&e))
 }
 
-fn unexpected(r: &Reply) -> ApiError {
+/// A reply that is not the one asked for: the daemon's refusal, or a fault.
+fn unexpected(r: Reply) -> WriteError {
     if let Reply::Error(e) = r {
         tracing::error!(error = %e, "sensr-guard refused a request");
-        return ApiError::new(StatusCode::CONFLICT, "sensr-guard refused the request");
+        return WriteError::Refused(e);
     }
+    WriteError::Api(unexpected_reply(&r))
+}
+
+fn unexpected_reply(r: &Reply) -> ApiError {
     tracing::error!(reply = ?r, "unexpected reply from sensr-guard");
     ApiError::new(StatusCode::BAD_GATEWAY, "unexpected reply from sensr-guard")
 }
@@ -156,20 +191,20 @@ fn unexpected(r: &Reply) -> ApiError {
 /// The owner's rules from the configuration, each inactive: what the status
 /// shows while the daemon is down. Pack rules live with the packs, which
 /// only the daemon loads, so they are not listed.
-async fn configured_rules(state: &AppState, caller: &Caller) -> Vec<RuleStatus> {
+async fn configured_rules(state: &AppState, caller: &Caller) -> Result<Vec<RuleStatus>, String> {
     let op = Op::ConfigGet {
         path: "guard.rules".parse().expect("a valid path"),
         source: Source::Head,
     };
     let rules = match crate::native::call(state, caller, op).await {
         Ok(Response::Value(Some(Value::Object(m)))) => m,
-        Ok(_) => return Vec::new(),
+        Ok(_) => return Ok(Vec::new()),
         Err(e) => {
             tracing::warn!(error = %e.message, "could not read the configured guard rules");
-            return Vec::new();
+            return Err(e.message);
         }
     };
-    rules
+    Ok(rules
         .iter()
         .filter(|(_, r)| r.get("enabled").and_then(Value::as_bool) != Some(false))
         .map(|(id, r)| RuleStatus {
@@ -185,15 +220,19 @@ async fn configured_rules(state: &AppState, caller: &Caller) -> Vec<RuleStatus> 
             reason: Some(NOT_RUNNING.to_owned()),
             hits: 0,
         })
-        .collect()
+        .collect())
 }
 
-/// The status of a daemon that is not running.
-fn down_view(rules: Vec<RuleStatus>) -> StatusView {
+/// The status of a daemon that is not running; `read_error` is why the
+/// configured rules could not be listed, if that failed.
+fn down_view(rules: Vec<RuleStatus>, read_error: Option<String>) -> StatusView {
     StatusView {
         running: false,
         enforcing: false,
-        reason: Some(NOT_RUNNING.to_owned()),
+        reason: Some(read_error.map_or_else(
+            || NOT_RUNNING.to_owned(),
+            |e| format!("{NOT_RUNNING}; the configured rules could not be read: {e}"),
+        )),
         kill_switch: false,
         lockdown: "unknown".to_owned(),
         packs: Vec::new(),
@@ -211,12 +250,15 @@ pub async fn status(
     State(state): State<Arc<AppState>>,
     Extension(caller): Extension<Caller>,
 ) -> ApiResult {
-    match send(Request::Status).await {
+    match send(Request::Status, client::SHORT_TIMEOUT).await {
         Ok(Reply::Status(v)) => Ok(Json(json!(v))),
-        Ok(other) => Err(unexpected(&other)),
+        Ok(other) => Err(unexpected_reply(&other)),
         Err(e) if is_down(&e) => {
-            let rules = configured_rules(&state, &caller).await;
-            Ok(Json(json!(down_view(rules))))
+            let (rules, err) = match configured_rules(&state, &caller).await {
+                Ok(r) => (r, None),
+                Err(e) => (Vec::new(), Some(e)),
+            };
+            Ok(Json(json!(down_view(rules, err))))
         }
         Err(e) => Err(unreachable(&e)),
     }
@@ -228,7 +270,7 @@ pub async fn status(
 /// two packs share maps to none. Empty while the daemon is down.
 pub(crate) async fn slot_ids() -> HashMap<u32, Option<String>> {
     let mut m: HashMap<u32, Option<String>> = HashMap::new();
-    if let Ok(Reply::Status(v)) = send(Request::Status).await {
+    if let Ok(Reply::Status(v)) = send(Request::Status, client::SHORT_TIMEOUT).await {
         for r in v.rules {
             if let Some(slot) = r.slot {
                 m.entry(slot)
@@ -358,11 +400,11 @@ pub(crate) async fn alert_rows(w: AlertsWanted) -> Result<Option<(Vec<Value>, u6
 }
 
 /// `POST /api/v1/guard/reload`: re-read the configuration.
-pub async fn reload(Extension(caller): Extension<Caller>) -> ApiResult {
+pub async fn reload(Extension(caller): Extension<Caller>) -> WriteResult {
     writable(&caller)?;
-    match ask(Request::Reload).await? {
+    match ask(Request::Reload, client::TIMEOUT).await? {
         Reply::Ok => Ok(Json(json!({}))),
-        other => Err(unexpected(&other)),
+        other => Err(unexpected(other)),
     }
 }
 
@@ -377,20 +419,39 @@ pub struct KillSwitchBody {
 pub async fn kill_switch(
     Extension(caller): Extension<Caller>,
     Json(b): Json<KillSwitchBody>,
-) -> ApiResult {
+) -> WriteResult {
     writable(&caller)?;
-    match ask(Request::KillSwitch { on: b.on }).await? {
+    match ask(Request::KillSwitch { on: b.on }, client::TIMEOUT).await? {
         Reply::Ok => Ok(Json(json!({}))),
-        other => Err(unexpected(&other)),
+        other => Err(unexpected(other)),
     }
 }
 
 /// `POST /api/v1/guard/check-packs`: fetch the pack index and install newer
 /// packs that verify.
-pub async fn check_packs(Extension(caller): Extension<Caller>) -> ApiResult {
+pub async fn check_packs(Extension(caller): Extension<Caller>) -> WriteResult {
     writable(&caller)?;
-    match ask(Request::CheckPacks).await? {
+    match ask(Request::CheckPacks, client::TIMEOUT).await? {
         Reply::Packs(p) => Ok(Json(json!({ "packs": p }))),
-        other => Err(unexpected(&other)),
+        other => Err(unexpected(other)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_config_read_is_said_in_the_reason() {
+        let v = down_view(Vec::new(), None);
+        assert_eq!(v.reason.as_deref(), Some("sensr-guard is not running"));
+        let v = down_view(Vec::new(), Some("sensr-agent is not reachable".into()));
+        assert!(!v.running && v.rules.is_empty());
+        assert_eq!(
+            v.reason.as_deref(),
+            Some(
+                "sensr-guard is not running; the configured rules could not be read: sensr-agent is not reachable"
+            )
+        );
     }
 }

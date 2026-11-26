@@ -613,13 +613,28 @@ fn insight_hosts(
     Ok(())
 }
 
+/// `sensr-guard` is not listening on its socket.
+#[derive(Debug)]
+struct GuardDown(String);
+
+impl std::fmt::Display for GuardDown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for GuardDown {}
+
 fn guard_send(
     socket: &std::path::Path,
     req: &sensr_guard::proto::Request,
 ) -> anyhow::Result<sensr_guard::proto::Reply> {
     sensr_guard::client::send(socket, req).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
-            anyhow::anyhow!("sensr-guard is not running ({}: {e})", socket.display())
+            anyhow::Error::new(GuardDown(format!(
+                "sensr-guard is not running ({}: {e})",
+                socket.display()
+            )))
         }
         std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(
             "permission denied on the sensr-guard socket {} (run as root)",
@@ -683,7 +698,7 @@ fn guard(args: &GuardArgs, out: &mut dyn Write) -> anyhow::Result<()> {
             }
             Ok(other) => bail!("unexpected reply from sensr-guard: {other:?}"),
             // Down is an answer to "status", not a failure.
-            Err(e) if e.to_string().contains("not running") => {
+            Err(e) if e.downcast_ref::<GuardDown>().is_some() => {
                 if args.json {
                     writeln!(
                         out,

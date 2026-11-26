@@ -189,7 +189,8 @@ const MAX_PAGE: u32 = 5000;
 /// or host. Every row has a `source`: `ids`, or `runtime-guard` for the
 /// guard's events, which are merged in only for a caller who also holds the
 /// guard privilege (and which a signature or host filter excludes: they
-/// have neither).
+/// have neither). Merging reads each source's newest `offset + limit` rows,
+/// so for such a caller `offset + limit` is at most 5000 (400 beyond that).
 pub async fn alerts(
     State(state): State<Arc<AppState>>,
     Extension(caller): Extension<Caller>,
@@ -203,9 +204,14 @@ pub async fn alerts(
         );
     let mut f = q.filter();
     let (limit, offset) = (f.limit.clamp(1, MAX_PAGE), f.offset);
+    if with_guard && u64::from(limit) + u64::from(offset) > u64::from(MAX_PAGE) {
+        return Err(bad(format!(
+            "offset + limit is at most {MAX_PAGE} when runtime guard events are merged in"
+        )));
+    }
     let guard = if with_guard {
         // Each side's newest `offset + limit` rows hold the merged page.
-        let newest = limit.saturating_add(offset).min(MAX_PAGE);
+        let newest = limit + offset;
         f.limit = newest;
         f.offset = 0;
         crate::guard::alert_rows(crate::guard::AlertsWanted {
@@ -228,9 +234,13 @@ pub async fn alerts(
             None => (Vec::new(), 0),
         };
         let available = ids.is_some() || guard.is_some();
-        if let Some((g, n)) = guard {
-            rows.extend(g);
+        if let Some((g, n)) = &guard {
+            rows.extend(g.iter().cloned());
             total += n;
+        }
+        if with_guard {
+            // The IDS side was read from offset 0: cut the page here, even
+            // when the guard has no database.
             // Stable: on equal times the IDS alert stays first.
             rows.sort_by_key(|r| std::cmp::Reverse(r["ts"].as_i64().unwrap_or(0)));
             rows = rows
@@ -315,13 +325,64 @@ mod tests {
             via: sensr_ipc::AuthMethod::Password,
         };
         let state = AppState::new(d.path().join("none.sock"));
-        let a = alerts(
-            State(state),
-            Extension(caller),
-            Query(AlertQuery::default()),
-        )
-        .await
-        .unwrap();
+        let page =
+            |q: AlertQuery| alerts(State(state.clone()), Extension(caller.clone()), Query(q));
+        let a = page(AlertQuery::default()).await.unwrap();
         assert_eq!(a.0["total"], 0);
+
+        // A caller who may see guard events, but the guard never ran (no
+        // events database): paging is still exactly the IDS page.
+        let mut al = AlertStore::open(&d.path().join(ALERTS_DB)).unwrap();
+        let alert = |ts: i64, sid: u32| {
+            sensr_flow::eve::Event::Alert(Box::new(sensr_flow::eve::Alert {
+                id: 0,
+                ts,
+                gid: 1,
+                sid,
+                rev: 1,
+                signature: format!("sig {sid}"),
+                category: "c".into(),
+                severity: 2,
+                action: "allowed".into(),
+                proto: "TCP".into(),
+                src_ip: "10.0.0.1".into(),
+                src_port: None,
+                dest_ip: "10.0.0.2".into(),
+                dest_port: None,
+                iface: "lan".into(),
+                app_proto: String::new(),
+                raw: "{}".into(),
+            }))
+        };
+        al.write(
+            &[
+                alert(1000, 1),
+                alert(2000, 2),
+                alert(3000, 3),
+                alert(4000, 4),
+            ],
+            None,
+        )
+        .unwrap();
+        let sids = |v: &Value| -> Vec<u64> {
+            v["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["sid"].as_u64().unwrap())
+                .collect()
+        };
+        let q = |limit, offset| AlertQuery {
+            limit: Some(limit),
+            offset: Some(offset),
+            ..AlertQuery::default()
+        };
+        let a = page(q(2, 0)).await.unwrap();
+        assert_eq!((sids(&a.0), &a.0["total"]), (vec![4, 3], &json!(4)));
+        let a = page(q(2, 2)).await.unwrap();
+        assert_eq!(sids(&a.0), vec![2, 1], "page 2 is the second page");
+        let a = page(q(1, 1)).await.unwrap();
+        assert_eq!(sids(&a.0), vec![3]);
+        assert!(a.0["rows"][0]["source"] == "ids");
     }
 }

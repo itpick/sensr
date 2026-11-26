@@ -1550,7 +1550,7 @@ async fn guard_switches_reach_the_daemon() {
     // A daemon refusal is 409 with a fixed message.
     let (st, body) = post("/api/v1/guard/kill-switch", Some(json!({"on": false}))).await;
     assert_eq!(st, 409, "{body}");
-    assert_eq!(body["message"], "sensr-guard refused the request");
+    assert_eq!(body, json!({"error": "kill switch file is read-only"}));
     assert_eq!(
         post("/api/v1/guard/kill-switch", Some(json!({}))).await.0,
         422
@@ -1706,6 +1706,35 @@ async fn alerts_merge_guard_events_sorted_by_time() {
     )
     .await;
     assert_eq!(body["total"], 1);
+    // paging reads each side's newest offset+limit rows: capped at 5000
+    let (st, body) = http(
+        &fx,
+        "GET",
+        "/api/v1/ids/alerts?limit=3000&offset=2001",
+        Some(&both),
+        None,
+    )
+    .await;
+    assert_eq!(st, 400, "{body}");
+    let (st, _) = http(
+        &fx,
+        "GET",
+        "/api/v1/ids/alerts?limit=3000&offset=2000",
+        Some(&both),
+        None,
+    )
+    .await;
+    assert_eq!(st, 200);
+    let ids_only = pw("idsonly", "pw");
+    let (st, _) = http(
+        &fx,
+        "GET",
+        "/api/v1/ids/alerts?limit=3000&offset=2001",
+        Some(&ids_only),
+        None,
+    )
+    .await;
+    assert_eq!(st, 200, "the cap is for guard-merged callers only");
     // a signature or host filter has no guard rows
     for q in ["sid=1", "host=10.0.0.1"] {
         let (_, body) = http(
