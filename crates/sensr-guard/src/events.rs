@@ -5,7 +5,12 @@
 //! Counters are kept apart on purpose: `dropped_kernel` is the ring buffer
 //! overflowing (the loader's `ringbuf_dropped()`, set with
 //! [`Pipeline::set_dropped_kernel`]); `dropped_rate` is this pipeline's own
-//! userspace cap.
+//! userspace cap (new rows only); `dropped_blocked` counts denials lost to
+//! the pending-memory bound.
+//!
+//! For the daemon (Task 7): call [`Pipeline::tick`] on a timer (at most 1 s)
+//! and [`Pipeline::drain`] on shutdown; if `Store::write_batch` fails, hand
+//! the batch back with [`Pipeline::requeue`] or it is lost.
 
 use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
@@ -17,6 +22,8 @@ use crate::maps::{GuardEvent, PATH_LEN};
 
 /// Identical events within this window become one row with a count.
 pub const DEDUPE_WINDOW: Duration = Duration::from_secs(10);
+/// A blocked row closes its window after this, so denials reach the DB soon.
+pub const BLOCKED_WINDOW: Duration = Duration::from_secs(1);
 /// Batches are handed out at most this often.
 pub const BATCH_INTERVAL: Duration = Duration::from_secs(5);
 /// Events kept per second, globally; the rest are counted as dropped.
@@ -210,7 +217,7 @@ pub struct Batch {
     pub rows: Vec<Row>,
 }
 
-type Key = (u8, u32, String, String, String);
+type Key = (u8, u8, bool, u32, String, String, String);
 
 /// De-duplicate, rate-limit and batch events.
 ///
@@ -219,7 +226,7 @@ type Key = (u8, u32, String, String, String);
 #[derive(Debug)]
 pub struct Pipeline {
     clock: BootClock,
-    pending: HashMap<Key, (Instant, Row)>,
+    pending: HashMap<Key, (Instant, Duration, Row)>,
     /// Rows whose run ended (window passed) before a batch took them.
     closed: Vec<Row>,
     last_batch: Instant,
@@ -227,6 +234,7 @@ pub struct Pipeline {
     window_count: u32,
     dropped_rate: u64,
     dropped_kernel: u64,
+    dropped_blocked: u64,
 }
 
 impl Pipeline {
@@ -241,12 +249,18 @@ impl Pipeline {
             window_count: 0,
             dropped_rate: 0,
             dropped_kernel: 0,
+            dropped_blocked: 0,
         }
     }
 
     /// Events dropped by the userspace cap (rate, or pending bound).
     pub fn dropped_rate(&self) -> u64 {
         self.dropped_rate
+    }
+
+    /// Blocked events lost to the pending-memory bound (never to the rate cap).
+    pub fn dropped_blocked(&self) -> u64 {
+        self.dropped_blocked
     }
 
     /// Events the kernel ring buffer dropped (as last set).
@@ -265,38 +279,52 @@ impl Pipeline {
     }
 
     /// Adds an event; returns a batch if one is due.
+    ///
+    /// Rate cap: 100 new rows per second, in fixed 1 s windows (so up to 200
+    /// can pass across a window boundary). Only a NEW row costs a token; an
+    /// event that folds into a pending row just bumps its count, so one noisy
+    /// event cannot starve distinct ones. Blocked events are exempt from the
+    /// cap (a denial must not vanish), but still dedupe and still obey the
+    /// [`MAX_PENDING`] memory bound; those drops go to `dropped_blocked`.
     pub fn push(&mut self, e: Event, now: Instant) -> Option<Batch> {
         if now.saturating_duration_since(self.window_start) >= Duration::from_secs(1) {
             self.window_start = now;
             self.window_count = 0;
         }
-        if self.window_count >= RATE_CAP_PER_SEC {
-            self.dropped_rate += 1;
-            return self.tick(now);
-        }
         let key: Key = (
             e.hook,
+            e.action,
+            e.blocked,
             e.rule_id,
             e.exe.clone(),
             e.target.clone(),
             e.unit.clone(),
         );
-        if let Some((first, row)) = self.pending.get_mut(&key) {
-            if now.saturating_duration_since(*first) < DEDUPE_WINDOW {
+        if let Some((first, window, row)) = self.pending.get_mut(&key) {
+            if now.saturating_duration_since(*first) < *window {
                 row.count = row.count.saturating_add(1);
-                self.window_count += 1;
                 return self.tick(now);
             }
             // The old run ended; keep its row for the next batch.
-            if let Some((_, old)) = self.pending.remove(&key) {
+            if let Some((_, _, old)) = self.pending.remove(&key) {
                 self.closed.push(old);
             }
         }
         if self.pending_len() >= MAX_PENDING {
-            self.dropped_rate += 1;
+            if e.blocked {
+                self.dropped_blocked += 1;
+            } else {
+                self.dropped_rate += 1;
+            }
             return self.tick(now);
         }
-        self.window_count += 1;
+        if !e.blocked {
+            if self.window_count >= RATE_CAP_PER_SEC {
+                self.dropped_rate += 1;
+                return self.tick(now);
+            }
+            self.window_count += 1;
+        }
         let ms = self.clock.unix_ms(e.ts_boot_ns);
         let row = Row {
             ts: ms.div_euclid(1000),
@@ -312,18 +340,28 @@ impl Pipeline {
             uid: e.uid,
             count: 1,
         };
+        let window = if row.blocked {
+            BLOCKED_WINDOW
+        } else {
+            DEDUPE_WINDOW
+        };
         let batch = self.tick(now);
-        self.pending.insert(key, (now, row));
+        self.pending.insert(key, (now, window, row));
         batch
     }
 
     /// A batch of the rows whose window has closed, if 5 s have passed since
     /// the last one and there is something to write.
+    ///
+    /// Task 7 must call this on a timer (at most every second) as well as
+    /// after each `push`, or rows wait for the next event. Latency from an
+    /// event to its batch is 10-15 s for alerts (10 s window + up to 5 s to
+    /// the next batch) and 1-6 s for blocked events.
     pub fn tick(&mut self, now: Instant) -> Option<Batch> {
         if now.saturating_duration_since(self.last_batch) < BATCH_INTERVAL {
             return None;
         }
-        let rows = self.take(|first| now.saturating_duration_since(first) >= DEDUPE_WINDOW);
+        let rows = self.take(|first, window| now.saturating_duration_since(first) >= window);
         if rows.is_empty() {
             return None;
         }
@@ -331,23 +369,41 @@ impl Pipeline {
         Some(Batch { rows })
     }
 
-    /// Everything pending, windows open or not (shutdown).
+    /// Puts a batch back after a failed `write_batch`, so it goes out with
+    /// the next one. Rows beyond the [`MAX_PENDING`] bound are counted in
+    /// `dropped_rate` (or `dropped_blocked`). Without this a failed write
+    /// loses the batch.
+    pub fn requeue(&mut self, batch: Batch) {
+        for row in batch.rows {
+            if self.pending_len() >= MAX_PENDING {
+                if row.blocked {
+                    self.dropped_blocked += u64::from(row.count);
+                } else {
+                    self.dropped_rate += u64::from(row.count);
+                }
+            } else {
+                self.closed.push(row);
+            }
+        }
+    }
+
+    /// Everything pending, windows open or not. Task 7 calls this on shutdown.
     pub fn drain(&mut self) -> Option<Batch> {
-        let rows = self.take(|_| true);
+        let rows = self.take(|_, _| true);
         (!rows.is_empty()).then_some(Batch { rows })
     }
 
-    fn take(&mut self, ready: impl Fn(Instant) -> bool) -> Vec<Row> {
+    fn take(&mut self, ready: impl Fn(Instant, Duration) -> bool) -> Vec<Row> {
         let keys: Vec<Key> = self
             .pending
             .iter()
-            .filter(|(_, (first, _))| ready(*first))
+            .filter(|(_, (first, window, _))| ready(*first, *window))
             .map(|(k, _)| k.clone())
             .collect();
         let mut rows: Vec<Row> = std::mem::take(&mut self.closed);
         rows.extend(
             keys.iter()
-                .filter_map(|k| self.pending.remove(k).map(|(_, r)| r)),
+                .filter_map(|k| self.pending.remove(k).map(|(_, _, r)| r)),
         );
         rows.sort_by_key(|r| (r.ts, r.ts_ms));
         rows
@@ -555,6 +611,130 @@ mod tests {
             p.push(ev(&format!("/f{i}")), t0);
         }
         assert_eq!((p.dropped_kernel(), p.dropped_rate()), (12, 1));
+    }
+
+    fn blocked(target: &str) -> Event {
+        Event {
+            blocked: true,
+            action: 1,
+            ..ev(target)
+        }
+    }
+
+    #[test]
+    fn duplicates_do_not_starve_distinct_events() {
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        for _ in 0..5_000 {
+            p.push(ev("/noisy"), t0);
+        }
+        p.push(ev("/other"), t0);
+        assert_eq!(p.dropped_rate(), 0);
+        let b = p.drain().unwrap();
+        assert_eq!(b.rows.len(), 2);
+        assert_eq!(b.rows.iter().map(|r| r.count).max(), Some(5_000));
+    }
+
+    #[test]
+    fn blocked_never_folds_into_alert_row() {
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        p.push(ev("/x"), t0);
+        p.push(blocked("/x"), t0);
+        let b = p.drain().unwrap();
+        assert_eq!(b.rows.len(), 2);
+        assert_eq!(b.rows.iter().filter(|r| r.blocked).count(), 1);
+    }
+
+    #[test]
+    fn blocked_is_exempt_from_rate_cap() {
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        for i in 0..300 {
+            p.push(blocked(&format!("/b{i}")), t0);
+        }
+        assert_eq!((p.dropped_rate(), p.dropped_blocked()), (0, 0));
+        assert_eq!(p.pending_len(), 300);
+        // Alerts still hit the cap, and blocked ones did not use tokens.
+        for i in 0..101 {
+            p.push(ev(&format!("/a{i}")), t0);
+        }
+        assert_eq!(p.dropped_rate(), 1);
+    }
+
+    #[test]
+    fn blocked_still_dedupes() {
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        for _ in 0..3 {
+            p.push(blocked("/x"), t0);
+        }
+        let b = p.drain().unwrap();
+        assert_eq!((b.rows.len(), b.rows[0].count), (1, 3));
+    }
+
+    #[test]
+    fn blocked_over_memory_bound_counts_dropped_blocked() {
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        for i in 0..MAX_PENDING {
+            p.push(blocked(&format!("/b{i}")), t0);
+        }
+        assert_eq!(p.pending_len(), MAX_PENDING);
+        p.push(blocked("/over"), t0);
+        p.push(ev("/alert-over"), t0);
+        assert_eq!((p.dropped_blocked(), p.dropped_rate()), (1, 1));
+        assert_eq!(p.pending_len(), MAX_PENDING);
+    }
+
+    #[test]
+    fn blocked_row_closes_after_1s() {
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        p.push(blocked("/x"), t0);
+        p.push(ev("/a"), t0);
+        let b = p.tick(t0 + Duration::from_secs(5)).unwrap();
+        assert_eq!(b.rows.len(), 1);
+        assert!(b.rows[0].blocked);
+        // The alert row waits for its 10 s window.
+        assert!(p.tick(t0 + Duration::from_secs(9)).is_none());
+        assert_eq!(p.tick(t0 + Duration::from_secs(10)).unwrap().rows.len(), 1);
+    }
+
+    #[test]
+    fn requeue_returns_a_failed_batch() {
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        p.push(ev("/a"), t0);
+        let b = p.drain().unwrap();
+        p.requeue(b);
+        assert_eq!(p.pending_len(), 1);
+        assert_eq!(p.drain().unwrap().rows[0].target, "/a");
+    }
+
+    #[test]
+    fn requeue_is_bounded() {
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        let row = Row {
+            ts: 0,
+            ts_ms: 0,
+            hook: "exec".into(),
+            action: "alert".into(),
+            blocked: false,
+            rule_id: 0,
+            exe: String::new(),
+            target: String::new(),
+            unit: String::new(),
+            pid: 0,
+            uid: 0,
+            count: 2,
+        };
+        p.requeue(Batch {
+            rows: vec![row; MAX_PENDING + 3],
+        });
+        assert_eq!(p.pending_len(), MAX_PENDING);
+        assert_eq!(p.dropped_rate(), 6);
     }
 
     #[test]

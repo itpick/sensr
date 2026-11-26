@@ -33,7 +33,6 @@ CREATE TABLE IF NOT EXISTS events (
     count   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_ts ON events (ts);
-PRAGMA user_version = 1;
 ";
 
 /// A stored row.
@@ -73,8 +72,7 @@ impl Store {
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.pragma_update(None, "synchronous", "NORMAL")?;
         db.busy_timeout(Duration::from_secs(5))?;
-        db.execute_batch(SCHEMA)?;
-        Ok(Store { db })
+        Self::init(db)
     }
 
     /// Opens read-only (the API).
@@ -89,8 +87,25 @@ impl Store {
 
     /// In memory (tests).
     pub fn memory() -> Result<Store> {
-        let db = Connection::open_in_memory()?;
+        Self::init(Connection::open_in_memory()?)
+    }
+
+    /// Creates the schema; sets `user_version` when it is 0 and refuses a
+    /// database from a newer version.
+    fn init(db: Connection) -> Result<Store> {
+        let v: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if v > SCHEMA_VERSION {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_SCHEMA),
+                Some(format!(
+                    "events.db is schema version {v}, newer than {SCHEMA_VERSION}"
+                )),
+            ));
+        }
         db.execute_batch(SCHEMA)?;
+        if v == 0 {
+            db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         Ok(Store { db })
     }
 
@@ -188,7 +203,7 @@ impl Store {
         let mut n = tx.execute("DELETE FROM events WHERE ts < ?1", [cutoff])?;
         n += tx.execute(
             "DELETE FROM events WHERE id IN
-             (SELECT id FROM events ORDER BY ts DESC, ts_ms DESC, id DESC LIMIT -1 OFFSET ?1)",
+             (SELECT id FROM events ORDER BY id DESC LIMIT -1 OFFSET ?1)",
             [i64::try_from(max_rows).unwrap_or(i64::MAX)],
         )?;
         tx.commit()?;
@@ -310,6 +325,26 @@ mod tests {
         assert!(
             ro.write_batch(&batch(vec![row(2, "bpf", false, "x")]))
                 .is_err()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn open_refuses_a_newer_schema_and_keeps_current_version() {
+        let dir = std::env::temp_dir().join(format!("guard-store-v-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("events.db");
+        {
+            let c = Connection::open(&p).unwrap();
+            c.pragma_update(None, "user_version", 2).unwrap();
+        }
+        assert!(Store::open(&p).is_err());
+        std::fs::remove_file(&p).unwrap();
+        drop(Store::open(&p).unwrap());
+        drop(Store::open(&p).unwrap());
+        assert_eq!(
+            Store::open(&p).unwrap().pragma_i64("user_version").unwrap(),
+            1
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
