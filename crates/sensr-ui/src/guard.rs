@@ -283,6 +283,51 @@ pub struct StatusRow {
     pub dropped_blocked: u64,
     /// Why the status is unknown ([`NOT_RUNNING`] or another failure).
     pub note: Option<String>,
+    /// A change the daemon let block again, waiting for confirmation.
+    pub pending: Option<PendingRow>,
+    /// How many pack block rules are held as alerts.
+    pub held: usize,
+}
+
+/// What the daemon's own confirm window (kill switch off, released rules)
+/// covers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRow {
+    /// Seconds until it is undone.
+    pub seconds_left: u64,
+    /// The kill switch was turned off.
+    pub kill_switch_off: bool,
+    /// Held block rules released in the window.
+    pub released: usize,
+}
+
+impl PendingRow {
+    /// What the card says.
+    pub fn text(&self) -> String {
+        let what = match (self.kill_switch_off, self.released) {
+            (true, 0) => "the kill switch turns back on".to_owned(),
+            (false, n) => format!(
+                "{} back to alerts",
+                plural(n, "the released rule goes", "the released rules go")
+            ),
+            (true, n) => format!(
+                "the kill switch turns back on and {} back to alerts",
+                plural(n, "the released rule goes", "the released rules go")
+            ),
+        };
+        format!(
+            "Rules block again. Confirm within {} or {what}.",
+            duration_words(self.seconds_left)
+        )
+    }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        one.to_owned()
+    } else {
+        many.to_owned()
+    }
 }
 
 /// One rule in the Rules table.
@@ -313,6 +358,8 @@ pub struct RuleRow {
     pub change: Option<String>,
     /// The running version's action, when a change alters it.
     pub live_action: Option<String>,
+    /// A pack's block rule held as an alert after a pack update.
+    pub held: bool,
 }
 
 impl RuleRow {
@@ -542,6 +589,12 @@ pub struct GuardQuery {
     pub window: Option<u64>,
     /// The pending commit was confirmed.
     pub confirmed: bool,
+    /// The kill switch went off in a confirm window (the daemon's).
+    pub kill_pending: bool,
+    /// The held block rules were released (in a confirm window).
+    pub released: bool,
+    /// The daemon's confirm window was confirmed.
+    pub blocks_confirmed: bool,
     /// `not_running`, `forbidden`, `refused`, `nothing`, `no_rule` or another failure.
     pub error: Option<String>,
 }
@@ -606,6 +659,9 @@ impl GuardQuery {
                 .and_then(|v| v.parse().ok())
                 .filter(|w| (1..=86_400).contains(w)),
             confirmed: flag("confirmed"),
+            kill_pending: flag("kill_pending"),
+            released: flag("released"),
+            blocks_confirmed: flag("blocks_confirmed"),
             error: get("error"),
         }
     }
@@ -627,7 +683,10 @@ impl GuardQuery {
                     "check_failed" => {
                         "Checking for pack updates failed (see the sensr-guard log).".to_owned()
                     }
-                    "confirm" => "There is no change waiting for confirmation.".to_owned(),
+                    "confirm" | "nothing_pending" => {
+                        "There is no change waiting for confirmation.".to_owned()
+                    }
+                    "nothing_held" => "No block rule is held.".to_owned(),
                     _ => "The change could not be made.".to_owned(),
                 },
             ));
@@ -658,10 +717,21 @@ impl GuardQuery {
                 false,
                 if on {
                     "Kill switch on: nothing is blocked, alerts only.".to_owned()
+                } else if self.kill_pending {
+                    "Kill switch off: block rules are enforced again. Confirm it below, or the kill switch turns back on by itself.".to_owned()
                 } else {
                     "Kill switch off: block rules are enforced again.".to_owned()
                 },
             ));
+        }
+        if self.released {
+            return Some((
+                false,
+                "The held block rules block now. Confirm it below, or they go back to alerts by itself.".to_owned(),
+            ));
+        }
+        if self.blocks_confirmed {
+            return Some((false, "Confirmed: rules keep blocking.".to_owned()));
         }
         if let Some((name, on)) = &self.pack {
             let state = if *on { "on" } else { "off" };
@@ -740,11 +810,10 @@ pub fn duration_words(secs: u64) -> String {
     }
 }
 
-/// The window a commit's `confirm_reason` names (`… confirm within 120 s …`).
-pub fn reason_window(reason: &str) -> Option<u64> {
-    let rest = &reason[reason.find("within ")? + "within ".len()..];
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok().filter(|w| *w > 0)
+/// The window a commit was given, seconds: from its deadline (unix seconds)
+/// and the time now (`None` when it has passed).
+pub fn window_left(deadline: u64, now: u64) -> Option<u64> {
+    Some(deadline.saturating_sub(now)).filter(|w| *w > 0)
 }
 
 /// The hook's label for the filter.
@@ -999,6 +1068,7 @@ mod server {
                     active: r.active,
                     reason: r.reason.clone(),
                     hits: r.hits,
+                    held: r.held,
                     ..RuleRow::default()
                 }),
         );
@@ -1053,9 +1123,15 @@ mod server {
         out
     }
 
-    /// The status card of a daemon that answered.
-    pub fn status_row(v: &StatusView) -> StatusRow {
+    /// The status card of a daemon that answered, at `now` (unix seconds).
+    pub fn status_row(v: &StatusView, now: u64) -> StatusRow {
         StatusRow {
+            pending: v.pending_confirm.as_ref().map(|p| PendingRow {
+                seconds_left: p.deadline.saturating_sub(now),
+                kill_switch_off: p.kill_switch_off,
+                released: p.released.len(),
+            }),
+            held: v.held.len(),
             running: v.running,
             enforcing: v.enforcing,
             reason: v.reason.clone(),
@@ -1275,15 +1351,63 @@ mod tests {
     }
 
     #[test]
+    fn the_daemon_window_says_what_it_undoes() {
+        let p = |k, r| PendingRow {
+            seconds_left: 120,
+            kill_switch_off: k,
+            released: r,
+        };
+        assert_eq!(
+            p(true, 0).text(),
+            "Rules block again. Confirm within 2 minutes or the kill switch turns back on."
+        );
+        assert!(
+            p(false, 1)
+                .text()
+                .ends_with("the released rule goes back to alerts.")
+        );
+        assert!(
+            p(true, 3)
+                .text()
+                .contains("kill switch turns back on and the released rules go back")
+        );
+        let v = sensr_guard::proto::StatusView {
+            running: true,
+            enforcing: true,
+            reason: None,
+            kill_switch: false,
+            lockdown: "none".into(),
+            packs: Vec::new(),
+            rules: Vec::new(),
+            dropped_kernel: 0,
+            dropped_rate: 0,
+            dropped_blocked: 0,
+            boot_complete: true,
+            pending_confirm: Some(sensr_guard::proto::PendingConfirm {
+                deadline: 1_090,
+                window_secs: 120,
+                kill_switch_off: true,
+                released: Vec::new(),
+            }),
+            held: vec![sensr_guard::proto::HeldRule {
+                pack: "core".into(),
+                rule_id: "x".into(),
+            }],
+        };
+        let row = status_row(&v, 1_000);
+        assert_eq!(row.pending.unwrap().seconds_left, 90);
+        assert_eq!(row.held, 1);
+    }
+
+    #[test]
     fn windows_read_as_words() {
         assert_eq!(duration_words(120), "2 minutes");
         assert_eq!(duration_words(60), "1 minute");
         assert_eq!(duration_words(90), "90 seconds");
-        assert_eq!(
-            reason_window("blocking rules changed: confirm within 120 s or the change rolls back"),
-            Some(120)
-        );
-        assert_eq!(reason_window("no number"), None);
+        // the window comes from the deadline, not the reason's prose
+        assert_eq!(window_left(1_000_120, 1_000_000), Some(120));
+        assert_eq!(window_left(1_000_000, 1_000_000), None);
+        assert_eq!(window_left(5, 1_000_000), None);
         let q = GuardQuery {
             window: Some(300),
             ..GuardQuery::default()

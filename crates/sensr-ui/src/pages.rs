@@ -1799,6 +1799,21 @@ pub fn guard_body(p: crate::guard::GuardView, q: &crate::guard::GuardQuery) -> A
         }
     });
 
+    // the daemon's own window: the kill switch off, or released held rules
+    let blocks_confirm = p.status.pending.clone().map(|w| {
+        view! {
+            <section class="card card-warn" aria-labelledby="guard-blocks-confirm">
+                <h2 id="guard-blocks-confirm">"Blocking again: waiting for confirmation"</h2>
+                <p>{w.text()}</p>
+                {can.then(|| view! {
+                    <form method="post" action="/ui/fn/guard_blocks_confirm_form" class="row-actions">
+                        <button type="submit" class="btn btn-primary">"Confirm"</button>
+                    </form>
+                })}
+            </section>
+        }
+    });
+
     // ---- status
     let st = &p.status;
     let up = st.note.is_none();
@@ -1879,6 +1894,9 @@ pub fn guard_body(p: crate::guard::GuardView, q: &crate::guard::GuardQuery) -> A
                 }
             });
             let state = if r.active { "active" } else { "inactive" };
+            let held = r.held.then(|| {
+                view! { " "<span class="pill pill-info">"held as an alert: a new block rule from a pack update"</span> }
+            });
             let hook = if r.hook.is_empty() {
                 "—".to_owned()
             } else {
@@ -1896,6 +1914,7 @@ pub fn guard_body(p: crate::guard::GuardView, q: &crate::guard::GuardQuery) -> A
                         <span class=if r.active { "pill pill-on" } else { "pill pill-warn" }>{state}</span>
                         {r.reason.clone().map(|x| view! { " "<span class="muted">{x}</span> })}
                         {r.change_text().map(|x| view! { " "<span class="pill pill-info">{x}</span> })}
+                        {held}
                     </td>
                     <td class="num">{r.hits}</td>
                     <td class="col-actions">{actions}</td>
@@ -1907,6 +1926,17 @@ pub fn guard_body(p: crate::guard::GuardView, q: &crate::guard::GuardQuery) -> A
         .rules
         .is_empty()
         .then(|| view! { <p class="muted">"No rules yet."</p> });
+    let release = (can && up && st.held > 0).then(|| {
+        view! {
+            <form method="post" action="/ui/fn/guard_release_form" class="scan-form">
+                <p>{format!(
+                    "A pack update brought {} that runs as an alert until you release it. Released, it blocks; confirm within 2 minutes or it goes back to an alert. Setting the rule's action in the pack's rule overrides also ends the hold.",
+                    if st.held == 1 { "1 block rule".to_owned() } else { format!("{} block rules", st.held) }
+                )}</p>
+                <button type="submit" class="btn">"Release held rules"</button>
+            </form>
+        }
+    });
     let rule_form = can.then(|| {
         let fields = <GuardRuleForm as crate::form::FormModel>::fields();
         let (key, inputs) = match &p.edit {
@@ -2085,6 +2115,7 @@ pub fn guard_body(p: crate::guard::GuardView, q: &crate::guard::GuardQuery) -> A
     view! {
         {message}
         {confirm}
+        {blocks_confirm}
         <section class="card" aria-labelledby="guard-status">
             <h2 id="guard-status">"Status"</h2>
             {note}
@@ -2094,6 +2125,7 @@ pub fn guard_body(p: crate::guard::GuardView, q: &crate::guard::GuardQuery) -> A
         <section class="card" aria-labelledby="guard-rules">
             <h2 id="guard-rules">"Rules"</h2>
             {rules_empty}
+            {release}
             <div class="table-wrap">
                 <table class="guard-rules">
                     <caption class="sr-only">"Rules"</caption>

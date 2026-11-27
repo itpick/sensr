@@ -604,13 +604,47 @@ fn kill_switch_needs_a_writer_and_a_running_daemon() {
         status.contains("on: nothing is blocked, alerts only"),
         "{status}"
     );
-    assert_eq!(
-        post(&b, || sensr_ui::actions::guard_kill_switch_form(
-            "off".into()
-        )),
-        "/ui/guard?kill=off"
+    // off lets rules block again: the daemon's confirm window
+    let loc = post(&b, || {
+        sensr_ui::actions::guard_kill_switch_form("off".into())
+    });
+    assert_eq!(loc, "/ui/guard?kill=off&kill_pending=1");
+    let q2 = query(&loc);
+    let p = page(&b, &q2);
+    assert!(!p.status.kill_switch);
+    let pending = p.status.pending.clone().expect("a confirm window");
+    assert!(
+        pending.kill_switch_off && pending.seconds_left > 100,
+        "{pending:?}"
     );
-    assert!(!page(&b, &q).status.kill_switch);
+    let doc = body(p, &q2);
+    let notice = text(doc.select(&sel("p[role=status]")).next().unwrap());
+    assert!(notice.contains("turns back on by itself"), "{notice}");
+    let card = doc
+        .select(&sel("section[aria-labelledby=guard-blocks-confirm]"))
+        .next()
+        .expect("the daemon's confirm card");
+    assert!(
+        text(card).contains("Confirm within 2 minutes or the kill switch turns back on"),
+        "{}",
+        text(card)
+    );
+    assert!(
+        card.select(&sel(
+            "form[action='/ui/fn/guard_blocks_confirm_form'] button"
+        ))
+        .any(|b| text(b) == "Confirm")
+    );
+    assert_eq!(
+        post(&b, sensr_ui::actions::guard_blocks_confirm_form),
+        "/ui/guard?blocks_confirmed=1"
+    );
+    let p = page(&b, &q);
+    assert!(!p.status.kill_switch && p.status.pending.is_none());
+    assert_eq!(
+        post(&b, sensr_ui::actions::guard_blocks_confirm_form),
+        "/ui/guard?error=nothing_pending"
+    );
 
     // read-only: no buttons, and the endpoint refuses
     let (_d, m) = guard_mock();
@@ -893,4 +927,94 @@ fn rule_form_saves_edits_and_deletes_with_codes_only() {
     let (_d, m) = guard_mock();
     let ro: BackendHandle = Arc::new(m.with_privileges(&["page-all", "user-config-readonly"]));
     assert_eq!(submit(&ro, None, "any", ""), "/ui/guard?error=forbidden");
+}
+
+#[test]
+fn an_unconfirmed_kill_switch_off_turns_back_on() {
+    let d = tempfile::tempdir().unwrap();
+    sensr_ui::mock::seed_guard(d.path(), now()).unwrap();
+    let t = Arc::new(std::sync::atomic::AtomicU64::new(1_800_000_000));
+    let clock = Arc::clone(&t);
+    let b: BackendHandle = Arc::new(
+        MockBackend::with_clock(Box::new(move || {
+            clock.load(std::sync::atomic::Ordering::SeqCst)
+        }))
+        .with_guard_dir(d.path()),
+    );
+    let q = GuardQuery::default();
+    post(&b, || {
+        sensr_ui::actions::guard_kill_switch_form("on".into())
+    });
+    post(&b, || {
+        sensr_ui::actions::guard_kill_switch_form("off".into())
+    });
+    assert!(!page(&b, &q).status.kill_switch);
+    t.fetch_add(121, std::sync::atomic::Ordering::SeqCst);
+    let p = page(&b, &q);
+    assert!(p.status.kill_switch && p.status.pending.is_none());
+}
+
+#[test]
+fn held_rules_are_shown_and_released_in_a_window() {
+    let (_d, m) = guard_mock();
+    let b: BackendHandle = Arc::new(m.with_guard_held());
+    let q = GuardQuery::default();
+    let p = page(&b, &q);
+    assert_eq!(p.status.held, 1);
+    let doc = body(p, &q);
+    let r = row(&doc, "Rules", "core-ssh-from-wan");
+    assert!(r.iter().any(|c| c == "alert"), "{r:?}");
+    assert!(r.iter().any(|c| c.contains("held as an alert")), "{r:?}");
+    let rules = doc
+        .select(&sel("section[aria-labelledby=guard-rules]"))
+        .next()
+        .unwrap();
+    assert!(
+        rules
+            .select(&sel("form[action='/ui/fn/guard_release_form'] button"))
+            .any(|b| text(b) == "Release held rules")
+    );
+    let loc = post(&b, sensr_ui::actions::guard_release_form);
+    assert_eq!(loc, "/ui/guard?released=1");
+    let q2 = query(&loc);
+    let p = page(&b, &q2);
+    assert_eq!(p.status.pending.as_ref().unwrap().released, 1);
+    let doc = body(p, &q2);
+    let r = row(&doc, "Rules", "core-ssh-from-wan");
+    assert!(r.iter().any(|c| c == "block"), "{r:?}");
+    let card = text(
+        doc.select(&sel("section[aria-labelledby=guard-blocks-confirm]"))
+            .next()
+            .unwrap(),
+    );
+    assert!(
+        card.contains("the released rule goes back to alerts"),
+        "{card}"
+    );
+    assert_eq!(
+        post(&b, sensr_ui::actions::guard_blocks_confirm_form),
+        "/ui/guard?blocks_confirmed=1"
+    );
+    let p = page(&b, &q);
+    assert_eq!(p.status.held, 0);
+    assert_eq!(
+        post(&b, sensr_ui::actions::guard_release_form),
+        "/ui/guard?error=nothing_held"
+    );
+    // read-only callers get no Release button
+    let (_d, m) = guard_mock();
+    let ro: BackendHandle = Arc::new(
+        m.with_guard_held()
+            .with_privileges(&["page-all", "user-config-readonly"]),
+    );
+    let doc = body(page(&ro, &q), &q);
+    assert!(
+        doc.select(&sel("form[action='/ui/fn/guard_release_form']"))
+            .next()
+            .is_none()
+    );
+    assert_eq!(
+        post(&ro, sensr_ui::actions::guard_release_form),
+        "/ui/guard?error=forbidden"
+    );
 }

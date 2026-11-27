@@ -95,8 +95,17 @@ test.describe("runtime guard", () => {
     await status.getByRole("button", { name: "Turn kill switch on" }).click();
     await expect(page.getByRole("status").first()).toHaveText("Kill switch on: nothing is blocked, alerts only.");
     await expect(region(page, "Status")).toContainText("on: nothing is blocked, alerts only");
+    // off lets rules block again: only for a confirm window
     await region(page, "Status").getByRole("button", { name: "Turn kill switch off" }).click();
-    await expect(page.getByRole("status").first()).toHaveText("Kill switch off: block rules are enforced again.");
+    await expect(page.getByRole("status").first()).toHaveText(
+      "Kill switch off: block rules are enforced again. Confirm it below, or the kill switch turns back on by itself.",
+    );
+    const card = region(page, "Blocking again: waiting for confirmation");
+    await expect(card).toContainText("or the kill switch turns back on");
+    await expectAccessible(page);
+    await card.getByRole("button", { name: "Confirm" }).click();
+    await expect(page.getByRole("status").first()).toHaveText("Confirmed: rules keep blocking.");
+    await expect(region(page, "Blocking again: waiting for confirmation")).toHaveCount(0);
     await expect(region(page, "Status").getByRole("button", { name: "Turn kill switch on" })).toBeVisible();
   });
 });

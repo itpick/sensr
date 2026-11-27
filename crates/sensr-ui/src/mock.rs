@@ -40,11 +40,31 @@ struct State {
     scans_cancelled: std::collections::HashSet<u64>,
     /// The runtime guard's kill switch.
     guard_kill: bool,
+    /// The guard daemon's own confirm window (kill switch off, released rules).
+    guard_pending: Option<sensr_guard::proto::PendingConfirm>,
+    /// Pack block rules held as alerts.
+    guard_held: Vec<sensr_guard::proto::HeldRule>,
+    /// Held rules released and confirmed: they block.
+    guard_unheld: Vec<sensr_guard::proto::HeldRule>,
 }
 
 impl State {
     fn head(&self) -> &Commit {
         self.history.last().expect("history is never empty")
+    }
+
+    /// Lapses the guard daemon's expired window: the kill switch goes back on,
+    /// released rules are held again.
+    fn guard_tick(&mut self) {
+        if self
+            .guard_pending
+            .as_ref()
+            .is_some_and(|p| (self.clock)() >= p.deadline)
+            && let Some(p) = self.guard_pending.take()
+            && p.kill_switch_off
+        {
+            self.guard_kill = true;
+        }
     }
 
     /// Lapses an expired confirm window: the box rolls back on its own.
@@ -183,6 +203,9 @@ impl MockBackend {
                 scan_queue: Vec::new(),
                 scans_cancelled: Default::default(),
                 guard_kill: false,
+                guard_pending: None,
+                guard_held: Vec::new(),
+                guard_unheld: Vec::new(),
             }),
             users: vec![("root".into(), "sensr".into())],
             insight_dir: None,
@@ -203,6 +226,19 @@ impl MockBackend {
     pub fn with_guard_boot_file(mut self) -> Self {
         self.guard_boot_file = true;
         self.with(|s| s.guard_kill = true);
+        self
+    }
+
+    /// A pack update brought the block rule `core/core-ssh-from-wan`: it is held as
+    /// an alert until released.
+    #[must_use]
+    pub fn with_guard_held(self) -> Self {
+        self.with(|s| {
+            s.guard_held = vec![sensr_guard::proto::HeldRule {
+                pack: "core".into(),
+                rule_id: "core-ssh-from-wan".into(),
+            }];
+        });
         self
     }
 
@@ -228,6 +264,7 @@ impl MockBackend {
         use sensr_guard::proto::{PackSource, PackStatus, RuleStatus, StatusView};
         use sensr_guard::rule::Action;
         self.with(|s| {
+            s.guard_tick();
             let doc = &s.head().doc;
             let action = |r: &Value| {
                 if r["action"] == "block" {
@@ -254,6 +291,7 @@ impl MockBackend {
                             "the listen program is not attached: the kernel refused it".to_owned()
                         }),
                         hits: if r["hook"] == "exec" { 3 } else { 0 },
+                        held: false,
                     }
                 })
                 .collect();
@@ -285,8 +323,27 @@ impl MockBackend {
                         active: true,
                         reason: None,
                         hits,
+                        held: false,
                     });
                 }
+            }
+            let released = |h: &sensr_guard::proto::HeldRule| {
+                s.guard_pending
+                    .as_ref()
+                    .is_some_and(|p| p.released.contains(h))
+            };
+            for h in s.guard_held.iter().chain(&s.guard_unheld) {
+                let held = s.guard_held.contains(h) && !released(h);
+                rules.push(RuleStatus {
+                    id: h.rule_id.clone(),
+                    pack: Some(h.pack.clone()),
+                    slot: Some(9),
+                    action: if held { Action::Alert } else { Action::Block },
+                    active: true,
+                    reason: None,
+                    hits: 0,
+                    held,
+                });
             }
             StatusView {
                 running: true,
@@ -300,6 +357,8 @@ impl MockBackend {
                 dropped_rate: 12,
                 dropped_blocked: 0,
                 boot_complete: true,
+                pending_confirm: s.guard_pending.clone(),
+                held: s.guard_held.clone(),
             }
         })
     }
@@ -1007,7 +1066,10 @@ impl Backend for MockBackend {
         }
         ready(Ok(self.guard_view()))
     }
-    fn guard_kill_switch(&self, on: bool) -> BoxFuture<'_, ApiResult<()>> {
+    fn guard_kill_switch(
+        &self,
+        on: bool,
+    ) -> BoxFuture<'_, ApiResult<Option<sensr_guard::proto::PendingConfirm>>> {
         if self.guard_down {
             return ready(Err(ApiError::Backend(crate::guard::NOT_RUNNING.to_owned())));
         }
@@ -1018,8 +1080,73 @@ impl Backend for MockBackend {
             ))));
         }
         ready(self.with(|s| {
-            s.guard_kill = on;
+            s.guard_tick();
+            if on {
+                s.guard_kill = true;
+                if let Some(p) = &mut s.guard_pending {
+                    p.kill_switch_off = false;
+                    if p.released.is_empty() {
+                        s.guard_pending = None;
+                    }
+                }
+                return Ok(None);
+            }
+            if !s.guard_kill {
+                return Ok(s.guard_pending.clone());
+            }
+            s.guard_kill = false;
+            let deadline = (s.clock)() + GUARD_CONFIRM_SECS as u64;
+            let p = s
+                .guard_pending
+                .get_or_insert_with(|| sensr_guard::proto::PendingConfirm {
+                    deadline,
+                    window_secs: GUARD_CONFIRM_SECS.into(),
+                    kill_switch_off: false,
+                    released: Vec::new(),
+                });
+            p.kill_switch_off = true;
+            p.deadline = deadline;
+            Ok(Some(p.clone()))
+        }))
+    }
+    fn guard_confirm_blocks(&self) -> BoxFuture<'_, ApiResult<()>> {
+        if self.guard_down {
+            return ready(Err(ApiError::Backend(crate::guard::NOT_RUNNING.to_owned())));
+        }
+        ready(self.with(|s| {
+            s.guard_tick();
+            let Some(p) = s.guard_pending.take() else {
+                return Err(ApiError::Conflict(
+                    "nothing is waiting for confirmation".into(),
+                ));
+            };
+            s.guard_held.retain(|h| !p.released.contains(h));
+            s.guard_unheld.extend(p.released);
             Ok(())
+        }))
+    }
+    fn guard_release_held(&self) -> BoxFuture<'_, ApiResult<sensr_guard::proto::PendingConfirm>> {
+        if self.guard_down {
+            return ready(Err(ApiError::Backend(crate::guard::NOT_RUNNING.to_owned())));
+        }
+        ready(self.with(|s| {
+            s.guard_tick();
+            if s.guard_held.is_empty() {
+                return Err(ApiError::Conflict("no block rule is held".into()));
+            }
+            let deadline = (s.clock)() + GUARD_CONFIRM_SECS as u64;
+            let held = s.guard_held.clone();
+            let p = s
+                .guard_pending
+                .get_or_insert_with(|| sensr_guard::proto::PendingConfirm {
+                    deadline,
+                    window_secs: GUARD_CONFIRM_SECS.into(),
+                    kill_switch_off: false,
+                    released: Vec::new(),
+                });
+            p.released = held;
+            p.deadline = deadline;
+            Ok(p.clone())
         }))
     }
     fn guard_check_packs(&self) -> BoxFuture<'_, ApiResult<Vec<sensr_guard::proto::PackCheck>>> {

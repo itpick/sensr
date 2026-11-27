@@ -904,9 +904,15 @@ mod server {
                 }
             })
         }
-        /// Turns the kill switch on or off. The daemon's refusal is [`ApiError::Conflict`]
-        /// with its explanation; the caller checks the privilege and read-only.
-        fn guard_kill_switch(&self, on: bool) -> BoxFuture<'_, ApiResult<()>> {
+        /// Turns the kill switch on or off. Turning it off lets rules block again: the
+        /// daemon's confirm window comes back (confirm it with
+        /// [`Backend::guard_confirm_blocks`] or the kill switch turns back on). The
+        /// daemon's refusal is [`ApiError::Conflict`] with its explanation; the caller
+        /// checks the privilege and read-only.
+        fn guard_kill_switch(
+            &self,
+            on: bool,
+        ) -> BoxFuture<'_, ApiResult<Option<sensr_guard::proto::PendingConfirm>>> {
             use sensr_guard::proto::{Reply, Request};
             let sock = self.guard_socket();
             Box::pin(async move {
@@ -917,7 +923,34 @@ mod server {
                 )
                 .await?
                 {
+                    Reply::Ok => Ok(None),
+                    Reply::Pending(p) => Ok(Some(p)),
+                    other => Err(guard_unexpected(other)),
+                }
+            })
+        }
+        /// Keeps what the daemon's confirm window let block. Nothing waiting is
+        /// [`ApiError::Conflict`]; errors as [`Backend::guard_kill_switch`].
+        fn guard_confirm_blocks(&self) -> BoxFuture<'_, ApiResult<()>> {
+            use sensr_guard::proto::{Reply, Request};
+            let sock = self.guard_socket();
+            Box::pin(async move {
+                match guard_send(sock, Request::Confirm, sensr_guard::client::TIMEOUT).await? {
                     Reply::Ok => Ok(()),
+                    other => Err(guard_unexpected(other)),
+                }
+            })
+        }
+        /// Lets the held block rules (from pack updates) block, in a confirm window.
+        /// Errors as [`Backend::guard_kill_switch`].
+        fn guard_release_held(
+            &self,
+        ) -> BoxFuture<'_, ApiResult<sensr_guard::proto::PendingConfirm>> {
+            use sensr_guard::proto::{Reply, Request};
+            let sock = self.guard_socket();
+            Box::pin(async move {
+                match guard_send(sock, Request::ReleaseHeld, sensr_guard::client::TIMEOUT).await? {
+                    Reply::Pending(p) => Ok(p),
                     other => Err(guard_unexpected(other)),
                 }
             })

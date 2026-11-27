@@ -12,13 +12,21 @@ pub enum Request {
     Status,
     /// Re-read the configuration.
     Reload,
-    /// Turn the kill switch on or off.
+    /// Turn the kill switch on or off. Off lets block rules block again,
+    /// so it opens a confirm window ([`Reply::Pending`]): unless
+    /// [`Request::Confirm`] comes in time, the kill switch turns back on.
     KillSwitch {
         /// The new state.
         on: bool,
     },
     /// Fetch the pack index, install any newer pack that verifies, reload.
+    /// Block rules that a new pack version brings are held as alerts.
     CheckPacks,
+    /// Keep what the pending confirm window let block.
+    Confirm,
+    /// Let the held block rules block, in a confirm window
+    /// ([`Reply::Pending`]).
+    ReleaseHeld,
 }
 
 /// A reply (adjacently tagged: `{"op":"status","data":{..}}`, since an
@@ -32,6 +40,9 @@ pub enum Reply {
     Status(StatusView),
     /// The outcome of [`Request::CheckPacks`], per pack.
     Packs(Vec<PackCheck>),
+    /// Done, and blocking again until the deadline: confirm it
+    /// ([`Request::Confirm`]) or it is undone.
+    Pending(PendingConfirm),
     /// Failed, with the reason.
     Error(String),
 }
@@ -44,6 +55,34 @@ pub enum PackSource {
     Builtin,
     /// Delivered with a signature.
     Signed,
+}
+
+/// A change that lets rules block again, waiting for the owner's
+/// confirmation. Unconfirmed at the deadline, it is undone: the kill switch
+/// goes back on and released rules are held again. A restart of the daemon
+/// undoes it too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingConfirm {
+    /// When it is undone, unix seconds.
+    pub deadline: u64,
+    /// The window it was given, seconds.
+    pub window_secs: u64,
+    /// The kill switch was turned off.
+    pub kill_switch_off: bool,
+    /// Held block rules that block in the window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub released: Vec<HeldRule>,
+}
+
+/// A pack's default block rule that a pack update brought: it runs as an
+/// alert until the owner releases it ([`Request::ReleaseHeld`] and a
+/// confirm) or sets the rule's action in `guard.pack_rules`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct HeldRule {
+    /// The pack.
+    pub pack: String,
+    /// The rule id.
+    pub rule_id: String,
 }
 
 /// One pack's outcome of [`Request::CheckPacks`].
@@ -120,6 +159,10 @@ pub struct RuleStatus {
     pub reason: Option<String>,
     /// Matches so far.
     pub hits: u64,
+    /// A pack's block rule held as an alert (see [`HeldRule`]); `action`
+    /// is then `alert`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
 }
 
 /// The daemon's status.
@@ -151,6 +194,12 @@ pub struct StatusView {
     /// Whether boot-complete.target was reached (module-load alerts are
     /// recorded only after it).
     pub boot_complete: bool,
+    /// A change waiting for confirmation, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_confirm: Option<PendingConfirm>,
+    /// Block rules held as alerts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<HeldRule>,
 }
 
 #[cfg(test)]
@@ -172,11 +221,21 @@ mod tests {
             serde_json::to_value(Request::CheckPacks).unwrap(),
             json!({"op": "check_packs"})
         );
+        assert_eq!(
+            serde_json::to_value(Request::Confirm).unwrap(),
+            json!({"op": "confirm"})
+        );
+        assert_eq!(
+            serde_json::to_value(Request::ReleaseHeld).unwrap(),
+            json!({"op": "release_held"})
+        );
         for r in [
             Request::Status,
             Request::Reload,
             Request::KillSwitch { on: false },
             Request::CheckPacks,
+            Request::Confirm,
+            Request::ReleaseHeld,
         ] {
             let s = serde_json::to_string(&r).unwrap();
             assert_eq!(serde_json::from_str::<Request>(&s).unwrap(), r);
@@ -213,11 +272,25 @@ mod tests {
                 active: true,
                 reason: None,
                 hits: 3,
+                held: true,
             }],
             dropped_kernel: 1,
             dropped_rate: 2,
             dropped_blocked: 3,
             boot_complete: true,
+            pending_confirm: Some(PendingConfirm {
+                deadline: 1_700_000_120,
+                window_secs: 120,
+                kill_switch_off: true,
+                released: vec![HeldRule {
+                    pack: "core".into(),
+                    rule_id: "r".into(),
+                }],
+            }),
+            held: vec![HeldRule {
+                pack: "core".into(),
+                rule_id: "r".into(),
+            }],
         };
         let checks = vec![PackCheck {
             name: "core".into(),
@@ -234,6 +307,12 @@ mod tests {
             Reply::Ok,
             Reply::Status(view),
             Reply::Packs(checks),
+            Reply::Pending(PendingConfirm {
+                deadline: 9,
+                window_secs: 120,
+                kill_switch_off: true,
+                released: Vec::new(),
+            }),
             Reply::Error("no".into()),
         ] {
             let s = serde_json::to_string(&r).unwrap();

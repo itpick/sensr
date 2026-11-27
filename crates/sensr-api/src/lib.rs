@@ -105,6 +105,8 @@ pub const ROUTES: &[Route] = &[
     ("/api/v1/guard/reload", || post(guard::reload)),
     ("/api/v1/guard/kill-switch", || post(guard::kill_switch)),
     ("/api/v1/guard/check-packs", || post(guard::check_packs)),
+    ("/api/v1/guard/confirm", || post(guard::confirm)),
+    ("/api/v1/guard/release-held", || post(guard::release_held)),
     ("/api/core/firmware/info", || get(compat::firmware_info)),
     ("/api/interfaces/overview/interfaces_info", || {
         get(compat::interfaces_info).post(compat::interfaces_info)

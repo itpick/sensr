@@ -33,7 +33,8 @@ mod linux {
     use sensr_guard::config;
     use sensr_guard::daemon::kernel::Kernel;
     use sensr_guard::daemon::{
-        Daemon, HttpFetcher, LOCKDOWN, Options, RELEASE_FILE, StartError, auto_check_due,
+        CONFIRM_WINDOW, Daemon, HttpFetcher, LOCKDOWN, LSM_FILE, Options, RELEASE_FILE, StartError,
+        auto_check_due,
     };
     use sensr_guard::events::BootClock;
     use sensr_guard::proto::Reply;
@@ -142,6 +143,8 @@ mod linux {
             kill_switch_file: args.kill_switch_file.clone(),
             lockdown_file: PathBuf::from(LOCKDOWN),
             release_file: args.release_file.clone(),
+            lsm_file: PathBuf::from(LSM_FILE),
+            confirm_window: CONFIRM_WINDOW,
             own_tgid: std::process::id(),
             clock: boot_clock()?,
             arch: std::env::consts::ARCH.to_owned(),

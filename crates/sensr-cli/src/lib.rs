@@ -152,7 +152,7 @@ pub struct GuardArgs {
     pub cmd: GuardCmd,
 }
 
-/// `sensr guard status|events|off|on`.
+/// `sensr guard status|events|off|on|confirm|release|reload`.
 #[derive(Debug, Subcommand)]
 pub enum GuardCmd {
     /// Whether the guard is running and enforcing, and each rule's state.
@@ -171,8 +171,17 @@ pub enum GuardCmd {
     },
     /// Turn the kill switch on: nothing blocks, rules only alert.
     Off,
-    /// Turn the kill switch off: blocking rules block again.
+    /// Turn the kill switch off: blocking rules block again, for a confirm
+    /// window (`sensr guard confirm`, or it turns back on).
     On,
+    /// Keep what the confirm window let block (the kill switch off, or
+    /// released rules).
+    Confirm,
+    /// Let the block rules a pack update brought (held as alerts) block,
+    /// for a confirm window.
+    Release,
+    /// Re-read the configuration (the unit's ExecReload).
+    Reload,
 }
 
 /// `sensr scan status` and `sensr scan show`.
@@ -721,12 +730,65 @@ fn guard(args: &GuardArgs, out: &mut dyn Write) -> anyhow::Result<()> {
                     writeln!(out, "kill switch on: nothing blocks, rules only alert")?
                 }
                 Reply::Ok => writeln!(out, "kill switch off: blocking rules block again")?,
+                Reply::Pending(p) => writeln!(
+                    out,
+                    "kill switch off: blocking rules block again; run `sensr guard confirm` within {} or the kill switch turns back on",
+                    window_words(p.window_secs)
+                )?,
                 Reply::Error(e) => bail!("sensr-guard refused: {e}"),
+                other => bail!("unexpected reply from sensr-guard: {other:?}"),
+            }
+        }
+        GuardCmd::Confirm => match guard_send(&args.guard_socket, &Request::Confirm)? {
+            Reply::Ok => writeln!(out, "confirmed: it stays")?,
+            Reply::Error(e) => bail!("sensr-guard refused: {e}"),
+            other => bail!("unexpected reply from sensr-guard: {other:?}"),
+        },
+        GuardCmd::Release => match guard_send(&args.guard_socket, &Request::ReleaseHeld)? {
+            Reply::Pending(p) => {
+                let names: Vec<String> = p
+                    .released
+                    .iter()
+                    .map(|r| format!("{}/{}", r.pack, r.rule_id))
+                    .collect();
+                writeln!(
+                    out,
+                    "blocking now: {}; run `sensr guard confirm` within {} or they are held as alerts again",
+                    names.join(", "),
+                    window_words(p.window_secs)
+                )?
+            }
+            Reply::Error(e) => bail!("sensr-guard refused: {e}"),
+            other => bail!("unexpected reply from sensr-guard: {other:?}"),
+        },
+        GuardCmd::Reload => {
+            // loading a new pack version can take a while (the verifier)
+            let r = sensr_guard::client::send_with_timeout(
+                &args.guard_socket,
+                &Request::Reload,
+                RELOAD_TIMEOUT,
+            )
+            .map_err(|e| anyhow::anyhow!("sensr-guard did not answer: {e}"))?;
+            match r {
+                Reply::Ok => writeln!(out, "sensr-guard reloaded its configuration")?,
+                Reply::Error(e) => bail!("sensr-guard refused the configuration: {e}"),
                 other => bail!("unexpected reply from sensr-guard: {other:?}"),
             }
         }
     }
     Ok(())
+}
+
+/// How long `sensr guard reload` waits (systemd's reload timeout is longer).
+const RELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(80);
+
+/// `2 minutes`, `90 seconds`.
+fn window_words(secs: u64) -> String {
+    match (secs % 60, secs / 60) {
+        (0, 1) => "1 minute".to_owned(),
+        (0, m) if m > 1 => format!("{m} minutes"),
+        _ => format!("{secs} seconds"),
+    }
 }
 
 /// `sensr guard events`: read the event database.
@@ -1274,6 +1336,9 @@ mod tests {
         assert!(matches!(g(&["guard", "status"]).cmd, GuardCmd::Status));
         assert!(matches!(g(&["guard", "off"]).cmd, GuardCmd::Off));
         assert!(matches!(g(&["guard", "on"]).cmd, GuardCmd::On));
+        assert!(matches!(g(&["guard", "confirm"]).cmd, GuardCmd::Confirm));
+        assert!(matches!(g(&["guard", "release"]).cmd, GuardCmd::Release));
+        assert!(matches!(g(&["guard", "reload"]).cmd, GuardCmd::Reload));
         let a = g(&[
             "guard", "--json", "events", "--hook", "exec", "-q", "curl", "--limit", "5",
         ]);
@@ -1304,8 +1369,12 @@ mod tests {
             let mut got = Vec::new();
             for reply in [
                 r#"{"op":"ok"}"#,
-                r#"{"op":"ok"}"#,
+                r#"{"op":"pending","data":{"deadline":4000000000,"window_secs":120,"kill_switch_off":true}}"#,
                 r#"{"op":"error","data":"nope"}"#,
+                r#"{"op":"ok"}"#,
+                r#"{"op":"pending","data":{"deadline":4000000000,"window_secs":120,"kill_switch_off":false,"released":[{"pack":"core","rule_id":"core-x"}]}}"#,
+                r#"{"op":"ok"}"#,
+                r#"{"op":"error","data":"bad rule"}"#,
                 r#"{"op":"status","data":{"running":true,"enforcing":false,"reason":"apply failed","kill_switch":true,"lockdown":"none","packs":[],"rules":[{"id":"r1","action":"block","active":false,"reason":"off","hits":2}],"dropped_kernel":0,"dropped_rate":0,"dropped_blocked":0,"boot_complete":true}}"#,
             ] {
                 let (s, _) = l.accept().unwrap();
@@ -1331,9 +1400,24 @@ mod tests {
                 .unwrap()
                 .contains("nothing blocks")
         );
-        assert!(run(&args(GuardCmd::On)).unwrap().contains("block again"));
+        let on = run(&args(GuardCmd::On)).unwrap();
+        assert!(
+            on.contains("block again")
+                && on.contains("sensr guard confirm")
+                && on.contains("2 minutes"),
+            "{on}"
+        );
         let e = run(&args(GuardCmd::Off)).unwrap_err();
         assert!(e.to_string().contains("refused: nope"), "{e}");
+        assert!(run(&args(GuardCmd::Confirm)).unwrap().contains("confirmed"));
+        let rel = run(&args(GuardCmd::Release)).unwrap();
+        assert!(
+            rel.contains("core/core-x") && rel.contains("sensr guard confirm"),
+            "{rel}"
+        );
+        assert!(run(&args(GuardCmd::Reload)).unwrap().contains("reloaded"));
+        let e = run(&args(GuardCmd::Reload)).unwrap_err();
+        assert!(e.to_string().contains("bad rule"), "{e}");
         let text = run(&args(GuardCmd::Status)).unwrap();
         assert!(
             text.contains("running: yes  enforcing: no  kill switch: on"),
@@ -1350,6 +1434,10 @@ mod tests {
                 Request::KillSwitch { on: true },
                 Request::KillSwitch { on: false },
                 Request::KillSwitch { on: true },
+                Request::Confirm,
+                Request::ReleaseHeld,
+                Request::Reload,
+                Request::Reload,
                 Request::Status
             ]
         );

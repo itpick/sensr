@@ -1712,7 +1712,7 @@ pub async fn guard_page(
     let packs = config.get("packs").cloned().unwrap_or_default();
     let (live, status) = match b.guard_status().await {
         Ok(v) => {
-            let row = status_row(&v);
+            let row = status_row(&v, u64::try_from(guard_imp::now()).unwrap_or(0));
             (Some(v), row)
         }
         Err(e) => (
@@ -1934,7 +1934,9 @@ pub async fn guard_kill_switch_form(on: String) -> Result<(), ServerFnError> {
         }
     };
     match b.guard_kill_switch(on).await {
-        Ok(()) => guard_imp::back(if on { "kill=on" } else { "kill=off" }),
+        Ok(None) => guard_imp::back(if on { "kill=on" } else { "kill=off" }),
+        // blocking again: the page shows the daemon's confirm window
+        Ok(Some(_)) => guard_imp::back("kill=off&kill_pending=1"),
         // the daemon refuses Off while the boot partition's file is there
         Err(crate::api::ApiError::Conflict(m)) if !on && m.contains("exists: remove it") => {
             guard_imp::back("error=boot_file");
@@ -2044,16 +2046,12 @@ pub async fn guard_apply_form() -> Result<(), ServerFnError> {
     }
     match b.commit(&imp::user(), "", None).await {
         Ok(rev) if rev.confirm_reason.is_some() => {
-            // the window as the agent said it, else from the deadline
+            // the window from the deadline the agent set
+            let now = u64::try_from(guard_imp::now()).unwrap_or(0);
             let window = rev
-                .confirm_reason
-                .as_deref()
-                .and_then(crate::guard::reason_window)
-                .or_else(|| {
-                    let now = u64::try_from(guard_imp::now()).unwrap_or(0);
-                    rev.confirm.as_ref().map(|w| w.deadline.saturating_sub(now))
-                })
-                .filter(|w| *w > 0)
+                .confirm
+                .as_ref()
+                .and_then(|w| crate::guard::window_left(w.deadline, now))
                 .map(|w| format!("&window={w}"))
                 .unwrap_or_default();
             guard_imp::back(&format!("applied={}&imposed=1{window}", rev.id));
@@ -2062,6 +2060,48 @@ pub async fn guard_apply_form() -> Result<(), ServerFnError> {
         Err(e) => {
             tracing::warn!("guard change not applied: {e}");
             guard_imp::back("error=failed");
+        }
+    }
+    Ok(())
+}
+
+/// The daemon's confirm card (the kill switch off, released rules): its Confirm button
+/// (a plain form post) keeps rules blocking.
+#[server(prefix = "/ui/fn", endpoint = "guard_blocks_confirm_form")]
+pub async fn guard_blocks_confirm_form() -> Result<(), ServerFnError> {
+    use crate::api::ApiError;
+    let b = imp::backend()?;
+    if !guard_imp::may_write(&b) {
+        guard_imp::back("error=forbidden");
+        return Ok(());
+    }
+    match b.guard_confirm_blocks().await {
+        Ok(()) => guard_imp::back("blocks_confirmed=1"),
+        Err(ApiError::Conflict(_)) => guard_imp::back("error=nothing_pending"),
+        Err(e) => {
+            tracing::warn!("guard confirm failed: {e}");
+            guard_imp::back(&format!("error={}", guard_imp::code(&e)));
+        }
+    }
+    Ok(())
+}
+
+/// Release held rules (a plain form post): the block rules a pack update brought, held
+/// as alerts, block, in the daemon's confirm window.
+#[server(prefix = "/ui/fn", endpoint = "guard_release_form")]
+pub async fn guard_release_form() -> Result<(), ServerFnError> {
+    use crate::api::ApiError;
+    let b = imp::backend()?;
+    if !guard_imp::may_write(&b) {
+        guard_imp::back("error=forbidden");
+        return Ok(());
+    }
+    match b.guard_release_held().await {
+        Ok(_) => guard_imp::back("released=1"),
+        Err(ApiError::Conflict(_)) => guard_imp::back("error=nothing_held"),
+        Err(e) => {
+            tracing::warn!("releasing held rules failed: {e}");
+            guard_imp::back(&format!("error={}", guard_imp::code(&e)));
         }
     }
     Ok(())

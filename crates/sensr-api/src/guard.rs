@@ -219,6 +219,7 @@ async fn configured_rules(state: &AppState, caller: &Caller) -> Result<Vec<RuleS
             active: false,
             reason: Some(NOT_RUNNING.to_owned()),
             hits: 0,
+            held: false,
         })
         .collect())
 }
@@ -241,6 +242,8 @@ fn down_view(rules: Vec<RuleStatus>, read_error: Option<String>) -> StatusView {
         dropped_rate: 0,
         dropped_blocked: 0,
         boot_complete: false,
+        pending_confirm: None,
+        held: Vec::new(),
     }
 }
 
@@ -416,6 +419,9 @@ pub struct KillSwitchBody {
 }
 
 /// `POST /api/v1/guard/kill-switch {on}`: nothing blocks while it is on.
+/// Turning it off lets rules block again: the reply then carries
+/// `pending_confirm` (its deadline), and unless `POST /api/v1/guard/confirm`
+/// comes before it the kill switch turns back on.
 pub async fn kill_switch(
     Extension(caller): Extension<Caller>,
     Json(b): Json<KillSwitchBody>,
@@ -423,6 +429,27 @@ pub async fn kill_switch(
     writable(&caller)?;
     match ask(Request::KillSwitch { on: b.on }, client::TIMEOUT).await? {
         Reply::Ok => Ok(Json(json!({}))),
+        Reply::Pending(p) => Ok(Json(json!({ "pending_confirm": p }))),
+        other => Err(unexpected(other)),
+    }
+}
+
+/// `POST /api/v1/guard/confirm`: keep what the confirm window let block
+/// (the kill switch off, released rules).
+pub async fn confirm(Extension(caller): Extension<Caller>) -> WriteResult {
+    writable(&caller)?;
+    match ask(Request::Confirm, client::TIMEOUT).await? {
+        Reply::Ok => Ok(Json(json!({}))),
+        other => Err(unexpected(other)),
+    }
+}
+
+/// `POST /api/v1/guard/release-held`: let the block rules a pack update
+/// brought (held as alerts) block, in a confirm window (`pending_confirm`).
+pub async fn release_held(Extension(caller): Extension<Caller>) -> WriteResult {
+    writable(&caller)?;
+    match ask(Request::ReleaseHeld, client::TIMEOUT).await? {
+        Reply::Pending(p) => Ok(Json(json!({ "pending_confirm": p }))),
         other => Err(unexpected(other)),
     }
 }

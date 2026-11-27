@@ -59,12 +59,14 @@ struct FakePack {
     last: Option<Compiled>,
 }
 
-const PROGRAMS: [(&str, &str); 12] = [
+const PROGRAMS: [(&str, &str); 14] = [
     ("guard_bind", "socket_bind"),
     ("guard_bpf", "bpf"),
     ("guard_connect", "socket_connect"),
     ("guard_exec", "bprm_check_security"),
+    ("guard_exec_commit", "bprm_committed_creds"),
     ("guard_exec_inherit", "task_alloc"),
+    ("guard_seed_exe", "iter/task"),
     ("guard_file_open", "file_open"),
     ("guard_listen", "socket_listen"),
     ("guard_module_data", "kernel_load_data"),
@@ -177,6 +179,7 @@ impl Env {
         )
         .unwrap();
         std::fs::write(dir.path().join("running-release"), "v1.0.0\n").unwrap();
+        std::fs::write(dir.path().join("lsm"), "capability,landlock,yama,bpf").unwrap();
         let env = Env {
             dir,
             fake: Fake::default(),
@@ -222,6 +225,8 @@ impl Env {
             kill_switch_file: self.p("boot/guard-off"),
             lockdown_file: self.p("lockdown"),
             release_file: self.p("running-release"),
+            lsm_file: self.p("lsm"),
+            confirm_window: WINDOW,
             own_tgid: 4242,
             clock: BootClock::new(1_700_000_000_000, 0),
             arch: "aarch64".into(),
@@ -252,6 +257,9 @@ impl Env {
     }
 }
 
+/// The confirm window the daemon gives a change that lets rules block again.
+const WINDOW: Duration = Duration::from_secs(120);
+
 fn rule<'a>(s: &'a StatusView, id: &str) -> &'a RuleStatus {
     s.rules
         .iter()
@@ -277,7 +285,7 @@ fn starts_with_the_builtin_pack_and_merges_rules() {
     assert_eq!(env.fake.log.lock().unwrap().loads, ["0.0.1"]);
     assert_eq!(s.packs.len(), 1);
     assert_eq!(s.packs[0].source, PackSource::Builtin);
-    assert_eq!(s.packs[0].programs.len(), 12);
+    assert_eq!(s.packs[0].programs.len(), 14);
     let (ids, _, _, kill) = env.last_apply();
     assert_eq!(
         ids,
@@ -372,8 +380,12 @@ fn kill_switch_toggles_live_and_persists() {
     drop(d);
     let mut d = env.start();
     assert!(d.status().kill_switch, "a restart keeps it on");
-    assert_eq!(d.handle(&Request::KillSwitch { on: false }), Reply::Ok);
+    assert!(matches!(
+        d.handle(&Request::KillSwitch { on: false }),
+        Reply::Pending(_)
+    ));
     assert!(!env.last_apply().3 && !d.status().kill_switch);
+    assert_eq!(d.handle(&Request::Confirm), Reply::Ok);
     assert!(!env.p("state").join(KILL_SWITCH_STATE).exists());
 }
 
@@ -1238,4 +1250,316 @@ fn packs_needing_a_release_wait_until_the_release_is_known() {
         "{:?}",
         s.packs[0]
     );
+}
+
+// --- the kill switch's confirm window ----------------------------------------
+
+/// A block rule, so turning the kill switch off really arms something.
+fn blocking(env: &Env) {
+    env.config(json!({"rules": [owner_rule("connect", json!({"net": {"cidr": "192.0.2.0/24"}}), "block")]}));
+}
+
+#[test]
+fn kill_switch_off_rolls_back_unless_confirmed() {
+    let env = Env::new();
+    blocking(&env);
+    let mut d = env.start();
+    assert_eq!(d.handle(&Request::KillSwitch { on: true }), Reply::Ok);
+    let t0 = Instant::now();
+    let Reply::Pending(p) = d.handle(&Request::KillSwitch { on: false }) else {
+        panic!("off lets rules block again: it must be confirmed");
+    };
+    assert!(p.kill_switch_off && p.released.is_empty(), "{p:?}");
+    assert_eq!(p.window_secs, WINDOW.as_secs());
+    let s = d.status();
+    assert!(!s.kill_switch, "blocking in the window");
+    assert!(!env.last_apply().3);
+    assert_eq!(s.pending_confirm.as_ref(), Some(&p));
+    assert!(rule(&s, OWNER).active);
+    assert!(
+        env.p("state").join(KILL_SWITCH_STATE).exists(),
+        "a restart in the window comes back with the kill switch on"
+    );
+    // nothing yet before the deadline
+    d.poll_events(t0 + WINDOW - Duration::from_secs(5));
+    assert!(!d.status().kill_switch);
+    // the deadline passes unconfirmed: on again, and it says why
+    d.poll_events(t0 + WINDOW + Duration::from_secs(1));
+    let s = d.status();
+    assert!(s.kill_switch && s.pending_confirm.is_none(), "{s:#?}");
+    assert!(env.last_apply().3);
+    assert!(
+        s.reason.as_deref().unwrap_or("").contains("not confirmed"),
+        "{:?}",
+        s.reason
+    );
+    assert!(matches!(d.handle(&Request::Confirm), Reply::Error(_)));
+}
+
+#[test]
+fn kill_switch_off_confirmed_stays_off() {
+    let env = Env::new();
+    blocking(&env);
+    let mut d = env.start();
+    d.handle(&Request::KillSwitch { on: true });
+    let t0 = Instant::now();
+    assert!(matches!(
+        d.handle(&Request::KillSwitch { on: false }),
+        Reply::Pending(_)
+    ));
+    assert_eq!(d.handle(&Request::Confirm), Reply::Ok);
+    assert!(!env.p("state").join(KILL_SWITCH_STATE).exists());
+    d.poll_events(t0 + WINDOW * 2);
+    let s = d.status();
+    assert!(!s.kill_switch && s.pending_confirm.is_none());
+    drop(d);
+    assert!(!env.start().status().kill_switch, "kept across a restart");
+}
+
+#[test]
+fn a_restart_in_the_window_comes_back_with_the_kill_switch_on() {
+    let env = Env::new();
+    blocking(&env);
+    let mut d = env.start();
+    d.handle(&Request::KillSwitch { on: true });
+    assert!(matches!(
+        d.handle(&Request::KillSwitch { on: false }),
+        Reply::Pending(_)
+    ));
+    drop(d);
+    let s = env.start().status();
+    assert!(s.kill_switch && s.pending_confirm.is_none());
+}
+
+#[test]
+fn kill_switch_on_in_the_window_ends_it() {
+    let env = Env::new();
+    blocking(&env);
+    let mut d = env.start();
+    d.handle(&Request::KillSwitch { on: true });
+    d.handle(&Request::KillSwitch { on: false });
+    assert_eq!(d.handle(&Request::KillSwitch { on: true }), Reply::Ok);
+    let s = d.status();
+    assert!(s.kill_switch && s.pending_confirm.is_none());
+    assert!(matches!(d.handle(&Request::Confirm), Reply::Error(_)));
+}
+
+#[test]
+fn off_when_already_off_or_with_nothing_to_confirm() {
+    let env = Env::new();
+    let mut d = env.start();
+    assert_eq!(
+        d.handle(&Request::KillSwitch { on: false }),
+        Reply::Ok,
+        "already off: nothing newly blocks"
+    );
+    let Reply::Error(e) = d.handle(&Request::Confirm) else {
+        panic!("nothing is waiting")
+    };
+    assert!(e.contains("nothing"), "{e}");
+}
+
+// --- block rules a pack update brings ---------------------------------------
+
+const BLOCKING_RULES: &str = r#"[
+  {"id":"core-a","enabled":true,"hook":"exec","target":{"path_prefix":"/tmp"},"action":"block"},
+  {"id":"core-b","enabled":true,"hook":"listen","target":"any","action":"alert"},
+  {"id":"core-c","enabled":true,"hook":"connect","target":{"net":{"cidr":"203.0.113.0/24"}},"action":"block"},
+  {"id":"core-d","enabled":false,"hook":"bpf","target":"any","action":"block"}
+]"#;
+
+/// A trusted key, known to the running daemon.
+fn trusted_key(env: &Env, d: &mut Daemon<Fake>) -> KeyPair {
+    let kp = keypair(env);
+    assert_eq!(d.handle(&Request::Reload), Reply::Ok);
+    kp
+}
+
+/// Install core `version` with `rules` as a pack check would.
+fn update(kp: &KeyPair, d: &mut Daemon<Fake>, version: &str, rules: &str) {
+    let a = full_archive("core", version, "0.0.0", rules, b"object");
+    let sig = sign(kp, &a);
+    let r = d.install_updates(vec![sensr_guard::daemon::Download {
+        name: "core".into(),
+        current: Some(Version::new(0, 0, 1)),
+        available: Some(version.parse().unwrap()),
+        fetched: Ok(Some((a, sig))),
+    }]);
+    assert!(r[0].installed && r[0].error.is_none(), "{r:?}");
+}
+
+fn action_of(env: &Env, id: &str) -> u8 {
+    let (ids, _, actions, _) = env.last_apply();
+    actions[ids.iter().position(|i| i == id).unwrap()]
+}
+
+#[test]
+fn a_pack_update_holds_its_new_block_rules_as_alerts() {
+    let env = Env::new();
+    let mut d = env.start();
+    let kp = trusted_key(&env, &mut d);
+    update(&kp, &mut d, "1.1.0", BLOCKING_RULES);
+    let s = d.status();
+    assert_eq!(s.packs[0].version, "1.1.0");
+    for id in ["core-a", "core-c"] {
+        let r = rule(&s, id);
+        assert!(r.held && r.active, "{r:?}");
+        assert_eq!(r.action, sensr_guard::rule::Action::Alert);
+        assert_eq!(action_of(&env, id), 0, "{id} is applied as an alert");
+    }
+    assert!(
+        !rule(&s, "core-d").held,
+        "a disabled block rule is not held"
+    );
+    assert_eq!(s.held.len(), 2);
+    // held across a restart
+    drop(d);
+    let s = env.start().status();
+    assert!(rule(&s, "core-c").held);
+    assert_eq!(action_of(&env, "core-c"), 0);
+}
+
+#[test]
+fn held_rules_block_once_released_and_confirmed() {
+    let env = Env::new();
+    let mut d = env.start();
+    let kp = trusted_key(&env, &mut d);
+    update(&kp, &mut d, "1.1.0", BLOCKING_RULES);
+    let t0 = Instant::now();
+    let Reply::Pending(p) = d.handle(&Request::ReleaseHeld) else {
+        panic!("releasing lets rules block: it must be confirmed");
+    };
+    assert_eq!(p.released.len(), 2);
+    assert!(!p.kill_switch_off);
+    assert_eq!(action_of(&env, "core-c"), 1, "blocking in the window");
+    let s = d.status();
+    assert!(!rule(&s, "core-c").held);
+    assert_eq!(rule(&s, "core-c").action, sensr_guard::rule::Action::Block);
+    // unconfirmed: held again
+    d.poll_events(t0 + WINDOW + Duration::from_secs(1));
+    assert!(rule(&d.status(), "core-c").held);
+    assert_eq!(action_of(&env, "core-c"), 0);
+    // released and confirmed: they block, also after a restart
+    assert!(matches!(d.handle(&Request::ReleaseHeld), Reply::Pending(_)));
+    assert_eq!(d.handle(&Request::Confirm), Reply::Ok);
+    d.poll_events(Instant::now() + WINDOW * 2);
+    assert_eq!(action_of(&env, "core-c"), 1);
+    assert!(d.status().held.is_empty());
+    drop(d);
+    let s = env.start().status();
+    assert!(!rule(&s, "core-c").held);
+    assert_eq!(action_of(&env, "core-c"), 1);
+}
+
+#[test]
+fn release_with_nothing_held_is_refused() {
+    let env = Env::new();
+    let mut d = env.start();
+    assert!(matches!(d.handle(&Request::ReleaseHeld), Reply::Error(_)));
+}
+
+#[test]
+fn an_owner_override_with_an_action_ends_the_hold() {
+    let env = Env::new();
+    let mut d = env.start();
+    let kp = trusted_key(&env, &mut d);
+    update(&kp, &mut d, "1.1.0", BLOCKING_RULES);
+    env.config(json!({"pack_rules": [
+        {"pack": "core", "rule_id": "core-c", "action": "block"},
+        {"pack": "core", "rule_id": "core-a", "enabled": true}
+    ]}));
+    assert_eq!(d.handle(&Request::Reload), Reply::Ok);
+    let s = d.status();
+    assert!(
+        !rule(&s, "core-c").held,
+        "the owner chose block (commit-confirm)"
+    );
+    assert_eq!(action_of(&env, "core-c"), 1);
+    assert!(
+        rule(&s, "core-a").held,
+        "enabled alone says nothing about the action"
+    );
+    assert_eq!(s.held.len(), 1);
+}
+
+#[test]
+fn block_rules_the_running_version_already_had_are_not_held() {
+    let env = Env::new();
+    let mut d = env.start();
+    let kp = trusted_key(&env, &mut d);
+    update(&kp, &mut d, "1.1.0", BLOCKING_RULES);
+    assert!(matches!(d.handle(&Request::ReleaseHeld), Reply::Pending(_)));
+    assert_eq!(d.handle(&Request::Confirm), Reply::Ok);
+    // 1.2.0: core-c unchanged, core-a now blocks something else
+    let rules = BLOCKING_RULES.replace(r#"{"path_prefix":"/tmp"}"#, r#"{"path_prefix":"/var"}"#);
+    update(&kp, &mut d, "1.2.0", &rules);
+    let s = d.status();
+    assert!(!rule(&s, "core-c").held, "the same block rule as before");
+    assert!(
+        rule(&s, "core-a").held,
+        "a block rule that changed what it blocks"
+    );
+}
+
+// --- the kernel's LSM list and exe seeding ----------------------------------
+
+#[test]
+fn without_the_bpf_lsm_nothing_is_enforced() {
+    let env = Env::new();
+    std::fs::write(env.p("lsm"), "capability,landlock,yama").unwrap();
+    env.config(json!({"rules": [owner_rule("connect", json!({"net": {"cidr": "192.0.2.0/24"}}), "block")]}));
+    let s = env.start().status();
+    assert!(s.running && !s.enforcing, "{s:#?}");
+    let why = s.reason.as_deref().unwrap();
+    assert!(why.contains("BPF LSM") && why.contains("lsm="), "{why}");
+    assert!(s.rules.iter().all(|r| !r.active), "{:#?}", s.rules);
+    assert!(
+        rule(&s, OWNER)
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("BPF LSM")
+    );
+}
+
+#[test]
+fn an_unreadable_lsm_list_is_not_a_reason_to_doubt() {
+    let env = Env::new();
+    std::fs::remove_file(env.p("lsm")).unwrap();
+    let s = env.start().status();
+    assert!(s.enforcing, "{s:#?}");
+}
+
+#[test]
+fn unseeded_tasks_are_said_for_exe_rules() {
+    let env = Env::new();
+    env.knobs()
+        .unattached
+        .insert("guard_seed_exe".into(), "no iterators here".into());
+    env.config(
+        json!({"rules": [{"id": OWNER, "enabled": true, "hook": "connect",
+        "process": {"exe_prefix": "/usr/bin"}, "target": "any", "action": "alert"}]}),
+    );
+    let s = env.start().status();
+    assert!(rule(&s, OWNER).active, "it still applies to new processes");
+    assert!(s.enforcing);
+    let why = s.reason.as_deref().unwrap();
+    assert!(
+        why.contains("started after") && why.contains("no iterators here"),
+        "{why}"
+    );
+}
+
+#[test]
+fn a_reload_keeps_the_loaded_packs() {
+    let env = Env::new();
+    let mut d = env.start();
+    env.config(json!({"retention_days": 29}));
+    assert_eq!(d.handle(&Request::Reload), Reply::Ok);
+    assert_eq!(
+        env.fake.log.lock().unwrap().loads,
+        ["0.0.1"],
+        "no new load: hits and task_exe stay"
+    );
+    assert_eq!(d.config().retention_days, 29);
 }

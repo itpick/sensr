@@ -24,8 +24,22 @@
 //! error.
 //!
 //! A rule is reported active only when it is enabled, applied, every
-//! program its hook needs is attached, and (for a block rule) the kill
+//! program its hook needs is attached, the kernel runs BPF LSM programs at
+//! all (`bpf` in /sys/kernel/security/lsm), and (for a block rule) the kill
 //! switch is off.
+//!
+//! # Blocking again needs a confirmation
+//!
+//! Two things let rules block without a configuration commit (which has
+//! commit-confirm of its own): turning the kill switch off, and the block
+//! rules a pack update brings. Both go through the same window as a
+//! commit: turning the kill switch off blocks at once but stays recorded
+//! as on until [`crate::proto::Request::Confirm`]; unconfirmed at the
+//! deadline (or after a restart) it is on again. A pack update's new
+//! default block rules are held as alerts (persisted in the state
+//! directory) until the owner releases them ([`Daemon::handle`] with
+//! `ReleaseHeld`, then a confirmation) or sets their action in
+//! `guard.pack_rules`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -40,7 +54,10 @@ use crate::config::Config;
 use crate::events::{Batch, BootClock, Pipeline, decode, hook_name};
 use crate::loader::ProgramStatus;
 use crate::packs::{self, PackSource as Source, PublicKey, VerifiedPack};
-use crate::proto::{PackCheck, PackSource, PackStatus, ProgramView, Reply, RuleStatus, StatusView};
+use crate::proto::{
+    HeldRule, PackCheck, PackSource, PackStatus, PendingConfirm, ProgramView, Reply, RuleStatus,
+    StatusView,
+};
 use crate::rule::{Action, Hook, Rule};
 
 /// The persisted live kill switch, inside the state directory.
@@ -68,6 +85,13 @@ pub const MAX_SIG: u64 = 4096;
 const MODULE_HOOK: &str = "module";
 /// The kernel's lockdown file.
 pub const LOCKDOWN: &str = "/sys/kernel/security/lockdown";
+/// The kernel's list of active LSMs.
+pub const LSM_FILE: &str = "/sys/kernel/security/lsm";
+/// The window a change that lets rules block again gets (as the agent's
+/// commit-confirm for block rules).
+pub const CONFIRM_WINDOW: Duration = Duration::from_secs(120);
+/// Held block rules (JSON), inside the state directory.
+pub const HELD_STATE: &str = "held-blocks.json";
 
 /// The kernel: loads verified packs.
 pub trait Backend: Send {
@@ -111,6 +135,11 @@ pub struct Options {
     /// Where the system updater records the running sensr release
     /// ([`RELEASE_FILE`]), which packs' `min_sensr` is compared with.
     pub release_file: PathBuf,
+    /// The kernel's active LSMs ([`LSM_FILE`]).
+    pub lsm_file: PathBuf,
+    /// How long a change that lets rules block again waits for its
+    /// confirmation ([`CONFIRM_WINDOW`]).
+    pub confirm_window: Duration,
     /// sensr-guard's own pid (never blocked, its bpf() calls ignored).
     pub own_tgid: u32,
     /// Boot time to wall time for events.
@@ -139,6 +168,69 @@ pub fn parse_lockdown(text: &str) -> String {
         .find_map(|w| w.strip_prefix('[').and_then(|w| w.strip_suffix(']')))
         .unwrap_or("none")
         .to_owned()
+}
+
+/// The active LSM list when it lacks `bpf` (then no BPF LSM program ever
+/// runs); `None` when `bpf` is in it or the list cannot be read (no
+/// securityfs: nothing to go by, so nothing is claimed).
+pub fn bpf_lsm_missing(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let list = text.trim();
+    (!list.split(',').any(|l| l.trim() == "bpf")).then(|| list.to_owned())
+}
+
+/// `2026-11-26 14:03 UTC` for unix seconds.
+fn utc_text(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // civil from days (Howard Hinnant)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        rem / 3600,
+        rem % 3600 / 60
+    )
+}
+
+/// Whether `r` blocks (enabled, action block).
+fn blocks(r: &Rule) -> bool {
+    r.enabled && r.action == Action::Block
+}
+
+/// The rules of `after` that block something `before` did not block: new
+/// block rules, rules that became block rules, and block rules that now
+/// match another hook, process or target.
+pub fn newly_blocking<'a>(before: &[Rule], after: &'a [Rule]) -> Vec<&'a Rule> {
+    after
+        .iter()
+        .filter(|n| blocks(n))
+        .filter(|n| {
+            !before.iter().any(|o| {
+                o.id == n.id
+                    && blocks(o)
+                    && o.hook == n.hook
+                    && o.process == n.process
+                    && o.target == n.target
+            })
+        })
+        .collect()
+}
+
+/// The held block rules recorded in `state_dir` (none when unreadable).
+fn read_held(state_dir: &Path) -> BTreeSet<HeldRule> {
+    std::fs::read(state_dir.join(HELD_STATE))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Vec<HeldRule>>(&b).ok())
+        .map(|v| v.into_iter().collect())
+        .unwrap_or_default()
 }
 
 /// The lockdown mode; `none` when the kernel has no lockdown LSM.
@@ -177,7 +269,7 @@ pub fn required_hooks(rule: &Rule) -> Vec<&'static str> {
         Hook::Bpf => vec!["bpf"],
     };
     if rule.process.exe_prefix.is_some() {
-        for h in ["bprm_check_security", "task_alloc"] {
+        for h in ["bprm_committed_creds", "task_alloc"] {
             if !v.contains(&h) {
                 v.push(h);
             }
@@ -276,6 +368,10 @@ struct Running {
     applied: Result<(), String>,
     /// The ring buffer's dropped count at the last poll.
     last_dropped: u64,
+    /// Ids of the pack's own rules applied as alerts because they are held.
+    held: BTreeSet<String>,
+    /// When it was loaded (unix seconds).
+    loaded_at: i64,
 }
 
 enum PackState {
@@ -532,6 +628,14 @@ pub struct Daemon<B: Backend> {
     dropped_kernel_base: u64,
     /// The running sensr release (`None`: unknown).
     sensr: Option<Version>,
+    /// The kernel's LSM list when it lacks `bpf`.
+    no_bpf_lsm: Option<String>,
+    /// What waits for the owner's confirmation, until when.
+    pending: Option<(Instant, PendingConfirm)>,
+    /// Pack block rules held as alerts (persisted in [`HELD_STATE`]).
+    held: BTreeSet<HeldRule>,
+    /// What the last unconfirmed window undid.
+    reverted: Option<String>,
 }
 
 impl<B: Backend> Daemon<B> {
@@ -563,8 +667,14 @@ impl<B: Backend> Daemon<B> {
             last_boot_check: None,
             dropped_kernel_base: 0,
             sensr: None,
+            no_bpf_lsm: None,
+            pending: None,
+            held: BTreeSet::new(),
+            reverted: None,
         };
         d.sensr = sensr_release(&d.opts.release_file);
+        d.no_bpf_lsm = bpf_lsm_missing(&d.opts.lsm_file);
+        d.held = read_held(&d.opts.state_dir);
         d.load_keys();
         let plan = d.plan_packs(&d.config);
         d.reconcile_packs(plan);
@@ -615,6 +725,7 @@ impl<B: Backend> Daemon<B> {
         );
         self.load_keys();
         self.sensr = sensr_release(&self.opts.release_file);
+        self.no_bpf_lsm = bpf_lsm_missing(&self.opts.lsm_file);
         let plan = self.plan_packs(&config);
         if let Err(e) = self.dry_run(&config, &plan) {
             (self.keys, self.keys_error, self.sensr) = previous;
@@ -629,28 +740,167 @@ impl<B: Backend> Daemon<B> {
 
     /// Turn the kill switch on or off, live; it persists across restarts
     /// in the state directory. Off is refused while the kill-switch file
-    /// exists (the owner put it there on purpose).
-    pub fn set_kill_switch(&mut self, on: bool) -> Result<(), String> {
+    /// exists (the owner put it there on purpose). Off lets rules block
+    /// again, so it opens a confirm window (the returned
+    /// [`PendingConfirm`]): the switch stays recorded as on until
+    /// [`Self::confirm`], and the deadline (or a restart) turns it on again.
+    pub fn set_kill_switch(
+        &mut self,
+        on: bool,
+        now: Instant,
+    ) -> Result<Option<PendingConfirm>, String> {
         let state = self.opts.state_dir.join(KILL_SWITCH_STATE);
         if on {
             std::fs::write(&state, b"on\n")
                 .map_err(|e| format!("recording the kill switch in {}: {e}", state.display()))?;
-        } else {
-            if self.opts.kill_switch_file.exists() {
-                return Err(format!(
-                    "{} exists: remove it to let rules block again",
-                    self.opts.kill_switch_file.display()
-                ));
+            if let Some((_, p)) = &mut self.pending {
+                p.kill_switch_off = false;
+                if p.released.is_empty() {
+                    self.pending = None;
+                }
             }
+            self.kill_switch = true;
+            self.apply_all();
+            return Ok(None);
+        }
+        if self.opts.kill_switch_file.exists() {
+            return Err(format!(
+                "{} exists: remove it to let rules block again",
+                self.opts.kill_switch_file.display()
+            ));
+        }
+        if !self.kill_switch {
+            // already off: nothing newly blocks (in a window: that window)
+            return Ok(self.pending.as_ref().map(|(_, p)| p.clone()));
+        }
+        // the state file stays until the confirmation
+        std::fs::write(&state, b"on\n")
+            .map_err(|e| format!("recording the kill switch in {}: {e}", state.display()))?;
+        let p = self.open_window(now, |p| p.kill_switch_off = true);
+        self.kill_switch = false;
+        self.apply_all();
+        Ok(Some(p))
+    }
+
+    /// Open (or extend: the deadline restarts) the confirm window with
+    /// `change`.
+    fn open_window(
+        &mut self,
+        now: Instant,
+        change: impl FnOnce(&mut PendingConfirm),
+    ) -> PendingConfirm {
+        let window = self.opts.confirm_window;
+        let mut p = self.pending.take().map_or_else(
+            || PendingConfirm {
+                deadline: 0,
+                window_secs: window.as_secs(),
+                kill_switch_off: false,
+                released: Vec::new(),
+            },
+            |(_, p)| p,
+        );
+        change(&mut p);
+        p.window_secs = window.as_secs();
+        p.deadline = u64::try_from(unix_now()).unwrap_or(0) + window.as_secs();
+        self.pending = Some((now + window, p.clone()));
+        self.reverted = None;
+        p
+    }
+
+    /// Keep what the confirm window let block: the kill switch stays off,
+    /// released rules are no longer held.
+    pub fn confirm(&mut self) -> Result<(), String> {
+        let Some((_, p)) = &self.pending else {
+            return Err("nothing is waiting for confirmation".into());
+        };
+        if p.kill_switch_off {
+            let state = self.opts.state_dir.join(KILL_SWITCH_STATE);
             match std::fs::remove_file(&state) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(format!("clearing {}: {e}", state.display())),
             }
         }
-        self.kill_switch = on;
-        self.apply_all();
+        if !p.released.is_empty() {
+            let mut held = self.held.clone();
+            for r in &p.released {
+                held.remove(r);
+            }
+            self.write_held(&held)?;
+            self.held = held;
+        }
+        self.pending = None;
         Ok(())
+    }
+
+    /// Let every held block rule block, in a confirm window.
+    pub fn release_held(&mut self, now: Instant) -> Result<PendingConfirm, String> {
+        let released: BTreeSet<HeldRule> = self
+            .pending
+            .iter()
+            .flat_map(|(_, p)| p.released.iter().cloned())
+            .collect();
+        let more: Vec<HeldRule> = self.held.difference(&released).cloned().collect();
+        if more.is_empty() {
+            return Err("no block rule is held".into());
+        }
+        let p = self.open_window(now, |p| p.released.extend(more));
+        self.apply_all();
+        Ok(p)
+    }
+
+    /// Undo an unconfirmed window once its deadline has passed.
+    pub fn tick(&mut self, now: Instant) {
+        let Some((deadline, p)) = &self.pending else {
+            return;
+        };
+        if now < *deadline {
+            return;
+        }
+        let mut undone = Vec::new();
+        if p.kill_switch_off {
+            self.kill_switch = true;
+            undone.push("the kill switch is on again");
+        }
+        if !p.released.is_empty() {
+            undone.push("the released block rules are held as alerts again");
+        }
+        tracing::warn!(undone = ?undone, "not confirmed in time");
+        self.reverted = Some(format!("not confirmed in time: {}", undone.join(", ")));
+        self.pending = None;
+        self.apply_all();
+    }
+
+    fn write_held(&self, held: &BTreeSet<HeldRule>) -> Result<(), String> {
+        let path = self.opts.state_dir.join(HELD_STATE);
+        let v: Vec<&HeldRule> = held.iter().collect();
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&v).unwrap_or_default())
+            .and_then(|()| std::fs::rename(&tmp, &path))
+            .map_err(|e| format!("recording held rules in {}: {e}", path.display()))
+    }
+
+    /// Whether the owner set `rule_id`'s action in `guard.pack_rules`.
+    fn action_overridden(&self, pack: &str, rule_id: &str) -> bool {
+        self.config
+            .pack_rules
+            .iter()
+            .any(|o| o.pack == pack && o.rule_id == rule_id && o.action.is_some())
+    }
+
+    /// The held rules that apply as alerts now: held, not released in the
+    /// window, and without an owner-set action.
+    fn holding(&self) -> BTreeSet<HeldRule> {
+        let released: BTreeSet<&HeldRule> = self
+            .pending
+            .iter()
+            .flat_map(|(_, p)| p.released.iter())
+            .collect();
+        self.held
+            .iter()
+            .filter(|h| !released.contains(h))
+            .cloned()
+            .collect()
     }
 
     fn pack_names(&self, config: &Config) -> Vec<String> {
@@ -761,6 +1011,8 @@ impl<B: Backend> Daemon<B> {
                 rules: Vec::new(),
                 applied: Ok(()),
                 last_dropped: 0,
+                held: BTreeSet::new(),
+                loaded_at: unix_now(),
             })),
             Err(e) => Err((vp, e)),
         }
@@ -898,6 +1150,25 @@ impl<B: Backend> Daemon<B> {
 
     /// Compile and apply every loaded pack's rules.
     fn apply_all(&mut self) {
+        // an owner-set action ends a hold: the owner chose (through
+        // commit-confirm, when it is block)
+        let ended: Vec<HeldRule> = self
+            .held
+            .iter()
+            .filter(|h| self.action_overridden(&h.pack, &h.rule_id))
+            .cloned()
+            .collect();
+        if !ended.is_empty() {
+            let mut held = self.held.clone();
+            for h in &ended {
+                held.remove(h);
+            }
+            if let Err(e) = self.write_held(&held) {
+                tracing::warn!("{e}");
+            }
+            self.held = held;
+        }
+        let holding = self.holding();
         let owner: Vec<Rule> = if self.owner_error.is_none() {
             self.config.rules.clone()
         } else {
@@ -911,10 +1182,22 @@ impl<B: Backend> Daemon<B> {
             let PackState::Running(r) = &mut p.state else {
                 continue;
             };
+            let mut held = BTreeSet::new();
             let mut rules: Vec<(Rule, bool)> = with_overrides(&p.name, &r.pack.rules, &overrides)
                 .into_iter()
-                .map(|r| (r, true))
+                .map(|mut rule| {
+                    let h = HeldRule {
+                        pack: p.name.clone(),
+                        rule_id: rule.id.clone(),
+                    };
+                    if rule.action == Action::Block && holding.contains(&h) {
+                        rule.action = Action::Alert;
+                        held.insert(rule.id.clone());
+                    }
+                    (rule, true)
+                })
                 .collect();
+            r.held = held;
             let own_only = rules.clone();
             if primary {
                 rules.extend(owner.iter().cloned().map(|r| (r, false)));
@@ -993,12 +1276,23 @@ impl<B: Backend> Daemon<B> {
             format!("{}\n", unix_now()),
         );
         if installed_any {
+            // the rules each pack ran with before: block rules it did not
+            // have are held
+            let before: HashMap<String, Vec<Rule>> = self
+                .packs
+                .iter()
+                .filter_map(|p| match &p.state {
+                    PackState::Running(r) => Some((p.name.clone(), r.pack.rules.clone())),
+                    PackState::Inactive { .. } => None,
+                })
+                .collect();
             let plan = self.plan_packs(&self.config);
             if let Err(e) = self.dry_run(&self.config, &plan) {
                 // install_one checked the new pack; this is another change
                 tracing::warn!("after the pack install: {e}");
             }
             self.reconcile_packs(plan);
+            self.hold_new_blocks(&before, &out);
             self.apply_all();
             // a pack that was installed but does not run says why
             for c in out.iter_mut().filter(|c| c.installed) {
@@ -1011,6 +1305,41 @@ impl<B: Backend> Daemon<B> {
             }
         }
         out
+    }
+
+    /// Hold the block rules the newly installed packs brought (see the
+    /// module docs), before their rules are applied.
+    fn hold_new_blocks(&mut self, before: &HashMap<String, Vec<Rule>>, checks: &[PackCheck]) {
+        let mut held = self.held.clone();
+        for p in &self.packs {
+            let PackState::Running(r) = &p.state else {
+                continue;
+            };
+            if !checks.iter().any(|c| c.installed && c.name == p.name) {
+                continue;
+            }
+            let old = before.get(&p.name).map_or(&[][..], Vec::as_slice);
+            if old == r.pack.rules.as_slice() {
+                continue; // still the version that ran
+            }
+            for rule in newly_blocking(old, &r.pack.rules) {
+                if !self.action_overridden(&p.name, &rule.id) {
+                    tracing::info!(pack = %p.name, rule = %rule.id, "new block rule held as an alert");
+                    held.insert(HeldRule {
+                        pack: p.name.clone(),
+                        rule_id: rule.id.clone(),
+                    });
+                }
+            }
+        }
+        if held != self.held {
+            if let Err(e) = self.write_held(&held) {
+                // not recorded: still held in memory; a restart would lose
+                // the hold, so say so
+                tracing::warn!("{e}");
+            }
+            self.held = held;
+        }
     }
 
     /// Verify one downloaded pack, check that it is the pack it is offered
@@ -1054,6 +1383,7 @@ impl<B: Backend> Daemon<B> {
     /// are due. Module-load alerts are skipped until boot-complete.target
     /// is reached (blocked module loads are always kept).
     pub fn poll_events(&mut self, now: Instant) -> Vec<Batch> {
+        self.tick(now);
         if !self.boot_complete
             && self
                 .last_boot_check
@@ -1134,10 +1464,33 @@ impl<B: Backend> Daemon<B> {
                             p.name
                         ));
                     }
+                    let seeded = programs
+                        .iter()
+                        .find(|p| p.hook.starts_with("iter/"))
+                        .map_or(Err("the pack has no seeding program".to_owned()), |p| {
+                            if p.attached {
+                                Ok(())
+                            } else {
+                                Err(p.reason.clone().unwrap_or_else(|| "unknown reason".into()))
+                            }
+                        });
+                    if let Err(why) = &seeded
+                        && r.rules
+                            .iter()
+                            .any(|(rule, _)| rule.enabled && rule.process.exe_prefix.is_some())
+                    {
+                        reasons.push(format!(
+                            "pack {}: processes that were already running when it loaded have no executable on record ({why}), so rules that match an executable apply only to processes started after {}",
+                            p.name,
+                            utc_text(r.loaded_at)
+                        ));
+                    }
                     for (slot, (rule, own)) in r.rules.iter().enumerate() {
                         owner_placed |= !own;
                         let why = if !rule.enabled {
                             Some("disabled".to_owned())
+                        } else if let Some(list) = &self.no_bpf_lsm {
+                            Some(format!("the BPF LSM is not active (lsm={list})"))
                         } else if let Err(e) = &r.applied {
                             Some(format!("not applied: {e}"))
                         } else if let Some(m) = missing_program(rule, &programs) {
@@ -1155,6 +1508,7 @@ impl<B: Backend> Daemon<B> {
                             active: why.is_none(),
                             reason: why,
                             hits: hits.get(&rule.id).copied().unwrap_or(0),
+                            held: *own && r.held.contains(&rule.id),
                         });
                     }
                     packs.push(PackStatus {
@@ -1194,6 +1548,7 @@ impl<B: Backend> Daemon<B> {
                     active: false,
                     reason: Some(why.clone()),
                     hits: 0,
+                    held: false,
                 });
             }
         }
@@ -1211,6 +1566,15 @@ impl<B: Backend> Daemon<B> {
         if let Some(e) = &self.keys_error {
             reasons.push(e.clone());
         }
+        if let Some(list) = &self.no_bpf_lsm {
+            enforcing = false;
+            reasons.push(format!(
+                "the BPF LSM is not active in this kernel (lsm={list}): the programs are loaded but never run; boot with bpf in lsm="
+            ));
+        }
+        if let Some(r) = &self.reverted {
+            reasons.push(r.clone());
+        }
         StatusView {
             running,
             enforcing,
@@ -1223,6 +1587,8 @@ impl<B: Backend> Daemon<B> {
             dropped_rate: self.pipeline.dropped_rate(),
             dropped_blocked: self.pipeline.dropped_blocked(),
             boot_complete: self.boot_complete,
+            pending_confirm: self.pending.as_ref().map(|(_, p)| p.clone()),
+            held: self.held.iter().cloned().collect(),
         }
     }
 
@@ -1234,9 +1600,15 @@ impl<B: Backend> Daemon<B> {
         match req {
             Request::Status => Reply::Status(self.status()),
             Request::Reload => self.reload().map_or_else(Reply::Error, |()| Reply::Ok),
-            Request::KillSwitch { on } => self
-                .set_kill_switch(*on)
-                .map_or_else(Reply::Error, |()| Reply::Ok),
+            Request::KillSwitch { on } => match self.set_kill_switch(*on, Instant::now()) {
+                Ok(Some(p)) => Reply::Pending(p),
+                Ok(None) => Reply::Ok,
+                Err(e) => Reply::Error(e),
+            },
+            Request::Confirm => self.confirm().map_or_else(Reply::Error, |()| Reply::Ok),
+            Request::ReleaseHeld => self
+                .release_held(Instant::now())
+                .map_or_else(Reply::Error, Reply::Pending),
             Request::CheckPacks => Reply::Error("check_packs is handled by the server".into()),
         }
     }

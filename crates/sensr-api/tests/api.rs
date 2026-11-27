@@ -1279,7 +1279,9 @@ struct GuardFx {
 impl GuardFx {
     /// Start (or stop) answering on the socket.
     fn daemon(&self, up: bool) {
-        use sensr_guard::proto::{PackCheck, Reply, Request, RuleStatus, StatusView};
+        use sensr_guard::proto::{
+            HeldRule, PackCheck, PendingConfirm, Reply, Request, RuleStatus, StatusView,
+        };
         use sensr_guard::rule::Action;
         use std::io::{BufRead, BufReader, Write};
         let _ = std::fs::remove_file(&self.sock);
@@ -1308,6 +1310,7 @@ impl GuardFx {
                                 active: true,
                                 reason: None,
                                 hits: 3,
+                                held: false,
                             },
                             RuleStatus {
                                 id: "core-twin-a".into(),
@@ -1317,6 +1320,7 @@ impl GuardFx {
                                 active: true,
                                 reason: None,
                                 hits: 0,
+                                held: false,
                             },
                             RuleStatus {
                                 id: "other-twin-b".into(),
@@ -1326,21 +1330,34 @@ impl GuardFx {
                                 active: true,
                                 reason: None,
                                 hits: 0,
+                                held: false,
                             },
                         ],
                         dropped_kernel: 0,
                         dropped_rate: 0,
                         dropped_blocked: 0,
                         boot_complete: true,
+                        pending_confirm: None,
+                        held: Vec::new(),
                     }),
                     Request::Reload => Reply::Ok,
-                    Request::KillSwitch { on } => {
-                        if on {
-                            Reply::Ok
-                        } else {
-                            Reply::Error("kill switch file is read-only".into())
-                        }
-                    }
+                    Request::KillSwitch { on: true } => Reply::Ok,
+                    Request::KillSwitch { on: false } => Reply::Pending(PendingConfirm {
+                        deadline: 4_000_000_000,
+                        window_secs: 120,
+                        kill_switch_off: true,
+                        released: Vec::new(),
+                    }),
+                    Request::Confirm => Reply::Error("nothing is waiting for confirmation".into()),
+                    Request::ReleaseHeld => Reply::Pending(PendingConfirm {
+                        deadline: 4_000_000_000,
+                        window_secs: 120,
+                        kill_switch_off: false,
+                        released: vec![HeldRule {
+                            pack: "core".into(),
+                            rule_id: "core-x".into(),
+                        }],
+                    }),
                     Request::CheckPacks => Reply::Packs(vec![PackCheck {
                         name: "core".into(),
                         current: Some("1".into()),
@@ -1547,10 +1564,21 @@ async fn guard_switches_reach_the_daemon() {
         post("/api/v1/guard/kill-switch", Some(json!({"on": true}))).await,
         (200, json!({}))
     );
-    // A daemon refusal is 409 with a fixed message.
+    // Off lets rules block again: the reply says until when to confirm.
     let (st, body) = post("/api/v1/guard/kill-switch", Some(json!({"on": false}))).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["pending_confirm"]["kill_switch_off"], true);
+    assert_eq!(body["pending_confirm"]["deadline"], 4_000_000_000u64);
+    // A daemon refusal is 409 with its message.
+    let (st, body) = post("/api/v1/guard/confirm", None).await;
     assert_eq!(st, 409, "{body}");
-    assert_eq!(body, json!({"error": "kill switch file is read-only"}));
+    assert_eq!(
+        body,
+        json!({"error": "nothing is waiting for confirmation"})
+    );
+    let (st, body) = post("/api/v1/guard/release-held", None).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["pending_confirm"]["released"][0]["rule_id"], "core-x");
     assert_eq!(
         post("/api/v1/guard/kill-switch", Some(json!({}))).await.0,
         422
@@ -1587,6 +1615,8 @@ async fn readonly_cannot_toggle_kill_switch() {
         ("/api/v1/guard/kill-switch", Some(json!({"on": true}))),
         ("/api/v1/guard/reload", None),
         ("/api/v1/guard/check-packs", None),
+        ("/api/v1/guard/confirm", None),
+        ("/api/v1/guard/release-held", None),
     ] {
         let (st, body) = http(&fx, "POST", p, Some(&who), b).await;
         assert_eq!(st, 403, "{p}: {body}");
@@ -1616,6 +1646,8 @@ async fn guard_needs_its_privilege() {
                 Some(json!({"on": true})),
             ),
             ("POST", "/api/v1/guard/check-packs", None),
+            ("POST", "/api/v1/guard/confirm", None),
+            ("POST", "/api/v1/guard/release-held", None),
         ] {
             assert_eq!(http(&fx, m, p, Some(&who), b).await.0, 403, "{m} {p}");
         }
