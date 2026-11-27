@@ -1300,12 +1300,16 @@ in
     # counters and the executables of running processes). Root
     # with the capabilities BPF LSM programs need; the programs are not
     # pinned, so they live and die with the process (fail open), and systemd
-    # brings it back within a second. Exit status 78 is a refusal (kernel
+    # restarts it 200 ms later. Exit status 78 is a refusal (kernel
     # lockdown is confidentiality): restarting would not help.
     systemd.services.sensr-guard = {
       description = "sensr runtime guard (eBPF LSM)";
       partOf = [ "sensr-agent.service" ];
-      unitConfig.ConditionPathExists = "${runtimeDir}/guard/guard.json";
+      unitConfig = {
+        ConditionPathExists = "${runtimeDir}/guard/guard.json";
+        # the restart back-off below limits a crash loop; never stop trying
+        StartLimitIntervalSec = 0;
+      };
       # systemctl is-active boot-complete.target (module-load alerts start
       # once boot is complete)
       path = [ config.systemd.package ];
@@ -1333,7 +1337,12 @@ in
           "reload"
         ];
         Restart = "always";
-        RestartSec = 1;
+        # back almost at once after a one-off crash (nothing blocks while it
+        # is down), backing off to 30 s if it keeps crashing so a crash loop
+        # does not eat the CPU; never give up (no start limit)
+        RestartSec = "200ms";
+        RestartSteps = 6;
+        RestartMaxDelaySec = "30s";
         RestartPreventExitStatus = 78;
         User = "root";
         Group = "sensr";
