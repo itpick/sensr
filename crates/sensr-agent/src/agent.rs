@@ -162,11 +162,14 @@ pub fn decode(v: &Value) -> Result<Document, IpcError> {
     })
 }
 
-/// Validation problems as comparable `(path, message)` pairs.
+/// Validation problems as comparable `(path, message)` pairs: the schema's,
+/// and the guard rules sensr-guard could not compile (it would drop every
+/// owner rule on such a configuration).
 fn problems(doc: &Document) -> BTreeSet<(String, String)> {
     issues(&doc.validate())
         .into_iter()
         .map(|i| (i.path, i.message))
+        .chain(sensr_apply::appliers::guard::rule_problems(doc))
         .collect()
 }
 
@@ -635,6 +638,22 @@ impl<A: Applier> Agent<A> {
                 inner.store.get(p.rollback_to).map_err(internal)?.document
             }
         };
+        if let Write::Commit(doc) = &write {
+            // a loaded document skips staging's checks; only problems the
+            // head does not have already (a restore or rollback is not
+            // refused for an old revision's rules: the daemon reports them)
+            let before: BTreeSet<_> = sensr_apply::appliers::guard::rule_problems(&inner.head.1)
+                .into_iter()
+                .collect();
+            let introduced: Vec<ValidationIssue> = sensr_apply::appliers::guard::rule_problems(doc)
+                .into_iter()
+                .filter(|p| !before.contains(p))
+                .map(|(path, message)| ValidationIssue { path, message })
+                .collect();
+            if !introduced.is_empty() {
+                return Err(validation(introduced));
+            }
+        }
         let running = inner.applied.as_ref().map(|(_, d)| d.clone());
         inner
             .applier

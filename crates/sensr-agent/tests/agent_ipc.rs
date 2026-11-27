@@ -1353,6 +1353,47 @@ impl Fx {
     }
 }
 
+/// Owner rules sensr-guard could not compile are refused like schema
+/// problems: the daemon would otherwise drop every owner rule.
+#[tokio::test]
+async fn guard_rules_the_daemon_cannot_compile_are_refused() {
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    let bad = json!({"hook": "connect", "target": {"path_prefix": "/etc"}});
+    let e = agent_err(try_set(&mut c, GUARD_RULE, bad.clone()).await);
+    assert_eq!(e.kind, ErrorKind::Validation);
+    assert_eq!(e.validations[0].path, GUARD_RULE, "{e:?}");
+    assert!(e.validations[0].message.contains("does not fit"), "{e:?}");
+    assert!(get(&mut c, GUARD_RULE, Source::Candidate).await.is_none());
+    for (rule, what) in [
+        (
+            json!({"hook": "exec", "process": {"unit": "u".repeat(64)}, "target": "any"}),
+            "unit",
+        ),
+        (
+            json!({"hook": "file_write", "target": {"path_prefix": "/etc/../x"}}),
+            "absolute path",
+        ),
+        (
+            json!({"hook": "setuid", "target": {"uid": 4294967295u32}}),
+            "reserved",
+        ),
+    ] {
+        let e = agent_err(try_set(&mut c, GUARD_RULE, rule).await);
+        assert!(e.validations[0].message.contains(what), "{e:?}");
+    }
+    // a whole document carrying one is staged, but never committed
+    let mut doc = get(&mut c, "/", Source::Head).await.unwrap();
+    doc["guard"] = json!({"rules": {"6a7e0000-0000-4000-8000-000000000001": bad}});
+    c.call(Op::ConfigLoad { document: doc }).await.unwrap();
+    let e = agent_err(commit(&mut c, None).await);
+    assert_eq!(e.kind, ErrorKind::Validation);
+    // a good rule goes through
+    c.call(Op::ConfigDiscard).await.unwrap();
+    set(&mut c, GUARD_RULE, guard_rule("alert")).await;
+    commit(&mut c, None).await.unwrap();
+}
+
 #[tokio::test]
 async fn block_change_forces_confirm_window() {
     let fx = Fx::start(true).await;

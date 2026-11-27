@@ -90,6 +90,41 @@ pub fn config(doc: &Document) -> Option<Config> {
     })
 }
 
+/// What the daemon's compiler refuses in the owner's rules, as (path,
+/// message) pairs: a hook/target mismatch, a unit name over 63 bytes, a
+/// path with `.`/`..` components or too long for the maps, the reserved uid
+/// 4294967295, too many rules. The daemon would drop every owner rule on
+/// such a configuration, so the agent refuses it up front (staging treats
+/// these as validation problems).
+pub fn rule_problems(doc: &Document) -> Vec<(String, String)> {
+    let Some(cfg) = config(doc) else {
+        return Vec::new();
+    };
+    let words = |e: &sensr_guard::compile::CompileError, id: &str| {
+        let text = e.to_string();
+        let text = text
+            .strip_prefix(&format!("rule {id}: "))
+            .unwrap_or(&text)
+            .to_owned();
+        format!("sensr-guard cannot compile this rule: {text}.")
+    };
+    let mut out: Vec<(String, String)> = cfg
+        .rules
+        .iter()
+        .filter_map(|r| {
+            sensr_guard::compile::compile(std::slice::from_ref(r))
+                .err()
+                .map(|e| (format!("guard.rules.{}", r.id), words(&e, &r.id)))
+        })
+        .collect();
+    if out.is_empty()
+        && let Err(e) = sensr_guard::compile::compile(&cfg.rules)
+    {
+        out.push(("guard.rules".into(), words(&e, "")));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +175,69 @@ mod tests {
                 ports: vec![22]
             }
         );
+    }
+
+    fn with_rule(rule: serde_json::Value) -> Document {
+        let mut d = Document::factory();
+        d.guard = serde_json::from_value(json!({"rules": {U1: rule}})).unwrap();
+        d
+    }
+
+    #[test]
+    fn rules_the_daemon_cannot_compile_are_problems() {
+        let long = format!("/{}", "a".repeat(300));
+        for (rule, what) in [
+            (
+                json!({"hook": "connect", "target": {"path_prefix": "/etc"}}),
+                "does not fit",
+            ),
+            (
+                json!({"hook": "exec", "process": {"unit": "u".repeat(64)}, "target": "any"}),
+                "unit",
+            ),
+            (
+                json!({"hook": "file_write", "target": {"path_prefix": "/etc/../root"}}),
+                "absolute path",
+            ),
+            (
+                json!({"hook": "exec", "process": {"exe_prefix": "/usr/./bin"}, "target": "any"}),
+                "absolute path",
+            ),
+            (
+                json!({"hook": "file_write", "target": {"path_prefix": long}}),
+                "too long",
+            ),
+            (
+                json!({"hook": "setuid", "target": {"uid": 4294967295u32}}),
+                "reserved",
+            ),
+        ] {
+            let p = rule_problems(&with_rule(rule.clone()));
+            assert_eq!(p.len(), 1, "{rule}: {p:?}");
+            assert_eq!(p[0].0, format!("guard.rules.{U1}"), "{rule}");
+            assert!(p[0].1.contains(what), "{rule}: {}", p[0].1);
+            assert!(!p[0].1.contains(U1), "the path names the rule: {}", p[0].1);
+        }
+    }
+
+    #[test]
+    fn rules_that_compile_and_disabled_or_off_guards_are_fine() {
+        assert!(
+            rule_problems(&with_rule(
+                json!({"hook": "connect", "target": {"net": {"cidr": "10.0.0.0/8", "ports": [22]}}})
+            ))
+            .is_empty()
+        );
+        // left out of guard.json, so never compiled
+        assert!(
+            rule_problems(&with_rule(
+                json!({"enabled": false, "hook": "connect", "target": {"path_prefix": "/etc"}})
+            ))
+            .is_empty()
+        );
+        let mut d = with_rule(json!({"hook": "connect", "target": {"path_prefix": "/etc"}}));
+        d.guard.enabled = false;
+        assert!(rule_problems(&d).is_empty());
     }
 
     #[test]
