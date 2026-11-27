@@ -6,7 +6,7 @@ A firewall and router OS written in Rust on NixOS. The goal is feature parity wi
 [OPNsense](https://opnsense.org/), including its Business Edition features, plus
 atomic upgrades, rollback and a typed, tested configuration model.
 
-**Status: early, in development.** Releases v0.1.0 to v0.1.24 are on
+**Status: early, in development.** Releases v0.1.0 to v0.1.30 are on
 [GitHub Releases](https://github.com/itpick/sensr/releases) with Raspberry Pi 4 and Pi 5 SD
 images, an x86 ISO and a qcow2. The author's home router is a Raspberry Pi 5 running sensr,
 upgraded from the in-app updater. It is still young: expect rough edges and missing OPNsense
@@ -15,8 +15,10 @@ features. For a mature option, see [opnsense-pi](https://github.com/itpick/opnse
 
 What works today, briefly: host inventory with smart device labels, per-host Isolated and
 Quarantine modes, per-host DNS activity (screen time per service, from Unbound dnstap),
-global search, traffic graphs, IDS (Suricata), WireGuard, DNS blocklists, gateway monitoring,
-OIDC, SAML and WebAuthn login, in-app updates, and boot-apply fault isolation with an
+a built-in port scanner (all TCP ports plus common UDP services, with service and TLS
+identification; each new device is scanned once when it joins, open ports show under the host
+name, and any range can be scanned on demand), global search, traffic graphs, IDS (Suricata),
+WireGuard, DNS blocklists, gateway monitoring, OIDC, SAML and WebAuthn login, in-app updates, and boot-apply fault isolation with an
 emergency firewall. CI is backed by a Cachix binary cache.
 
 **Install page:** https://itpick.github.io/sensr/ (lists the images in the latest release)
@@ -95,6 +97,7 @@ Crates under `crates/`:
 | `sensr-monitor` | Gateway monitor (dpinger equivalent) |
 | `sensr-net` | Network model and state, IPv6 prefix delegation |
 | `sensr-rules` | Firewall rule IR, alias resolution, nftables renderer |
+| `sensr-scan` | Port scanner service: TCP connect and UDP probe scans, service and TLS identification, scan history |
 | `sensr-schema` | Typed config field types, constraints, versioned migrations |
 | `sensr-schema-derive` | `#[derive(SensrModel)]` and `#[derive(SensrOptions)]` |
 | `sensr-ui` | Leptos web UI with the OPNsense-style layout |
