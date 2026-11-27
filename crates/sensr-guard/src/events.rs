@@ -28,6 +28,17 @@ pub const BLOCKED_WINDOW: Duration = Duration::from_secs(1);
 pub const BATCH_INTERVAL: Duration = Duration::from_secs(5);
 /// Events kept per second, globally; the rest are counted as dropped.
 pub const RATE_CAP_PER_SEC: u32 = 100;
+/// New rows one rule may add per second, on average (a token bucket per
+/// rule slot), so one noisy rule cannot use up the global budget.
+pub const RULE_RATE_PER_SEC: u32 = 20;
+/// The most a rule's bucket holds: a burst it may add at once.
+pub const RULE_BURST: u32 = 50;
+/// `sock_type` of a listening TCP socket (`SOCK_STREAM`).
+pub const SOCK_STREAM: u8 = 1;
+/// `sock_type` of a UDP bind (`SOCK_DGRAM`).
+pub const SOCK_DGRAM: u8 = 2;
+/// The hook number of `listen`.
+const LISTEN_HOOK: u8 = 2;
 /// Hard bound on pending (not yet batched) rows.
 pub const MAX_PENDING: usize = 4096;
 /// Bytes kept of a text field.
@@ -108,6 +119,26 @@ pub struct Event {
     pub target: String,
     /// Leaf cgroup name.
     pub unit: String,
+    /// Listen events: the socket type (`SOCK_STREAM` for a listen, the
+    /// bind's type otherwise); 0 for other hooks and older packs.
+    pub sock_type: u8,
+}
+
+impl Event {
+    /// The target as the de-duplication key sees it: a bind of a socket
+    /// that does not listen (UDP) is keyed without its port, so a client
+    /// that binds a fresh random port for each request (a resolver's
+    /// queries) is one row with a count, not a row per port.
+    fn dedupe_target(&self) -> String {
+        if self.hook == LISTEN_HOOK
+            && self.sock_type != 0
+            && self.sock_type != SOCK_STREAM
+            && let Some((addr, _port)) = self.target.rsplit_once(':')
+        {
+            return format!("{addr}:*");
+        }
+        self.target.clone()
+    }
 }
 
 /// Text of a NUL-terminated field: bytes up to the first NUL, lossy UTF-8,
@@ -178,6 +209,7 @@ pub fn decode(raw: &[u8]) -> Option<Event> {
         exe,
         target,
         unit,
+        sock_type: raw[offset_of!(GuardEvent, sock_type)],
     })
 }
 
@@ -226,6 +258,8 @@ type Key = (u8, u8, bool, u32, String, String, String);
 #[derive(Debug)]
 pub struct Pipeline {
     clock: BootClock,
+    /// Per rule slot: tokens left and when they were last topped up.
+    buckets: HashMap<u32, (f64, Instant)>,
     pending: HashMap<Key, (Instant, Duration, Row)>,
     /// Rows whose run ended (window passed) before a batch took them.
     closed: Vec<Row>,
@@ -242,6 +276,7 @@ impl Pipeline {
     pub fn new(clock: BootClock, now: Instant) -> Self {
         Self {
             clock,
+            buckets: HashMap::new(),
             pending: HashMap::new(),
             closed: Vec::new(),
             last_batch: now,
@@ -280,12 +315,15 @@ impl Pipeline {
 
     /// Adds an event; returns a batch if one is due.
     ///
-    /// Rate cap: 100 new rows per second, in fixed 1 s windows (so up to 200
-    /// can pass across a window boundary). Only a NEW row costs a token; an
-    /// event that folds into a pending row just bumps its count, so one noisy
-    /// event cannot starve distinct ones. Blocked events are exempt from the
-    /// cap (a denial must not vanish), but still dedupe and still obey the
-    /// [`MAX_PENDING`] memory bound; those drops go to `dropped_blocked`.
+    /// Rate caps: 100 new rows per second globally, in fixed 1 s windows
+    /// (so up to 200 can pass across a window boundary), and per rule a
+    /// token bucket of [`RULE_BURST`] refilled at [`RULE_RATE_PER_SEC`]. A
+    /// row passes only when both have room, and then takes from both. Only
+    /// a NEW row costs a token; an event that folds into a pending row just
+    /// bumps its count, so one noisy event cannot starve distinct ones.
+    /// Blocked events are exempt from the caps (a denial must not vanish),
+    /// but still dedupe and still obey the [`MAX_PENDING`] memory bound;
+    /// those drops go to `dropped_blocked`.
     pub fn push(&mut self, e: Event, now: Instant) -> Option<Batch> {
         if now.saturating_duration_since(self.window_start) >= Duration::from_secs(1) {
             self.window_start = now;
@@ -297,12 +335,16 @@ impl Pipeline {
             e.blocked,
             e.rule_id,
             e.exe.clone(),
-            e.target.clone(),
+            e.dedupe_target(),
             e.unit.clone(),
         );
         if let Some((first, window, row)) = self.pending.get_mut(&key) {
             if now.saturating_duration_since(*first) < *window {
                 row.count = row.count.saturating_add(1);
+                if row.target != e.target {
+                    // folded across ports: say so
+                    row.target.clone_from(&key.5);
+                }
                 return self.tick(now);
             }
             // The old run ended; keep its row for the next batch.
@@ -319,10 +361,19 @@ impl Pipeline {
             return self.tick(now);
         }
         if !e.blocked {
-            if self.window_count >= RATE_CAP_PER_SEC {
+            let (tokens, last) = self
+                .buckets
+                .entry(e.rule_id)
+                .or_insert((f64::from(RULE_BURST), now));
+            let refill =
+                now.saturating_duration_since(*last).as_secs_f64() * f64::from(RULE_RATE_PER_SEC);
+            *tokens = (*tokens + refill).min(f64::from(RULE_BURST));
+            *last = now;
+            if self.window_count >= RATE_CAP_PER_SEC || *tokens < 1.0 {
                 self.dropped_rate += 1;
                 return self.tick(now);
             }
+            *tokens -= 1.0;
             self.window_count += 1;
         }
         let ms = self.clock.unix_ms(e.ts_boot_ns);
@@ -441,6 +492,15 @@ mod tests {
             exe: "/bin/sh".into(),
             target: target.into(),
             unit: "u.service".into(),
+            sock_type: 0,
+        }
+    }
+
+    /// `ev(target)` of rule slot `rule`.
+    fn ev_r(target: &str, rule: u32) -> Event {
+        Event {
+            rule_id: rule,
+            ..ev(target)
         }
     }
 
@@ -573,15 +633,16 @@ mod tests {
     fn rate_cap_counts_dropped() {
         let t0 = Instant::now();
         let mut p = pipe(t0);
+        // spread over 20 rules, so the per-rule cap is not what stops them
         for i in 0..10_000 {
-            p.push(ev(&format!("/f{i}")), t0);
+            p.push(ev_r(&format!("/f{i}"), i % 20), t0);
             assert!(p.pending_len() <= MAX_PENDING);
         }
         assert_eq!(p.pending_len(), 100);
         assert_eq!(p.dropped_rate(), 9_900);
         assert_eq!(p.dropped_kernel(), 0);
         // The next second admits events again.
-        p.push(ev("/next"), t0 + Duration::from_secs(1));
+        p.push(ev_r("/next", 21), t0 + Duration::from_secs(1));
         assert_eq!(p.pending_len(), 101);
     }
 
@@ -594,7 +655,7 @@ mod tests {
         for s in 0..60u64 {
             for i in 0..100 {
                 p.push(
-                    ev(&format!("/{s}/{i}")),
+                    ev_r(&format!("/{s}/{i}"), i),
                     t0 + Duration::from_millis(s * 100),
                 );
                 assert!(p.pending_len() <= MAX_PENDING);
@@ -608,7 +669,7 @@ mod tests {
         let mut p = pipe(t0);
         p.set_dropped_kernel(12);
         for i in 0..101 {
-            p.push(ev(&format!("/f{i}")), t0);
+            p.push(ev_r(&format!("/f{i}"), i), t0);
         }
         assert_eq!((p.dropped_kernel(), p.dropped_rate()), (12, 1));
     }
@@ -657,7 +718,7 @@ mod tests {
         assert_eq!(p.pending_len(), 300);
         // Alerts still hit the cap, and blocked ones did not use tokens.
         for i in 0..101 {
-            p.push(ev(&format!("/a{i}")), t0);
+            p.push(ev_r(&format!("/a{i}"), i), t0);
         }
         assert_eq!(p.dropped_rate(), 1);
     }
@@ -763,6 +824,141 @@ mod tests {
         assert_eq!(b.rows.len(), 1);
         assert_eq!(b.rows[0].target, "/a");
         assert_eq!(p.pending_len(), 1);
+    }
+
+    #[test]
+    fn one_noisy_rule_does_not_eat_the_global_budget() {
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        for i in 0..1_000 {
+            p.push(ev_r(&format!("/noisy{i}"), 1), t0);
+        }
+        assert_eq!(p.pending_len(), RULE_BURST as usize);
+        assert_eq!(p.dropped_rate(), 1_000 - u64::from(RULE_BURST));
+        // other rules still get the rest of the global second
+        for i in 0..10 {
+            p.push(ev_r(&format!("/quiet{i}"), 2 + i), t0);
+        }
+        assert_eq!(p.pending_len(), RULE_BURST as usize + 10);
+    }
+
+    #[test]
+    fn a_rule_bucket_refills_at_its_rate() {
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        for i in 0..RULE_BURST {
+            p.push(ev_r(&format!("/a{i}"), 1), t0);
+        }
+        p.push(ev_r("/over", 1), t0);
+        assert_eq!(p.dropped_rate(), 1);
+        // half a second: RULE_RATE_PER_SEC / 2 new tokens
+        let t = t0 + Duration::from_millis(500);
+        for i in 0..RULE_RATE_PER_SEC {
+            p.push(ev_r(&format!("/b{i}"), 1), t);
+        }
+        assert_eq!(p.dropped_rate(), 1 + u64::from(RULE_RATE_PER_SEC / 2));
+        // the bucket never holds more than the burst
+        let t = t0 + Duration::from_secs(3600);
+        for i in 0..RULE_BURST + 5 {
+            p.push(
+                ev_r(&format!("/c{i}"), 1),
+                t + Duration::from_secs(u64::from(i / 90)),
+            );
+        }
+        assert_eq!(p.dropped_rate(), 1 + u64::from(RULE_RATE_PER_SEC / 2) + 5);
+    }
+
+    #[test]
+    fn blocked_events_do_not_use_rule_tokens() {
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        for i in 0..200 {
+            p.push(
+                Event {
+                    rule_id: 1,
+                    ..blocked(&format!("/b{i}"))
+                },
+                t0,
+            );
+        }
+        assert_eq!(p.dropped_rate(), 0);
+        p.push(ev_r("/a", 1), t0);
+        assert_eq!((p.pending_len(), p.dropped_rate()), (201, 0));
+    }
+
+    fn udp_bind(target: &str) -> Event {
+        Event {
+            hook: 2,
+            sock_type: SOCK_DGRAM,
+            ..ev(target)
+        }
+    }
+
+    #[test]
+    fn udp_binds_to_new_ports_fold_into_one_row() {
+        // a resolver binds a new random port for every query
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        for port in 30_000..30_500 {
+            p.push(udp_bind(&format!("0.0.0.0:{port}")), t0);
+            p.push(udp_bind(&format!("[::]:{port}")), t0);
+        }
+        assert_eq!(p.dropped_rate(), 0);
+        let b = p.drain().unwrap();
+        assert_eq!(b.rows.len(), 2, "{:?}", b.rows);
+        assert!(b.rows.iter().all(|r| r.count == 500));
+        // the row says the port varied
+        let mut t: Vec<_> = b.rows.iter().map(|r| r.target.as_str()).collect();
+        t.sort_unstable();
+        assert_eq!(t, ["0.0.0.0:*", "[::]:*"]);
+    }
+
+    #[test]
+    fn tcp_listens_and_other_hooks_keep_the_port() {
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        for port in [22, 80, 443] {
+            p.push(
+                Event {
+                    sock_type: SOCK_STREAM,
+                    ..udp_bind(&format!("0.0.0.0:{port}"))
+                },
+                t0,
+            );
+            // old packs report no socket type: keep the port
+            p.push(
+                Event {
+                    sock_type: 0,
+                    ..udp_bind(&format!("10.0.0.1:{port}"))
+                },
+                t0,
+            );
+            // connect (hook 1) never folds ports
+            p.push(
+                Event {
+                    hook: 1,
+                    ..udp_bind(&format!("10.0.0.2:{port}"))
+                },
+                t0,
+            );
+        }
+        assert_eq!(p.drain().unwrap().rows.len(), 9);
+    }
+
+    #[test]
+    fn a_udp_row_seen_once_keeps_its_port() {
+        let t0 = Instant::now();
+        let mut p = pipe(t0);
+        p.push(udp_bind("0.0.0.0:5353"), t0);
+        let b = p.drain().unwrap();
+        assert_eq!(b.rows[0].target, "0.0.0.0:5353");
+    }
+
+    #[test]
+    fn decode_reads_the_socket_type() {
+        let mut b = raw(2, b"/bin/unbound\0", b"");
+        b[offset_of!(GuardEvent, sock_type)] = 2;
+        assert_eq!(decode(&b).unwrap().sock_type, 2);
     }
 
     #[test]

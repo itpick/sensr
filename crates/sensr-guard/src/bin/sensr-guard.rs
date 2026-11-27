@@ -222,14 +222,14 @@ mod linux {
         let mut last_prune: Option<Instant> = None;
         loop {
             let stopping = stop.load(Ordering::SeqCst);
-            let batches = {
+            let (batches, max_rows) = {
                 let mut d = shared.lock();
                 let mut b = d.poll_events(Instant::now());
                 if stopping {
                     // what the ring buffers still held, then everything
                     b.extend(d.drain());
                 }
-                b
+                (b, u64::from(d.config().max_rows))
             };
             for batch in batches {
                 if store.is_none() {
@@ -243,6 +243,14 @@ mod linux {
                     Some(s) => s.write_batch(&batch).map_err(|e| e.to_string()),
                     None => Err("events.db is not open".into()),
                 };
+                // a burst may not grow the database past max_rows until the
+                // hourly prune
+                if written.is_ok()
+                    && let Some(s) = store.as_mut()
+                    && let Err(e) = s.trim(max_rows)
+                {
+                    tracing::warn!(error = %e, "trimming events");
+                }
                 if let Err(e) = written {
                     tracing::warn!(error = %e, rows = batch.rows.len(), "writing events");
                     store = None;

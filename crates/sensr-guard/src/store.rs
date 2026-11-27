@@ -235,6 +235,26 @@ impl Store {
         .collect()
     }
 
+    /// Deletes the oldest rows beyond `max_rows`, cheaply when there are
+    /// none (one look at the id range): called after every batch, so a
+    /// burst cannot grow the database past its bound until the hourly
+    /// [`Self::prune`]. Returns the number deleted.
+    pub fn trim(&mut self, max_rows: u64) -> Result<usize> {
+        let span: i64 = self.db.query_row(
+            "SELECT COALESCE(MAX(id) - MIN(id) + 1, 0) FROM events",
+            [],
+            |r| r.get(0),
+        )?;
+        if u64::try_from(span).unwrap_or(0) <= max_rows {
+            return Ok(0);
+        }
+        self.db.execute(
+            "DELETE FROM events WHERE id IN
+             (SELECT id FROM events ORDER BY id DESC LIMIT -1 OFFSET ?1)",
+            [i64::try_from(max_rows).unwrap_or(i64::MAX)],
+        )
+    }
+
     /// Deletes rows older than `retention_days` (unix seconds `now`), then
     /// the oldest rows beyond `max_rows`. Returns the number deleted.
     pub fn prune(&mut self, retention_days: u32, max_rows: u64, now: i64) -> Result<usize> {
@@ -352,6 +372,24 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].row.ts, 200);
         assert_eq!(s.count(&Filter::default()).unwrap(), 3);
+    }
+
+    #[test]
+    fn trim_keeps_the_newest_max_rows_after_every_batch() {
+        let mut s = Store::memory().unwrap();
+        for b in 0..5 {
+            let rows = (0..40)
+                .map(|i| row(1000 + b * 40 + i, "exec", false, "/x"))
+                .collect();
+            s.write_batch(&batch(rows)).unwrap();
+            s.trim(100).unwrap();
+            assert!(s.count(&Filter::default()).unwrap() <= 100);
+        }
+        let ev = s.events(&Filter::default(), 1000, 0).unwrap();
+        assert_eq!(ev.len(), 100);
+        assert_eq!(ev.last().unwrap().row.ts, 1100, "the oldest rows went");
+        // under the bound: nothing to do
+        assert_eq!(s.trim(1000).unwrap(), 0);
     }
 
     #[test]
