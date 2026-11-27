@@ -140,10 +140,6 @@ pkgs.testers.runNixOSTest {
         "C /boot/sensr/config.xml - - - - ${fixture}"
       ];
       users.users.root.hashedPassword = lib.mkForce null;
-      # There is no internet here: the scheduled update check (5 min after
-      # boot) can only fail, which (i) would count; under TCG the test runs
-      # past it.
-      systemd.timers.sensr-update.enable = false;
       environment.systemPackages = with pkgs; [
         bpftools
         curl
