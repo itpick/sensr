@@ -486,7 +486,11 @@ impl Engine {
         );
     }
 
-    /// The guard daemon's config (nothing when the guard is off).
+    /// The guard daemon's config (nothing when the guard is off). A change
+    /// reloads the daemon (`reload-or-restart`: started when it is not
+    /// running): a restart would detach the programs for the load time
+    /// (nothing watched, nothing blocked), reset the hit counters and lose
+    /// the executable of every process already running.
     fn plan_guard(&self, doc: &Document, plan: &mut Plan) {
         let Some(cfg) = guard::config(doc) else {
             return;
@@ -502,7 +506,7 @@ impl Engine {
         plan.units.insert(
             guard::UNIT.into(),
             UnitSpec {
-                action: UnitAction::Restart,
+                action: UnitAction::Reload,
                 inputs: [conf].into(),
             },
         );
@@ -1565,6 +1569,26 @@ mod tests {
         doc.portscan.enabled = false;
         let mut plan = Plan::default();
         e.plan_portscan(&doc, &mut plan);
+        assert!(plan.files.is_empty() && plan.units.is_empty());
+    }
+
+    #[test]
+    fn plan_writes_guard_json_and_reloads_the_daemon() {
+        let root = tempfile::tempdir().unwrap();
+        let (e, _) = engine(root.path());
+        let mut doc = home_router();
+        let mut plan = Plan::default();
+        e.plan_guard(&doc, &mut plan);
+        let conf = e.staging.live_dir(guard::DIR).join(guard::CONFIG);
+        assert!(plan.files.contains_key(&conf));
+        // a reload keeps the programs attached (a restart would detach them,
+        // reset hit counters and lose the exe of every running process)
+        let u = &plan.units[guard::UNIT];
+        assert_eq!(u.action, UnitAction::Reload);
+        assert!(u.inputs.contains(&conf));
+        doc.guard.enabled = false;
+        let mut plan = Plan::default();
+        e.plan_guard(&doc, &mut plan);
         assert!(plan.files.is_empty() && plan.units.is_empty());
     }
 

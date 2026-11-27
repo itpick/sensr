@@ -1295,7 +1295,9 @@ in
     };
 
     # Runtime guard (Services > Runtime Guard). The agent writes
-    # /run/sensr/guard/guard.json and restarts the unit when it changes. Root
+    # /run/sensr/guard/guard.json and reloads the unit when it changes
+    # (reload-or-restart: a reload keeps the programs attached, the hit
+    # counters and the executables of running processes). Root
     # with the capabilities BPF LSM programs need; the programs are not
     # pinned, so they live and die with the process (fail open), and systemd
     # brings it back within a second. Exit status 78 is a refusal (kernel
@@ -1320,6 +1322,15 @@ in
           "${pkgs.sensr-guard-bpf}/share/sensr-guard/packs"
           "--keys"
           "${pkgs.sensr-guard-keys}/share/sensr-guard/keys"
+        ];
+        # asks the daemon to re-read guard.json and waits for its answer, so
+        # a configuration it refuses fails the reload (the running rules stay)
+        ExecReload = lib.escapeShellArgs [
+          "${cfg.package}/bin/sensr"
+          "guard"
+          "--guard-socket"
+          "/run/sensr-guard/guard.sock"
+          "reload"
         ];
         Restart = "always";
         RestartSec = 1;
