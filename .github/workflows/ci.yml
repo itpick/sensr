@@ -190,6 +190,32 @@ jobs:
           echo "qcow boots (s): $(tr '\n' ' ' < $out/boot-seconds)" >> "$GITHUB_STEP_SUMMARY"
           echo "qcow image bytes: $(cat $out/image-bytes)" >> "$GITHUB_STEP_SUMMARY"
 
+  # The runtime guard's VM tests on a runner of their own (see guardChecks
+  # in flake.nix): their timing bounds need a runner nothing else loads.
+  guard-vm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Let the nix sandbox use KVM (VM tests)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            system-features = nixos-test benchmark big-parallel kvm
+      - uses: cachix/cachix-action@v17
+        if: vars.CACHIX_CACHE != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          skipPush: true
+      # build the closures first, then run the two tests one at a time
+      - run: nix build -L --no-link .#guardChecks.x86_64-linux.guard-load.driver .#guardChecks.x86_64-linux.guard.driver
+      - run: nix build -L --no-link .#guardChecks.x86_64-linux.guard-load
+      - run: nix build -L --no-link .#guardChecks.x86_64-linux.guard
+
   nix-aarch64:
     runs-on: ubuntu-24.04-arm
     steps:

@@ -127,6 +127,28 @@
         }
       );
 
+      # The runtime guard's VM tests. Not in `checks`: CI runs them in their
+      # own job (guard-vm) on a runner of their own, because their timing
+      # bounds (back within 5 s of a kill) and the other VM tests' boot
+      # deadlines do not survive sharing one runner.
+      guardChecks = lib.genAttrs [ "x86_64-linux" ] (
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        {
+            # The runtime guard's loader on a BPF-LSM kernel (the same checks
+            # run by hand on aarch64 with nix/tests/guard-load.sh).
+            guard-load = import ./nix/tests/guard-load.nix { inherit pkgs; };
+            # The runtime guard end to end on the router: alerts, blocks held
+            # for confirm, never-block, kill switch, refused pack, restart.
+            guard = import ./nix/tests/guard.nix {
+              inherit pkgs;
+              sensrModules = testModules;
+            };
+        }
+      );
+
       checks = forLinux (
         pkgs:
         {
@@ -166,15 +188,6 @@
           # The house acceptance scorecard (synthetic defaults; private runs
           # go through nix/tests/house/run.sh).
           house = import ./nix/tests/house.nix {
-            inherit pkgs;
-            sensrModules = testModules;
-          };
-          # The runtime guard's loader on a BPF-LSM kernel (the same checks
-          # run by hand on aarch64 with nix/tests/guard-load.sh).
-          guard-load = import ./nix/tests/guard-load.nix { inherit pkgs; };
-          # The runtime guard end to end on the router: alerts, blocks held
-          # for confirm, never-block, kill switch, refused pack, restart.
-          guard = import ./nix/tests/guard.nix {
             inherit pkgs;
             sensrModules = testModules;
           };
