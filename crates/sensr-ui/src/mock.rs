@@ -358,7 +358,12 @@ impl MockBackend {
                 dropped_blocked: 0,
                 boot_complete: true,
                 pending_confirm: s.guard_pending.clone(),
-                held: s.guard_held.clone(),
+                held: s
+                    .guard_held
+                    .iter()
+                    .filter(|h| !released(h))
+                    .cloned()
+                    .collect(),
             }
         })
     }

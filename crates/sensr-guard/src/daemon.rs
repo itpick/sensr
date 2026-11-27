@@ -888,8 +888,9 @@ impl<B: Backend> Daemon<B> {
             .any(|o| o.pack == pack && o.rule_id == rule_id && o.action.is_some())
     }
 
-    /// The held rules that apply as alerts now: held, not released in the
-    /// window, and without an owner-set action.
+    /// The held rules that apply as alerts now: held and not released in
+    /// the window (an owner-set action already ended the hold: see
+    /// [`Self::apply_all`]).
     fn holding(&self) -> BTreeSet<HeldRule> {
         let released: BTreeSet<&HeldRule> = self
             .pending
@@ -1588,7 +1589,8 @@ impl<B: Backend> Daemon<B> {
             dropped_blocked: self.pipeline.dropped_blocked(),
             boot_complete: self.boot_complete,
             pending_confirm: self.pending.as_ref().map(|(_, p)| p.clone()),
-            held: self.held.iter().cloned().collect(),
+            // released in the window: not held now
+            held: self.holding().into_iter().collect(),
         }
     }
 

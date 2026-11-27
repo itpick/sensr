@@ -1434,6 +1434,7 @@ fn held_rules_block_once_released_and_confirmed() {
     assert_eq!(action_of(&env, "core-c"), 1, "blocking in the window");
     let s = d.status();
     assert!(!rule(&s, "core-c").held);
+    assert!(s.held.is_empty(), "released: not held in the window");
     assert_eq!(rule(&s, "core-c").action, sensr_guard::rule::Action::Block);
     // unconfirmed: held again
     d.poll_events(t0 + WINDOW + Duration::from_secs(1));
