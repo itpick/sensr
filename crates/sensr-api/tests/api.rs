@@ -1668,9 +1668,11 @@ async fn alerts_merge_guard_events_sorted_by_time() {
     let both = pw("idsguard", "pw");
     let (st, body) = http(&fx, "GET", "/api/v1/ids/alerts", Some(&both), None).await;
     assert_eq!(st, 200, "{body}");
+    // only the blocked guard row is an alert: the others (1000 ms, 5000 ms)
+    // are for the guard's own Events list
     assert_eq!(
         (&body["available"], &body["total"]),
-        (&json!(true), &json!(5))
+        (&json!(true), &json!(3))
     );
     let rows = body["rows"].as_array().unwrap();
     let order: Vec<_> = rows
@@ -1680,21 +1682,19 @@ async fn alerts_merge_guard_events_sorted_by_time() {
     assert_eq!(
         order,
         [
-            ("runtime-guard", 5_000_000),
             ("ids", 4_000_000),
             ("runtime-guard", 3_000_000),
             ("ids", 2_000_000),
-            ("runtime-guard", 1_000_500),
         ]
     );
-    assert_eq!(rows[1]["signature"], "ET new");
-    let g = &rows[2];
+    assert_eq!(rows[0]["signature"], "ET new");
+    let g = &rows[1];
     assert_eq!(g["hook"], "exec");
     assert_eq!(g["action"], "blocked");
     assert_eq!(g["severity"], 1);
     assert_eq!(g["target"], "/bin/nc");
     assert_eq!(g["category"], "runtime-guard");
-    assert_eq!(rows[4]["rule"], "no-curl");
+    assert!(g["rule"].is_null(), "slot 8 is shared by two packs");
 
     // paging runs over the merged list
     let (_, body) = http(
@@ -1711,8 +1711,8 @@ async fn alerts_merge_guard_events_sorted_by_time() {
         .iter()
         .map(|r| r["ts"].as_i64().unwrap())
         .collect();
-    assert_eq!(order, [4_000_000, 3_000_000]);
-    assert_eq!(body["total"], 5);
+    assert_eq!(order, [3_000_000, 2_000_000]);
+    assert_eq!(body["total"], 3);
     // time range (ms) and text apply to both
     let (_, body) = http(
         &fx,

@@ -5166,6 +5166,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "sensr-agent",
+ "sensr-api",
  "sensr-auth",
  "sensr-flow",
  "sensr-guard",

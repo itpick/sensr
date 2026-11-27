@@ -23,17 +23,21 @@ use crate::error::ApiError;
 
 type ApiResult = Result<Json<Value>, ApiError>;
 
+#[cfg(feature = "test-hooks")]
 static TEST_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// Test hook: read the insight databases from `dir` (tests cannot set the
 /// environment: `unsafe_code` is forbidden). Only the first call has any
-/// effect; returns whether it did. Not for production use.
+/// effect; returns whether it did. Only in builds with the `test-hooks`
+/// feature (the crate's own tests).
+#[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub fn use_dir(dir: PathBuf) -> bool {
     TEST_DIR.set(dir).is_ok()
 }
 
 pub(crate) fn dir() -> PathBuf {
+    #[cfg(feature = "test-hooks")]
     if let Some(d) = TEST_DIR.get() {
         return d.clone();
     }

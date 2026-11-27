@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(feature = "test-hooks")]
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use axum::extract::{Query, State};
@@ -75,11 +77,14 @@ pub const NOT_RUNNING: &str = "sensr-guard is not running";
 /// The `source` of a guard row among the IDS alerts.
 pub const SOURCE: &str = "runtime-guard";
 
+#[cfg(feature = "test-hooks")]
 static PATHS: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
 
 /// Test hook: point the API at another state directory and control socket
 /// (tests cannot set the environment: `unsafe_code` is forbidden). Only the
-/// first call has any effect; returns whether it did. Not for production use.
+/// first call has any effect; returns whether it did. Only in builds with
+/// the `test-hooks` feature (the crate's own tests).
+#[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub fn use_paths(dir: PathBuf, socket: PathBuf) -> bool {
     PATHS.set((dir, socket)).is_ok()
@@ -87,6 +92,7 @@ pub fn use_paths(dir: PathBuf, socket: PathBuf) -> bool {
 
 /// The state directory (the test hook's, else `SENSR_GUARD_DIR`, else the default).
 pub(crate) fn dir() -> PathBuf {
+    #[cfg(feature = "test-hooks")]
     if let Some((d, _)) = PATHS.get() {
         return d.clone();
     }
@@ -95,6 +101,7 @@ pub(crate) fn dir() -> PathBuf {
 
 /// The control socket (the test hook's, else `SENSR_GUARD_SOCKET`, else the default).
 pub(crate) fn socket() -> PathBuf {
+    #[cfg(feature = "test-hooks")]
     if let Some((_, s)) = PATHS.get() {
         return s.clone();
     }
@@ -377,7 +384,8 @@ fn alert_row(e: &StoredEvent, rule: Value) -> Value {
     })
 }
 
-/// The newest guard events matching `w` as alert rows, and how many match.
+/// The newest blocked guard events matching `w` as alert rows, and how many
+/// match.
 /// `None` while the guard has never run.
 pub(crate) async fn alert_rows(w: AlertsWanted) -> Result<Option<(Vec<Value>, u64)>, ApiError> {
     let slots = slot_ids().await;
@@ -385,7 +393,10 @@ pub(crate) async fn alert_rows(w: AlertsWanted) -> Result<Option<(Vec<Value>, u6
         let Some(s) = store()? else {
             return Ok(None);
         };
+        // the alert-worthy rows only: what was blocked (the rest is the
+        // guard's own Events list)
         let f = Filter {
+            blocked: Some(true),
             text: w.text,
             since_ms: w.since,
             until_ms: w.until,

@@ -10,6 +10,13 @@ repository.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+# Test-only hooks that point the API at other database directories and
+# sockets (tests cannot set the environment). Never in production builds;
+# the crate's own tests turn it on through the dev-dependency below.
+test-hooks = []
+
 [[bin]]
 name = "sensr-api"
 path = "src/main.rs"
@@ -53,6 +60,8 @@ tracing-subscriber.workspace = true
 rcgen.workspace = true
 webauthn-authenticator-rs = { version = "0.6.2", features = ["softpasskey"] }
 sensr-agent.workspace = true
+# this crate with its test hooks, for tests/
+sensr-api = { path = ".", features = ["test-hooks"] }
 tempfile.workspace = true
 
 [lints]
