@@ -17,9 +17,12 @@
 #       it is pending curl from the router to the target fails (a blocked
 #       event is recorded); then it is confirmed;
 #   (d) never-block (RF1): with an Exec block rule on the nft binary, nft
-#       from a root shell is refused, but a commit still succeeds: the
-#       agent's own `nft -c` runs (sensr-agent.service, recorded as not
-#       blocked) and its systemctl restarts sensr-guard;
+#       from a root shell is refused, and so is nft in a cgroup named
+#       sshd.service that is not directly under system.slice (a delegated
+#       subtree gets no exemption from a name), but a commit still
+#       succeeds: the agent's own `nft -c` runs (sensr-agent.service,
+#       recorded as not blocked) and the change reloads sensr-guard (same
+#       pid: the programs stay attached);
 #   (e) /boot/firmware/sensr/guard-off and a restart of sensr-guard: the
 #       status says kill_switch and the curl goes through; removing it and
 #       restarting blocks again;
@@ -31,6 +34,11 @@
 #       the built-in core stays active, saying why;
 #   (h) SIGKILL of sensr-guard: within 2 s the status says not running with
 #       every rule inactive, and within 5 s it is back and enforcing;
+#   (j) turning the kill switch off blocks again only for a confirm window:
+#       unconfirmed, the kill switch is back on by itself; confirmed, it
+#       stays off;
+#   (k) a block commit with a short confirm window that is not confirmed
+#       rolls back by itself, and the rule stops blocking;
 #   (i) no failed units.
 #
 # timeScale stretches the timing assertions of (b) and (h) for runs without
@@ -183,6 +191,7 @@ pkgs.testers.runNixOSTest {
     # owner rules and the pack-rule override (uuid keys)
     CONNECT_RULE = "6d0de000-0000-4000-8000-0000000000c1"
     NFT_RULE = "6d0de000-0000-4000-8000-0000000000c2"
+    ROLLBACK_RULE = "6d0de000-0000-4000-8000-0000000000c3"
     BPF_OVERRIDE = "6d0de000-0000-4000-8000-0000000000f1"
 
     def api(method, path, body=None):
@@ -356,13 +365,27 @@ pkgs.testers.runNixOSTest {
         rc, out = router.execute(f"{NFT} list tables 2>&1")
         print(out)
         assert rc != 0 and "not permitted" in out, (rc, out)
+        # a cgroup named after an exempt unit, but not directly under
+        # system.slice (as a user's delegated subtree could make one)
+        for fake in ["user.slice/sshd.service", "system.slice/sshd.service/fake"]:
+            rc, out = router.execute(
+                f"mkdir -p /sys/fs/cgroup/{fake} && sh -c 'echo $$ > /sys/fs/cgroup/{fake}/cgroup.procs"
+                f" && exec {NFT} list tables' 2>&1"
+            )
+            print(fake, out)
+            assert rc != 0 and "not permitted" in out, (fake, rc, out)
+            router.succeed(f"rmdir /sys/fs/cgroup/{fake}")
         pid0 = guard_pid()
-        # a harmless change whose apply runs `nft -c` and restarts sensr-guard
+        # a harmless change whose apply runs `nft -c` and reloads sensr-guard
         ok("PUT", "/api/v1/config/doc/guard/retention_days", 29)
         out = commit("guard test: retention 29 days")
         assert not out["pending_confirm"] and not out["confirm_reason"], out
         router.succeed("jq -e '.retention_days == 29' /run/sensr/guard/guard.json")
-        router.wait_until_succeeds(f"test \"$(systemctl show -P MainPID sensr-guard.service)\" != {pid0}", timeout=60)
+        router.wait_until_succeeds(
+            "journalctl -b -u sensr-guard --no-pager | grep -q 'sensr-guard reloaded its configuration'",
+            timeout=60,
+        )
+        assert guard_pid() == pid0, "a configuration change reloads, it does not restart"
         wait_enforcing(active(NFT_RULE))
         _, rows = poll(
             "nft exec events",
@@ -472,6 +495,67 @@ pkgs.testers.runNixOSTest {
         assert up_ms <= 5000 * SCALE, f"back only after {up_ms} ms"
         assert guard_pid() != pid0
         router.fail(CURL_TARGET)
+
+    with subtest("(j) the kill switch off blocks again only once confirmed"):
+        router.fail(CURL_TARGET)
+        ok("POST", "/api/v1/guard/kill-switch", {"on": True})
+        router.succeed(CURL_TARGET)
+        out = ok("POST", "/api/v1/guard/kill-switch", {"on": False})
+        print(out)
+        p = out["pending_confirm"]
+        assert p["kill_switch_off"] and p["window_secs"] == 120, out
+        router.fail(CURL_TARGET)
+        s = status()
+        assert not s["kill_switch"] and s["pending_confirm"], s
+        # not confirmed: on again by itself after the window
+        took, _ = poll(
+            "kill switch back on",
+            lambda: status()["kill_switch"],
+            timeout=120 + 30 * SCALE,
+            interval=5,
+        )
+        print(f"kill switch back on after {took:.0f} s")
+        s = status()
+        assert s.get("pending_confirm") is None and "not confirmed" in (s.get("reason") or ""), s
+        router.succeed(CURL_TARGET)
+        # confirmed: it stays off
+        ok("POST", "/api/v1/guard/kill-switch", {"on": False})
+        ok("POST", "/api/v1/guard/confirm")
+        s = status()
+        assert not s["kill_switch"] and s.get("pending_confirm") is None, s
+        router.fail("test -e /var/lib/sensr-guard/kill-switch")
+        router.fail(CURL_TARGET)
+        code, out = api("POST", "/api/v1/guard/confirm")
+        assert code == 409, (code, out)
+
+    with subtest("(k) an unconfirmed block commit rolls back by itself"):
+        router.succeed("printf '#!/bin/sh\\nexit 0\\n' > /tmp/y && chmod +x /tmp/y && /tmp/y")
+        ok("PUT", f"/api/v1/config/doc/guard/rules/{ROLLBACK_RULE}", {
+            "description": "guard test: nobody runs /tmp/y",
+            "hook": "exec",
+            "target": {"path_prefix": "/tmp/y"},
+            "action": "block",
+        })
+        # the product's own short window (commit-confirm's confirm_secs)
+        window = 60 if SCALE > 1 else 20
+        out = ok("POST", "/api/v1/config/commit", {
+            "description": "guard test: block /tmp/y, never confirmed",
+            "confirm_secs": window,
+        })
+        print(json.dumps(out, indent=1))
+        assert out["pending_confirm"], out
+        wait_enforcing(active(ROLLBACK_RULE))
+        router.fail("/tmp/y")
+        took, _ = poll(
+            "automatic rollback",
+            lambda: router.execute("sensr status --json | jq -e '.pending_confirm == null'")[0] == 0,
+            timeout=window + 60 * SCALE,
+            interval=2,
+        )
+        print(f"rolled back after {took:.0f} s")
+        wait_enforcing(f"all(.rules[]; .id != \"{ROLLBACK_RULE}\")")
+        router.succeed("/tmp/y")
+        router.fail(f"jq -e '.rules[] | select(.id == \"{ROLLBACK_RULE}\")' /run/sensr/guard/guard.json")
 
     with subtest("(i) no failed units"):
         for m in (router, target, upstream):
