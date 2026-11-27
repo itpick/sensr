@@ -14,6 +14,7 @@
 pub mod convert;
 pub mod dns_runtime;
 pub mod emergency;
+pub mod guard;
 pub mod insight;
 pub mod interfaces;
 pub mod kea;

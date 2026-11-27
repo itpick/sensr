@@ -464,8 +464,36 @@ in
     environment.systemPackages = [
       cfg.package
       trialHealth
+      # the guard's built-in packs and pack keys, at the paths sensr-guard
+      # and the API know (/run/current-system/sw/share/sensr-guard/...)
+      pkgs.sensr-guard-bpf
+      pkgs.sensr-guard-keys
     ]
     ++ appliedPackages;
+
+    # The runtime guard's programs are BPF LSM programs: the bpf LSM must be
+    # in lsm= (NixOS puts it last by default) and lockdown must not be
+    # confidentiality, which keeps them from reading kernel memory
+    # (sensr-guard refuses to start then).
+    assertions = [
+      {
+        assertion = lib.elem "bpf" config.security.lsm;
+        message = "services.sensr: security.lsm must include \"bpf\" (sensr-guard's programs are BPF LSM programs)";
+      }
+      {
+        # one lsm= only (the one security.lsm renders): a second would
+        # override it on the command line
+        assertion =
+          lib.filter (lib.hasPrefix "lsm=") config.boot.kernelParams == [
+            "lsm=${lib.concatStringsSep "," config.security.lsm}"
+          ];
+        message = "services.sensr: set the LSMs with security.lsm, not an lsm= kernel parameter";
+      }
+      {
+        assertion = !(lib.elem "lockdown=confidentiality" config.boot.kernelParams);
+        message = "services.sensr: lockdown=confidentiality stops sensr-guard's BPF programs";
+      }
+    ];
     environment.etc."sensr/version.json".text = builtins.toJSON versionJson;
 
     environment.variables.SENSR_AGENT_SOCKET = socket;
@@ -1262,6 +1290,86 @@ in
         # small and steady: a lookup in the kernel per packet, a read every
         # few seconds here
         Nice = 5;
+        MemoryMax = "256M";
+      };
+    };
+
+    # Runtime guard (Services > Runtime Guard). The agent writes
+    # /run/sensr/guard/guard.json and reloads the unit when it changes
+    # (reload-or-restart: a reload keeps the programs attached, the hit
+    # counters and the executables of running processes). Root
+    # with the capabilities BPF LSM programs need; the programs are not
+    # pinned, so they live and die with the process (fail open), and systemd
+    # restarts it 200 ms later. Exit status 78 is a refusal (kernel
+    # lockdown is confidentiality): restarting would not help.
+    systemd.services.sensr-guard = {
+      description = "sensr runtime guard (eBPF LSM)";
+      partOf = [ "sensr-agent.service" ];
+      unitConfig = {
+        ConditionPathExists = "${runtimeDir}/guard/guard.json";
+        # the restart back-off below limits a crash loop; never stop trying
+        StartLimitIntervalSec = 0;
+      };
+      # systemctl is-active boot-complete.target (module-load alerts start
+      # once boot is complete)
+      path = [ config.systemd.package ];
+      serviceConfig = commonHardening // {
+        ExecStart = lib.escapeShellArgs [
+          "${cfg.package}/bin/sensr-guard"
+          "--config"
+          "${runtimeDir}/guard/guard.json"
+          "--state"
+          "/var/lib/sensr-guard"
+          "--socket"
+          "/run/sensr-guard/guard.sock"
+          "--builtin"
+          "${pkgs.sensr-guard-bpf}/share/sensr-guard/packs"
+          "--keys"
+          "${pkgs.sensr-guard-keys}/share/sensr-guard/keys"
+        ];
+        # asks the daemon to re-read guard.json and waits for its answer, so
+        # a configuration it refuses fails the reload (the running rules stay)
+        ExecReload = lib.escapeShellArgs [
+          "${cfg.package}/bin/sensr"
+          "guard"
+          "--guard-socket"
+          "/run/sensr-guard/guard.sock"
+          "reload"
+        ];
+        Restart = "always";
+        # back almost at once after a one-off crash (nothing blocks while it
+        # is down), backing off to 30 s if it keeps crashing so a crash loop
+        # does not eat the CPU; never give up (no start limit)
+        RestartSec = "200ms";
+        RestartSteps = 6;
+        RestartMaxDelaySec = "30s";
+        RestartPreventExitStatus = 78;
+        User = "root";
+        Group = "sensr";
+        # systemd creates both root:sensr 0750: group sensr (sensr-api, the
+        # CLI) traverses /run/sensr-guard to the socket, which sensr-guard
+        # makes 0660, and reads events.db (0640 by the umask).
+        RuntimeDirectory = "sensr-guard";
+        RuntimeDirectoryMode = "0750";
+        StateDirectory = "sensr-guard";
+        StateDirectoryMode = "0750";
+        UMask = "0027";
+        # loading and attaching BPF LSM programs (CAP_SYS_ADMIN for the
+        # attach), and the maps' locked memory
+        CapabilityBoundingSet = [
+          "CAP_BPF"
+          "CAP_PERFMON"
+          "CAP_SYS_ADMIN"
+          "CAP_SYS_RESOURCE"
+        ];
+        ProtectSystem = "strict";
+        ReadWritePaths = [ "/var/lib/sensr-guard" ];
+        PrivateDevices = true;
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_INET"
+          "AF_INET6"
+        ];
         MemoryMax = "256M";
       };
     };

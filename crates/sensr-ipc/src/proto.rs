@@ -536,6 +536,9 @@ pub struct CommitOutcome {
     pub revision: RevisionInfo,
     /// Present when the commit is provisional.
     pub pending_confirm: Option<PendingConfirm>,
+    /// Why a confirm window was imposed on a commit that did not ask for one.
+    #[serde(default)]
+    pub confirm_reason: Option<String>,
 }
 
 /// A successfully authenticated identity.

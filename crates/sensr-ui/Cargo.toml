@@ -26,6 +26,7 @@ ssr = [
   "dep:sensr-auth",
   "dep:sensr-flow",
   "dep:sensr-schema",
+  "dep:sensr-guard",
   "sensr-scan/store",
   "sensr-scan/client",
   "dep:serde_path_to_error",
@@ -62,6 +63,9 @@ sensr-scan.workspace = true
 sensr-auth = { workspace = true, optional = true }
 sensr-flow = { workspace = true, optional = true, features = ["store"] }
 sensr-schema = { workspace = true, optional = true }
+# runtime guard: control socket client, status types and the event store (the page's
+# views carry display text only, so the browser bundle needs none of it)
+sensr-guard = { workspace = true, optional = true, features = ["store"] }
 ipnet = { workspace = true, optional = true }
 serde_path_to_error = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }

@@ -19,6 +19,26 @@ jobs:
       # the workspace build leaves sensr-scan's daemon feature off
       - run: cargo clippy -p sensr-scan --all-features --all-targets -- -D warnings
       - run: cargo test -p sensr-scan --all-features
+      # sensr-guard's loader and daemon (aya, Linux only; the socket, the
+      # pack check, the sensr-guard binary) are behind the daemon feature,
+      # which only the Nix package turns on for the workspace
+      - run: cargo clippy -p sensr-guard --all-targets --all-features -- -D warnings
+      - run: cargo test -p sensr-guard --all-features
+
+  guard-pack-version:
+    # a change to the core pack must raise bpf/guard/VERSION (semver): on
+    # pull requests against the merge base, on pushes to main against the
+    # commit before the push
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Check bpf/guard/VERSION
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: .github/scripts/check-guard-pack-version.sh "$BASE"
 
   nft-goldens:
     # every nft JSON golden must load into a real kernel (nft -c: check, no commit)
@@ -170,6 +190,32 @@ jobs:
           echo "qcow boots (s): $(tr '\n' ' ' < $out/boot-seconds)" >> "$GITHUB_STEP_SUMMARY"
           echo "qcow image bytes: $(cat $out/image-bytes)" >> "$GITHUB_STEP_SUMMARY"
 
+  # The runtime guard's VM tests on a runner of their own (see guardChecks
+  # in flake.nix): their timing bounds need a runner nothing else loads.
+  guard-vm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Let the nix sandbox use KVM (VM tests)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            system-features = nixos-test benchmark big-parallel kvm
+      - uses: cachix/cachix-action@v17
+        if: vars.CACHIX_CACHE != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          skipPush: true
+      # build the closures first, then run the two tests one at a time
+      - run: nix build -L --no-link .#guardChecks.x86_64-linux.guard-load.driver .#guardChecks.x86_64-linux.guard.driver
+      - run: nix build -L --no-link .#guardChecks.x86_64-linux.guard-load
+      - run: nix build -L --no-link .#guardChecks.x86_64-linux.guard
+
   nix-aarch64:
     runs-on: ubuntu-24.04-arm
     steps:
@@ -189,6 +235,7 @@ jobs:
           skipPush: ${{ github.event_name == 'pull_request' }}
           pushFilter: '(\.img(\.zst)?|\.iso|\.qcow2?|-sd-image-.*|-nixos-disk-image|-installer.*)$'
       - run: nix build -L .#checks.aarch64-linux.sensr
+      - run: nix build -L .#checks.aarch64-linux.guard-bpf-build
       - name: Build the Pi 4 and Pi 5 images
         run: |
           nix build -L .#images.pi4 -o pi4

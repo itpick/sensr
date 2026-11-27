@@ -4,10 +4,12 @@
 //! (`ids.suppressions`) through the normal config routes.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::Extension;
 use axum::Json;
-use axum::extract::Query;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use sensr_flow::config::{ALERTS_DB, DB_DIR, FLOWS_DB};
 use sensr_flow::eve::{AlertFilter, AlertStore};
@@ -15,15 +17,27 @@ use sensr_flow::store::{FlowStore, RowKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::AppState;
+use crate::auth::Caller;
 use crate::error::ApiError;
 
 type ApiResult = Result<Json<Value>, ApiError>;
 
-#[cfg(test)]
+#[cfg(feature = "test-hooks")]
 static TEST_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// Test hook: read the insight databases from `dir` (tests cannot set the
+/// environment: `unsafe_code` is forbidden). Only the first call has any
+/// effect; returns whether it did. Only in builds with the `test-hooks`
+/// feature (the crate's own tests).
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub fn use_dir(dir: PathBuf) -> bool {
+    TEST_DIR.set(dir).is_ok()
+}
+
 pub(crate) fn dir() -> PathBuf {
-    #[cfg(test)]
+    #[cfg(feature = "test-hooks")]
     if let Some(d) = TEST_DIR.get() {
         return d.clone();
     }
@@ -172,18 +186,82 @@ fn alerts_db() -> Option<AlertStore> {
     p.exists().then(|| AlertStore::open_read_only(&p).ok())?
 }
 
+/// The most rows either source is asked for in one page of the alerts list.
+const MAX_PAGE: u32 = 5000;
+
 /// `GET /api/v1/ids/alerts`: newest first, filtered by signature id, text
-/// or host.
-pub async fn alerts(Query(q): Query<AlertQuery>) -> ApiResult {
-    let f = q.filter();
+/// or host. Every row has a `source`: `ids`, or `runtime-guard` for the
+/// guard's events, which are merged in only for a caller who also holds the
+/// guard privilege (and which a signature or host filter excludes: they
+/// have neither). Merging reads each source's newest `offset + limit` rows,
+/// so for such a caller `offset + limit` is at most 5000 (400 beyond that).
+pub async fn alerts(
+    State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    Query(q): Query<AlertQuery>,
+) -> ApiResult {
+    let with_guard = q.sid.is_none()
+        && q.host.as_deref().is_none_or(str::is_empty)
+        && state.registry.grants(
+            caller.info.privileges.iter().map(String::as_str),
+            "/api/v1/guard/events",
+        );
+    let mut f = q.filter();
+    let (limit, offset) = (f.limit.clamp(1, MAX_PAGE), f.offset);
+    if with_guard && u64::from(limit) + u64::from(offset) > u64::from(MAX_PAGE) {
+        return Err(bad(format!(
+            "offset + limit is at most {MAX_PAGE} when runtime guard events are merged in"
+        )));
+    }
+    let guard = if with_guard {
+        // Each side's newest `offset + limit` rows hold the merged page.
+        let newest = limit + offset;
+        f.limit = newest;
+        f.offset = 0;
+        crate::guard::alert_rows(crate::guard::AlertsWanted {
+            text: f.text.clone(),
+            since: f.since,
+            until: f.until,
+            newest,
+        })
+        .await?
+    } else {
+        None
+    };
     blocking(move || {
-        let Some(s) = alerts_db() else {
-            return Ok(json!({ "available": false, "rows": [], "total": 0 }));
+        let ids = alerts_db();
+        let (mut rows, mut total) = match &ids {
+            Some(s) => {
+                let (rows, total) = s.list(&f).map_err(internal)?;
+                (rows.iter().map(ids_row).collect::<Vec<_>>(), total)
+            }
+            None => (Vec::new(), 0),
         };
-        let (rows, total) = s.list(&f).map_err(internal)?;
-        Ok(json!({ "available": true, "rows": rows, "total": total }))
+        let available = ids.is_some() || guard.is_some();
+        if let Some((g, n)) = &guard {
+            rows.extend(g.iter().cloned());
+            total += n;
+        }
+        if with_guard {
+            // The IDS side was read from offset 0: cut the page here, even
+            // when the guard has no database.
+            // Stable: on equal times the IDS alert stays first.
+            rows.sort_by_key(|r| std::cmp::Reverse(r["ts"].as_i64().unwrap_or(0)));
+            rows = rows
+                .into_iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .collect();
+        }
+        Ok(json!({ "available": available, "rows": rows, "total": total }))
     })
     .await
+}
+
+fn ids_row(a: &sensr_flow::eve::Alert) -> Value {
+    let mut v = json!(a);
+    v["source"] = json!("ids");
+    v
 }
 
 /// `GET /api/v1/ids/signatures`: the most frequent signatures.
@@ -241,7 +319,74 @@ mod tests {
         }))
         .await;
         assert!(bad_kind.is_err());
-        let a = alerts(Query(AlertQuery::default())).await.unwrap();
+        let caller = Caller {
+            info: sensr_ipc::AuthInfo {
+                user: "u".into(),
+                uid: 0,
+                groups: vec![],
+                privileges: vec!["page-all".into()],
+            },
+            via: sensr_ipc::AuthMethod::Password,
+        };
+        let state = AppState::new(d.path().join("none.sock"));
+        let page =
+            |q: AlertQuery| alerts(State(state.clone()), Extension(caller.clone()), Query(q));
+        let a = page(AlertQuery::default()).await.unwrap();
         assert_eq!(a.0["total"], 0);
+
+        // A caller who may see guard events, but the guard never ran (no
+        // events database): paging is still exactly the IDS page.
+        let mut al = AlertStore::open(&d.path().join(ALERTS_DB)).unwrap();
+        let alert = |ts: i64, sid: u32| {
+            sensr_flow::eve::Event::Alert(Box::new(sensr_flow::eve::Alert {
+                id: 0,
+                ts,
+                gid: 1,
+                sid,
+                rev: 1,
+                signature: format!("sig {sid}"),
+                category: "c".into(),
+                severity: 2,
+                action: "allowed".into(),
+                proto: "TCP".into(),
+                src_ip: "10.0.0.1".into(),
+                src_port: None,
+                dest_ip: "10.0.0.2".into(),
+                dest_port: None,
+                iface: "lan".into(),
+                app_proto: String::new(),
+                raw: "{}".into(),
+            }))
+        };
+        al.write(
+            &[
+                alert(1000, 1),
+                alert(2000, 2),
+                alert(3000, 3),
+                alert(4000, 4),
+            ],
+            None,
+        )
+        .unwrap();
+        let sids = |v: &Value| -> Vec<u64> {
+            v["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["sid"].as_u64().unwrap())
+                .collect()
+        };
+        let q = |limit, offset| AlertQuery {
+            limit: Some(limit),
+            offset: Some(offset),
+            ..AlertQuery::default()
+        };
+        let a = page(q(2, 0)).await.unwrap();
+        assert_eq!((sids(&a.0), &a.0["total"]), (vec![4, 3], &json!(4)));
+        let a = page(q(2, 2)).await.unwrap();
+        assert_eq!(sids(&a.0), vec![2, 1], "page 2 is the second page");
+        let a = page(q(1, 1)).await.unwrap();
+        assert_eq!(sids(&a.0), vec![3]);
+        assert!(a.0["rows"][0]["source"] == "ids");
     }
 }

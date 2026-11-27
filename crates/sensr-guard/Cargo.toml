@@ -1,0 +1,77 @@
+[package]
+name = "sensr-guard"
+description = "Runtime guard: dynamic eBPF packs that watch or block exec, connect, listen, file writes, setuid, module loads and bpf() (shared contract types; the loader is behind the daemon feature)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# SQLite event store.
+store = ["dep:rusqlite"]
+# The loader and daemon. The BPF side (aya) is Linux-only; elsewhere the
+# feature builds the platform-neutral parts (the apply plan).
+daemon = [
+  "packs",
+  "store",
+  "dep:aya",
+  "dep:object",
+  "dep:tokio",
+  "dep:clap",
+  "dep:tracing",
+  "dep:tracing-subscriber",
+  "dep:anyhow",
+  "dep:ureq",
+]
+# Pack archives: minisign verification, unpacking, atomic install.
+packs = ["dep:tar", "dep:zstd", "dep:minisign-verify", "dep:getrandom"]
+
+[dependencies]
+ipnet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+tar = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
+minisign-verify = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+thiserror.workspace = true
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+ureq = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { workspace = true, optional = true }
+object = { workspace = true, optional = true }
+# the sensr-guard binary
+anyhow = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[dev-dependencies]
+minisign.workspace = true
+tempfile.workspace = true
+
+# The daemon (Linux; elsewhere it prints that it is Linux only).
+[[bin]]
+name = "sensr-guard"
+path = "src/bin/sensr-guard.rs"
+required-features = ["daemon"]
+
+# Test tool for the loader's VM test (nix/tests/guard-load.nix) and live
+# runs: loads a pack, applies rules on command, and exits on `quit`.
+[[bin]]
+name = "guard-load-probe"
+path = "src/bin/guard-load-probe.rs"
+required-features = ["daemon"]
+test = false
+
+[lints]
+workspace = true
+
+[[test]]
+name = "daemon"
+required-features = ["daemon"]

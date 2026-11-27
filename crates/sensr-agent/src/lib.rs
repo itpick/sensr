@@ -14,6 +14,7 @@ pub mod auth;
 pub mod diff;
 pub mod fingerprint;
 pub mod gateways;
+pub mod guard_confirm;
 pub mod hosts;
 pub mod ifnames;
 pub mod pd;

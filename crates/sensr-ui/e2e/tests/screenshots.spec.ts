@@ -27,6 +27,7 @@ const pages: [string, string][] = [
   ["services-ids-rules", "/ui/ids/rules"],
   ["services-ids-userdefined", "/ui/ids/userdefined"],
   ["services-ids-alerts", "/ui/ids/alerts"],
+  ["services-runtime-guard", "/ui/guard"],
   ["reporting-insight", "/ui/diagnostics/networkinsight"],
   ["reporting-insight-host", "/ui/diagnostics/networkinsight?range=7d&host=192.168.1.100"],
   ["system-gateways-status", "/ui/routing/status"],

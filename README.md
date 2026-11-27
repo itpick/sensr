@@ -14,11 +14,14 @@ features. For a mature option, see [opnsense-pi](https://github.com/itpick/opnse
 [vyos-pi](https://github.com/itpick/vyos-pi). The plan is in [`docs/PLAN.md`](docs/PLAN.md).
 
 What works today, briefly: host inventory with smart device labels, per-host Isolated and
-Quarantine modes, per-host DNS activity (screen time per service, from Unbound dnstap),
-a built-in port scanner (all TCP ports plus common UDP services, with service and TLS
+Quarantine modes, per-host DNS activity (screen time per service, from Unbound dnstap), a
+built-in port scanner (all TCP ports plus common UDP services, with service and TLS
 identification; each new device is scanned once when it joins, open ports show under the host
-name, and any range can be scanned on demand), global search, traffic graphs, IDS (Suricata),
-WireGuard, DNS blocklists, gateway monitoring, OIDC, SAML and WebAuthn login, in-app updates, and boot-apply fault isolation with an
+name, and any range can be scanned on demand), a runtime guard (eBPF LSM programs that watch
+and can block program launches, connections, listeners, file changes, module loads and BPF
+loads, with signed rule packs, a kill switch and a confirm window before anything blocks),
+global search, traffic graphs, IDS (Suricata), WireGuard, DNS blocklists, gateway monitoring,
+OIDC, SAML and WebAuthn login, in-app updates, and boot-apply fault isolation with an
 emergency firewall. CI is backed by a Cachix binary cache.
 
 **Install page:** https://itpick.github.io/sensr/ (lists the images in the latest release)
@@ -92,6 +95,7 @@ Crates under `crates/`:
 | `sensr-feeds` | Alias data feeds: URL tables, GeoIP and ASN, host names, neighbour table |
 | `sensr-fingerprint` | Smart host labels from an embedded OUI table and passive evidence |
 | `sensr-flow` | Traffic accounting and IDS alert storage |
+| `sensr-guard` | Runtime guard daemon: loads the eBPF programs, compiles rules into maps, signed rule packs, event store |
 | `sensr-import-opnsense` | Lossless importer from an OPNsense `config.xml` |
 | `sensr-ipc` | Typed IPC between the API/CLI and the agent |
 | `sensr-monitor` | Gateway monitor (dpinger equivalent) |

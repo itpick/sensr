@@ -27,8 +27,8 @@ use crate::appliers::convert::{self, ConvertError, SecretsDir};
 use crate::appliers::interfaces::InterfacesModel;
 use crate::appliers::sysctl::{Sysctl, SysctlApplyError};
 use crate::appliers::{
-    SliceError, SliceModels, emergency, insight, kea, nft, ntp, portscan, suricata, timezone,
-    unbound,
+    SliceError, SliceModels, emergency, guard, insight, kea, nft, ntp, portscan, suricata,
+    timezone, unbound,
 };
 use crate::cmd::{Cmd, CmdError, Runner};
 use crate::hooks::{HookLevel, Hooks};
@@ -371,6 +371,7 @@ impl Engine {
             .insert("kernel.hostname".into(), doc.system.hostname.to_string());
         self.plan_ids(doc, rt, &mut plan)?;
         self.plan_insight(doc, &mut plan);
+        self.plan_guard(doc, &mut plan);
         self.plan_portscan(doc, &mut plan);
         let secrets = convert::secret_files(doc, &self.opts.secrets)
             .into_iter()
@@ -480,6 +481,32 @@ impl Engine {
             insight::UNIT.into(),
             UnitSpec {
                 action: UnitAction::Restart,
+                inputs: [conf].into(),
+            },
+        );
+    }
+
+    /// The guard daemon's config (nothing when the guard is off). A change
+    /// reloads the daemon (`reload-or-restart`: started when it is not
+    /// running): a restart would detach the programs for the load time
+    /// (nothing watched, nothing blocked), reset the hit counters and lose
+    /// the executable of every process already running.
+    fn plan_guard(&self, doc: &Document, plan: &mut Plan) {
+        let Some(cfg) = guard::config(doc) else {
+            return;
+        };
+        let conf = self.staging.live_dir(guard::DIR).join(guard::CONFIG);
+        plan.files.insert(
+            conf.clone(),
+            FileSpec {
+                contents: serde_json::to_vec_pretty(&cfg).expect("guard config serialises"),
+                mode: 0o644,
+            },
+        );
+        plan.units.insert(
+            guard::UNIT.into(),
+            UnitSpec {
+                action: UnitAction::Reload,
                 inputs: [conf].into(),
             },
         );
@@ -1115,9 +1142,10 @@ impl Engine {
         }
 
         // units a document no longer wants (IDS switched off)
-        for unit in suricata::OWNED_UNITS
-            .iter()
-            .chain(&[insight::UNIT, portscan::UNIT])
+        for unit in
+            suricata::OWNED_UNITS
+                .iter()
+                .chain(&[insight::UNIT, guard::UNIT, portscan::UNIT])
         {
             if applied.plan.units.contains_key(*unit) && !p.plan.units.contains_key(*unit) {
                 self.run(&Cmd::new("systemctl").args(["stop", unit]), &mut report)?;
@@ -1541,6 +1569,26 @@ mod tests {
         doc.portscan.enabled = false;
         let mut plan = Plan::default();
         e.plan_portscan(&doc, &mut plan);
+        assert!(plan.files.is_empty() && plan.units.is_empty());
+    }
+
+    #[test]
+    fn plan_writes_guard_json_and_reloads_the_daemon() {
+        let root = tempfile::tempdir().unwrap();
+        let (e, _) = engine(root.path());
+        let mut doc = home_router();
+        let mut plan = Plan::default();
+        e.plan_guard(&doc, &mut plan);
+        let conf = e.staging.live_dir(guard::DIR).join(guard::CONFIG);
+        assert!(plan.files.contains_key(&conf));
+        // a reload keeps the programs attached (a restart would detach them,
+        // reset hit counters and lose the exe of every running process)
+        let u = &plan.units[guard::UNIT];
+        assert_eq!(u.action, UnitAction::Reload);
+        assert!(u.inputs.contains(&conf));
+        doc.guard.enabled = false;
+        let mut plan = Plan::default();
+        e.plan_guard(&doc, &mut plan);
         assert!(plan.files.is_empty() && plan.units.is_empty());
     }
 

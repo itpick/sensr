@@ -64,6 +64,20 @@ fn revision(r: sensr_ipc::RevisionInfo) -> Revision {
         time: u64::try_from(r.time_ms / 1000).unwrap_or(0),
         user: r.username,
         message: r.description,
+        confirm: None,
+        confirm_reason: None,
+    }
+}
+
+/// A commit's revision with the agent's confirm window and its reason.
+fn committed(o: sensr_ipc::CommitOutcome) -> Revision {
+    Revision {
+        confirm: o.pending_confirm.map(|p| ConfirmWindow {
+            revision: p.revision,
+            deadline: u64::try_from(p.deadline_ms / 1000).unwrap_or(0),
+        }),
+        confirm_reason: o.confirm_reason,
+        ..revision(o.revision)
     }
 }
 
@@ -162,6 +176,20 @@ impl Backend for UiBackend {
         .boxed()
     }
 
+    fn get_head<'a>(&'a self, p: &'a str) -> BoxFuture<'a, ApiResult<Value>> {
+        async move {
+            let op = Op::ConfigGet {
+                path: path(p)?,
+                source: Source::Head,
+            };
+            match self.call(op).await? {
+                Response::Value(v) => Ok(v.unwrap_or(Value::Null)),
+                other => Err(unexpected(other)),
+            }
+        }
+        .boxed()
+    }
+
     fn set<'a>(&'a self, p: &'a str, value: Value) -> BoxFuture<'a, ApiResult<()>> {
         async move {
             match self
@@ -194,7 +222,7 @@ impl Backend for UiBackend {
                 confirm_secs,
             };
             match self.call(op).await? {
-                Response::Committed(o) => Ok(revision(o.revision)),
+                Response::Committed(o) => Ok(committed(*o)),
                 other => Err(unexpected(other)),
             }
         }
@@ -222,7 +250,7 @@ impl Backend for UiBackend {
     fn rollback<'a>(&'a self, _user: &'a str, to: u64) -> BoxFuture<'a, ApiResult<Revision>> {
         async move {
             match self.call(Op::ConfigRollback { to: Some(to) }).await? {
-                Response::Committed(o) => Ok(revision(o.revision)),
+                Response::Committed(o) => Ok(committed(*o)),
                 other => Err(unexpected(other)),
             }
         }
@@ -314,6 +342,14 @@ impl Backend for UiBackend {
 
     fn scan_socket(&self) -> std::path::PathBuf {
         crate::portscan::socket()
+    }
+
+    fn guard_dir(&self) -> std::path::PathBuf {
+        crate::guard::dir()
+    }
+
+    fn guard_socket(&self) -> std::path::PathBuf {
+        crate::guard::socket()
     }
 
     fn may_access(&self, url: &str) -> bool {

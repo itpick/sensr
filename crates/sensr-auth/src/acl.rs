@@ -200,6 +200,11 @@ impl Registry {
             &["ui/portscan", "ui/portscan/*", "api/v1/portscan/*"],
         );
         r.insert(
+            "page-services-guard",
+            "Services: Runtime Guard",
+            &["ui/guard", "ui/guard/*", "api/v1/guard/*"],
+        );
+        r.insert(
             "page-sensr-status",
             "sensr: Status (native API)",
             &["api/v1/status", "api/v1/status/*"],
@@ -697,6 +702,28 @@ mod tests {
             Some("page-system-firmware-manualupdate")
         );
         assert_eq!(r.covering("/nowhere"), None);
+    }
+
+    #[test]
+    fn runtime_guard_privilege_covers_its_pages_and_api_only() {
+        let r = Registry::builtin();
+        for url in [
+            "/ui/guard",
+            "/ui/guard/rules",
+            "/api/v1/guard/status",
+            "/api/v1/guard/events",
+            "/api/v1/guard/kill-switch",
+        ] {
+            assert_eq!(r.covering(url), Some("page-services-guard"), "{url}");
+            assert!(r.grants(["page-services-guard"], url), "{url}");
+            assert!(!r.grants(["page-services-ids"], url), "{url}");
+        }
+        assert!(!r.grants(["page-services-guard"], "/api/v1/ids/alerts"));
+        assert!(!r.grants(["page-services-guard"], "/ui/guardian"));
+        assert_eq!(
+            r.get("page-services-guard").unwrap().description,
+            "Services: Runtime Guard"
+        );
     }
 
     proptest::proptest! {

@@ -41,9 +41,24 @@ async fn main() -> anyhow::Result<()> {
             dir
         }
     };
+    // Guard events: a real sensr-guard directory if one is named, else a fixture.
+    let guard = match std::env::var_os("SENSR_GUARD_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => {
+            let dir =
+                std::env::temp_dir().join(format!("sensr-ui-dev-guard-{}", std::process::id()));
+            std::fs::create_dir_all(&dir)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
+            sensr_ui::mock::seed_guard(&dir, i64::try_from(now)?).map_err(anyhow::Error::msg)?;
+            dir
+        }
+    };
     let mut backend = sensr_ui::mock::MockBackend::new()
         .with_insight_dir(insight)
-        .with_scan_dir(scans);
+        .with_scan_dir(scans)
+        .with_guard_dir(guard);
     // SENSR_UI_PRIVILEGES="page-all,user-config-readonly" runs the server as a read-only user.
     if let Ok(list) = std::env::var("SENSR_UI_PRIVILEGES") {
         let names: Vec<&str> = list

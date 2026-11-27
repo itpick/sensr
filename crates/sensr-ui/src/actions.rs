@@ -1603,6 +1603,530 @@ pub async fn portscan_page() -> Result<PortscanView, ServerFnError> {
     Ok(page)
 }
 
+pub use crate::guard::GuardView;
+
+#[cfg(feature = "ssr")]
+mod guard_imp {
+    use crate::api::{ApiError, BackendHandle};
+
+    /// The caller may see the Runtime Guard page.
+    pub fn may_view(b: &BackendHandle) -> bool {
+        b.may_access("/api/v1/guard/status")
+    }
+
+    /// The caller may change rules, packs and the switches: the guard privilege, and not
+    /// read-only (the API refuses read-only principals the same way).
+    pub fn may_write(b: &BackendHandle) -> bool {
+        b.may_access("/api/v1/guard/kill-switch") && !b.read_only()
+    }
+
+    /// The caller may run Check for pack updates (its own API privilege).
+    pub fn may_check(b: &BackendHandle) -> bool {
+        b.may_access("/api/v1/guard/check-packs") && !b.read_only()
+    }
+
+    /// Back to the page with `q` (codes only).
+    pub fn back(q: &str) {
+        leptos_axum::redirect(&format!("/ui/guard?{q}"));
+    }
+
+    /// The URL code of a failed daemon request.
+    pub fn code(e: &ApiError) -> &'static str {
+        match e {
+            ApiError::Backend(m) if m == crate::guard::NOT_RUNNING => "not_running",
+            ApiError::Conflict(_) => "refused",
+            _ => "failed",
+        }
+    }
+
+    pub fn now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
+    }
+
+    /// The staged `guard` section as an object.
+    pub async fn section(b: &BackendHandle) -> Result<serde_json::Value, ApiError> {
+        Ok(match b.get("guard").await? {
+            v @ serde_json::Value::Object(_) => v,
+            _ => serde_json::json!({}),
+        })
+    }
+
+    /// Mutable access to the `key` map of `guard` (created when missing).
+    pub fn map<'a>(
+        guard: &'a mut serde_json::Value,
+        key: &str,
+    ) -> &'a mut serde_json::Map<String, serde_json::Value> {
+        let obj = guard
+            .as_object_mut()
+            .expect("the guard section is an object");
+        let v = obj
+            .entry(key.to_owned())
+            .or_insert_with(|| serde_json::json!({}));
+        if !v.is_object() {
+            *v = serde_json::json!({});
+        }
+        v.as_object_mut().expect("just made it an object")
+    }
+}
+
+/// Services › Runtime Guard: the daemon's status, the rules (configured owner rules joined
+/// with the daemon's state, then the packs' rules), one page of events matching `hook`,
+/// `q` and `range` from `offset`, the packs, and the owner rule `edit` to fill the form
+/// with. While the daemon is down the configured rules are listed inactive.
+#[server(prefix = "/ui/fn", input = Json)]
+pub async fn guard_page(
+    hook: Option<String>,
+    q: String,
+    range: String,
+    offset: u32,
+    edit: Option<String>,
+) -> Result<GuardView, ServerFnError> {
+    use crate::api::ApiError;
+    use crate::guard::{
+        ConfirmRow, EventsPage, GuardQuery, PER_PAGE, RuleEdit, StatusRow, event_row, filter,
+        is_key, pack_rows, rule_inputs, rule_rows, slot_names, status_row,
+    };
+    let b = imp::backend()?;
+    if !guard_imp::may_view(&b) {
+        return Err(ServerFnError::new("You may not view the runtime guard."));
+    }
+    // the same rules as the page's own query
+    let query = GuardQuery::from_query(|k| match k {
+        "hook" => hook.clone(),
+        "q" => Some(q.clone()),
+        "range" => Some(range.clone()),
+        "offset" => Some(offset.to_string()),
+        "edit" => edit.clone(),
+        _ => None,
+    });
+    let config = guard_imp::section(&b).await.map_err(imp::err)?;
+    let rules = config.get("rules").cloned().unwrap_or_default();
+    let head = b
+        .get_head("guard.rules")
+        .await
+        .ok()
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_default();
+    let packs = config.get("packs").cloned().unwrap_or_default();
+    let (live, status) = match b.guard_status().await {
+        Ok(v) => {
+            let row = status_row(&v, u64::try_from(guard_imp::now()).unwrap_or(0));
+            (Some(v), row)
+        }
+        Err(e) => (
+            None,
+            StatusRow {
+                note: Some(match e {
+                    ApiError::Backend(m) | ApiError::Conflict(m) => m,
+                    other => other.to_string(),
+                }),
+                ..StatusRow::default()
+            },
+        ),
+    };
+    let slots = slot_names(&rules, live.as_ref());
+    let events = match b
+        .guard_events(filter(&query, guard_imp::now()), PER_PAGE, query.offset)
+        .await
+    {
+        Ok(Some((rows, total))) => EventsPage {
+            available: true,
+            rows: rows.iter().map(|e| event_row(e, &slots)).collect(),
+            total,
+            offset: query.offset,
+            note: None,
+        },
+        Ok(None) => EventsPage::default(),
+        Err(e) => EventsPage {
+            note: Some(match e {
+                ApiError::Backend(m) => m,
+                other => other.to_string(),
+            }),
+            ..EventsPage::default()
+        },
+    };
+    let pending = b.pending().await.ok();
+    Ok(GuardView {
+        can_write: guard_imp::may_write(&b),
+        rules: rule_rows(&rules, &head, live.as_ref()),
+        can_check: guard_imp::may_check(&b),
+        staged_sections: pending
+            .as_ref()
+            .map(|p| p.changed.clone())
+            .unwrap_or_default(),
+        packs: pack_rows(&packs, live.as_ref()),
+        status,
+        events,
+        staged: pending
+            .as_ref()
+            .is_some_and(|p| p.changed.iter().any(|c| c == "guard")),
+        confirm: pending.and_then(|p| {
+            p.confirm.map(|w| ConfirmRow {
+                revision: w.revision,
+                seconds_left: w.deadline.saturating_sub(p.now),
+            })
+        }),
+        edit: query.edit.filter(|k| is_key(k)).and_then(|key| {
+            rules.get(&key).map(|r| RuleEdit {
+                inputs: rule_inputs(r),
+                key,
+            })
+        }),
+    })
+}
+
+pub use guard_rule_form::*;
+
+/// The rule form post: one argument per form input, so more than clippy likes (the server
+/// macro also generates the browser-side stub, hence a module).
+#[allow(clippy::too_many_arguments)]
+mod guard_rule_form {
+    #[cfg(feature = "ssr")]
+    use super::{guard_imp, imp};
+    #[cfg(feature = "ssr")]
+    use crate::form::Inputs;
+    use leptos::prelude::*;
+
+    /// The rule form (a plain form post): adds a rule, or saves the owner rule `key`, into the
+    /// staged `guard.rules`, then back to `/ui/guard` with `saved=1` (and `block=1` for a
+    /// block rule: applying it opens a confirm window), or the refused fields as
+    /// `invalid=` codes. Nothing the form sent is echoed.
+    #[server(prefix = "/ui/fn", endpoint = "guard_rule_submit")]
+    pub async fn guard_rule_submit(
+        key: Option<String>,
+        enabled: Option<String>,
+        description: String,
+        hook: String,
+        exe_prefix: String,
+        unit: String,
+        target_kind: String,
+        target: String,
+        ports: String,
+        action: String,
+    ) -> Result<(), ServerFnError> {
+        use crate::api::ApiError;
+        use crate::guard::{GuardRuleForm, field_of, is_key, rule_value};
+        let b = imp::backend()?;
+        if !guard_imp::may_write(&b) {
+            guard_imp::back("error=forbidden");
+            return Ok(());
+        }
+        let key = key.filter(|k| !k.is_empty());
+        let mut guard = match guard_imp::section(&b).await {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!("guard rule not saved: {e}");
+                guard_imp::back("error=failed");
+                return Ok(());
+            }
+        };
+        if let Some(k) = &key
+            && !(is_key(k) && guard_imp::map(&mut guard, "rules").contains_key(k))
+        {
+            guard_imp::back("error=no_rule");
+            return Ok(());
+        }
+        let inputs: Inputs = [
+            ("enabled", enabled.is_some().to_string()),
+            ("description", description),
+            ("hook", hook),
+            ("exe_prefix", exe_prefix),
+            ("unit", unit),
+            ("target_kind", target_kind),
+            ("target", target),
+            ("ports", ports),
+            ("action", action),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        // a refused edit comes back to the same rule's form (its key is checked above)
+        let edit = key
+            .as_ref()
+            .map(|k| format!("&edit={}#guard-rule-form", crate::pages::url_encode(k)))
+            .unwrap_or_default();
+        let invalid = |fields: Vec<&str>| {
+            let mut f: Vec<&str> = fields.into_iter().filter(|f| !f.is_empty()).collect();
+            f.dedup();
+            if f.is_empty() {
+                guard_imp::back(&format!("error=failed{edit}"));
+            } else {
+                guard_imp::back(&format!(
+                    "invalid={}{edit}",
+                    crate::pages::url_encode(&f.join(","))
+                ));
+            }
+        };
+        let form = match crate::form::apply_inputs::<GuardRuleForm>(&serde_json::json!({}), &inputs)
+        {
+            Ok(f) => f,
+            Err(errors) => {
+                let fields: Vec<&str> = <GuardRuleForm as crate::form::FormModel>::fields()
+                    .iter()
+                    .map(|f| f.path)
+                    .filter(|p| errors.iter().any(|e| e.path == *p))
+                    .collect();
+                invalid(fields);
+                return Ok(());
+            }
+        };
+        let id = key.unwrap_or_else(crate::models::new_uuid);
+        guard_imp::map(&mut guard, "rules").insert(id, rule_value(&form));
+        match b.set("guard", guard).await {
+            Ok(()) if form.action == "block" => guard_imp::back("saved=1&block=1"),
+            Ok(()) => guard_imp::back("saved=1"),
+            Err(ApiError::Validation(errors)) => {
+                invalid(errors.iter().map(|e| field_of(&e.path)).collect());
+            }
+            Err(e) => {
+                tracing::warn!("guard rule not saved: {e}");
+                guard_imp::back("error=failed");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A rule's Delete button (a plain form post): drops the owner rule `key` from the staged
+/// `guard.rules`.
+#[server(prefix = "/ui/fn", endpoint = "guard_rule_delete")]
+pub async fn guard_rule_delete(key: String) -> Result<(), ServerFnError> {
+    let b = imp::backend()?;
+    if !guard_imp::may_write(&b) {
+        guard_imp::back("error=forbidden");
+        return Ok(());
+    }
+    let Ok(mut guard) = guard_imp::section(&b).await else {
+        guard_imp::back("error=failed");
+        return Ok(());
+    };
+    if guard_imp::map(&mut guard, "rules").remove(&key).is_none() {
+        guard_imp::back("error=no_rule");
+        return Ok(());
+    }
+    match b.set("guard", guard).await {
+        Ok(()) => guard_imp::back("deleted=1"),
+        Err(e) => {
+            tracing::warn!("guard rule not deleted: {e}");
+            guard_imp::back("error=failed");
+        }
+    }
+    Ok(())
+}
+
+/// The kill switch buttons (plain form posts): `on` is `on` or `off`. While it is on
+/// nothing blocks (alerts only).
+#[server(prefix = "/ui/fn", endpoint = "guard_kill_switch_form")]
+pub async fn guard_kill_switch_form(on: String) -> Result<(), ServerFnError> {
+    let b = imp::backend()?;
+    if !guard_imp::may_write(&b) {
+        guard_imp::back("error=forbidden");
+        return Ok(());
+    }
+    let on = match on.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => {
+            guard_imp::back("error=failed");
+            return Ok(());
+        }
+    };
+    match b.guard_kill_switch(on).await {
+        Ok(None) => guard_imp::back(if on { "kill=on" } else { "kill=off" }),
+        // blocking again: the page shows the daemon's confirm window
+        Ok(Some(_)) => guard_imp::back("kill=off&kill_pending=1"),
+        // the daemon refuses Off while the boot partition's file is there
+        Err(crate::api::ApiError::Conflict(m)) if !on && m.contains("exists: remove it") => {
+            guard_imp::back("error=boot_file");
+        }
+        Err(e) => {
+            tracing::info!("kill switch not changed: {e}");
+            guard_imp::back(&format!("error={}", guard_imp::code(&e)));
+        }
+    }
+    Ok(())
+}
+
+/// A pack's Turn on / Turn off button (a plain form post): stages `guard.packs` for
+/// `name` (`enabled` is `on` or `off`). Installing packs never touches the config; this
+/// is the owner's switch.
+#[server(prefix = "/ui/fn", endpoint = "guard_pack_form")]
+pub async fn guard_pack_form(name: String, enabled: String) -> Result<(), ServerFnError> {
+    let b = imp::backend()?;
+    if !guard_imp::may_write(&b) {
+        guard_imp::back("error=forbidden");
+        return Ok(());
+    }
+    let on = match enabled.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => {
+            guard_imp::back("error=failed");
+            return Ok(());
+        }
+    };
+    if !crate::guard::is_pack_name(&name) {
+        guard_imp::back("error=failed");
+        return Ok(());
+    }
+    let Ok(mut guard) = guard_imp::section(&b).await else {
+        guard_imp::back("error=failed");
+        return Ok(());
+    };
+    let packs = guard_imp::map(&mut guard, "packs");
+    match packs
+        .values_mut()
+        .find(|p| p.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str()))
+    {
+        Some(p) => p["enabled"] = serde_json::Value::Bool(on),
+        None => {
+            packs.insert(
+                crate::models::new_uuid(),
+                serde_json::json!({"name": name, "enabled": on}),
+            );
+        }
+    }
+    match b.set("guard", guard).await {
+        Ok(()) => guard_imp::back(&format!("pack={name}&pack_on={}", u8::from(on))),
+        Err(e) => {
+            tracing::warn!("guard pack not switched: {e}");
+            guard_imp::back("error=failed");
+        }
+    }
+    Ok(())
+}
+
+/// Check for pack updates (a plain form post): the daemon fetches the pack index and
+/// installs newer packs that verify; each pack's outcome comes back as a code.
+#[server(prefix = "/ui/fn", endpoint = "guard_check_packs_form")]
+pub async fn guard_check_packs_form() -> Result<(), ServerFnError> {
+    let b = imp::backend()?;
+    if !guard_imp::may_check(&b) {
+        guard_imp::back("error=forbidden");
+        return Ok(());
+    }
+    match b.guard_check_packs().await {
+        Ok(checks) => {
+            let lines: Vec<String> = checks
+                .iter()
+                .map(|c| crate::guard::check_line(c).encode())
+                .collect();
+            guard_imp::back(&format!(
+                "checked={}",
+                crate::pages::url_encode(&lines.join(","))
+            ));
+        }
+        Err(e) => {
+            tracing::warn!("pack check failed: {e}");
+            let code = match guard_imp::code(&e) {
+                "not_running" => "not_running",
+                _ => "check_failed",
+            };
+            guard_imp::back(&format!("error={code}"));
+        }
+    }
+    Ok(())
+}
+
+/// The page's Apply button (a plain form post): commits the staged changes. When the
+/// agent imposes a confirm window (a change that may newly block), the page comes back
+/// with `imposed=1` and shows Confirm.
+#[server(prefix = "/ui/fn", endpoint = "guard_apply_form")]
+pub async fn guard_apply_form() -> Result<(), ServerFnError> {
+    let b = imp::backend()?;
+    if !guard_imp::may_write(&b) {
+        guard_imp::back("error=forbidden");
+        return Ok(());
+    }
+    if !b.pending().await.is_ok_and(|p| p.dirty()) {
+        guard_imp::back("error=nothing");
+        return Ok(());
+    }
+    match b.commit(&imp::user(), "", None).await {
+        Ok(rev) if rev.confirm_reason.is_some() => {
+            // the window from the deadline the agent set
+            let now = u64::try_from(guard_imp::now()).unwrap_or(0);
+            let window = rev
+                .confirm
+                .as_ref()
+                .and_then(|w| crate::guard::window_left(w.deadline, now))
+                .map(|w| format!("&window={w}"))
+                .unwrap_or_default();
+            guard_imp::back(&format!("applied={}&imposed=1{window}", rev.id));
+        }
+        Ok(rev) => guard_imp::back(&format!("applied={}", rev.id)),
+        Err(e) => {
+            tracing::warn!("guard change not applied: {e}");
+            guard_imp::back("error=failed");
+        }
+    }
+    Ok(())
+}
+
+/// The daemon's confirm card (the kill switch off, released rules): its Confirm button
+/// (a plain form post) keeps rules blocking.
+#[server(prefix = "/ui/fn", endpoint = "guard_blocks_confirm_form")]
+pub async fn guard_blocks_confirm_form() -> Result<(), ServerFnError> {
+    use crate::api::ApiError;
+    let b = imp::backend()?;
+    if !guard_imp::may_write(&b) {
+        guard_imp::back("error=forbidden");
+        return Ok(());
+    }
+    match b.guard_confirm_blocks().await {
+        Ok(()) => guard_imp::back("blocks_confirmed=1"),
+        Err(ApiError::Conflict(_)) => guard_imp::back("error=nothing_pending"),
+        Err(e) => {
+            tracing::warn!("guard confirm failed: {e}");
+            guard_imp::back(&format!("error={}", guard_imp::code(&e)));
+        }
+    }
+    Ok(())
+}
+
+/// Release held rules (a plain form post): the block rules a pack update brought, held
+/// as alerts, block, in the daemon's confirm window.
+#[server(prefix = "/ui/fn", endpoint = "guard_release_form")]
+pub async fn guard_release_form() -> Result<(), ServerFnError> {
+    use crate::api::ApiError;
+    let b = imp::backend()?;
+    if !guard_imp::may_write(&b) {
+        guard_imp::back("error=forbidden");
+        return Ok(());
+    }
+    match b.guard_release_held().await {
+        Ok(_) => guard_imp::back("released=1"),
+        Err(ApiError::Conflict(_)) => guard_imp::back("error=nothing_held"),
+        Err(e) => {
+            tracing::warn!("releasing held rules failed: {e}");
+            guard_imp::back(&format!("error={}", guard_imp::code(&e)));
+        }
+    }
+    Ok(())
+}
+
+/// The confirm card's Confirm button (a plain form post): keeps the commit on probation.
+#[server(prefix = "/ui/fn", endpoint = "guard_confirm_form")]
+pub async fn guard_confirm_form() -> Result<(), ServerFnError> {
+    use crate::api::ApiError;
+    let b = imp::backend()?;
+    if !guard_imp::may_write(&b) {
+        guard_imp::back("error=forbidden");
+        return Ok(());
+    }
+    match b.confirm().await {
+        Ok(()) => guard_imp::back("confirmed=1"),
+        Err(ApiError::Conflict(_)) => guard_imp::back("error=confirm"),
+        Err(e) => {
+            tracing::warn!("confirm failed: {e}");
+            guard_imp::back("error=failed");
+        }
+    }
+    Ok(())
+}
+
 /// Services › Intrusion Detection › Alerts: one page, newest first. `text` is a signature id
 /// or part of the message; `host` an address on either side.
 #[server(prefix = "/ui/fn", input = Json)]

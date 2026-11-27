@@ -149,6 +149,9 @@ fn crate_now_ms() -> i64 {
 /// `sensr config commit`.
 pub fn committed(out: &mut dyn Write, o: &CommitOutcome) -> io::Result<()> {
     writeln!(out, "committed and applied revision {}", o.revision.id)?;
+    if let Some(reason) = &o.confirm_reason {
+        writeln!(out, "{reason}")?;
+    }
     if let Some(p) = &o.pending_confirm {
         let left = ((p.deadline_ms - crate_now_ms()).max(0) + 999) / 1000;
         writeln!(

@@ -1323,3 +1323,180 @@ async fn service_override_set_rejects_bad_input() {
     let e = agent_err(override_set(&mut c, "example.com", Some(("X", Category::Other))).await);
     assert_eq!(e.kind, ErrorKind::Forbidden);
 }
+
+const GUARD_RULE: &str = "guard.rules.6a7e0000-0000-4000-8000-000000000001";
+
+fn guard_rule(action: &str) -> Value {
+    json!({"hook": "exec", "target": "any", "action": action})
+}
+
+impl Fx {
+    /// Like `start`, but with the guard confirm window set to `window`.
+    async fn start_guard_window(window: Duration) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let applier = FakeApplier::default();
+        let settings = Settings {
+            trusted_uids: vec![Self::my_uid(&dir)],
+            rollback_retry: Duration::from_millis(100),
+            guard_confirm: window,
+            ..Settings::default()
+        };
+        let agent = Agent::new(sensr_agent::store::in_memory(), applier.clone(), settings).unwrap();
+        agent.boot().await.unwrap();
+        let running =
+            sensr_agent::start(agent, &dir.path().join("agent.sock"), 0o600, None).unwrap();
+        Fx {
+            dir,
+            applier,
+            running: Some(running),
+        }
+    }
+}
+
+/// Owner rules sensr-guard could not compile are refused like schema
+/// problems: the daemon would otherwise drop every owner rule.
+#[tokio::test]
+async fn guard_rules_the_daemon_cannot_compile_are_refused() {
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    let bad = json!({"hook": "connect", "target": {"path_prefix": "/etc"}});
+    let e = agent_err(try_set(&mut c, GUARD_RULE, bad.clone()).await);
+    assert_eq!(e.kind, ErrorKind::Validation);
+    assert_eq!(e.validations[0].path, GUARD_RULE, "{e:?}");
+    assert!(e.validations[0].message.contains("does not fit"), "{e:?}");
+    assert!(get(&mut c, GUARD_RULE, Source::Candidate).await.is_none());
+    for (rule, what) in [
+        (
+            json!({"hook": "exec", "process": {"unit": "u".repeat(64)}, "target": "any"}),
+            "unit",
+        ),
+        (
+            json!({"hook": "file_write", "target": {"path_prefix": "/etc/../x"}}),
+            "absolute path",
+        ),
+        (
+            json!({"hook": "setuid", "target": {"uid": 4294967295u32}}),
+            "reserved",
+        ),
+    ] {
+        let e = agent_err(try_set(&mut c, GUARD_RULE, rule).await);
+        assert!(e.validations[0].message.contains(what), "{e:?}");
+    }
+    // a whole document carrying one is staged, but never committed
+    let mut doc = get(&mut c, "/", Source::Head).await.unwrap();
+    doc["guard"] = json!({"rules": {"6a7e0000-0000-4000-8000-000000000001": bad}});
+    c.call(Op::ConfigLoad { document: doc }).await.unwrap();
+    let e = agent_err(commit(&mut c, None).await);
+    assert_eq!(e.kind, ErrorKind::Validation);
+    // a good rule goes through
+    c.call(Op::ConfigDiscard).await.unwrap();
+    set(&mut c, GUARD_RULE, guard_rule("alert")).await;
+    commit(&mut c, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn block_change_forces_confirm_window() {
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    set(&mut c, "system.hostname", json!("a")).await;
+    commit(&mut c, None).await.unwrap();
+
+    set(&mut c, GUARD_RULE, guard_rule("block")).await;
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let Response::Committed(out) = commit(&mut c, None).await.unwrap() else {
+        panic!()
+    };
+    let p = out.pending_confirm.expect("a block change needs a confirm");
+    assert!(
+        (119_000..=121_000).contains(&(p.deadline_ms - before)),
+        "{}",
+        p.deadline_ms - before
+    );
+    assert!(out.confirm_reason.unwrap().contains("confirm within 120 s"));
+
+    // An explicit window is the caller's to choose.
+    set(&mut c, GUARD_RULE, guard_rule("alert")).await;
+    c.call(Op::ConfigConfirm).await.unwrap();
+    commit(&mut c, None).await.unwrap();
+    set(&mut c, GUARD_RULE, guard_rule("block")).await;
+    let Response::Committed(out) = commit(&mut c, Some(5)).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(out.confirm_reason, None);
+}
+
+#[tokio::test]
+async fn block_change_rolls_back_when_not_confirmed() {
+    let fx = Fx::start_guard_window(Duration::from_secs(1)).await;
+    let mut c = fx.client().await;
+    set(&mut c, "system.hostname", json!("a")).await;
+    commit(&mut c, None).await.unwrap();
+    set(&mut c, GUARD_RULE, guard_rule("block")).await;
+    commit(&mut c, None).await.unwrap();
+    assert!(
+        get(&mut c, GUARD_RULE, Source::Applied).await.is_some(),
+        "applied provisionally"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if get(&mut c, GUARD_RULE, Source::Head).await.is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("rolled back");
+    assert!(get(&mut c, GUARD_RULE, Source::Applied).await.is_none());
+}
+
+#[tokio::test]
+async fn alert_only_change_commits_directly() {
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    set(&mut c, "system.hostname", json!("a")).await;
+    commit(&mut c, None).await.unwrap();
+    set(&mut c, GUARD_RULE, guard_rule("alert")).await;
+    let Response::Committed(out) = commit(&mut c, None).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(out.pending_confirm, None);
+    assert_eq!(out.confirm_reason, None);
+}
+
+#[tokio::test]
+async fn rollback_to_a_block_revision_forces_confirm_window() {
+    let fx = Fx::start(true).await;
+    let mut c = fx.client().await;
+    set(&mut c, "system.hostname", json!("a")).await;
+    commit(&mut c, None).await.unwrap();
+    set(&mut c, GUARD_RULE, guard_rule("block")).await;
+    commit(&mut c, Some(1000)).await.unwrap();
+    c.call(Op::ConfigConfirm).await.unwrap(); // rev 3 has the block rule
+    set(&mut c, GUARD_RULE, guard_rule("alert")).await;
+    let Response::Committed(out) = commit(&mut c, None).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(out.pending_confirm, None);
+    let Response::Committed(out) = c.call(Op::ConfigRollback { to: Some(3) }).await.unwrap() else {
+        panic!()
+    };
+    assert!(out.pending_confirm.is_some(), "restoring a block rule");
+    assert!(out.confirm_reason.unwrap().contains("confirm within"));
+}
+
+#[tokio::test]
+async fn first_block_commit_without_a_baseline_has_no_window() {
+    // Nothing applied yet: there is no revision to fall back to.
+    let fx = Fx::start_with(true, false).await;
+    let mut c = fx.client().await;
+    set(&mut c, GUARD_RULE, guard_rule("block")).await;
+    let Response::Committed(out) = commit(&mut c, None).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(out.pending_confirm, None);
+    assert_eq!(out.confirm_reason, None);
+}

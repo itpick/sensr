@@ -116,15 +116,46 @@
         screenshots = true;
       };
 
-      packages = forAll (pkgs: {
-        default = pkgs.sensr;
-        sensr = pkgs.sensr;
-      });
+      packages = forAll (
+        pkgs:
+        {
+          default = pkgs.sensr;
+          sensr = pkgs.sensr;
+        }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          sensr-guard-bpf = pkgs.sensr-guard-bpf;
+        }
+      );
+
+      # The runtime guard's VM tests. Not in `checks`: CI runs them in their
+      # own job (guard-vm) on a runner of their own, because their timing
+      # bounds (back within 5 s of a kill) and the other VM tests' boot
+      # deadlines do not survive sharing one runner.
+      guardChecks = lib.genAttrs [ "x86_64-linux" ] (
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        {
+            # The runtime guard's loader on a BPF-LSM kernel (the same checks
+            # run by hand on aarch64 with nix/tests/guard-load.sh).
+            guard-load = import ./nix/tests/guard-load.nix { inherit pkgs; };
+            # The runtime guard end to end on the router: alerts, blocks held
+            # for confirm, never-block, kill switch, refused pack, restart.
+            guard = import ./nix/tests/guard.nix {
+              inherit pkgs;
+              sensrModules = testModules;
+            };
+        }
+      );
 
       checks = forLinux (
         pkgs:
         {
           sensr = pkgs.sensr;
+          # The runtime guard's core pack: objects, sections, never-block
+          # list (both arches; aarch64 runs in CI's nix-aarch64 job).
+          guard-bpf-build = import ./nix/tests/guard-bpf-build.nix { inherit pkgs; };
         }
         // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
           boot-first-run = import ./nix/tests/boot-first-run.nix {

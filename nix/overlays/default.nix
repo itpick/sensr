@@ -44,12 +44,14 @@ let
     pname = "sensr";
     version = workspaceToml.workspace.package.version;
     strictDeps = true;
-    # xtask is developer tooling and never ships in an image. The sensr-scan
-    # binary needs its crate's `daemon` feature (the crate's default is the
-    # light shared part the agent and apply link against); in commonArgs so
-    # the dependency-only build caches the daemon's crates too.
+    # xtask is developer tooling and never ships in an image. The daemons'
+    # binaries need their crates' `daemon` features (the crates' default is
+    # the light shared part the agent and apply link against; sensr-guard's
+    # daemon is the aya loader, Linux only); in commonArgs so the
+    # dependency-only build caches the daemons' crates too.
     cargoExtraArgs = "--locked --workspace --features sensr-scan/daemon"
-      + lib.optionalString (builtins.pathExists (src + "/crates/xtask")) " --exclude xtask";
+      + lib.optionalString (builtins.pathExists (src + "/crates/xtask")) " --exclude xtask"
+      + lib.optionalString final.stdenv.hostPlatform.isLinux " --features sensr-guard/daemon";
   };
 
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -77,6 +79,28 @@ in
         -t ${final.python3} -t ${final.bison} -t ${final.flex} -t ${final.gnum4} {} +
     '';
 
+  # The runtime guard's built-in core pack (BPF objects, manifest, default
+  # rules), built against the kernel the images boot.
+  sensr-guard-bpf = final.callPackage ../packages/sensr-guard-bpf.nix {
+    src = src + "/bpf/guard";
+    # The pack's own version (bpf/guard/VERSION, bumped with every change
+    # to the programs or default rules; CI checks it): a router installs a
+    # signed pack only when it is newer than what it runs.
+    version = lib.fileContents (src + "/bpf/guard/VERSION");
+    kernel = final.linuxPackages_latest.kernel;
+  };
+
+  # The public keys sensr-guard verifies signed packs against: every *.pub
+  # in nix/pi5/guard-keys (none yet: only the built-in packs run).
+  sensr-guard-keys = final.runCommand "sensr-guard-keys" { } ''
+    mkdir -p $out/share/sensr-guard/keys
+    for f in ${src + "/nix/pi5/guard-keys"}/*.pub; do
+      if [ -f "$f" ]; then
+        cp "$f" $out/share/sensr-guard/keys/
+      fi
+    done
+  '';
+
   sensr = craneLib.buildPackage (
     commonArgs
     // {
@@ -89,6 +113,8 @@ in
       # names its binary that, provide the name here so units and docs can
       # rely on it.
       postInstall = ''
+        # the loader's test tool (nix/tests/guard-load.nix builds its own)
+        rm -f $out/bin/guard-load-probe
         if [ ! -e $out/bin/sensr ] && [ -e $out/bin/sensr-cli ]; then
           ln -s sensr-cli $out/bin/sensr
         fi

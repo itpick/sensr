@@ -179,6 +179,7 @@ const DIAGNOSTICS: &[Node] =
 
 const SERVICES: &[Node] = &[n("Services").kids(&[
     n("DHCPv4"),
+    n("Guard").label("Runtime Guard").url("/ui/guard"),
     n("IDS")
         .label("Intrusion Detection")
         .kids(&[n("Administration").order(10).url("/ui/ids")]),
@@ -500,6 +501,7 @@ mod tests {
             "/ui/firewall/d_nat",
             "/ui/ids",
             "/ui/portscan",
+            "/ui/guard",
             "/ui/unbound/overview",
             "/ui/unbound/general",
             "/ui/unbound/overrides",

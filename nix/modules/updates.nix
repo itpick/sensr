@@ -328,7 +328,9 @@ let
           if [ "$(state_auto)" = true ]; then
             install
           else
-            check
+            # an unreachable manifest (WAN down) is on the updates page
+            # already; it is not a failed unit
+            check || echo "scheduled update check failed; the updates page says why" >&2
           fi
           ;;
         *) echo "usage: sensr-update [--check|--install|--handle|--timer]" >&2; exit 2 ;;

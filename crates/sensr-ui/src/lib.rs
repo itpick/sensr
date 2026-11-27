@@ -12,6 +12,7 @@ pub mod app;
 pub mod chart;
 pub mod form;
 pub mod grid;
+pub mod guard;
 pub mod islands;
 pub mod menu;
 pub mod models;
