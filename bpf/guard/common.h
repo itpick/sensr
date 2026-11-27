@@ -143,6 +143,7 @@ struct guard_event {
 	char exe[GUARD_PATH_LEN];
 	char target[GUARD_PATH_LEN];
 	__u8 addr[16]; /* network order; IPv4 in addr[0..4] */
+	__u8 sock_type; /* listen: SOCK_STREAM (listen) or the bind's type; else 0 */
 	__u16 port; /* host order */
 	__u8 family; /* AF_INET, AF_INET6 or 0 */
 	char unit[GUARD_UNIT_LEN];
@@ -156,6 +157,7 @@ _Static_assert(sizeof(struct guard_config) == 8, "guard_config");
 _Static_assert(__builtin_offsetof(struct guard_event, exe) == 27, "event.exe");
 _Static_assert(__builtin_offsetof(struct guard_event, target) == 283, "event.target");
 _Static_assert(__builtin_offsetof(struct guard_event, addr) == 539, "event.addr");
+_Static_assert(__builtin_offsetof(struct guard_event, sock_type) == 555, "event.sock_type");
 _Static_assert(__builtin_offsetof(struct guard_event, port) == 556, "event.port");
 _Static_assert(__builtin_offsetof(struct guard_event, family) == 558, "event.family");
 _Static_assert(__builtin_offsetof(struct guard_event, unit) == 559, "event.unit");
@@ -283,6 +285,10 @@ struct guard_scratch {
 	struct guard_rule_set acc;
 	struct guard_rule_set tmp;
 	struct guard_rule_set proc; /* acc after the process dimensions */
+	/* The task's cgroup, for the never-block check: its parent's name and
+	 * its depth (0: the root cgroup). */
+	char cg_parent[GUARD_UNIT_LEN];
+	int cg_level;
 };
 
 struct {
@@ -385,6 +391,8 @@ static __always_inline int begin(struct guard_scratch *s, struct task_struct *ta
 	struct guard_path_key *exe = bpf_task_storage_get(&task_exe, task, 0, 0);
 	const struct guard_rule_set *v;
 	const char *kname;
+	struct cgroup *cg, *parent;
+	struct cgroup_subsys_state *pcss;
 
 	ev->ts = bpf_ktime_get_boot_ns();
 	ev->pid = bpf_get_current_pid_tgid() >> 32;
@@ -396,10 +404,24 @@ static __always_inline int begin(struct guard_scratch *s, struct task_struct *ta
 	ev->blocked = 0;
 	ev->port = 0;
 	ev->family = 0;
+	ev->sock_type = 0;
 	__builtin_memset(ev->addr, 0, sizeof(ev->addr));
 	__builtin_memset(ev->unit, 0, sizeof(ev->unit));
-	kname = BPF_CORE_READ(task, cgroups, dfl_cgrp, kn, name);
+	__builtin_memset(s->cg_parent, 0, sizeof(s->cg_parent));
+	cg = BPF_CORE_READ(task, cgroups, dfl_cgrp);
+	kname = BPF_CORE_READ(cg, kn, name);
 	bpf_probe_read_kernel_str(ev->unit, sizeof(ev->unit), kname);
+	/* Where the cgroup sits decides never-block, not just its name: a
+	 * delegated subtree (user@.service) can name a cgroup sshd.service.
+	 * cgroup.self is the parent's css, embedded in its struct cgroup. */
+	s->cg_level = BPF_CORE_READ(cg, level);
+	pcss = BPF_CORE_READ(cg, self.parent);
+	if (pcss) {
+		parent = (struct cgroup *)((void *)pcss -
+					   bpf_core_field_offset(struct cgroup, self));
+		kname = BPF_CORE_READ(parent, kn, name);
+		bpf_probe_read_kernel_str(s->cg_parent, sizeof(s->cg_parent), kname);
+	}
 	/* s->target is the caller's: some fill it before begin(). */
 
 	/* exe dimension: an unknown exe matches only the wildcard (prefixlen
@@ -481,7 +503,8 @@ static __always_inline int emit(struct guard_scratch *s, int r, const char *targ
 	if (action == GUARD_ACTION_BLOCK) {
 		cfg = bpf_map_lookup_elem(&config, &zero);
 		/* No config yet: fail open. */
-		if (cfg && !cfg->kill_switch && !is_neverblock(ev->unit))
+		if (cfg && !cfg->kill_switch &&
+		    !is_neverblock(ev->unit, s->cg_parent, s->cg_level))
 			verdict = -GUARD_EPERM;
 	}
 	ev->blocked = verdict != 0;
@@ -553,8 +576,13 @@ static __always_inline int and_target_nopath(struct guard_scratch *s)
 	return and_lpm_dim(s, &path_prefix_lpm, &s->target);
 }
 
-/* acc &= net set(addr) & (port set(port) | port set(any)). */
-static __always_inline int and_target_net(struct guard_scratch *s, __u8 family, __u16 port)
+/*
+ * acc &= net set(addr) & (port set(port) | port set(any)). `dual`: a
+ * dual-stack socket (IPv6, not v6only), whose `::` also takes IPv4, so a
+ * bind or listen on `::` is matched by the IPv4 rules of 0.0.0.0 too.
+ */
+static __always_inline int and_target_net(struct guard_scratch *s, __u8 family, __u16 port,
+					  int dual)
 {
 	struct guard_event *ev = &s->ev;
 	struct guard_port_key pk = { .port = port };
@@ -585,9 +613,26 @@ static __always_inline int and_target_net(struct guard_scratch *s, __u8 family, 
 		ok = and_lpm_dim(s, &net4_lpm, &k);
 	} else {
 		struct guard_net6_key k = { .prefixlen = 128 };
+		__u64 hi, lo;
 
 		__builtin_memcpy(k.addr, ev->addr, 16);
-		ok = and_lpm_dim(s, &net6_lpm, &k);
+		__builtin_memcpy(&hi, &ev->addr[0], 8);
+		__builtin_memcpy(&lo, &ev->addr[8], 8);
+		if (dual && !hi && !lo) {
+			/* [::] dual-stack: net6(::) | net4(0.0.0.0) */
+			struct guard_net4_key k4 = { .prefixlen = 32 };
+			const struct guard_rule_set *v6 = bpf_map_lookup_elem(&net6_lpm, &k);
+			const struct guard_rule_set *v4 = bpf_map_lookup_elem(&net4_lpm, &k4);
+
+			set_clear(&s->tmp);
+			if (v6)
+				set_or(&s->tmp, v6);
+			if (v4)
+				set_or(&s->tmp, v4);
+			ok = set_and(&s->acc, &s->tmp);
+		} else {
+			ok = and_lpm_dim(s, &net6_lpm, &k);
+		}
 	}
 	if (!ok)
 		return 0;

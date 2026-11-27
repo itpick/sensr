@@ -166,6 +166,28 @@ fn tail(s: &str, max: usize) -> String {
     format!("...{}", &s[start..])
 }
 
+/// Run an iterator program once (`iter/<type>` sections), reading it to
+/// the end; the core pack's `iter/task` seeds `task_exe` for the tasks that
+/// predate the load. Its link is closed afterwards; the program stays loaded.
+fn run_iter(program: &mut Program, iter_type: &str, btf: &Btf) -> Result<(), String> {
+    use std::io::Read;
+
+    let Program::Iter(it) = program else {
+        return Err(format!(
+            "not an iterator program ({:?})",
+            program.prog_type()
+        ));
+    };
+    it.load(iter_type, btf).map_err(|e| short_reason(&e))?;
+    let id = it.attach().map_err(|e| short_reason(&e))?;
+    let link = it.take_link(id).map_err(|e| short_reason(&e))?;
+    let mut file = link.into_file().map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    file.read_to_end(&mut out)
+        .map_err(|e| format!("reading the iterator: {e}"))?;
+    Ok(())
+}
+
 fn attach(program: &mut Program, hook: &str, btf: &Btf) -> Result<(), String> {
     match program {
         Program::Lsm(lsm) => {
@@ -233,24 +255,32 @@ fn load_object(object: &str, bytes: &[u8]) -> Result<Loaded, LoadError> {
             source: Box::new(e),
         })?;
 
+    // LSM programs first, iterators after: an iterator that seeds state
+    // (task_exe) runs once the hooks that keep it current are attached, so
+    // no task falls between the two.
     let mut status = Vec::new();
-    for (name, program) in ebpf.programs_mut() {
-        let section = sections.get(name).cloned().unwrap_or_default();
-        let hook = section
-            .split_once('/')
-            .map(|(_, h)| h.to_string())
-            .unwrap_or_default();
-        let result = if hook.is_empty() {
-            Err(format!("no program section for {name}"))
-        } else {
-            attach(program, &hook, &btf)
-        };
-        status.push(ProgramStatus {
-            name: name.to_string(),
-            hook,
-            attached: result.is_ok(),
-            reason: result.err(),
-        });
+    for pass in [false, true] {
+        for (name, program) in ebpf.programs_mut() {
+            let section = sections.get(name).cloned().unwrap_or_default();
+            let iter = section.starts_with("iter/") || section.starts_with("iter.s/");
+            if iter != pass {
+                continue;
+            }
+            let (kind, sub) = section.split_once('/').unwrap_or_default();
+            let (hook, result) = if sub.is_empty() {
+                (String::new(), Err(format!("no program section for {name}")))
+            } else if iter {
+                (format!("{kind}/{sub}"), run_iter(program, sub, &btf))
+            } else {
+                (sub.to_string(), attach(program, sub, &btf))
+            };
+            status.push(ProgramStatus {
+                name: name.to_string(),
+                hook,
+                attached: result.is_ok(),
+                reason: result.err(),
+            });
+        }
     }
     status.sort_by(|a, b| a.name.cmp(&b.name));
 

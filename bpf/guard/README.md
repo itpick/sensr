@@ -19,8 +19,10 @@ compiler and the loader must follow it exactly. Change both sides together.
 
 | Source object | Section | Hook |
 |---|---|---|
-| exec.bpf.o | `lsm.s/bprm_check_security` | `exec`. It also caches the new exe in `task_exe`. |
+| exec.bpf.o | `lsm.s/bprm_check_security` | `exec` |
+| | `lsm.s/bprm_committed_creds` | No hook. Once an exec has gone through, it caches the new exe in `task_exe`. |
 | | `lsm/task_alloc` | No hook. It copies the parent's `task_exe` to each new task. |
+| | `iter/task` | No hook. The loader reads this iterator once after attaching everything: it seeds `task_exe` for the tasks that were already running (from `mm->exe_file`). |
 | connect.bpf.o | `lsm/socket_connect` | `connect` (IPv4 and IPv6) |
 | listen.bpf.o | `lsm/socket_bind` | `listen` for non-stream inet sockets bound to a non-zero port (UDP) |
 | | `lsm/socket_listen` | `listen` for TCP, with the bound address |
@@ -104,6 +106,7 @@ strings to slots.
 | `char exe[256]` | 27 | cached exe of the task ("" if unknown) |
 | `char target[256]` | 283 | path; for setuid the uid in decimal; for bpf `prog_load` / `link_create`; "" for net hooks |
 | `u8 addr[16]` | 539 | network order; IPv4 is in `addr[0..4]` |
+| `u8 sock_type` | 555 | listen: 1 (`SOCK_STREAM`, a `listen()`) or the bind's socket type (2 for UDP); 0 for every other hook |
 | `u16 port` | 556 | host order |
 | `u8 family` | 558 | 2 (AF_INET), 10 (AF_INET6), or 0 |
 | `char unit[64]` | 559 | leaf cgroup name (the systemd unit) |
@@ -149,6 +152,10 @@ Each rule is a slot. Each program looks up one `rule_set` per
   or mapped addresses, which only IPv4 rules (or an explicit
   `::ffff:a.b.c.d/>=96` rule, compiled into `net4_lpm`) cover. To match
   everything, use `Target::Any`.
+- **dual stack**: a `listen` (bind or listen) on `::` of an IPv6 socket
+  without `IPV6_V6ONLY` also takes IPv4, so it is looked up as
+  `net6_lpm(::) | net4_lpm(0.0.0.0)`: an IPv4 rule on the any-address
+  (or a CIDR covering it) applies to it too.
 - **port**: `port_rules[port] | port_rules[0x10000]`.
 - **uid**: `uid_rules[new euid] | uid_rules[0xffffffff]`.
 
@@ -216,7 +223,8 @@ On a match:
 - it returns `-EPERM` only if all of these hold:
   - the action is block;
   - `config[0]` exists and `kill_switch == 0`;
-  - the task's leaf cgroup name is not in `neverblock.h`.
+  - the task's cgroup is not never-block (`neverblock.h`: its leaf name
+    and where it sits).
 
 With no `config` entry, nothing blocks (fail open).
 
@@ -237,6 +245,10 @@ If the ring buffer is full, the event is lost and `ringbuf_dropped[0]`
 - **"A kernel module loads after boot completed"** (`core-module-load`).
   The programs report every module load. sensr-guard ignores module events
   until `boot-complete.target` is reached.
+- **UDP binds to ever new ports** (a resolver binds a random port per
+  query): every bind is reported (`sock_type` 2); sensr-guard folds those
+  of one process, rule and address into one row whatever the port
+  (`addr:*`), and caps new rows per rule and in total.
 
 ## Known limits
 
@@ -250,10 +262,10 @@ If the ring buffer is full, the event is lost and `ringbuf_dropped[0]`
 - **setuid**: `task_fix_setuid` covers uid and euid changes (setuid,
   setreuid, setresuid, setfsuid). Gaining privileges through file
   capabilities, or `setgid`, is not covered. The target is the new euid.
-- **Scripts**: the exe cache is set at `bprm_check_security`. A script
-  runs that hook twice, once for the script and once for its interpreter.
-  The interpreter's pass sees the script as the calling exe, and the cache
-  ends up holding the interpreter.
+- **Scripts**: a script runs `bprm_check_security` twice, once for the
+  script and once for its interpreter; both passes see the program that
+  called exec as the calling exe. The cache, set when the exec is
+  committed, holds the interpreter.
 - **Per-task working memory**: each task that hits a hook gets a `scratch`
   entry of about 6 KiB (TASK_STORAGE, freed when the task exits).
 - **Paths longer than PATH_MAX** (4096): `bpf_d_path` fails, so nothing
@@ -261,26 +273,44 @@ If the ring buffer is full, the event is lost and `ringbuf_dropped[0]`
 
 ## Never-block (neverblock.h)
 
-These leaf cgroup names are exempt from blocks, never from alerts:
-`init.scope`, `sensr-agent.service`, `sensr-guard.service`,
-`sensr-api.service`, `sshd.service`, `systemd-networkd.service`,
-`systemd-resolved.service`, `systemd-journald.service`,
-`sensr-kea-dhcp4.service`, `sensr-unbound.service`, `nix-daemon.service`,
-`sensr-nic-recover.service`, and the prefixes `sensr-update`, `sensr-pi5-`,
-`sensr-bootlog`, `sensr-trial-`.
+Exempt from blocks, never from alerts:
+
+- the root cgroup (depth 0): kernel threads and the usermode helpers the
+  kernel starts there, such as `modprobe` for `request_module` (nft and
+  WireGuard need it);
+- `init.scope`, directly under the root (depth 1);
+- directly under `system.slice` (depth 2, parent `system.slice`):
+  `sensr-agent.service`, `sensr-guard.service`, `sensr-api.service`,
+  `sshd.service`, `systemd-networkd.service`, `systemd-resolved.service`,
+  `systemd-journald.service`, `sensr-kea-dhcp4.service`,
+  `sensr-unbound.service`, `nix-daemon.service`,
+  `sensr-nic-recover.service`, and the prefixes `sensr-update`,
+  `sensr-pi5-`, `sensr-bootlog`, `sensr-trial-`.
+
+The place counts, not only the name: a user's delegated subtree
+(`user.slice/user-UID.slice/user@UID.service/...`) can create a cgroup
+named `sshd.service`, and gets no exemption from it. The depth is
+`cgroup->level` (absolute, whatever cgroup namespace the task is in) and
+the parent is `cgroup->self.parent`, both CO-RE reads.
 
 The list is compiled in. No map or rule can change it. `neverblock_test.c`
 is its host test, which `checks.<system>.guard-bpf-build` runs.
 
 ## The exe cache
 
-- **At exec**: `task_exe` is set when the exec is allowed, cut to 255
-  bytes if the path is longer. A denied exec keeps the old exe.
+- **At exec**: `task_exe` is set at `bprm_committed_creds`, once the exec
+  has gone through (every LSM allowed it and the new image is committed),
+  cut to 255 bytes if the path is longer. An exec that is denied, here or
+  by anyone else, or fails later (`ENOEXEC`) never gets there: the old
+  exe stays.
 - **At fork or thread creation**: `lsm/task_alloc` copies `task_exe` to the
   new task.
-- **Tasks that predate the load**: they have no entry, so only
-  wildcard-exe rules match them. The loader may seed them by updating
-  `task_exe` with a pidfd key and a `struct guard_path_key` value.
+- **Tasks that predate the load**: the loader reads the `iter/task`
+  iterator once, after the LSM programs are attached. It gives each task
+  without an entry the path of its `mm->exe_file`; kernel threads (no mm)
+  stay unknown, and a task that exec'd or forked meanwhile keeps its
+  entry. If the iterator cannot run, sensr-guard's status says that rules
+  matching an executable apply only to processes started after the load.
 
 ## Versions
 

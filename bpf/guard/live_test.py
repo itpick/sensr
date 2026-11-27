@@ -10,8 +10,15 @@ It loads and attaches each object with bpftool, fills its maps the way
 README.md says the rule compiler must, and checks the verdicts (EPERM or
 not), the ring-buffer events, the hit counters, the kill switch, the
 never-block units and the guard_tgid exemption. It creates cgroups named
-gt-*.scope, sshd.service etc. under /sys/fs/cgroup and files under /tmp/gt
-and /etc/gtprot. Every object is detached when its test ends (unpinning the
+gt-*.scope, system.slice/sshd.service etc. under /sys/fs/cgroup and files
+under /tmp/gt and /etc/gtprot. Never-block depends on a cgroup's depth in
+the real hierarchy, so a container must share the host's cgroup namespace
+(docker run --cgroupns=host), and the cases that need a unit to be exempt
+run only when /sys/fs/cgroup is the kernel's root cgroup: set
+GUARD_LIVE_ROOT_CGROUP=1 then. (A Docker engine that itself runs in a
+nested cgroup namespace, as OrbStack's does, cannot reach it: there every
+cgroup sits deeper than its path says, so the exempt cases are skipped and
+only the "still blocked" ones are checked.) Every object is detached when its test ends (unpinning the
 links). The module object is only loaded: a module load needs real modules.
 """
 import ctypes, json, mmap, os, socket, struct, subprocess, sys
@@ -21,6 +28,14 @@ FS = "/sys/fs/bpf"
 libc = ctypes.CDLL(None, use_errno=True)
 SYS_BPF = 280 if os.uname().machine == "aarch64" else 321
 FAILS = []
+ROOT_CGROUP = os.environ.get("GUARD_LIVE_ROOT_CGROUP") == "1"
+
+def exempt_check(name, cond, detail=""):
+    """A never-block case: needs the kernel's root cgroup (see the docstring)."""
+    if ROOT_CGROUP:
+        check(name, cond, detail)
+    else:
+        print("SKIP " + name + "  [not the root cgroup namespace]")
 
 def check(name, cond, detail=""):
     print(("PASS " if cond else "FAIL ") + name + (f"  [{detail}]" if detail else ""))
@@ -123,11 +138,11 @@ def cstr(b):
 
 def parse(b):
     assert len(b) == 624, len(b)
-    (ts, pid, ppid, uid, rid, hook, action, blocked, exe, target, addr, port, fam, un) = \
-        struct.unpack_from("<QIIIIBBB256s256s16sxHB64s", b)
+    (ts, pid, ppid, uid, rid, hook, action, blocked, exe, target, addr, st, port, fam, un) = \
+        struct.unpack_from("<QIIIIBBB256s256s16sBHB64s", b)
     return dict(ts=ts, pid=pid, ppid=ppid, uid=uid, rule=rid, hook=hook, action=action,
                 blocked=blocked, exe=cstr(exe), target=cstr(target), addr=addr, port=port,
-                family=fam, unit=cstr(un))
+                family=fam, unit=cstr(un), sock_type=st)
 
 def cg(name):
     os.makedirs(f"/sys/fs/cgroup/{name}", exist_ok=True)
@@ -184,9 +199,9 @@ def t_connect():
     check("connect: other address not denied", out != "eperm", out)
     rc, out = in_cg("gt-b.scope", CONNECT.format(ip="1.2.3.4", port=80))
     check("connect: other unit not denied", out != "eperm", out)
-    rc, out = in_cg("sshd.service", CONNECT.format(ip="1.2.3.4", port=80))
-    check("connect: never-block unit sshd.service not denied", out != "eperm", out)
-    rc, out = in_cg("sensr-agentx.service", CONNECT.format(ip="1.2.3.4", port=80))
+    rc, out = in_cg("system.slice/sshd.service", CONNECT.format(ip="1.2.3.4", port=80))
+    exempt_check("connect: never-block unit system.slice/sshd.service not denied", out != "eperm", out)
+    rc, out = in_cg("system.slice/sensr-agentx.service", CONNECT.format(ip="1.2.3.4", port=80))
     check("connect: sensr-agentx.service is denied", out == "eperm", out)
     evs = [e for e in r.drain() if e["hook"] == H_CONNECT]
     blocked = [e for e in evs if e["blocked"]]
@@ -198,10 +213,25 @@ def t_connect():
               and e["addr"][:4] == socket.inet_aton("1.2.3.4") and e["port"] == 80
               and e["unit"] == "gt-a.scope" and e["exe"] == "" and e["pid"] > 0 and e["ppid"] > 0,
               str(e))
-    check("connect: never-block event says not blocked, action block",
-          len(nb) == 1 and nb[0]["blocked"] == 0 and nb[0]["action"] == BLOCK)
-    check("connect: two blocked events", len(blocked) == 2, str(len(blocked)))
+    exempt_check("connect: never-block event says not blocked, action block",
+                 len(nb) == 1 and nb[0]["blocked"] == 0 and nb[0]["action"] == BLOCK)
+    exempt_check("connect: two blocked events", len(blocked) == 2, str(len(blocked)))
     check("connect: hits counted", hits(o, 3) == 3, str(hits(o, 3)))
+    # never-block is by place, not name alone: a delegated subtree (as a
+    # user's user@UID.service) naming a cgroup sshd.service is still blocked
+    for fake in ["gt-u.slice/sshd.service", "gt-u.slice/gt-v.service/sshd.service",
+                 "system.slice/gt-w.service/sshd.service", "sshd.service"]:
+        rc, out = in_cg(fake, CONNECT.format(ip="1.2.3.4", port=80))
+        check(f"connect: {fake} (not directly under system.slice) is denied", out == "eperm", out)
+    # the root cgroup (kernel threads, usermode helpers such as modprobe)
+    if ROOT_CGROUP:
+        upd(o, "unit_rules", unit(""), rs(3))
+        rc, out = in_cg("", CONNECT.format(ip="1.2.3.4", port=80))
+        check("connect: the root cgroup is never blocked", out != "eperm", out)
+        upd(o, "unit_rules", unit(""), rs())
+    else:
+        exempt_check("connect: the root cgroup is never blocked", False)
+    r.drain()
     # port-specific: 1.2.3.4:443 only
     upd(o, "port_rules", PORT_ANY, rs())
     upd(o, "port_rules", struct.pack("<I", 443), rs(3))
@@ -283,15 +313,29 @@ print(n)
 
 def t_exec():
     o = "exec"
+    os.makedirs("/tmp/gt", exist_ok=True)
+    sh("cp", "/bin/true", "/tmp/gt/true")
+    # a process that predates the load: it waits for a line, then runs /tmp/gt/true
+    cg("gt-a.scope")
+    def pre():
+        open("/sys/fs/cgroup/gt-a.scope/cgroup.procs", "w").write("0")
+    old = subprocess.Popen([sys.executable, "-c",
+                            "import subprocess; input(); subprocess.run(['/tmp/gt/true'])"],
+                           preexec_fn=pre, stdin=subprocess.PIPE, text=True)
     load(o)
     r = Ring(o)
     config(o)
-    os.makedirs("/tmp/gt", exist_ok=True)
-    sh("cp", "/bin/true", "/tmp/gt/true")
     rule(o, 5, H_EXEC, ALERT)
     wildcards(o, [5])
     upd(o, "path_prefix_lpm", pathkey("/tmp/gt/"), rs(5))
     r.drain()
+    # the loader reads the seeding iterator once (bpftool pinned its link)
+    seeded = sh("cat", f"{FS}/{o}/guard_seed_exe", check_=False)
+    old.communicate("\n")
+    evs = [e for e in r.drain() if e["hook"] == H_EXEC]
+    check("exec: the seeding iterator gives a task that predates the load its exe",
+          seeded.returncode == 0 and len(evs) == 1 and evs[0]["exe"].startswith("/usr/bin/python"),
+          f"{seeded.returncode} {seeded.stderr} {evs}")
     rc, out = in_cg("gt-a.scope", "import subprocess; print(subprocess.run(['/tmp/gt/true']).returncode)")
     evs = [e for e in r.drain() if e["hook"] == H_EXEC]
     check("exec: alert on /tmp/gt/true", out == "0" and len(evs) == 1 and evs[0]["target"] == "/tmp/gt/true"
@@ -301,6 +345,19 @@ def t_exec():
               evs[0]["exe"])
     rc, out = in_cg("gt-a.scope", "import subprocess; print(subprocess.run(['/bin/true']).returncode)")
     check("exec: /bin/true does not match", not [e for e in r.drain() if e["hook"] == H_EXEC], out)
+    # an exec that fails after the check (ENOEXEC: not a binary) keeps the old exe
+    open("/tmp/gt/junk", "wb").write(b"\0" * 64)
+    os.chmod("/tmp/gt/junk", 0o755)
+    rc, out = in_cg("gt-a.scope", """
+import os, subprocess
+try: os.execv('/tmp/gt/junk', ['junk'])
+except OSError as e: print(e.errno, end=' ')
+print(subprocess.run(['/tmp/gt/true']).returncode)
+""")
+    evs = [e for e in r.drain() if e["hook"] == H_EXEC]
+    late = [e for e in evs if e["target"] == "/tmp/gt/true"]
+    check("exec: a failed exec does not replace the cached exe", out == "8 0" and len(late) == 1
+          and late[0]["exe"].startswith("/usr/bin/python"), f"{out} {evs}")
     rule(o, 5, H_EXEC, BLOCK)
     rc, out = in_cg("gt-a.scope", """
 import subprocess
@@ -308,8 +365,25 @@ try: subprocess.run(['/tmp/gt/true']); print('ran')
 except PermissionError: print('eperm')
 """)
     check("exec: block denies /tmp/gt/true", out == "eperm", out)
+    # a denied exec keeps the old exe too
+    rule(o, 6, H_EXEC, ALERT)
+    upd(o, "exe_prefix_lpm", ANYPATH, rs(5, 6))
+    upd(o, "unit_rules", ANYUNIT, rs(5, 6))
+    upd(o, "path_prefix_lpm", pathkey("/bin/"), rs(6))
+    upd(o, "path_prefix_lpm", pathkey("/usr/bin/"), rs(6))
+    r.drain()
+    rc, out = in_cg("gt-a.scope", """
+import os, subprocess
+try: os.execv('/tmp/gt/true', ['true'])
+except PermissionError: print('eperm', end=' ')
+print(subprocess.run(['/bin/true']).returncode)
+""")
+    evs = [e for e in r.drain() if e["hook"] == H_EXEC and e["target"] == "/usr/bin/true"]
+    check("exec: a denied exec does not replace the cached exe", out == "eperm 0" and len(evs) == 1
+          and evs[0]["exe"].startswith("/usr/bin/python"), f"{out} {evs}")
+    rule(o, 6, H_EXEC, ALERT, enabled=0)
     rc, out = in_cg("init.scope", "import subprocess; print(subprocess.run(['/tmp/gt/true']).returncode)")
-    check("exec: init.scope never blocked", out == "0", out)
+    exempt_check("exec: init.scope never blocked", out == "0", out)
     r.drain()
     # process exe constraint: only when the caller's exe is under /usr/bin/ (python is)
     upd(o, "exe_prefix_lpm", ANYPATH, rs())
@@ -383,8 +457,8 @@ print(t(lambda: open('/etc/gtprot/f').read()),
     evs = [e for e in r.drain() if e["hook"] == H_FILE]
     tg = sorted(set(e["target"] for e in evs))
     check("file: event targets", tg == ["/etc/gtprot/f", "/etc/gtprot/new"], str(tg))
-    rc, out = in_cg("sensr-update-check.service", code)
-    check("file: sensr-update* prefix never blocked", out.split()[1] == "ok", out)
+    rc, out = in_cg("system.slice/sensr-update-check.service", code)
+    exempt_check("file: sensr-update* prefix never blocked", out.split()[1] == "ok", out)
     # a write under a >255-byte path below the blocked prefix
     longdir = "/etc/gtprot/" + "/".join(["d" * 60] * 5)
     os.makedirs(longdir, exist_ok=True)  # mkdir is not hooked
@@ -488,6 +562,28 @@ print(t('::ffff:127.0.0.1'), t('::1'))
     evs = r.drain()
     check("listen: bind to ::ffff:127.0.0.1 hits the IPv4 rule, ::1 does not",
           out == "eperm ok" and len(evs) == 1 and evs[0]["family"] == 2, f"{out} {evs}")
+    # dual-stack [::] takes IPv4 too: the IPv4 any-address rule applies,
+    # unless the socket is v6only
+    rc, out = in_cg("gt-a.scope", """
+import socket
+def t(kind, v6only, p):
+    s = socket.socket(socket.AF_INET6, kind)
+    s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, v6only)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(('::', p))
+        if kind == socket.SOCK_STREAM: s.listen()
+        return 'ok'
+    except PermissionError: return 'eperm'
+print(t(socket.SOCK_DGRAM, 0, 8082), t(socket.SOCK_DGRAM, 1, 8082),
+      t(socket.SOCK_STREAM, 0, 8081), t(socket.SOCK_STREAM, 1, 8081))
+""")
+    evs = r.drain()
+    check("listen: dual-stack [::] binds and listens hit the IPv4 rule, v6only ones do not",
+          out == "eperm ok eperm ok" and len(evs) == 2 and all(e["family"] == 10 for e in evs),
+          f"{out} {evs}")
+    check("listen: events carry the socket type (UDP bind 2, TCP listen 1)",
+          sorted(e["sock_type"] for e in evs) == [1, 2], str([e["sock_type"] for e in evs]))
     unload(o)
 
 def t_bpf():

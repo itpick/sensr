@@ -1,5 +1,5 @@
 # checks.<system>.guard-bpf-build: the core pack builds, its one linked
-# object carries every expected LSM section and exactly one copy of each
+# object carries every expected program section and exactly one copy of each
 # map (so the programs share them), the manifest and default rules are
 # valid JSON, and the never-block list behaves (a host C test of the same
 # neverblock.h the programs include).
@@ -15,7 +15,12 @@ let
   packVersion = lib.fileContents ../../bpf/guard/VERSION;
   # the sections (programs) the linked object must carry, by source
   sections = {
-    exec = [ "lsm.s/bprm_check_security" "lsm/task_alloc" ];
+    exec = [
+      "lsm.s/bprm_check_security"
+      "lsm.s/bprm_committed_creds"
+      "lsm/task_alloc"
+      "iter/task"
+    ];
     connect = [ "lsm/socket_connect" ];
     listen = [ "lsm/socket_bind" "lsm/socket_listen" ];
     file = [ "lsm.s/file_open" "lsm.s/path_unlink" "lsm.s/path_rename" ];
@@ -24,11 +29,11 @@ let
     bpf = [ "lsm/bpf" ];
   };
   allSections = lib.concatLists (lib.attrValues sections) ++ [ ".maps" "license" ".BTF" ];
-  # the contract's maps (bpf/guard/README.md) plus the internal scratch map
+  # the contract's maps (bpf/guard/README.md) plus the internal scratch maps
   maps = [
     "rules_meta" "exe_prefix_lpm" "path_prefix_lpm" "net4_lpm" "net6_lpm"
     "port_rules" "unit_rules" "uid_rules" "hits" "config" "events"
-    "ringbuf_dropped" "task_exe" "scratch"
+    "ringbuf_dropped" "task_exe" "scratch" "seed_buf"
   ];
 in
 pkgs.runCommand "guard-bpf-build"

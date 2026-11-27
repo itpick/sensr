@@ -88,7 +88,7 @@ pkgs.testers.runNixOSTest {
     print(guard.succeed("uname -r"))
 
     print(guard.succeed(
-        "bash ${./guard-load.sh} ${probe}/bin/guard-load-probe ${pack} http://server/ 12"
+        "bash ${./guard-load.sh} ${probe}/bin/guard-load-probe ${pack} http://server/ 14"
     ))
   '';
 }

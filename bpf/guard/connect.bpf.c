@@ -50,7 +50,7 @@ int BPF_PROG(guard_connect, struct socket *sock, struct sockaddr *address, int a
 	if (!s || !begin(s, task, GUARD_HOOK_CONNECT))
 		return 0;
 	family = read_sockaddr(s, address, addrlen, &port);
-	if (!family || !and_target_net(s, family, port))
+	if (!family || !and_target_net(s, family, port, 0))
 		return 0;
 	return finish(s, GUARD_HOOK_CONNECT);
 }

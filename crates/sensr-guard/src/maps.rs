@@ -275,6 +275,9 @@ pub struct GuardEvent {
     pub target: [u8; PATH_LEN],
     /// Network order.
     pub addr: [u8; 16],
+    /// Listen events: `SOCK_STREAM` (a listen) or the bind's socket type;
+    /// otherwise 0.
+    pub sock_type: u8,
     /// Host order.
     pub port: u16,
     /// 2, 10 or 0.
@@ -325,6 +328,7 @@ mod tests {
         assert_eq!(offset_of!(GuardEvent, blocked), 26);
         assert_eq!(offset_of!(GuardEvent, exe), 27);
         assert_eq!(offset_of!(GuardEvent, target), 283);
+        assert_eq!(offset_of!(GuardEvent, sock_type), 555);
         assert_eq!(offset_of!(GuardEvent, addr), 539);
         assert_eq!(offset_of!(GuardEvent, port), 556);
         assert_eq!(offset_of!(GuardEvent, family), 558);
