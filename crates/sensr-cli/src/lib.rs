@@ -762,11 +762,14 @@ fn guard(args: &GuardArgs, out: &mut dyn Write) -> anyhow::Result<()> {
             other => bail!("unexpected reply from sensr-guard: {other:?}"),
         },
         GuardCmd::Reload => {
-            // loading a new pack version can take a while (the verifier)
-            let r = sensr_guard::client::send_with_timeout(
+            // loading a new pack version can take a while (the verifier); a
+            // daemon that is still starting (restarted with the agent) binds
+            // its socket late, so wait for it rather than fail the apply
+            let r = sensr_guard::client::send_when_up(
                 &args.guard_socket,
                 &Request::Reload,
                 RELOAD_TIMEOUT,
+                RELOAD_WAIT_FOR_SOCKET,
             )
             .map_err(|e| anyhow::anyhow!("sensr-guard did not answer: {e}"))?;
             match r {
@@ -781,6 +784,8 @@ fn guard(args: &GuardArgs, out: &mut dyn Write) -> anyhow::Result<()> {
 
 /// How long `sensr guard reload` waits (systemd's reload timeout is longer).
 const RELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(80);
+/// How long `sensr guard reload` waits for a starting daemon's socket.
+const RELOAD_WAIT_FOR_SOCKET: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `2 minutes`, `90 seconds`.
 fn window_words(secs: u64) -> String {

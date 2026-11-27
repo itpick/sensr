@@ -45,6 +45,34 @@ pub fn send_with_timeout(path: &Path, req: &Request, timeout: Duration) -> io::R
     serde_json::from_str(&reply).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Like [`send_with_timeout`], but while the socket is missing or refuses
+/// connections (the daemon is still starting: it binds the socket only once
+/// its programs are loaded) keep trying for up to `wait`.
+///
+/// # Errors
+/// As [`send_with_timeout`]; the last connect error once `wait` is over.
+pub fn send_when_up(
+    path: &Path,
+    req: &Request,
+    timeout: Duration,
+    wait: Duration,
+) -> io::Result<Reply> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match send_with_timeout(path, req, timeout) {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            r => return r,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +134,38 @@ mod tests {
         let e = send(&path, &Request::Status).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
         t.join().unwrap();
+    }
+
+    #[test]
+    fn waiting_for_the_socket_reaches_a_daemon_that_binds_late() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.sock");
+        let p2 = path.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            let l = UnixListener::bind(&p2).unwrap();
+            let (s, _) = l.accept().unwrap();
+            BufReader::new(&s).read_line(&mut String::new()).unwrap();
+            (&s).write_all(b"{\"op\":\"ok\"}\n").unwrap();
+        });
+        let r = send_when_up(&path, &Request::Reload, TIMEOUT, Duration::from_secs(10)).unwrap();
+        assert_eq!(r, Reply::Ok);
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn waiting_for_the_socket_gives_up_after_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let e = send_when_up(
+            &dir.path().join("none"),
+            &Request::Reload,
+            TIMEOUT,
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }
